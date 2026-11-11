@@ -329,10 +329,13 @@ pub(crate) fn edit_project(
     if changed.contains_key("remote") || changed.contains_key("delivery") {
         // The forge check of an add: the repo a GitHub remote names, and no
         // delivery mode Gerrit cannot run.
-        let mut repo = next.repo.clone();
+        // Only a new remote names a repo, and a repo set in the same edit
+        // wins. A new GitHub remote names it again, so the repo follows a
+        // moved remote; any other remote leaves it as it was.
+        let rederive = changed.contains_key("remote") && edit.repo.is_none();
+        let mut repo = if rederive { None } else { next.repo.clone() };
         detect_forge(&next.id, next.remote.as_deref(), next.delivery, &mut repo)?;
-        // Only a new remote names a repo; a delivery change leaves it be.
-        if changed.contains_key("remote") && repo != next.repo {
+        if rederive && repo.is_some() && repo != next.repo {
             next.repo = repo;
             changed.insert("repo".into(), json!(next.repo));
         }

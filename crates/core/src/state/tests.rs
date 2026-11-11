@@ -3001,6 +3001,59 @@ fn project_edit_reads_the_repo_from_a_github_remote() {
     assert_eq!(edited.value.repo.as_deref(), Some("example/iota"));
 }
 
+/// P16: a new GitHub remote names the repo again, so the repo follows a
+/// moved remote. A repo set in the same edit wins, and a remote that names
+/// no GitHub repo leaves the repo as it was.
+#[test]
+fn project_edit_reads_the_repo_again_when_the_remote_changes() {
+    let (mut store, _) = memory_store();
+    let input = project_input(
+        "lambda",
+        Some("https://github.com/example/lambda.git"),
+        Delivery::DirectPush,
+    );
+    store.project_add(&owner(), input).unwrap();
+    assert_eq!(
+        store.project("lambda").unwrap().repo.as_deref(),
+        Some("example/lambda")
+    );
+    let edit = |store: &mut crate::Store, edit: ProjectEdit| {
+        let rev = store.project("lambda").unwrap().rev;
+        store
+            .project_edit(&owner(), "lambda", rev, edit)
+            .unwrap()
+            .value
+    };
+
+    let moved = edit(
+        &mut store,
+        ProjectEdit {
+            remote: Some(Some("git@github.com:other/lambda-moved.git".into())),
+            ..ProjectEdit::default()
+        },
+    );
+    assert_eq!(moved.repo.as_deref(), Some("other/lambda-moved"));
+
+    let named = edit(
+        &mut store,
+        ProjectEdit {
+            remote: Some(Some("https://github.com/third/lambda.git".into())),
+            repo: Some(Some("example/mirror".into())),
+            ..ProjectEdit::default()
+        },
+    );
+    assert_eq!(named.repo.as_deref(), Some("example/mirror"));
+
+    let other = edit(
+        &mut store,
+        ProjectEdit {
+            remote: Some(Some("https://git.example.com/lambda.git".into())),
+            ..ProjectEdit::default()
+        },
+    );
+    assert_eq!(other.repo.as_deref(), Some("example/mirror"));
+}
+
 /// P16: an add refuses an empty default branch, as an edit does.
 #[test]
 fn project_add_refuses_an_empty_default_branch() {
