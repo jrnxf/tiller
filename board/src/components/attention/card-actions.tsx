@@ -360,13 +360,11 @@ function useHerdrFocus(sessionId: string, off: string | null | undefined) {
   return { action, shown, feedback };
 }
 
-export function OpenInHerdr({
+function OpenInHerdr({
   sessionId,
-  label,
   off,
 }: {
   sessionId: string;
-  label?: string;
   // Why the button is off: pane focus is not forwarded to a peer.
   off?: string | null;
 }) {
@@ -382,7 +380,7 @@ export function OpenInHerdr({
         onClick={action.trigger}
       >
         <PaneIcon />
-        {label ?? "Open in herdr"}
+        Open in herdr
         <kbd>O</kbd>
       </button>
       {feedback}

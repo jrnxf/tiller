@@ -945,7 +945,18 @@ function attentionFor(
         card_id: cardId("gamma-13"),
         kind: "decision",
         question: "Raise gamma capacity to 2 so the cache trim starts now, or let it wait?",
-        evidence: "gamma-12 holds gamma's only slot while it waits on a permission prompt.",
+        // The orchestrator's screen when it asked, so the evidence has a pane
+        // tail to read and a live session to open.
+        evidence: JSON.stringify({
+          pane_tail: [
+            "● Checked gamma's queue: gamma-13 waits for a slot.",
+            "● gamma-12 holds gamma's only slot while it waits on a permission prompt.",
+            "● host-a has two free slots, so gamma could run two at once.",
+            "● Asked the owner on gamma-13. Waiting for the decision.",
+          ].join("\n"),
+          session_id: orchestratorSession("gamma"),
+          last_observation_at: "2026-11-02T11:40:00.000Z",
+        }),
         recommendation: "Raise it. host-a has two free slots.",
         consequence: null,
         options: [

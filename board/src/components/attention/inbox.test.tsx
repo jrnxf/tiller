@@ -3,17 +3,23 @@ import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
-import type { AgentRow, AgentsResponse, PromptDialog } from "../../lib/api-types";
+import type {
+  AgentRow,
+  AgentsResponse,
+  AttentionResponse,
+  PromptDialog,
+} from "../../lib/api-types";
 import { hydrateFromSnapshot } from "../../lib/boot";
 import {
   FIXTURE_HEAD_SHA,
   fixtureResource,
   fixtureSnapshot,
+  orchestratorSession,
   serverResponses,
 } from "../../lib/fixtures";
 import type { Scenario } from "../../lib/fixtures";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
-import { agentsQuery } from "../../lib/queries";
+import { agentsQuery, attentionQuery } from "../../lib/queries";
 import { receiptsStore } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
 import { applyChange } from "../../lib/sse";
@@ -87,6 +93,8 @@ function stubDaemon(scenario: Scenario, hold = false) {
         fixtureResource(path, scenario);
       return new Response(JSON.stringify(data), { status: 200 });
     }
+    // A live terminal's stream: it never answers, so it stays connecting.
+    if (/\/terminal(\/\w+)?$/.test(path)) return new Promise<Response>(() => {});
     const read = /^\/api\/v1\/agents\/([^/]+)\/prompt$/.exec(path);
     if (read?.[1]) {
       reads.push(read[1]);
@@ -648,6 +656,75 @@ test("O does nothing while the detail pane is hidden or the key is held", async 
   fireEvent.keyDown(window, { key: "o" });
   await flush();
   expect(calls).toHaveLength(1);
+});
+
+const GAMMA_ORCH = orchestratorSession("gamma");
+
+// The pane tail block of the selected decision's evidence.
+function paneTail(): HTMLElement {
+  const detail = document.querySelector<HTMLElement>(".in-detail");
+  const head = detail?.querySelector<HTMLElement>(".ev-acts")?.parentElement;
+  if (!head) throw new Error("no pane tail head");
+  return head;
+}
+
+test("a current decision's pane tail has View live, with Open in herdr in its ··· menu", async () => {
+  stubDaemon("default");
+  await renderInbox("default", CAPACITY);
+  const head = paneTail();
+  const live = within(head).getByRole("button", { name: "View live" });
+  const more = within(head).getByRole("button", { name: "More actions" });
+  // The primary is rightmost, the menu on its left.
+  expect(more.compareDocumentPosition(live) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(live.className).toContain("primary");
+  expect(within(head).queryByRole("button", { name: /Open in herdr/ })).toBeNull();
+  fireEvent.click(more);
+  const menu = await screen.findByRole("menu", { name: "More actions" });
+  fireEvent.click(within(menu).getByRole("menuitem", { name: /Open in herdr/ }));
+  await flush();
+  expect(calls.map((call) => call.path)).toEqual([`/api/v1/agents/${GAMMA_ORCH}/focus`]);
+});
+
+test("View live opens the agent's live terminal over the Inbox, and closing it returns to the decision", async () => {
+  stubDaemon("default");
+  const { router } = await renderInbox("default", CAPACITY);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  fireEvent.click(within(paneTail()).getByRole("button", { name: "View live" }));
+  const dialog = await screen.findByRole("dialog", { name: "Terminal for gamma-orch" });
+  expect(within(dialog).getByText("gamma-orch")).toBeTruthy();
+  expect(within(dialog).getByRole("group", { name: "Live terminal for gamma-orch" })).toBeTruthy();
+  const agents = within(dialog).getByRole("link", { name: "View in Agents" });
+  expect(agents.getAttribute("href")).toContain(`agent=${GAMMA_ORCH}`);
+  // The decision stays under it, and is where closing lands.
+  expect(router.state.location.search).toEqual({ item: CAPACITY });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Close the expanded terminal" }));
+  await flush();
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(router.state.location.search).toEqual({ item: CAPACITY });
+  expect(screen.getByRole("heading", { name: /Raise gamma capacity to 2/ })).toBeTruthy();
+  expect(calls).toHaveLength(0);
+});
+
+test("a decision that is no longer current has no View live", async () => {
+  stubDaemon("default");
+  const { queryClient } = await renderInbox("default", CAPACITY);
+  expect(within(paneTail()).getByRole("button", { name: "View live" })).toBeTruthy();
+  act(() => {
+    queryClient.setQueryData<AttentionResponse>(attentionQuery().queryKey, (attention) =>
+      attention
+        ? {
+            ...attention,
+            items: attention.items.map((item) =>
+              item.id === CAPACITY ? { ...item, still_current: false } : item,
+            ),
+          }
+        : attention,
+    );
+  });
+  // The detail says why, and only then the pane tail has no way in.
+  await screen.findByTestId("not-current");
+  expect(screen.queryByRole("button", { name: "View live" })).toBeNull();
+  expect(document.querySelector(".in-detail .ev-acts")).toBeNull();
 });
 
 const COUNTS = ["Landed", "New decisions", "Failed runs", "Memory suggestions"];

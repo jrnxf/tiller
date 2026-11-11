@@ -504,6 +504,7 @@ export function LiveTerminal({
   machine,
   peer,
   strip,
+  onClose,
 }: {
   sessionId: string;
   // What the terminal is, for assistive tech: "build on beta-7".
@@ -512,8 +513,10 @@ export function LiveTerminal({
   heading: ReactNode;
   actions?: ReactNode;
   // The Agents view's stage: the screen fills the room it is given, with no
-  // header row, and the footer carries the size and the expand button.
-  variant?: "stage";
+  // header row, and the footer carries the size and the expand button. A
+  // popup is the expanded view alone, open from the start, over the page it
+  // was opened from: closing it calls `onClose`.
+  variant?: "stage" | "popup";
   control?: Ref<TerminalControl>;
   // Start typing as soon as the pane is live: the owner switched agents from
   // the keyboard while typing. Read once, when the terminal mounts.
@@ -528,12 +531,14 @@ export function LiveTerminal({
   peer?: string;
   // What the stage shows between the screen and its footer: the answer buttons.
   strip?: ReactNode;
+  onClose?: () => void;
 }) {
   const phone = usePhone();
   const tail = machine !== undefined;
   // A tail or a peer's pane: nothing here types into it.
   const watch = tail || peer !== undefined;
   const stage = variant === "stage";
+  const popup = variant === "popup";
   const [host] = useState(() => {
     const element = document.createElement("div");
     element.className = "mir-x";
@@ -548,8 +553,10 @@ export function LiveTerminal({
   const [status, setStatus] = useState<MirrorStatus>({ kind: "connecting" });
   const [size, setSize] = useState<TerminalSize | null>(null);
   const [typing, setTyping] = useState(false);
-  const [view, setView] = useState<View>("inline");
-  const [scale, setScale] = useState<Scale>("fit");
+  // A popup opens as the large view: the sheet at 1:1 on a phone, the dialog
+  // fitted on a computer.
+  const [view, setView] = useState<View>(popup ? (phone ? "sheet" : "dialog") : "inline");
+  const [scale, setScale] = useState<Scale>(popup && phone ? "one" : "fit");
   const [font, setFont] = useState(BASE_FONT);
   // The Fit is the stage's on a computer, while the board is on screen, the
   // stage is not expanded, and herdr has not refused it for this agent.
@@ -863,8 +870,9 @@ export function LiveTerminal({
 
   const collapse = useCallback(() => {
     termRef.current?.blur();
-    setView("inline");
-  }, []);
+    if (popup) onClose?.();
+    else setView("inline");
+  }, [popup, onClose]);
 
   useImperativeHandle(
     control,
@@ -1122,8 +1130,10 @@ export function LiveTerminal({
   );
 
   return (
-    <div className={`mir${stage ? " stage" : ""}${state}`}>
-      {stage ? null : (
+    // A popup has no inline view: only its dialog or sheet, which a portal
+    // puts over the page.
+    <div className={popup ? "mir-popup" : `mir${stage ? " stage" : ""}${state}`}>
+      {stage || popup ? null : (
         <div className="mir-h">
           <StatusMark status={status} />
           {typing && view === "inline" ? <span className="lab sm acc">Typing</span> : null}
@@ -1134,14 +1144,16 @@ export function LiveTerminal({
           {expandButton}
         </div>
       )}
-      {message}
+      {popup ? null : message}
       {screenShown && (view === "inline" || stage) ? screen : null}
       {screenShown && stage ? (
         <div className="mir-strip" ref={stripBox}>
           {strip}
         </div>
       ) : null}
-      {screenShown ? <div className="mir-f">{stage ? stageFooter : footer("inline")}</div> : null}
+      {screenShown && !popup ? (
+        <div className="mir-f">{stage ? stageFooter : footer("inline")}</div>
+      ) : null}
       {view === "dialog" ? (
         <Expanded
           onClose={collapse}
@@ -1188,6 +1200,8 @@ export function LiveTerminal({
             <span className="mir-sheet-t">{heading}</span>
             <span className="sp" />
             <ScaleSwitch scale={scale} onScale={setScale} />
+            {/* A popup's sheet is its only view, so it keeps its way on. */}
+            {popup ? actions : null}
           </div>
           {message}
           <div

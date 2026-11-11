@@ -33,7 +33,7 @@ import { answeredStore, withdrawnStore } from "./answered";
 import type { Withdrawn } from "./answered";
 import { AnswerForm } from "./answer";
 import { ApproveBlock } from "./approve";
-import { CardActions, HerdrMenu, OpenInHerdr } from "./card-actions";
+import { CardActions, HerdrMenu } from "./card-actions";
 import { CardOverflow } from "./card-lifecycle";
 import { tidy } from "./ansi";
 import { RecapCard } from "./recap";
@@ -58,6 +58,7 @@ import {
   RetiredIcon,
 } from "./icons";
 import { Terminal } from "./terminal";
+import { ViewLive } from "./view-live";
 import { WithdrawButton } from "./withdraw";
 import "./inbox.css";
 
@@ -171,10 +172,15 @@ function Evidence({
 }) {
   const sessionId = item.subject_session_id ?? evidence.sessionId;
   const card = ctx.cards.get(item.card_id);
-  // The pane is only there to open while the session is live.
+  // The pane is only there to open while the session is live. A peer's
+  // pane opens from its own host, so it has no live view here.
+  const off = focusReason(ownerOf(card ?? item));
   const herdr =
     sessionId && item.still_current ? (
-      <OpenInHerdr sessionId={sessionId} off={focusReason(ownerOf(card ?? item))} />
+      <span className="ev-acts">
+        <HerdrMenu sessionId={sessionId} off={off} />
+        {off === null ? <ViewLive sessionId={sessionId} /> : null}
+      </span>
     ) : null;
   if (!evidence.paneTail && evidence.lines.length === 0) return null;
   return (

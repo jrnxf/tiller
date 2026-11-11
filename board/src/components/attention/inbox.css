@@ -1058,6 +1058,14 @@ div.waiting {
   margin-top: 8px;
 }
 
+/* The tail's actions at the head's right end: ··· then View live. */
+.ev-acts {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
 .ev-head {
   display: flex;
   flex-wrap: wrap;
