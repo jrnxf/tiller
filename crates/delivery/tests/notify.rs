@@ -349,5 +349,5 @@ fn a_notify_command_that_leaves_a_process_behind_returns_within_the_limit() {
         .notify(&note())
         .unwrap_err();
     assert!(started.elapsed() < limit, "{:?}", started.elapsed());
-    assert!(error.contains("exit"), "{error}");
+    assert!(error.contains("no display"), "{error}");
 }

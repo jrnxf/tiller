@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use std::process::{Command as Process, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -50,6 +50,9 @@ pub const COMMAND_SECS: u64 = 10;
 
 /// How long after the notify command exits its stderr may still arrive.
 const STDERR_GRACE: Duration = Duration::from_millis(200);
+
+/// How much of the notify command's stderr an error keeps.
+const STDERR_BYTES: usize = 64 * 1024;
 
 /// One notification for the owner.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,13 +154,19 @@ impl Notify for Command {
             });
         }
         let stderr = child.stderr.take();
+        let text = Arc::new(Mutex::new(Vec::new()));
         let (sender, receiver) = mpsc::channel();
+        let shared = Arc::clone(&text);
         std::thread::spawn(move || {
-            let mut text = String::new();
-            if let Some(stderr) = stderr {
-                let _ = stderr.take(64 * 1024).read_to_string(&mut text);
+            if let Some(mut stderr) = stderr {
+                let mut chunk = [0; 4096];
+                while let Ok(read @ 1..) = stderr.read(&mut chunk) {
+                    let mut text = shared.lock().unwrap_or_else(PoisonError::into_inner);
+                    let room = STDERR_BYTES.saturating_sub(text.len());
+                    text.extend_from_slice(&chunk[..read.min(room)]);
+                }
             }
-            let _ = sender.send(text);
+            let _ = sender.send(());
         });
         let deadline = Instant::now() + self.limit;
         let status = loop {
@@ -178,7 +187,9 @@ impl Notify for Command {
         let grace = deadline
             .saturating_duration_since(Instant::now())
             .min(STDERR_GRACE);
-        let stderr = receiver.recv_timeout(grace).unwrap_or_default();
+        let _ = receiver.recv_timeout(grace);
+        let stderr = String::from_utf8_lossy(&text.lock().unwrap_or_else(PoisonError::into_inner))
+            .into_owned();
         let stderr = stderr.trim();
         match status {
             Some(status) if status.success() => Ok(()),
