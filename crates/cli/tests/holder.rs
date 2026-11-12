@@ -1182,13 +1182,21 @@ fn every_query_is_answered_once_on_the_pty_and_never_reaches_a_subscriber() {
                 .collect::<String>()
         })
         .collect();
-    let script = format!("stty raw -echo; head -c 1 >/dev/null; printf '{printf}'; exec cat -v");
+    // The marker shows that `stty` has run, so the input is not echoed,
+    // and it leaves the cursor at row 1 column 1 for the cursor report.
+    let script = format!(
+        "stty raw -echo; printf 'ready\\r'; head -c 1 >/dev/null; printf '{printf}'; exec cat -v"
+    );
     let pane = holder.spawn(&world, &["/bin/sh", "-c", &script]);
     let updates = holder.updates(&pane);
-    assert!(matches!(
-        next(&updates, &holder, "repaint"),
-        Update::Repaint { .. }
-    ));
+    let Update::Repaint { bytes, .. } = next(&updates, &holder, "repaint") else {
+        panic!("no repaint");
+    };
+    // The marker stays on the screen, so it is in the repaint when it came
+    // before the subscription.
+    if !holds(&bytes, b"ready") {
+        output_until(&updates, &holder, "ready");
+    }
     holder.client.input(&pane.pane, "g").unwrap();
     // The cursor report is the last answer.
     let seen = output_until(&updates, &holder, "R").concat();
