@@ -1711,6 +1711,7 @@ name = "tiller-agents"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "nix",
  "proptest",
  "regex",
  "ring",
@@ -1724,6 +1725,7 @@ dependencies = [
  "tiller-core",
  "tiller-herdr",
  "tiller-observe",
+ "tiller-panes",
  "tiller-reconcile",
  "toml",
  "ureq",
@@ -1752,6 +1754,7 @@ dependencies = [
  "tiller-daemon",
  "tiller-herdr",
  "tiller-observe",
+ "tiller-panes",
  "tiller-reconcile",
  "toml",
  "tracing",
@@ -1801,6 +1804,7 @@ dependencies = [
  "tiller-delivery",
  "tiller-herdr",
  "tiller-observe",
+ "tiller-panes",
  "tiller-reconcile",
  "tokio",
  "toml",

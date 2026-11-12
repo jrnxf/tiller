@@ -113,7 +113,8 @@ pub fn bound_pane<'a>(snapshot: &'a Snapshot, session: &Session) -> Option<&'a P
 /// `effective` is the view's word; `snapshot` is this pass's successful herdr
 /// read, or `None` when it failed. A session that is not stale and whose
 /// pane is present is alive without any probe. A session with no pane yet
-/// (a spawn that has not bound) is unknown: the spawn path owns it.
+/// (a spawn that has not bound) is unknown: the spawn path owns it. So is a
+/// session whose pane is in the terminal holder.
 pub fn climb(
     session: &Session,
     effective: &str,
@@ -124,7 +125,13 @@ pub fn climb(
     let Some(snapshot) = snapshot else {
         return Verdict::Unknown;
     };
-    if session.pane_id.is_none() {
+    let Some(pane_id) = session.pane_id.as_deref() else {
+        return Verdict::Unknown;
+    };
+    // A pane in the terminal holder is never in herdr's snapshot. Its
+    // ladder (the holder's list and exit codes) comes with H10; until then
+    // nothing here calls it dead.
+    if tiller_core::ids::is_holder_pane(pane_id) {
         return Verdict::Unknown;
     }
     let pane = bound_pane(snapshot, session);
@@ -259,5 +266,18 @@ mod tests {
             climb(&s, "stale", false, Some(&snap), &Fixed(Probe::Dead)),
             Verdict::Unknown
         );
+    }
+
+    #[test]
+    fn a_session_in_the_terminal_holder_is_unknown_not_gone() {
+        let pane = format!("p{}", tiller_core::ids::new_ulid());
+        let s = session(Some(&pane));
+        let snap = snapshot(&[("w1:p1", None)]);
+        for effective in ["working", "stale"] {
+            assert_eq!(
+                climb(&s, effective, true, Some(&snap), &Fixed(Probe::Dead)),
+                Verdict::Unknown
+            );
+        }
     }
 }

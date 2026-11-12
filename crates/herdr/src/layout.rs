@@ -101,7 +101,8 @@ impl Binding {
     }
 }
 
-/// Every live session on `host_id` that has a pane.
+/// Every live session on `host_id` that has a herdr pane. A session whose
+/// pane is in the terminal holder is not herdr's to lay out, poll or read.
 pub fn bindings(conn: &Connection, host_id: &str) -> tiller_core::Result<Vec<Binding>> {
     let sessions: Vec<Session> = list(
         conn,
@@ -113,6 +114,9 @@ pub fn bindings(conn: &Connection, host_id: &str) -> tiller_core::Result<Vec<Bin
         let Some(pane_id) = session.pane_id.clone() else {
             continue;
         };
+        if tiller_core::ids::is_holder_pane(&pane_id) {
+            continue;
+        }
         let (slot, model) = match (&session.role, &session.run_id) {
             (Role::Orchestrator, _) | (_, None) => (
                 Slot::Orchestrator {
