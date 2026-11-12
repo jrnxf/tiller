@@ -27,7 +27,9 @@ use tiller_agents::spawn::config::SpawnConfig;
 use tiller_core::Timestamp;
 use tiller_daemon::dto::{CheckStatus, DoctorCheck, DoctorGate, DoctorReport};
 use tiller_herdr::client::{Cli, Herdr};
+use tiller_holder::lock::{live_pid, lock_path};
 use tiller_observe::hooks::{EVENTS, Handler};
+use tiller_panes::{HolderClient, run_dir, socket_path};
 use tiller_reconcile::tools::{self, PROBE_TIMEOUT, read_version, version_parts};
 
 use super::admin::{config_file, load_config};
@@ -85,6 +87,111 @@ fn herdr(program: Vec<OsString>) -> Check {
         )
         .version(snapshot.version),
         Err(error) => Check::missing("herdr", true, error.to_string()),
+    }
+}
+
+/// What the holder's socket and lock showed (`terminal-holder.md` 2.2).
+#[derive(Debug, PartialEq, Eq)]
+enum HolderState {
+    /// It answered a ping.
+    Answers { version: String, instance: String },
+    /// No socket, and no process holds the lock.
+    Absent,
+    /// A socket file is left that nothing listens on, and no process holds
+    /// the lock: a holder that crashed.
+    Stale,
+    /// A process holds the lock, but the socket does not answer.
+    Silent { pid: u32, error: String },
+    /// Something listens but is no holder this build can talk to: another
+    /// program, or a holder on a protocol version this tiller does not
+    /// speak.
+    Broken(String),
+}
+
+/// Looks at the holder of `home`. Read only: it connects, pings and reads
+/// the lock file's pid, and takes no lock.
+fn probe_holder(home: &Path) -> HolderState {
+    use std::io::ErrorKind;
+    let socket = socket_path(home);
+    let pid = live_pid(&lock_path(&run_dir(home)));
+    match std::os::unix::net::UnixStream::connect(&socket) {
+        Ok(_) => {}
+        Err(error) => {
+            return match (pid, error.kind()) {
+                (Some(pid), _) => HolderState::Silent {
+                    pid,
+                    error: error.to_string(),
+                },
+                (None, ErrorKind::NotFound) => HolderState::Absent,
+                (None, ErrorKind::ConnectionRefused) => HolderState::Stale,
+                (None, _) => HolderState::Broken(error.to_string()),
+            };
+        }
+    }
+    match HolderClient::connect(&socket, "cli") {
+        Ok(client) => match client.ping() {
+            Ok(()) => HolderState::Answers {
+                version: client.welcome().holder.clone(),
+                instance: client.welcome().instance.clone(),
+            },
+            Err(error) => HolderState::Broken(error.to_string()),
+        },
+        Err(error) => match pid {
+            Some(pid) => HolderState::Silent {
+                pid,
+                error: error.to_string(),
+            },
+            None => HolderState::Broken(error.to_string()),
+        },
+    }
+}
+
+/// The `holder` check. The holder is off until cutover (`terminal-holder.md`
+/// 11.2), so none running is a warning; a holder that is there and does not
+/// answer is a failure.
+fn holder(state: HolderState) -> Check {
+    const NAME: &str = "holder";
+    match state {
+        HolderState::Answers { version, instance } => Check::new(
+            NAME,
+            true,
+            Status::Ok,
+            format!("answers a ping; instance {instance}"),
+        )
+        .version(Some(version))
+        .code("answers"),
+        HolderState::Absent => Check::new(
+            NAME,
+            true,
+            Status::Warn,
+            "no holder runs for this home, so no agent has a terminal; \
+             start one with: tiller holder --detach",
+        )
+        .code("not_running"),
+        HolderState::Stale => Check::new(
+            NAME,
+            true,
+            Status::Warn,
+            "a holder socket is left but no holder runs (it crashed or was killed); \
+             the next holder removes it. Start one with: tiller holder --detach",
+        )
+        .code("stale_socket"),
+        HolderState::Silent { pid, error } => Check::new(
+            NAME,
+            true,
+            Status::Fail,
+            format!(
+                "pid {pid} holds the holder lock, but the socket does not answer: {error}"
+            ),
+        )
+        .code("not_answering"),
+        HolderState::Broken(error) => Check::new(
+            NAME,
+            true,
+            Status::Fail,
+            format!("something listens on the holder socket but is no holder this tiller can use: {error}"),
+        )
+        .code("broken"),
     }
 }
 
@@ -726,6 +833,10 @@ pub fn report(app: &App) -> Report {
         no_mistakes_pair,
     );
     probes.ready(hooks());
+    let holder_home = app.home.clone();
+    probes.one(Check::missing("holder", true, late()), move || {
+        holder(probe_holder(&holder_home))
+    });
     let marker = app.owner_marker();
     let daemon = daemon_running(&app.home);
     probes.ready(owner_marker(marker.as_deref(), daemon));

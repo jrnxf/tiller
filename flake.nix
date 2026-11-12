@@ -309,6 +309,145 @@
                 && allowHostArgs false == allowHostArgs true
               ) "nix/module.nix: daemon.allowHosts does not reach the daemon as --allow-host arguments";
               pkgs.runCommand "tiller-module-restarts-daemon" { } "touch $out";
+            # The holder service (`terminal-holder.md` 2.2, 11.2) is off by
+            # default; on, its launchd agent and systemd unit name the
+            # profile's `tiller` and no store path, so they stay the same
+            # across packages and a switch never restarts the holder.
+            moduleHolderService =
+              let
+                stubPackage = name: pkgs.writeText name name;
+                configFor =
+                  isDarwin: tiller:
+                  (lib.evalModules {
+                    modules = [
+                      (import ./nix/module.nix self)
+                      {
+                        options = {
+                          home.packages = lib.mkOption { type = lib.types.listOf lib.types.package; };
+                          home.profileDirectory = lib.mkOption { type = lib.types.str; };
+                          home.homeDirectory = lib.mkOption { type = lib.types.str; };
+                          home.username = lib.mkOption { type = lib.types.str; };
+                          launchd.agents = lib.mkOption {
+                            type = lib.types.attrsOf lib.types.anything;
+                            default = { };
+                          };
+                          systemd.user.services = lib.mkOption {
+                            type = lib.types.attrsOf lib.types.anything;
+                            default = { };
+                          };
+                        };
+                        config = {
+                          home.profileDirectory = "/home/user/.nix-profile";
+                          home.homeDirectory = "/home/user";
+                          home.username = "user";
+                          programs.tiller = tiller;
+                        };
+                      }
+                    ];
+                    specialArgs.pkgs.stdenv.hostPlatform = {
+                      inherit system isDarwin;
+                      isLinux = !isDarwin;
+                    };
+                  }).config;
+                on = package: {
+                  enable = true;
+                  inherit package;
+                  holder = {
+                    enable = true;
+                    extraPath = [ "/home/user/.local/bin" ];
+                    environment.TILLER_HOME = "/home/user/.tiller";
+                  };
+                };
+                agent = isDarwin: package: (configFor isDarwin (on package)).launchd.agents.tiller-holder;
+                unit = isDarwin: package: (configFor isDarwin (on package)).systemd.user.services.tiller-holder;
+                a = stubPackage "tiller-a";
+                b = stubPackage "tiller-b";
+                off =
+                  isDarwin:
+                  configFor isDarwin {
+                    enable = true;
+                    package = a;
+                  };
+                # The Linux environment as an attrset.
+                envOf =
+                  service:
+                  lib.listToAttrs (
+                    map (
+                      word:
+                      let
+                        parts = lib.splitString "=" (lib.removeSuffix "\"" (lib.removePrefix "\"" word));
+                      in
+                      lib.nameValuePair (lib.head parts) (lib.concatStringsSep "=" (lib.tail parts))
+                    ) service.Service.Environment
+                  );
+                path =
+                  isDarwin:
+                  lib.splitString ":" (
+                    if isDarwin then (agent true a).config.EnvironmentVariables.PATH else (envOf (unit false a)).PATH
+                  );
+                mentionsStore = value: lib.hasInfix builtins.storeDir (builtins.toJSON value);
+              in
+              assert lib.assertMsg (
+                (off true).launchd.agents == { } || !(off true).launchd.agents ? tiller-holder
+              ) "nix/module.nix: the launchd holder agent exists with holder.enable off";
+              assert lib.assertMsg (
+                !(off false).systemd.user.services ? tiller-holder
+              ) "nix/module.nix: the systemd holder unit exists with holder.enable off";
+              assert lib.assertMsg (
+                (agent true a).config.ProgramArguments == [
+                  "/home/user/.nix-profile/bin/tiller"
+                  "holder"
+                ]
+              ) "nix/module.nix: the launchd holder agent does not run the profile's tiller holder";
+              assert lib.assertMsg (
+                (unit false a).Service.ExecStart == "/home/user/.nix-profile/bin/tiller holder"
+              ) "nix/module.nix: the systemd holder unit does not run the profile's tiller holder";
+              assert lib.assertMsg (builtins.toJSON (agent true a) == builtins.toJSON (agent true b))
+                "nix/module.nix: the launchd holder agent changes with the package, so a switch would reload the holder";
+              assert lib.assertMsg (builtins.toJSON (unit false a) == builtins.toJSON (unit false b))
+                "nix/module.nix: the systemd holder unit changes with the package, so a switch would restart the holder";
+              assert lib.assertMsg (
+                !mentionsStore (agent true a) && !mentionsStore (unit false a)
+              ) "nix/module.nix: a holder service definition names a store path";
+              assert lib.assertMsg (
+                (unit false a).Unit.X-RestartIfChanged == false
+                && (unit false a).Unit.X-StopIfChanged == false
+                && (unit false a).Unit.X-SwitchMethod == "keep-old"
+              ) "nix/module.nix: the systemd holder unit can be restarted or stopped by a switch";
+              assert lib.assertMsg (
+                (unit false a).Service.KillMode == "process" && (unit false a).Service.Restart == "on-failure"
+              ) "nix/module.nix: the systemd holder unit lacks KillMode=process or Restart=on-failure";
+              assert lib.assertMsg (
+                (agent true a).config.KeepAlive.SuccessfulExit == false && (agent true a).config.RunAtLoad
+              ) "nix/module.nix: the launchd holder agent does not start at load and restart after a crash";
+              # The plist home-manager writes for the agent.
+              assert lib.assertMsg
+                (
+                  let
+                    plist = lib.generators.toPlist { } (agent true a).config;
+                  in
+                  lib.hasInfix "<key>ProgramArguments</key>" plist
+                  && lib.hasInfix "<string>/home/user/.nix-profile/bin/tiller</string>" plist
+                  && lib.hasInfix "<string>holder</string>" plist
+                  && lib.hasInfix "<key>SuccessfulExit</key>" plist
+                  && lib.hasInfix "<key>RunAtLoad</key>" plist
+                  && lib.hasInfix "/home/user/Library/Logs/tiller-holder.log" plist
+                  && !lib.hasInfix builtins.storeDir plist
+                )
+                "nix/module.nix: the launchd holder agent's plist lacks its command, KeepAlive or log, or names a store path";
+              assert lib.assertMsg (
+                builtins.elem "/home/user/.local/bin" (path true)
+                && builtins.elem "/home/user/.local/bin" (path false)
+                && builtins.elem "/opt/homebrew/bin" (path true)
+                && !builtins.elem "/opt/homebrew/bin" (path false)
+              ) "nix/module.nix: the holder PATH is not the profile, extraPath and the system directories";
+              assert lib.assertMsg (
+                (agent true a).config.EnvironmentVariables.TILLER_HOME == "/home/user/.tiller"
+                && (envOf (unit false a)).TILLER_HOME == "/home/user/.tiller"
+                && !(agent true a).config.EnvironmentVariables ? TILLER_PACKAGE
+                && !(envOf (unit false a)) ? TILLER_PACKAGE
+              ) "nix/module.nix: holder.environment does not reach the holder, or TILLER_PACKAGE does";
+              pkgs.runCommand "tiller-module-holder-service" { } "touch $out";
           };
 
           devShells.default = craneLib.devShell {
