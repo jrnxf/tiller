@@ -164,7 +164,7 @@ async fn mirror(
                 },
             };
             // A burst of output already waiting goes as one frame, so a
-            // fast writer does not fill the view's queue line by line.
+            // fast writer costs the browser fewer lines.
             let update = match update {
                 Some(Ok(Some(Update::Output(mut bytes)))) => {
                     while bytes.len() < BURST
@@ -184,7 +184,7 @@ async fn mirror(
             };
             let line = match update {
                 Some(Ok(Some(Update::Repaint { cols, rows, bytes }))) => {
-                    if !queue(tx, &TerminalLine::Size { cols, rows }) {
+                    if !deliver(tx, &mut stop, &TerminalLine::Size { cols, rows }).await {
                         return;
                     }
                     frame(&mut seq, true, &bytes)
@@ -205,10 +205,30 @@ async fn mirror(
                 Some(Ok(None)) | None => return,
             };
             let closed = matches!(line, TerminalLine::Closed { .. });
-            if !queue(tx, &line) || closed {
+            if !deliver(tx, &mut stop, &line).await || closed {
                 return;
             }
         }
+    }
+}
+
+/// Sends one NDJSON line, waiting while the browser's queue is full: the
+/// holder's output is a byte stream, so no frame may drop. A browser that
+/// stays behind backs the subscription up until the holder says `Lagged`,
+/// and the view opens again with a repaint. False when the browser left or
+/// the daemon stops.
+async fn deliver(
+    tx: &mpsc::Sender<Bytes>,
+    stop: &mut watch::Receiver<bool>,
+    message: &TerminalLine,
+) -> bool {
+    let Ok(mut line) = serde_json::to_vec(message) else {
+        return false;
+    };
+    line.push(b'\n');
+    tokio::select! {
+        sent = tx.send(Bytes::from(line)) => sent.is_ok(),
+        () = stopping(stop) => false,
     }
 }
 
