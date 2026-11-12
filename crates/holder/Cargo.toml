@@ -1,0 +1,35 @@
+[package]
+name = "tiller-holder"
+description = "The terminal holder: PTYs, the reaper, the screen model, the repaint and the socket server (terminal-holder.md 2, 3)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+alacritty_terminal.workspace = true
+jiff.workspace = true
+libc.workspace = true
+rustix = { workspace = true, features = ["fs", "process", "pty", "stdio", "termios"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tiller-panes.workspace = true
+tokio = { workspace = true, features = ["io-util", "net", "signal", "sync", "time"] }
+tracing.workspace = true
+ulid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+# The workspace forbids unsafe code. The holder needs it for a few syscalls
+# (the child's setup between fork and exec), so it denies it instead: each
+# block allows it by name and says why it is sound.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+undocumented_unsafe_blocks = "deny"

@@ -2,6 +2,7 @@ mod app;
 mod cmd;
 mod daemon;
 mod guard;
+mod holder;
 mod hook;
 mod lisbon;
 mod stable;
@@ -161,6 +162,8 @@ enum Command {
     Health(health::Cmd),
     /// Serve the board on localhost
     Daemon(daemon::Args),
+    /// Keep the agents' terminals: PTYs, their screens and the holder socket
+    Holder,
     /// Record a Claude Code hook event (reads the hook input on stdin)
     Hook(hook::Args),
     /// The PreToolUse backstop for fleet sessions
@@ -224,11 +227,13 @@ fn dispatch(app: &App, command: Command) -> Done {
         Command::Import(args) => import::import(app, args),
         Command::Doctor => doctor::run(app),
         Command::Health(cmd) => health::run(app, cmd),
-        Command::Daemon(_) | Command::Hook(_) | Command::Guard(_) => Err(Failure::new(
-            "internal",
-            1,
-            "daemon, hook and guard are run before dispatch",
-        )),
+        Command::Daemon(_) | Command::Holder | Command::Hook(_) | Command::Guard(_) => {
+            Err(Failure::new(
+                "internal",
+                1,
+                "daemon, holder, hook and guard are run before dispatch",
+            ))
+        }
     }
 }
 
@@ -319,6 +324,9 @@ fn main() -> ExitCode {
                 ExitCode::from(exit)
             }
         };
+    }
+    if let Command::Holder = &cli.command {
+        return holder::run();
     }
     if let Command::Daemon(args) = &cli.command {
         if let Some(message) = daemon::refuse_db(cli.db.as_deref()) {
