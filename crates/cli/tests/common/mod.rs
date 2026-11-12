@@ -15,6 +15,8 @@ use tiller_core::domain::{Effort, RunRole};
 use tiller_core::state::runs::{NewOrchestrator, NewRun, SpawnChecks};
 use tiller_core::{Actor, Ctx, Store};
 
+pub mod holder;
+
 /// What a caller's shell may set that changes what `tiller` does, removed
 /// from every command a test runs. Run from a Claude Code shell, over ssh or
 /// neither, the owner checks see the same caller: no `CLAUDECODE`, no

@@ -60,8 +60,14 @@ pub fn interrupt(app: &App, run: &str) -> Done {
     let mut store = app.write()?;
     let run = resolve_run(&store, run)?;
     let world = tools.world(None, None);
-    let applied = control::interrupt(&mut store, &app.ctx(), world.herdr, &Waits::default(), &run)
-        .map_err(failure)?;
+    let applied = control::interrupt(
+        &mut store,
+        &app.ctx(),
+        &world.routed(),
+        &Waits::default(),
+        &run,
+    )
+    .map_err(failure)?;
     let warning = unseen("the cancel", applied.value.cancel, &applied.value.evidence);
     Ok(Outcome::applied(applied).with_warning(warning))
 }

@@ -4,6 +4,8 @@
 //! dialog, never a guess.
 
 use sha2::{Digest, Sha256};
+use tiller_panes::Key;
+use tiller_panes::keys::Named;
 
 use crate::api::pane_tail;
 use crate::auth::hex;
@@ -31,7 +33,7 @@ impl Dialog {
     /// The keys that pick `option`, or None when the dialog does not offer
     /// it. A permission dialog takes the digit alone; a cursor menu takes
     /// the arrow keys from the cursor to the option's row, then Enter.
-    pub fn keys(&self, option: u8) -> Option<Vec<String>> {
+    pub fn keys(&self, option: u8) -> Option<Vec<Key>> {
         if !self
             .prompt
             .options
@@ -41,11 +43,15 @@ impl Dialog {
             return None;
         }
         Some(match self.prompt.layout {
-            PromptLayout::Permission => vec![option.to_string()],
+            PromptLayout::Permission => option.to_string().chars().filter_map(Key::char).collect(),
             PromptLayout::Trust => {
-                let arrow = if option > self.cursor { "down" } else { "up" };
-                let mut keys = vec![arrow.to_owned(); usize::from(option.abs_diff(self.cursor))];
-                keys.push("enter".to_owned());
+                let arrow = Key::named(if option > self.cursor {
+                    Named::Down
+                } else {
+                    Named::Up
+                });
+                let mut keys = vec![arrow; usize::from(option.abs_diff(self.cursor))];
+                keys.push(Key::ENTER);
                 keys
             }
         })
@@ -372,10 +378,10 @@ mod tests {
         let dialog = read(TRUST, &Wait::Input).unwrap();
         insta::assert_json_snapshot!(dialog.prompt);
         // The cursor starts on No, exit: Yes is one row down.
-        assert_eq!(dialog.keys(1), Some(vec!["enter".to_owned()]));
+        assert_eq!(dialog.keys(1), Some(vec![Key::ENTER]));
         assert_eq!(
             dialog.keys(2),
-            Some(vec!["down".to_owned(), "enter".to_owned()])
+            Some(vec![Key::named(Named::Down), Key::ENTER])
         );
         assert_eq!(dialog.keys(3), None);
         assert_eq!(dialog.keys(0), None);
@@ -393,9 +399,9 @@ mod tests {
         let dialog = read(&moved, &Wait::Input).unwrap();
         assert_eq!(
             dialog.keys(1),
-            Some(vec!["up".to_owned(), "enter".to_owned()])
+            Some(vec![Key::named(Named::Up), Key::ENTER])
         );
-        assert_eq!(dialog.keys(2), Some(vec!["enter".to_owned()]));
+        assert_eq!(dialog.keys(2), Some(vec![Key::ENTER]));
         // The cursor is not part of the dialog's hash.
         let shown = read(TRUST, &Wait::Input).unwrap();
         assert_eq!(dialog.prompt.screen, shown.prompt.screen);
@@ -408,7 +414,7 @@ mod tests {
         assert_eq!(read(TRUST, &Wait::Permission(String::new())), None);
         assert_eq!(read(BASH, &Wait::Input), None);
         let bash = read(BASH, &Wait::Permission("Bash".to_owned())).unwrap();
-        assert_eq!(bash.keys(4), Some(vec!["4".to_owned()]));
+        assert_eq!(bash.keys(4), Some(vec![Key::char('4').unwrap()]));
         assert_eq!(bash.keys(5), None);
     }
 
@@ -487,13 +493,13 @@ mod tests {
         let trust = every(read(TRUST, &Wait::Input).unwrap());
         let mut sent = std::collections::BTreeSet::new();
         for &PromptOption { n, .. } in &offered {
-            sent.extend(permission.keys(n).unwrap());
+            sent.extend(permission.keys(n).unwrap().iter().map(ToString::to_string));
             for cursor in 1..=9 {
                 let moved = Dialog {
                     cursor,
                     ..trust.clone()
                 };
-                sent.extend(moved.keys(n).unwrap());
+                sent.extend(moved.keys(n).unwrap().iter().map(ToString::to_string));
             }
         }
         for name in &sent {

@@ -120,7 +120,7 @@ pub(crate) fn words(words: &[String]) -> Vec<OsString> {
 /// The Tiller home as the launch fragments name it: absolute (a relative
 /// `TILLER_HOME` is anchored at the current directory) and without a
 /// trailing slash.
-fn absolute_home(home: &Path) -> Result<PathBuf, Failure> {
+pub(super) fn absolute_home(home: &Path) -> Result<PathBuf, Failure> {
     Ok(std::path::absolute(home)?.components().collect())
 }
 
@@ -630,7 +630,8 @@ fn refused(failure: Failure) -> StartError {
 }
 
 /// `tiller agent focus <run|session>`: focuses the agent's pane in the
-/// herdr client, on its saved machine for a remote host. Writes nothing.
+/// herdr client, on its saved machine for a remote host, or in the attach
+/// clients of the terminal holder. Writes nothing.
 pub fn focus(app: &App, target: &str) -> Done {
     app.require_owner("tiller agent focus")?;
     let tools = Tools::load(app)?;
@@ -638,9 +639,31 @@ pub fn focus(app: &App, target: &str) -> Done {
     let session = resolve_session(&store, target)?;
     let (pane, machine) = tiller_core::state::runs::focus_target(store.conn(), &session)?;
     if tiller_core::ids::is_holder_pane(&pane) {
-        return Err(failure(SpawnError::Refused(format!(
-            "focus is not ready yet for an agent in the terminal holder (pane {pane}); watch it in the board's live view"
-        ))));
+        // Open in terminal (`terminal-holder.md` 5.3), from this shell: the
+        // attach clients switch to the pane, and with none the command to
+        // open one is the warning.
+        let holder = tools.holder.as_ref().ok_or_else(|| {
+            failure(SpawnError::Panes(PanesError::Unreachable(
+                "no holder runs on this host (start it with tiller holder, or run tiller doctor)"
+                    .into(),
+            )))
+        })?;
+        let clients = holder
+            .switch(&tiller_panes::PaneId::from(pane.as_str()))
+            .map_err(|error| failure(SpawnError::Panes(error)))?;
+        let warning = (clients == 0).then(|| {
+            format!(
+                "no tiller attach client shows the pane; open one with tiller attach {}",
+                session.id
+            )
+        });
+        return Ok(Outcome::read(json!({
+            "session_id": session.id,
+            "pane_id": pane,
+            "machine": null,
+            "attach_clients": clients,
+        }))
+        .with_warning(warning));
     }
     let herdr = match &machine {
         Some(machine) => tools.herdr.clone().on_machine(machine),

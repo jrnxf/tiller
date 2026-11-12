@@ -4104,15 +4104,31 @@ fn cleanup_never_ends_a_run_whose_holder_pane_runs() {
         "{error}"
     );
 
-    // Once the pane's agent exits, cleanup goes ahead and closes nothing
-    // in herdr.
+    // Once the pane's agent exits, cleanup goes ahead: the holder forgets
+    // the pane, and herdr closes nothing.
     assert!(panes.exit(
         &tiller_panes::PaneId::from(spawned.pane_id.as_str()),
         Some(0),
         None
     ));
     let cleaned = rig.cleanup(&run).unwrap();
-    assert!(cleaned.closed_panes.is_empty());
+    assert_eq!(cleaned.closed_panes, std::slice::from_ref(&spawned.pane_id));
+    assert!(
+        panes
+            .calls()
+            .contains(&format!("forget {}", spawned.pane_id)),
+        "{:?}",
+        panes.calls()
+    );
+    assert!(tiller_panes::Panes::list(&panes).unwrap().panes.is_empty());
+    assert!(
+        !rig.herdr
+            .calls()
+            .iter()
+            .any(|c| c.starts_with("close_pane")),
+        "{:?}",
+        rig.herdr.calls()
+    );
     assert_eq!(cleaned.returned.as_deref(), Some(spawned.worktree.as_str()));
 }
 
@@ -4156,8 +4172,8 @@ fn an_orchestrator_starts_in_the_terminal_holder_with_no_workspace() {
 }
 
 #[test]
-fn a_stop_never_takes_a_holder_pane_for_a_gone_one() {
-    let (mut rig, _panes) = holder_rig(Rig::new());
+fn a_stop_of_a_holder_pane_reads_the_holder_and_never_takes_it_for_gone() {
+    let (mut rig, panes) = holder_rig(Rig::new());
     let card = rig.card(CardKind::Ship, None);
     let spawned = rig.spawn(&card, RunRole::Builder);
     rig.done(&spawned.run.id, RunOutcome::Abandoned).unwrap();
@@ -4168,9 +4184,11 @@ fn a_stop_never_takes_a_holder_pane_for_a_gone_one() {
         poll: std::time::Duration::from_millis(10),
         pacing: tiller_herdr::submit::Pacing::INSTANT,
     };
+    let pane = tiller_panes::PaneId::from(spawned.pane_id.as_str());
 
     // herdr has no such pane, which a stop would read as proof the agent
-    // is gone: the stop refuses instead, and the session stays live.
+    // is gone: the stop asks the holder, which runs it at no composer, so
+    // the stop refuses and the session stays live.
     let world = world!(rig);
     let error = crate::control::stop_agent(
         &mut rig.fleet.store,
@@ -4183,11 +4201,33 @@ fn a_stop_never_takes_a_holder_pane_for_a_gone_one() {
     assert!(
         error
             .to_string()
-            .contains("not ready yet for an agent in the terminal holder"),
+            .contains("did not come to an empty composer"),
         "{error}"
     );
     let session: tiller_core::domain::Session =
         get(rig.fleet.store.conn(), "session", &spawned.session.id).unwrap();
     assert!(session.ended_at.is_none());
+    assert!(
+        panes
+            .calls()
+            .iter()
+            .any(|c| c.starts_with(&format!("screen {pane} ")))
+    );
+
+    // Once its agent exits, the stop ends the session and the holder
+    // forgets the pane.
+    assert!(panes.exit(&pane, Some(0), None));
+    let world = world!(rig);
+    crate::control::stop_agent(
+        &mut rig.fleet.store,
+        &owner(),
+        &world,
+        &waits,
+        &spawned.session,
+    )
+    .unwrap();
+    let session: tiller_core::domain::Session =
+        get(rig.fleet.store.conn(), "session", &spawned.session.id).unwrap();
+    assert!(session.ended_at.is_some());
     assert!(herdr_launches(&rig).is_empty(), "{:?}", rig.herdr.calls());
 }

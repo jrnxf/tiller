@@ -144,6 +144,14 @@ pub struct Pane {
     pub subscribers: u32,
 }
 
+impl Pane {
+    /// How long the child has printed nothing, or None when it never printed.
+    pub fn quiet_for(&self) -> Option<std::time::Duration> {
+        let at = self.last_output_at?;
+        Some(Timestamp::now().duration_since(at).unsigned_abs())
+    }
+}
+
 /// Every pane of one holder `instance`, running or exited.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Listing {

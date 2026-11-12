@@ -12,6 +12,7 @@ pub mod guards;
 pub mod handoff;
 pub mod holdout;
 pub mod intake;
+pub mod labels;
 pub mod land;
 pub mod numbering;
 pub mod review;

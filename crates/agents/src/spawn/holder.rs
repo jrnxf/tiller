@@ -1,6 +1,6 @@
-//! A session's pane in the terminal holder (`terminal-holder.md` 4.4), the
-//! first slice (S1c): one `spawn` in place of herdr's workspace, row
-//! tokens, layout pass and typed launch line.
+//! A session's pane in the terminal holder (`terminal-holder.md` 4.4): one
+//! `spawn` in place of herdr's workspace, row tokens, layout pass and typed
+//! launch line.
 //!
 //! The holder runs the launch script itself, which `exec`s the agent, so
 //! nothing is typed into the pane. The pane's `key` is the session id and
@@ -10,7 +10,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use tiller_panes::{Meta, Pane, PaneId, PaneState, Panes, Spawn};
+use tiller_herdr::routed::CLOSE_GRACE;
+use tiller_panes::{Meta, Pane, PaneId, PaneState, Panes, PanesError, Spawn};
 
 use super::Result;
 
@@ -113,81 +114,54 @@ pub(crate) fn open(
     }
 }
 
-/// Ends a pane a failed launch opened, by its process group, since the
-/// slice's holder has no `close` (H09 brings it). A pane that is gone or
-/// has exited already needs nothing.
+/// Ends a pane a failed launch opened: `close`, which sends `hup` and then
+/// `kill` after the grace, and `forget` (4.4 Stop). A pane that is gone or
+/// has exited already is only forgotten.
 pub(crate) fn close(panes: &dyn Panes, pane: &str) -> std::result::Result<(), String> {
     let id = PaneId::from(pane);
     end(panes, |p| p.pane == id)
 }
 
-/// Kills the process group of the running pane that `which` picks.
+/// Closes and forgets the pane that `which` picks.
 fn end(panes: &dyn Panes, which: impl Fn(&Pane) -> bool) -> std::result::Result<(), String> {
     let listing = panes.list().map_err(|e| e.to_string())?;
-    let Some(found) = listing
-        .panes
-        .iter()
-        .find(|p| p.state == PaneState::Running && which(p))
-    else {
+    let Some(found) = listing.panes.iter().find(|p| which(p)) else {
         return Ok(());
     };
     let pane = &found.pane;
-    // Pid 0 or 1 would signal this process's own group or init's.
-    let pid = i32::try_from(found.pid)
-        .ok()
-        .filter(|pid| *pid > 1)
-        .ok_or_else(|| {
-            format!(
-                "pane {pane} has pid {}, which is never signalled",
-                found.pid
-            )
-        })?;
-    match nix::sys::signal::killpg(
-        nix::unistd::Pid::from_raw(pid),
-        nix::sys::signal::Signal::SIGKILL,
-    ) {
-        Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
-        Err(e) => return Err(format!("killing pane {pane} (pid {pid}): {e}")),
+    if found.state == PaneState::Running {
+        match panes.close(pane, CLOSE_GRACE) {
+            Ok(_) | Err(PanesError::NotFound(_) | PanesError::Exited(_)) => {}
+            Err(e) => return Err(format!("closing pane {pane}: {e}")),
+        }
     }
-    // The holder reaps the child a moment later. Until it does, the pane
-    // lists as running, and a cleanup right after would refuse it.
-    let deadline = std::time::Instant::now() + REAPED;
-    loop {
-        let listing = panes.list().map_err(|e| e.to_string())?;
-        if !listing
-            .panes
-            .iter()
-            .any(|p| p.pane == *pane && p.state == PaneState::Running)
-        {
-            return Ok(());
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(format!(
-                "pane {pane} still runs {} s after its kill",
-                REAPED.as_secs()
-            ));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    match panes.forget(pane) {
+        Ok(()) | Err(PanesError::NotFound(_)) => Ok(()),
+        Err(e) => Err(format!("forgetting pane {pane}: {e}")),
     }
 }
-
-/// How long a killed pane may take to list as exited.
-const REAPED: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Whether the holder's `pane` still runs: a run's cleanup never ends a
 /// session whose pane lives. A holder that does not answer cannot prove
 /// the pane gone, so it refuses. With no holder socket at all, no holder
 /// runs, and a pane dies with its holder's PTY, so none of its panes does.
 pub(crate) fn running(panes: Option<&dyn Panes>, pane: &str) -> Result<bool> {
+    Ok(state(panes, pane)? == Some(PaneState::Running))
+}
+
+/// The state of the holder's `pane`, or None when the holder does not list
+/// it (or no holder runs), on the terms of [`running`].
+pub(crate) fn state(panes: Option<&dyn Panes>, pane: &str) -> Result<Option<PaneState>> {
     let Some(panes) = panes else {
-        return Ok(false);
+        return Ok(None);
     };
     let id = PaneId::from(pane);
     Ok(panes
         .list()?
         .panes
         .iter()
-        .any(|p| p.pane == id && p.state == PaneState::Running))
+        .find(|p| p.pane == id)
+        .map(|p| p.state))
 }
 
 #[cfg(test)]
@@ -196,31 +170,23 @@ mod tests {
 
     use super::*;
 
-    /// A holder that starts the pane but whose answer is lost, and that
-    /// lists the pane with the pid of a real process group.
-    struct LostReply {
-        inner: tiller_panes::FakePanes,
-        pid: u32,
-    }
+    /// A holder that starts the pane but whose answer is lost.
+    struct LostReply(tiller_panes::FakePanes);
 
     impl Panes for LostReply {
         fn spawn(&self, req: &Spawn) -> tiller_panes::Result<Pane> {
-            self.inner.spawn(req)?;
+            self.0.spawn(req)?;
             Err(tiller_panes::PanesError::Unreachable(
                 "no reply in time".into(),
             ))
         }
 
         fn list(&self) -> tiller_panes::Result<tiller_panes::Listing> {
-            let mut listing = self.inner.list()?;
-            for pane in &mut listing.panes {
-                pane.pid = self.pid;
-            }
-            Ok(listing)
+            self.0.list()
         }
 
         fn get(&self, pane: &PaneId) -> tiller_panes::Result<Option<Pane>> {
-            self.inner.get(pane)
+            self.0.get(pane)
         }
 
         fn screen(
@@ -229,19 +195,19 @@ mod tests {
             read: tiller_panes::message::Read,
             format: tiller_panes::message::Format,
         ) -> tiller_panes::Result<tiller_panes::message::Screen> {
-            self.inner.screen(pane, read, format)
+            self.0.screen(pane, read, format)
         }
 
         fn input(&self, pane: &PaneId, text: &str) -> tiller_panes::Result<()> {
-            self.inner.input(pane, text)
+            self.0.input(pane, text)
         }
 
         fn paste(&self, pane: &PaneId, text: &str) -> tiller_panes::Result<()> {
-            self.inner.paste(pane, text)
+            self.0.paste(pane, text)
         }
 
         fn keys(&self, pane: &PaneId, keys: &[tiller_panes::Key]) -> tiller_panes::Result<()> {
-            self.inner.keys(pane, keys)
+            self.0.keys(pane, keys)
         }
 
         fn set_meta(
@@ -250,7 +216,7 @@ mod tests {
             set: &tiller_panes::message::Meta,
             remove: &[&str],
         ) -> tiller_panes::Result<Pane> {
-            self.inner.set_meta(pane, set, remove)
+            self.0.set_meta(pane, set, remove)
         }
 
         fn signal(
@@ -258,7 +224,7 @@ mod tests {
             pane: &PaneId,
             signal: tiller_panes::message::Signal,
         ) -> tiller_panes::Result<()> {
-            self.inner.signal(pane, signal)
+            self.0.signal(pane, signal)
         }
 
         fn close(
@@ -266,30 +232,22 @@ mod tests {
             pane: &PaneId,
             grace: std::time::Duration,
         ) -> tiller_panes::Result<tiller_panes::message::Exit> {
-            self.inner.close(pane, grace)
+            self.0.close(pane, grace)
         }
 
         fn forget(&self, pane: &PaneId) -> tiller_panes::Result<()> {
-            self.inner.forget(pane)
+            self.0.forget(pane)
         }
 
         fn switch(&self, pane: &PaneId) -> tiller_panes::Result<usize> {
-            self.inner.switch(pane)
+            self.0.switch(pane)
         }
     }
 
     #[test]
-    fn a_spawn_whose_answer_is_lost_ends_the_pane_it_started() {
-        use std::os::unix::process::CommandExt as _;
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .process_group(0)
-            .spawn()
-            .unwrap();
-        let panes = LostReply {
-            inner: tiller_panes::FakePanes::new(),
-            pid: child.id(),
-        };
+    fn a_spawn_whose_answer_is_lost_closes_and_forgets_the_pane_it_started() {
+        let fake = tiller_panes::FakePanes::new();
+        let panes = LostReply(fake.clone());
         let owner = Owner {
             session: "S1",
             run: Some("R1"),
@@ -305,11 +263,11 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("unreachable"), "{error}");
-        // The stray pane's process group is ended, not left to run.
-        let status = child.wait().unwrap();
-        assert!(!status.success(), "{status:?}");
-        use std::os::unix::process::ExitStatusExt as _;
-        assert_eq!(status.signal(), Some(9), "{status:?}");
+        // The stray pane is closed and forgotten, not left to run.
+        let calls = fake.calls();
+        assert!(calls.iter().any(|c| c.starts_with("close ")), "{calls:?}");
+        assert!(calls.iter().any(|c| c.starts_with("forget ")), "{calls:?}");
+        assert!(fake.list().unwrap().panes.is_empty());
     }
 
     #[test]

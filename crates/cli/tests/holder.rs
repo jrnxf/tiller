@@ -928,6 +928,8 @@ fn signal_close_and_forget_take_a_pane_from_running_to_gone() {
     let err = holder.client.forget(&sleeper.pane).unwrap_err();
     assert_eq!(refused(&err), ErrorCode::BadRequest, "{err}");
     assert!(err.to_string().contains("is running"), "{err}");
+    // A signal sent before the shell prints would leave nothing to keep.
+    shows(&holder, &sleeper, "up");
     holder.client.signal(&sleeper.pane, Signal::Term).unwrap();
     let exit = exit_of(&holder, &sleeper);
     assert_eq!((exit.code, exit.signal), (None, Some(15)), "{exit:?}");

@@ -11,6 +11,7 @@ pub mod front;
 pub mod layout;
 pub mod poller;
 pub use tiller_panes::process;
+pub mod routed;
 pub mod submit;
 
 #[cfg(any(test, feature = "testing"))]

@@ -693,11 +693,12 @@ pub fn write_refreshed(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
 /// reuses unchanged: the run's brief and hash stay what they were. The
 /// script is named for the session and how it starts
 /// (`relaunch-<session>.sh`, `resume-<session>.sh`) and replaces only an
-/// earlier script of that same name. Returns the line to type.
-pub fn write_again(spec: &AgainSpec<'_>, start: Start<'_>) -> Result<String, SpawnError> {
+/// earlier script of that same name. Returns the launch, whose line a
+/// herdr pane takes typed and whose script a holder pane runs.
+pub fn write_again(spec: &AgainSpec<'_>, start: Start<'_>) -> Result<Launch, SpawnError> {
     absolute("the worktree", spec.worktree)?;
     absolute("the scratch directory", spec.scratch)?;
-    let launch = Launch {
+    let mut launch = Launch {
         prompt: spec.scratch.join("prompt.md"),
         settings: spec.scratch.join("settings.json"),
         mcp: spec.scratch.join("mcp.json"),
@@ -757,7 +758,8 @@ pub fn write_again(spec: &AgainSpec<'_>, start: Start<'_>) -> Result<String, Spa
     write_new(&partial, text.as_bytes(), 0o700)?;
     fs::rename(&partial, &launch.script)?;
     trust::record(spec.claude_config, spec.worktree)?;
-    Ok(format!("sh {}", sh_quote(&launch.script.to_string_lossy())))
+    launch.line = format!("sh {}", sh_quote(&launch.script.to_string_lossy()));
+    Ok(launch)
 }
 
 #[cfg(test)]

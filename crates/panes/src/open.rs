@@ -9,6 +9,8 @@ use std::time::Duration;
 
 use serde::Serialize;
 
+use crate::{PaneId, Panes, PanesError};
+
 /// What "Open in terminal" did (`terminal-holder.md` 5.3). A terminal app
 /// that does not open is the caller's error, which the answer reports as
 /// `failed` with the reason.
@@ -121,6 +123,47 @@ impl Terminal for MacApp {
     fn open(&self, command: &[OsString]) -> io::Result<()> {
         launch(self.open_command(command))
     }
+}
+
+/// Why "Open in terminal" failed.
+#[derive(Debug, thiserror::Error)]
+pub enum OpenError {
+    #[error(transparent)]
+    Holder(#[from] PanesError),
+
+    #[error("{app} did not open: {source}")]
+    Terminal { app: String, source: io::Error },
+}
+
+/// Shows the holder's `pane` (`terminal-holder.md` 5.3): `switch` moves
+/// every attach client to it, then a configured `terminal` comes to the
+/// front, or, with no client attached, opens a new window running `attach`
+/// (`tiller attach <session>`).
+pub fn open_pane(
+    panes: &dyn Panes,
+    terminal: Option<&dyn Terminal>,
+    pane: &PaneId,
+    attach: &[OsString],
+) -> Result<Opened, OpenError> {
+    let attached = panes.switch(pane)? > 0;
+    let Some(terminal) = terminal else {
+        return Ok(if attached {
+            Opened::Focused
+        } else {
+            Opened::Unseen
+        });
+    };
+    let app = || terminal.name().to_owned();
+    if attached {
+        terminal
+            .raise()
+            .map_err(|source| OpenError::Terminal { app: app(), source })?;
+        return Ok(Opened::Raised);
+    }
+    terminal
+        .open(attach)
+        .map_err(|source| OpenError::Terminal { app: app(), source })?;
+    Ok(Opened::Launched)
 }
 
 #[cfg(test)]

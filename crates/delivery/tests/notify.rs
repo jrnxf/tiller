@@ -5,14 +5,14 @@
 use tiller_core::domain::{Attention, AttentionKind};
 use tiller_core::state::attention::NewAttention;
 use tiller_core::state::list;
-use tiller_delivery::notify::{NEW_MINUTES, Notifier};
+use tiller_delivery::notify::{Command, NEW_MINUTES, Note, Notifier, Notify as _, ViaHerdr};
 use tiller_herdr::fake::FakeHerdr;
 use tiller_herdr::testing::{Fleet, at, owner};
 
 struct World {
     fleet: Fleet,
     herdr: FakeHerdr,
-    notifier: Notifier<FakeHerdr>,
+    notifier: Notifier<ViaHerdr<FakeHerdr>>,
     card: String,
 }
 
@@ -28,7 +28,7 @@ impl World {
                 .unwrap()
                 .card_id;
         Self {
-            notifier: Notifier::new(fleet.open(), herdr.clone()),
+            notifier: Notifier::new(fleet.open(), ViaHerdr(herdr.clone())),
             fleet,
             herdr,
             card,
@@ -77,7 +77,7 @@ fn new_attention_item_notifies_once() {
 
     // A second pass, and a fresh notifier as after a daemon restart, stay quiet.
     assert!(w.notifier.pass(at(5)).unwrap().notified.is_empty());
-    let mut restarted = Notifier::new(w.fleet.open(), w.herdr.clone());
+    let mut restarted = Notifier::new(w.fleet.open(), ViaHerdr(w.herdr.clone()));
     assert!(restarted.pass(at(6)).unwrap().notified.is_empty());
     assert_eq!(w.shown().len(), 2);
 
@@ -168,7 +168,7 @@ fn a_refused_send_is_recorded_once_and_never_retried() {
     assert!(error.contains("refused by the fake"), "{error}");
 
     // At most once: a second pass and a restart neither send nor record again.
-    let mut restarted = Notifier::new(w.fleet.open(), w.herdr.clone());
+    let mut restarted = Notifier::new(w.fleet.open(), ViaHerdr(w.herdr.clone()));
     assert!(w.notifier.pass(at(5)).unwrap().failed.is_empty());
     assert!(restarted.pass(at(6)).unwrap().failed.is_empty());
     assert_eq!(kinds(&w, &item.id).len(), 3);
@@ -193,7 +193,7 @@ fn a_sent_notification_writes_its_outcome_once() {
 
     // At most once: a second pass and a restart write nothing more, and a
     // late outcome call applies nothing on an item that has its outcome.
-    let mut restarted = Notifier::new(w.fleet.open(), w.herdr.clone());
+    let mut restarted = Notifier::new(w.fleet.open(), ViaHerdr(w.herdr.clone()));
     assert!(w.notifier.pass(at(5)).unwrap().notified.is_empty());
     assert!(restarted.pass(at(6)).unwrap().notified.is_empty());
     let ctx = tiller_core::Ctx::at(tiller_core::Actor::Daemon, at(7));
@@ -281,4 +281,73 @@ fn a_failed_outcome_write_does_not_stop_the_pass() {
             "attention.notify_sent"
         ]
     );
+}
+
+/// A note as the notifier builds it.
+fn note() -> Note {
+    Note {
+        title: "alpha".into(),
+        message: "Decision: ship it?".into(),
+        session_id: Some("sess-1".into()),
+        pane: Some("h1".into()),
+        cwd: None,
+        host: "laptop".into(),
+    }
+}
+
+/// A `sh -c` command that runs `body`.
+fn shell(body: &str) -> Command {
+    Command::new(vec!["sh".into(), "-c".into(), body.into()]).unwrap()
+}
+
+#[test]
+fn the_notify_command_gets_the_note_on_stdin_and_the_pane_in_its_env() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out");
+    let command = shell(&format!(
+        "{{ cat; echo; echo \"$TILLER_SESSION_ID $TILLER_PANE $TILLER_HOST\"; }} > {}",
+        out.display()
+    ));
+    command.notify(&note()).unwrap();
+    let text = std::fs::read_to_string(&out).unwrap();
+    let (payload, env) = text.trim_end().split_once('\n').unwrap();
+    let payload: serde_json::Value = serde_json::from_str(payload).unwrap();
+    assert_eq!(payload["hook_event_name"], "Notification");
+    assert_eq!(payload["title"], "alpha");
+    assert_eq!(payload["message"], "Decision: ship it?");
+    assert_eq!(payload["session_id"], "sess-1");
+    assert_eq!(env, "sess-1 h1 laptop");
+}
+
+#[test]
+fn a_notify_command_that_fails_or_hangs_is_a_failed_send() {
+    let failed = shell("echo no display >&2; exit 3").notify(&note());
+    let error = failed.unwrap_err();
+    assert!(error.contains("no display"), "{error}");
+    let hung = shell("sleep 5")
+        .with_limit(std::time::Duration::from_millis(200))
+        .notify(&note());
+    assert!(hung.unwrap_err().contains("did not exit"));
+    assert!(Command::new(Vec::new()).is_none());
+}
+
+/// A process the command leaves behind holds its stderr open, and the send
+/// still ends within the limit.
+#[test]
+fn a_notify_command_that_leaves_a_process_behind_returns_within_the_limit() {
+    let limit = std::time::Duration::from_secs(2);
+    let started = std::time::Instant::now();
+    shell("sleep 5 & exit 0")
+        .with_limit(limit)
+        .notify(&note())
+        .unwrap();
+    assert!(started.elapsed() < limit, "{:?}", started.elapsed());
+
+    let started = std::time::Instant::now();
+    let error = shell("echo no display >&2; sleep 5 & exit 3")
+        .with_limit(limit)
+        .notify(&note())
+        .unwrap_err();
+    assert!(started.elapsed() < limit, "{:?}", started.elapsed());
+    assert!(error.contains("no display"), "{error}");
 }
