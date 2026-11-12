@@ -88,6 +88,8 @@ pub struct Config {
     pub assets: Assets,
     /// The board's Start orchestrator (`tiller orchestrator start`).
     pub orchestrators: Option<Arc<dyn crate::api::OrchestratorStart>>,
+    /// The terminal holder, for the panes of agents that run in it.
+    pub holder: Option<Arc<dyn crate::holder::Holder>>,
 }
 
 /// How a run ended.
@@ -416,6 +418,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         damage: damage.clone(),
         orchestrators: config.orchestrators,
         mirrors: crate::mirror::Mirrors::new(&config.home),
+        holder: config.holder,
         sessions: crate::auth::Sessions::default(),
         streams: crate::sse::Streams::default(),
         ssh: config.ssh.clone(),
@@ -440,6 +443,13 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         let fits = state.0.mirrors.fits();
         let herdr = state.0.herdr.clone();
         tokio::spawn(async move { fits.restore_left(&herdr).await });
+    }
+
+    // The panes of sessions in the terminal holder are the holder's; this
+    // daemon only says which of them it found again.
+    if let Some(holder) = state.0.holder.clone() {
+        let db = db.clone();
+        tokio::task::spawn_blocking(move || crate::holder::reattach(&db, holder.as_ref()));
     }
 
     // Handlers first: a SIGTERM that follows the address line at once, or

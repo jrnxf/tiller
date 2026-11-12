@@ -485,6 +485,7 @@ mod tests {
             damage: crate::readonly::Damage::default(),
             orchestrators: None,
             mirrors: crate::mirror::Mirrors::new(home),
+            holder: None,
             sessions: crate::auth::Sessions::default(),
             streams: crate::sse::Streams::default(),
             ssh: vec!["ssh".into()],
