@@ -855,6 +855,118 @@ async fn moved_base_goes_stale() {
     assert_eq!(home.view("alpha").await["doc"]["dirty"], true);
 }
 
+/// Commits as the owner, past the filter and the hooks the repo has.
+fn owner_commit(root: &Path, path: &str, message: &str) {
+    git(root, &["add", path]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=Owner",
+            "-c",
+            "user.email=owner@example.com",
+            "commit",
+            "--quiet",
+            "--no-gpg-sign",
+            "-m",
+            message,
+        ],
+    );
+}
+
+/// The owner's memory repo can run a git clean filter on its documents.
+/// Tiller commits the bytes it writes with no filter between, so its own
+/// write is never an uncommitted edit, and the index holds the blob `HEAD`
+/// holds.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clean_filter_does_not_make_tillers_own_write_an_edit() {
+    let home = home();
+    home.add("k-1", "alpha", NOTE_SECTION, "First note").await;
+    let root = home.repo().root().to_path_buf();
+    git(
+        &root,
+        &["config", "filter.shout.clean", "sed -e s/slow/SLOW/"],
+    );
+    git(&root, &["config", "filter.shout.smudge", "cat"]);
+    std::fs::write(root.join(".gitattributes"), "*.md filter=shout\n").unwrap();
+    owner_commit(&root, ".gitattributes", "filter");
+
+    home.add(
+        "k-2",
+        "alpha",
+        RULE_SECTION,
+        "Run the slow suite before landing",
+    )
+    .await;
+    // Tiller's bytes went in as they are: the filter never ran on them.
+    assert!(text(&home, ALPHA).contains("the slow suite"));
+    let at_head = home.git(&["rev-parse", &format!("HEAD:{ALPHA}")]);
+    assert!(
+        home.git(&["cat-file", "blob", at_head.trim()])
+            .contains("the slow suite")
+    );
+    assert_eq!(home.view("alpha").await["doc"]["dirty"], false);
+
+    // The next board edit is not refused as an uncommitted edit.
+    home.add("k-3", "alpha", RULE_SECTION, "Keep commits small")
+        .await;
+    assert!(text(&home, ALPHA).contains("Keep commits small"));
+    // The index holds the blob HEAD holds, so nothing is staged.
+    let at_head = home.git(&["rev-parse", &format!("HEAD:{ALPHA}")]);
+    let staged = home.git(&["ls-files", "--stage", "--", ALPHA]);
+    assert_eq!(staged.split_whitespace().nth(1), Some(at_head.trim()));
+    assert_eq!(home.git(&["diff", "--cached", "--name-only"]).trim(), "");
+
+    // An owner's commit through the filter is not an edit either.
+    let owned = format!("{}- Owner rule on the slow path\n", text(&home, ALPHA));
+    std::fs::write(root.join(ALPHA), owned).unwrap();
+    owner_commit(&root, ALPHA, "owner");
+    assert_eq!(home.view("alpha").await["doc"]["dirty"], false);
+    home.add("k-4", "alpha", NOTE_SECTION, "Late note").await;
+
+    // A hand edit nobody committed still blocks changes.
+    std::fs::write(root.join(ALPHA), "## How we work here\n\n- hand edit\n").unwrap();
+    let answer = home
+        .edit(
+            "k-5",
+            json!({"project": "alpha", "op": "add", "section": NOTE_SECTION, "text": "Later"}),
+        )
+        .await;
+    let error = refusal(&answer, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        error.message.contains("uncommitted edits"),
+        "{}",
+        error.message
+    );
+}
+
+/// An end-of-line rule gives the owner's checkout bytes that are not
+/// `HEAD`'s. The file is clean when the rule stages `HEAD`'s blob from it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_end_of_line_rule_checkout_is_not_an_edit() {
+    let home = home();
+    home.add("k-1", "alpha", NOTE_SECTION, "First note").await;
+    let root = home.repo().root().to_path_buf();
+    std::fs::write(root.join(".gitattributes"), "*.md text eol=crlf\n").unwrap();
+    owner_commit(&root, ".gitattributes", "line endings");
+
+    // The owner's checkout writes the document with CRLF line endings.
+    let crlf = text(&home, ALPHA).replace('\n', "\r\n");
+    std::fs::write(root.join(ALPHA), &crlf).unwrap();
+    assert_eq!(home.view("alpha").await["doc"]["dirty"], false);
+    home.add("k-2", "alpha", NOTE_SECTION, "Second note").await;
+    assert!(text(&home, ALPHA).contains("Second note"));
+    assert_eq!(home.view("alpha").await["doc"]["dirty"], false);
+
+    // A CRLF hand edit nobody committed still blocks changes.
+    let edited = format!(
+        "{}- hand edit\r\n",
+        text(&home, ALPHA).replace('\n', "\r\n")
+    );
+    std::fs::write(root.join(ALPHA), edited).unwrap();
+    assert_eq!(home.view("alpha").await["doc"]["dirty"], true);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn flagged_commit_is_undone() {
     let home = home();

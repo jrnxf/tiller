@@ -339,9 +339,7 @@ impl Repo {
         };
         let file = self.root.join(path);
         let work_blob = if file.is_file() {
-            self.git(None, &["hash-object", "--", path], None)?
-                .trim()
-                .to_owned()
+            self.work_blob(path, &head_blob)?
         } else {
             EMPTY_BLOB.to_owned()
         };
@@ -357,6 +355,22 @@ impl Repo {
             text,
             clean,
         })
+    }
+
+    /// The working file's blob. Tiller writes and commits a file's bytes
+    /// with no git filter between, so the bytes as they are come first.
+    /// When they are not `HEAD`'s, the blob is the one the repo's filters
+    /// (a clean filter, an end-of-line rule) stage, as the owner's
+    /// `git add` makes it.
+    fn work_blob(&self, path: &str, head_blob: &str) -> Result<String> {
+        let raw = self.git(None, &["hash-object", "--no-filters", "--", path], None)?;
+        if raw.trim() == head_blob {
+            return Ok(raw.trim().to_owned());
+        }
+        Ok(self
+            .git(None, &["hash-object", "--", path], None)?
+            .trim()
+            .to_owned())
     }
 
     /// The text of a blob, for the revision detail.
@@ -496,7 +510,9 @@ impl Repo {
 
     /// Writes the one file from its new blob, then its entry in the real
     /// index; every other staged change stays as it was. On a failure the
-    /// file is put back as it was.
+    /// file is put back as it was. The entry names the new blob itself, so
+    /// the index holds what `HEAD` holds and no filter of the owner's runs
+    /// on the bytes Tiller wrote.
     fn check_out(&self, path: &str, blob: &str) -> Result<()> {
         let text = self.git(None, &["cat-file", "blob", blob], None)?;
         let file = self.root.join(path);
@@ -515,11 +531,16 @@ impl Repo {
             }
             done
         };
+        let entry = format!("100644,{blob},{path}");
         let written = replace(text.as_bytes())
             .map_err(|e| internal("write", e))
             .and_then(|()| {
-                self.git(None, &["update-index", "--add", "--", path], None)
-                    .map(drop)
+                self.git(
+                    None,
+                    &["update-index", "--add", "--cacheinfo", &entry],
+                    None,
+                )
+                .map(drop)
             });
         if written.is_err() {
             let _ = match &before {
