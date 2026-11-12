@@ -320,6 +320,9 @@ fn hello(holder: &Holder, conn: &Conn, frame: Frame) -> Next {
     match handshake::negotiate(hello.proto, SUPPORTED) {
         Some(proto) => {
             tracing::debug!(client = %hello.client, version = %hello.version, proto, "welcome");
+            if hello.client == "attach" {
+                conn.mark_attach();
+            }
             conn.send_message(&HolderMessage::Welcome(holder.welcome(proto)));
             Next::Go
         }

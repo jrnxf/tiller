@@ -1909,6 +1909,7 @@ dependencies = [
  "qrcode",
  "rsa",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
