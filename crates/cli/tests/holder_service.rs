@@ -11,7 +11,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use common::{Running, World};
+use common::World;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::{Pid, getsid};
 use serde_json::{Value, json};
@@ -181,22 +181,11 @@ fn fake_holder(socket: &Path, upgrade: Value) {
 fn upgrade_says_clearly_that_a_holder_without_upgrade_cannot_do_it() {
     let world = World::new();
     let socket = socket_path(&world.home());
-    // The real holder of this build answers `upgrade` with `unsupported`.
-    let _holder = Running::new(
-        world
-            .bare_command()
-            .arg("holder")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
+    // A holder from before the live upgrade answers it with `unsupported`.
+    fake_holder(
+        &socket,
+        json!({"type":"error","code":"unsupported","message":"upgrade is not supported"}),
     );
-    let deadline = Instant::now() + WAIT;
-    while HolderClient::connect(&socket, "daemon").is_err() {
-        assert!(Instant::now() < deadline, "the holder did not listen");
-        std::thread::sleep(Duration::from_millis(20));
-    }
     for args in [
         &["holder", "upgrade"][..],
         &["holder", "upgrade", "--dry-run"],
@@ -209,6 +198,7 @@ fn upgrade_says_clearly_that_a_holder_without_upgrade_cannot_do_it() {
             out.json
         );
         let message = out.json["error"]["message"].as_str().unwrap();
+        assert!(message.contains("version 9.9.9"), "{message}");
         assert!(message.contains("does not support upgrade"), "{message}");
         assert!(message.contains("keeps running as it is"), "{message}");
     }

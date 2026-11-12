@@ -453,6 +453,9 @@ pub(crate) fn mode_bytes(mode: TermMode, style: CursorStyle) -> Vec<u8> {
     if !mode.contains(TermMode::ALTERNATE_SCROLL) {
         out.push_str("\x1b[?1007l");
     }
+    if !mode.contains(TermMode::URGENCY_HINTS) {
+        out.push_str("\x1b[?1042l");
+    }
     if mode.contains(TermMode::INSERT) {
         out.push_str("\x1b[4h");
     }
@@ -727,6 +730,28 @@ mod tests {
         round_trip(b"\x1b[?1004h\x1b[?25l\x1b[5 q\x1b[>5u\x1b[?7l\x1b[4h");
         round_trip(b"\x1b[?1049h\x1b[>1u\x1b[?1003h\x1b[20h\x1b[?6h\x1b[3;4H");
         round_trip(b"\x1b[?1007l\x1b[2 q");
+    }
+
+    #[test]
+    fn the_mode_bytes_set_each_mode_an_app_can_set_or_clear() {
+        let fresh = *Model::new(size()).term().mode();
+        let set = |mode: TermMode| {
+            let mut model = Model::new(size());
+            model
+                .feed(&mode_bytes(mode, CursorStyle::default()))
+                .unwrap();
+            *model.term().mode()
+        };
+        assert_eq!(set(fresh), fresh);
+        // Each mode on its own, turned the other way from a fresh
+        // terminal's. Vi mode is the terminal's, not the app's.
+        for (name, flag) in TermMode::all().iter_names() {
+            if flag.bits().count_ones() != 1 || flag == TermMode::VI {
+                continue;
+            }
+            let mode = fresh ^ flag;
+            assert_eq!(set(mode), mode, "{name}");
+        }
     }
 
     #[test]

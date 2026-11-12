@@ -22,10 +22,42 @@ use alacritty_terminal::vte::{Params, Parser, Perform};
 use tiller_panes::Size;
 use tiller_panes::message::{Format, Read, Screen as ScreenRead};
 
+use crate::handover::RecordError;
+use crate::handover::term::{self, TermState};
 use crate::query::Listener;
-use crate::scanner::Scanner;
+use crate::scanner::{Scanner, ScannerState};
 use crate::snapshot::Snapshot;
 use crate::{repaint, screen};
+
+/// What starts a synchronized update (mode 2026).
+const BSU: &[u8] = b"\x1b[?2026h";
+
+/// Everything a pane's model keeps, as a live upgrade hands it over
+/// (`terminal-holder.md` 6.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelState {
+    pub size: Size,
+    pub term: TermState,
+    /// The character `CSI b` repeats.
+    pub preceding: Option<char>,
+    /// The bytes of the open synchronized update, which the term has not
+    /// had yet.
+    pub sync: Option<Vec<u8>>,
+    pub teller: TellerState,
+    pub scanner: ScannerState,
+}
+
+/// What the model's [`Teller`] keeps.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TellerState {
+    pub title: String,
+    /// The title stack, bottom first.
+    pub stack: Vec<String>,
+    /// What was told and not yet taken.
+    pub told: Vec<Told>,
+    /// The last character printed, the sync update's bytes included.
+    pub last: Option<char>,
+}
 
 /// The scrollback rows the model keeps (section 2.8).
 pub const SCROLLBACK: usize = 10_000;
@@ -57,7 +89,7 @@ pub enum Told {
 }
 
 /// The most titles the title stack keeps, as `alacritty_terminal` keeps.
-const TITLE_STACK: usize = 4096;
+pub const TITLE_STACK: usize = 4096;
 
 /// The most notifications told between two takes.
 pub const NOTIFY_MAX: usize = 8;
@@ -93,11 +125,16 @@ fn capped(mut text: String) -> String {
 /// flood over many reads tells this much for each read. Its parser splits an OSC at `;` into 16
 /// parts at most, as the model's does, so a body with more than 13 `;` in
 /// it loses its end.
+///
+/// It also keeps the last character printed, the one `CSI b` repeats: the
+/// model's parser keeps it where nothing can read it, and a live upgrade
+/// hands it over.
 #[derive(Debug, Default)]
 struct Teller {
     title: String,
     stack: VecDeque<String>,
     told: Vec<Told>,
+    last: Option<char>,
 }
 
 impl Teller {
@@ -128,6 +165,10 @@ impl Teller {
 }
 
 impl Perform for Teller {
+    fn print(&mut self, c: char) {
+        self.last = Some(c);
+    }
+
     fn execute(&mut self, byte: u8) {
         if byte == 0x07 {
             self.tell(Told::Bell);
@@ -240,12 +281,10 @@ pub struct ModelPanic {
     pub recent: Vec<u8>,
 }
 
-/// The terminal state and its parsers.
+/// The terminal state and its parser.
 struct Screen {
     term: Term<Listener>,
     parser: Processor,
-    teller: Teller,
-    teller_parser: Parser,
 }
 
 impl Screen {
@@ -258,8 +297,6 @@ impl Screen {
         Self {
             term: Term::new(config, &GridSize(size), listener),
             parser: Processor::new(),
-            teller: Teller::default(),
-            teller_parser: Parser::new(),
         }
     }
 
@@ -278,9 +315,29 @@ impl Screen {
     }
 }
 
+/// What the model's parser holds of an open synchronized update (mode
+/// 2026), which it keeps where nothing can read it: a live upgrade hands
+/// this over (`terminal-holder.md` 6.2).
+#[derive(Debug)]
+struct SyncMirror {
+    /// The bytes the parser holds, the latest it was fed.
+    kept: Vec<u8>,
+    /// The last character the parser printed before them.
+    preceding: Option<char>,
+    /// Whether the parser was in its ground state where `kept` starts, so
+    /// that a new parser fed `kept` after the update's start is in the
+    /// same state. Only a sequence the update's start cut short, such as a
+    /// UTF-8 character or an OSC, makes it false.
+    exact: bool,
+}
+
 /// One pane's screen.
 pub struct Model {
     screen: Screen,
+    teller: Teller,
+    teller_parser: Parser,
+    /// The open synchronized update, if one is open.
+    sync: Option<SyncMirror>,
     /// What the term writes back to the app, shared with `screen.term`.
     listener: Listener,
     scanner: Scanner,
@@ -307,6 +364,9 @@ impl Model {
         let listener = Listener::default();
         Self {
             screen: Screen::new(size, listener.clone()),
+            teller: Teller::default(),
+            teller_parser: Parser::new(),
+            sync: None,
             listener,
             scanner: Scanner::new(),
             size,
@@ -323,22 +383,83 @@ impl Model {
     /// Feeds the PTY's next read: its whole sequences now, its cut tail with
     /// the next read.
     pub fn feed(&mut self, bytes: &[u8]) -> Result<(), ModelPanic> {
+        let overflowed = self.scanner.overflowed();
         let whole = self.scanner.split(bytes);
         if whole.is_empty() {
             return Ok(());
         }
         self.remember(&whole);
-        self.guarded(|screen| {
-            screen.teller_parser.advance(&mut screen.teller, &whole);
-            screen.parser.advance(&mut screen.term, &whole);
-        })
+        let before = self.sync.take();
+        let fed = self.guarded(|screen| screen.parser.advance(&mut screen.term, &whole));
+        if fed.is_err() {
+            self.tell(&whole);
+            self.teller.last = None;
+            return fed;
+        }
+        self.follow(&whole, before, overflowed);
+        Ok(())
+    }
+
+    /// The teller reads `bytes`. A panic in it starts it afresh.
+    fn tell(&mut self, bytes: &[u8]) {
+        let read = catch_unwind(AssertUnwindSafe(|| {
+            self.teller_parser.advance(&mut self.teller, bytes);
+        }));
+        if read.is_err() {
+            self.teller = Teller::default();
+            self.teller_parser = Parser::new();
+        }
+    }
+
+    /// The teller reads `whole`, which the model's parser was just fed, and
+    /// the sync mirror follows what the parser held of it. `before` is the
+    /// mirror before the feed. `overflowed` is whether `whole` went on a
+    /// sequence over the scanner's bound, so it did not start in the ground
+    /// state.
+    fn follow(&mut self, whole: &[u8], before: Option<SyncMirror>, overflowed: bool) {
+        if self.sync_deadline().is_none() {
+            self.tell(whole);
+            return;
+        }
+        let count = self.screen.parser.sync_bytes_count();
+        let mut sync = match before {
+            Some(mut sync) if count == sync.kept.len() + whole.len() => {
+                // Held whole: the parser read none of it.
+                sync.kept.extend_from_slice(whole);
+                self.tell(whole);
+                self.sync = Some(sync);
+                return;
+            }
+            Some(sync) => sync,
+            None => SyncMirror {
+                kept: Vec::new(),
+                preceding: None,
+                exact: !overflowed,
+            },
+        };
+        // The parser read up to the last `count` bytes and holds those: the
+        // update's start, or a new start inside it, is there. The buffer is
+        // always the end of what the parser was fed.
+        let parsed_new = whole.len().saturating_sub(count);
+        self.tell(&whole[..parsed_new]);
+        sync.preceding = self.teller.last;
+        self.tell(&whole[parsed_new..]);
+        sync.kept.extend_from_slice(whole);
+        let Some(parsed) = sync.kept.len().checked_sub(count) else {
+            sync.exact = false;
+            self.sync = Some(sync);
+            return;
+        };
+        sync.exact &= crate::scanner::ends_in_ground(&sync.kept[..parsed]);
+        sync.kept.drain(..parsed);
+        self.sync = Some(sync);
     }
 
     /// What the app told the terminal since the last call: titles, bells
     /// and notifications, in order, with a flood cut down as [`Teller`]
     /// says. What the update that panicked told is kept.
     pub fn take_told(&mut self) -> Vec<Told> {
-        std::mem::take(&mut self.screen.teller.told)
+        std::mem::take(&mut self.teller.told)
     }
 
     /// The bytes that answer the queries fed since the last call, in the
@@ -382,6 +503,7 @@ impl Model {
 
     /// Ends the open synchronized update: its deadline passed.
     pub fn end_sync(&mut self) -> Result<(), ModelPanic> {
+        self.sync = None;
         self.guarded(|screen| screen.parser.stop_sync(&mut screen.term))
     }
 
@@ -419,9 +541,9 @@ impl Model {
                     .map(|text| (*text).to_owned())
                     .or_else(|| payload.downcast_ref::<String>().cloned())
                     .unwrap_or_else(|| "a panic with no message".to_owned());
-                // The teller read the bytes whole, and what it read stands:
-                // only the screen is lost. Its parser starts afresh, as the
-                // model's does. The app set its modes once and does not set
+                // What the teller read stands: only the screen is lost, and
+                // with it the character `CSI b` repeats and the open
+                // synchronized update. The app set its modes once and does not set
                 // them again when it redraws, so the fresh screen keeps them:
                 // keys and pastes still reach the app in its form. The
                 // modes in force are kept, not the kitty flag stacks, the
@@ -429,9 +551,9 @@ impl Model {
                 // to itself.
                 let mode = *self.screen.term.mode();
                 let style = self.screen.term.cursor_style();
-                let teller = std::mem::take(&mut self.screen.teller);
                 self.screen = Screen::with_modes(self.size, mode, style, &self.listener);
-                self.screen.teller = teller;
+                self.teller.last = None;
+                self.sync = None;
                 self.scanner = Scanner::new();
                 Err(ModelPanic {
                     message,
@@ -460,6 +582,112 @@ impl Model {
         &self.screen.term
     }
 
+    /// Everything the model keeps, for a live upgrade. A synchronized
+    /// update that a sequence it cut short started (see [`SyncMirror`])
+    /// does not fit a record: its parser state is lost.
+    pub fn export(&self) -> Result<ModelState, RecordError> {
+        let (preceding, sync) = match &self.sync {
+            Some(sync) if !sync.exact => {
+                return Err(RecordError::Unfit(
+                    "a synchronized update starts inside a cut sequence".into(),
+                ));
+            }
+            Some(sync) => (sync.preceding, Some(sync.kept.clone())),
+            None => (self.teller.last, None),
+        };
+        // The parsers have the start of a sequence over the scanner's bound,
+        // and the scanner no longer has it, so a new model could not read
+        // the rest of it the same way.
+        if self.scanner.overflowed() {
+            return Err(RecordError::Unfit(
+                "a sequence over the scanner's bound is open".into(),
+            ));
+        }
+        let held = sync.as_ref().map(Vec::len);
+        let parser_holds = self
+            .sync_deadline()
+            .map(|_| self.screen.parser.sync_bytes_count());
+        if held != parser_holds {
+            return Err(RecordError::Unfit(format!(
+                "the synchronized update holds {parser_holds:?} bytes, the mirror {held:?}"
+            )));
+        }
+        let term = catch_unwind(AssertUnwindSafe(|| term::capture(&self.screen.term)))
+            .map_err(|_| RecordError::Unfit("reading the screen panicked".into()))?;
+        Ok(ModelState {
+            size: self.size,
+            term,
+            preceding,
+            sync,
+            teller: TellerState {
+                title: self.teller.title.clone(),
+                stack: self.teller.stack.iter().cloned().collect(),
+                told: self.teller.told.clone(),
+                last: self.teller.last,
+            },
+            scanner: self.scanner.export(),
+        })
+    }
+
+    /// A model from [`Model::export`], read back to check that it is the
+    /// same. An open synchronized update gets a new deadline, 150 ms from
+    /// now, as a new update start would give it.
+    pub fn import(state: &ModelState) -> Result<Self, RecordError> {
+        let size = state.size;
+        if !term::fits(usize::from(size.rows), usize::from(size.cols)) {
+            return Err(RecordError::Bad("a screen size"));
+        }
+        let scanner =
+            Scanner::import(state.scanner.clone()).ok_or(RecordError::Bad("a scanner"))?;
+        if scanner.overflowed() {
+            return Err(RecordError::Unfit(
+                "a sequence over the scanner's bound is open".into(),
+            ));
+        }
+        let model = catch_unwind(AssertUnwindSafe(|| {
+            let mut model = Model::new(size);
+            let screen = &mut model.screen;
+            // The character `CSI b` repeats first: only printing it sets it,
+            // and the cells it touched are written over next.
+            if let Some(c) = state.preceding {
+                let mut buf = [0; 4];
+                screen
+                    .parser
+                    .advance(&mut screen.term, c.encode_utf8(&mut buf).as_bytes());
+            }
+            let modes = state.term.mode - TermMode::KITTY_KEYBOARD_PROTOCOL;
+            let modes = repaint::mode_bytes(modes, CursorStyle::default());
+            screen.parser.advance(&mut screen.term, &modes);
+            term::restore(&mut screen.term, &state.term);
+            if let Some(kept) = &state.sync {
+                screen.parser.advance(&mut screen.term, BSU);
+                screen.parser.advance(&mut screen.term, kept);
+                model.sync = Some(SyncMirror {
+                    kept: kept.clone(),
+                    preceding: state.preceding,
+                    exact: true,
+                });
+            }
+            model.teller = Teller {
+                title: state.teller.title.clone(),
+                stack: state.teller.stack.iter().cloned().collect(),
+                told: state.teller.told.clone(),
+                last: state.teller.last,
+            };
+            model.scanner = scanner;
+            // Nothing above asks the term a question; drop what it may say.
+            model.take_answers();
+            model
+        }))
+        .map_err(|_| RecordError::Unfit("restoring the screen panicked".into()))?;
+        if model.export()? != *state {
+            return Err(RecordError::Unfit(
+                "the screen read back differs from the record".into(),
+            ));
+        }
+        Ok(model)
+    }
+
     /// Makes the next update panic inside its `catch_unwind`.
     #[cfg(test)]
     pub(crate) fn fail_next(&mut self) {
@@ -470,6 +698,7 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use alacritty_terminal::index::{Column, Line, Point};
+    use tiller_panes::message::MAX_RECENT;
 
     use super::*;
 
@@ -608,15 +837,9 @@ mod tests {
         let mut model = Model::new(size());
         model.feed(b"\x1b]2;build\x07\x1b[22t").unwrap();
         model.take_told();
-        // The teller reads the update, and then the model's parser panics.
-        model
-            .guarded::<()>(|screen| {
-                screen
-                    .teller_parser
-                    .advance(&mut screen.teller, b"\x1b]2;test\x07");
-                panic!("the model broke");
-            })
-            .unwrap_err();
+        // The model's parser panics on the update, and the teller reads it.
+        model.fail_next();
+        model.feed(b"\x1b]2;test\x07").unwrap_err();
         assert_eq!(model.take_told(), [Told::Title("test".into())]);
         model.feed(b"\x1b]2;other\x07\x1b[23t").unwrap();
         assert_eq!(model.take_told(), [Told::Title("build".into())]);
@@ -701,5 +924,185 @@ mod tests {
         assert_eq!(err.message, "a fault the test asked for");
         let screen = model.screen(Read::Visible, Format::Text).unwrap();
         assert_eq!(screen.rows_text, ["", "", "", ""]);
+    }
+
+    /// `model` through the handover's byte form and back.
+    fn handed_over(model: &Model) -> Model {
+        let state = model.export().unwrap();
+        let mut w = crate::handover::codec::Writer::new();
+        crate::handover::put_model(&mut w, &state);
+        let bytes = w.into_bytes();
+        let mut r = crate::handover::codec::Reader::new(&bytes);
+        let read = crate::handover::get_model(&mut r).unwrap();
+        assert!(r.done());
+        assert_eq!(read, state);
+        Model::import(&read).unwrap()
+    }
+
+    /// Feeds `bytes` to both models, and checks that they stay the same in
+    /// everything they keep, what they draw, what they tell and what they
+    /// answer.
+    fn same_after(old: &mut Model, new: &mut Model, bytes: &[u8]) {
+        for model in [&mut *old, &mut *new] {
+            model.feed(bytes).unwrap();
+        }
+        assert_eq!(old.export().unwrap(), new.export().unwrap());
+        assert_eq!(old.repaint().unwrap(), new.repaint().unwrap());
+        assert_eq!(old.take_told(), new.take_told());
+        assert_eq!(old.take_answers(), new.take_answers());
+    }
+
+    /// A screen with every part the handover carries set to something
+    /// other than its default.
+    fn busy_screen() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        // Colors the app set, and titles on the stack.
+        bytes.extend_from_slice(b"\x1b]4;1;rgb:12/34/56\x1b\\\x1b]10;rgb:aa/bb/cc\x07");
+        bytes.extend_from_slice(b"\x1b]2;first\x07\x1b[22t\x1b]2;second\x07");
+        // Scrollback, with every kind of cell.
+        for n in 0..12 {
+            bytes.extend_from_slice(
+                format!("\x1b[1;3;31;4:3;58:5:200m{n}\x1b[m e\u{301}\u{302} 日 \x1b[2;5;7;8;9;38;5;100;48;2;1;2;3m!\x1b[m\r\n")
+                    .as_bytes(),
+            );
+        }
+        bytes.extend_from_slice(b"\x1b]8;id=x;https://example.com/a\x1b\\link\x1b]8;;\x1b\\ ");
+        // A row that wraps, and the cursor waiting to wrap.
+        bytes.extend_from_slice(&[b'w'; 39]);
+        // Tab stops at columns 4 and 12 only.
+        bytes.extend_from_slice(b"\x1b[3g\x1b[1;5H\x1bH\x1b[1;13H\x1bH");
+        // A saved cursor with its pen, a scroll region and a cursor style.
+        bytes.extend_from_slice(b"\x1b[3;4H\x1b[32;44m\x1b7\x1b[2;3r\x1b[5 q");
+        // Kitty flags on the primary screen, then the alternate screen with
+        // its own content and flags.
+        bytes.extend_from_slice(b"\x1b[>1u\x1b[>3u\x1b[?1049h\x1b[35malt\x1b[>5u");
+        // Modes, then G1 as line drawing, shifted in.
+        bytes.extend_from_slice(
+            b"\x1b[?2004h\x1b[?1h\x1b=\x1b[?1002h\x1b[?1006h\x1b[?1004h\x1b[?1007l\x1b[?1042l\x1b[20h\x1b[4h\x1b[?25l",
+        );
+        bytes.extend_from_slice(b"\x1b)0\x0eq\x1b[2;7HZ");
+        bytes
+    }
+
+    #[test]
+    fn every_part_of_the_model_reads_back_after_a_handover() {
+        let mut old = Model::new(size());
+        old.feed(&busy_screen()).unwrap();
+        let mut new = handed_over(&old);
+        assert_eq!(old.repaint().unwrap(), new.repaint().unwrap());
+        assert_eq!(old.take_told(), new.take_told());
+        // What each part does next is the same: the repeat of the last
+        // character, both charsets, the tab stops, the kitty stacks, the
+        // scroll region, the saved cursor, the title stack and the queries.
+        same_after(
+            &mut old,
+            &mut new,
+            b"\x1b[3b\x0fq\x0eq\t\tX\x1b[>4u\x1b[<2u\x1b[?u\x1b[6n",
+        );
+        same_after(
+            &mut old,
+            &mut new,
+            b"\x1b[3;1H\n\n\nscrolled\x1b8saved\x1b[23t",
+        );
+        // Leaving the alternate screen shows the old primary screen.
+        same_after(&mut old, &mut new, b"\x1b[?1049l\x1b[?u\x1b[<u\x1b[?u");
+        assert!((0..4).any(|line| row(&new, line).starts_with('w')));
+        same_after(
+            &mut old,
+            &mut new,
+            b"\x1b[r\x1b[H\x1b[2J\x1b[4lnew\x1b[?1049h\x1b[?1049l",
+        );
+        // The scrollback came over whole.
+        assert_eq!(
+            old.screen(Read::Recent(MAX_RECENT), Format::Ansi).unwrap(),
+            new.screen(Read::Recent(MAX_RECENT), Format::Ansi).unwrap()
+        );
+    }
+
+    #[test]
+    fn the_character_a_repeat_repeats_moves_with_the_model() {
+        // A replacement character for a bad byte, a C1 character, a wide
+        // one and a combining one.
+        for last in [
+            &b"a\xff"[..],
+            "a\u{9b}".as_bytes(),
+            "日".as_bytes(),
+            "e\u{301}".as_bytes(),
+        ] {
+            let mut old = Model::new(size());
+            old.feed(last).unwrap();
+            let mut new = handed_over(&old);
+            same_after(&mut old, &mut new, b"\x1b[3b");
+        }
+    }
+
+    #[test]
+    fn a_read_cut_inside_a_sequence_or_a_character_goes_on_after_a_handover() {
+        for (cut, rest) in [
+            (&b"ab\x1b[3"[..], &b"1mcd"[..]),
+            (b"ab\xe6\x97", b"\xa5cd"),
+            (b"\x1b]2;ti", b"tle\x07x"),
+            (b"\x1bP1$", b"q\x1b\\x"),
+        ] {
+            let mut old = Model::new(size());
+            old.feed(cut).unwrap();
+            let mut new = handed_over(&old);
+            same_after(&mut old, &mut new, rest);
+        }
+    }
+
+    #[test]
+    fn a_sequence_over_the_scanners_bound_does_not_fit_a_record_until_it_ends() {
+        let mut model = Model::new(size());
+        let mut long = b"x\x1b]2;".to_vec();
+        long.extend(std::iter::repeat_n(b'a', crate::scanner::HELD_MAX + 10));
+        model.feed(&long).unwrap();
+        assert!(matches!(model.export(), Err(RecordError::Unfit(_))));
+        model.feed(b"aa\x07after").unwrap();
+        let mut new = handed_over(&model);
+        same_after(&mut model, &mut new, b" more");
+    }
+
+    #[test]
+    fn an_open_synchronized_update_moves_with_its_bytes() {
+        let cases: [(&[u8], &[u8]); 4] = [
+            (b"before\x1b[?2026hheld", b" more\x1b[?2026l"),
+            // A new update started inside the open one.
+            (b"\x1b[?2026ha\x1b[?2026hb", b"c\x1b[?2026l"),
+            // An update that ended, and a new one after it in one read.
+            (b"\x1b[?2026ha\x1b[?2026l\x1b[?2026hb", b"c\x1b[?2026l"),
+            // The update's end cut between reads.
+            (b"\x1b[?2026hb\x1b[?20", b"26lc"),
+        ];
+        for (open, rest) in cases {
+            let mut old = Model::new(size());
+            old.feed(open).unwrap();
+            assert!(old.sync_deadline().is_some(), "{open:?}");
+            let mut new = handed_over(&old);
+            assert!(new.sync_deadline().is_some());
+            same_after(&mut old, &mut new, rest);
+            assert!(new.sync_deadline().is_none());
+        }
+        // An update that ends at its deadline.
+        let mut old = Model::new(size());
+        old.feed(b"\x1b[?2026hlate").unwrap();
+        let mut new = handed_over(&old);
+        old.end_sync().unwrap();
+        new.end_sync().unwrap();
+        assert_eq!(old.export().unwrap(), new.export().unwrap());
+    }
+
+    #[test]
+    fn an_update_that_starts_inside_a_cut_sequence_does_not_fit_a_record() {
+        // The update's start comes after an OSC that is still open where
+        // the parser stopped: the parser's state there is not in the record.
+        let mut model = Model::new(size());
+        model
+            .feed(b"\x1b[?2026hx\x1b[?2026l\x1b]2;a\x1b[?2026h")
+            .unwrap();
+        assert!(matches!(model.export(), Err(RecordError::Unfit(_))));
+        // Once the update ends, the model fits again.
+        model.end_sync().unwrap();
+        model.export().unwrap();
     }
 }

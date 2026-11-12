@@ -201,6 +201,32 @@
                     || { echo "board/bun.nix is stale: run 'bun run nix:sync' in board/" >&2; exit 1; }
                   touch $out
                 '';
+            # vendor/alacritty_terminal is the released crate plus the handover
+            # patch, and nothing else (vendor/README.md).
+            alacrittyPatchFresh =
+              pkgs.runCommand "tiller-alacritty-patch-fresh"
+                {
+                  crate = pkgs.fetchurl {
+                    name = "alacritty_terminal-0.26.0.tar.gz";
+                    url = "https://static.crates.io/crates/alacritty_terminal/alacritty_terminal-0.26.0.crate";
+                    # The checksum Cargo.lock had for the registry crate.
+                    sha256 = "bda177466b9524d59f1b12f0dd30b68696788e9992a7e959021c4a0ed96fcf59";
+                  };
+                  nativeBuildInputs = [ pkgs.patch ];
+                }
+                ''
+                  tar -xzf $crate
+                  mkdir upstream
+                  cp -R alacritty_terminal-0.26.0/{README.md,LICENSE-APACHE,src} upstream/
+                  # The manifest drops the authors (the scrub check rejects any
+                  # email address) and the reference tests, which are not vendored.
+                  sed '/^authors = \[/,/^\]/d; /^\[\[test\]\]/,/^$/d' \
+                    alacritty_terminal-0.26.0/Cargo.toml > upstream/Cargo.toml
+                  patch -d upstream -p1 < ${./nix/patches/alacritty_terminal-0.26.0-handover.patch}
+                  diff -ru upstream ${./vendor/alacritty_terminal} \
+                    || { echo "vendor/alacritty_terminal is not the crate plus the patch (vendor/README.md)" >&2; exit 1; }
+                  touch $out
+                '';
             # A rebuild restarts the daemon only because the launchd agent and
             # the systemd unit change with the package (see nix/module.nix).
             # Evaluates the module against stub home-manager options with two

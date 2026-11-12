@@ -632,7 +632,8 @@ pub enum HolderMessage {
     Watching {
         id: u64,
     },
-    /// The reply to `upgrade`: the holder re-executes now.
+    /// The reply to `upgrade`: the holder re-executed, and the new image
+    /// sends it. For a dry run, the old one sends it: every check passed.
     Upgrading {
         id: u64,
     },

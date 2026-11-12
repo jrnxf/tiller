@@ -55,6 +55,9 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a request may take in all, from its first byte out to its
 /// reply's last byte in, and how long one frame's write may take.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long an `upgrade` may take: the holder runs the new binary twice,
+/// for up to 5 s and 10 s, before it re-executes.
+const UPGRADE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a connect waits before it tries again, when the holder's
 /// listen queue is full.
 const CONNECT_RETRY: Duration = Duration::from_millis(10);
@@ -520,7 +523,8 @@ fn read_replies(shared: &Shared, mut reader: BufReader<Timed>) {
 /// How the holder answered `upgrade`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Upgrade {
-    /// The holder re-executes now; this connection ends.
+    /// The holder re-executed, and this connection ends. For a dry run:
+    /// every check passed, and nothing changed.
     Upgrading,
     /// The holder will not re-execute, and keeps running as it is.
     Refused(String),
@@ -714,7 +718,7 @@ impl HolderClient {
             binary: binary.to_owned(),
             dry_run,
         };
-        self.call("upgrade", request, REQUEST_TIMEOUT, |reply| match reply {
+        self.call("upgrade", request, UPGRADE_TIMEOUT, |reply| match reply {
             HolderMessage::Upgrading { .. } => Ok(Upgrade::Upgrading),
             HolderMessage::UpgradeRefused { reason, .. } => Ok(Upgrade::Refused(reason)),
             reply => Err(unexpected("upgrade", &reply)),

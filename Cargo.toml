@@ -14,6 +14,9 @@ members = [
     "crates/reconcile",
     "crates/replay",
 ]
+# The patched alacritty_terminal is a dependency, not a member: its own
+# tests and lints are upstream's.
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -84,6 +87,11 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
+
+# alacritty_terminal 0.26.0 plus getters and setters the holder's live
+# upgrade needs (vendor/README.md). The patch is nix/patches/alacritty_terminal-0.26.0-handover.patch.
+[patch.crates-io]
+alacritty_terminal = { path = "vendor/alacritty_terminal" }
 
 [profile.release]
 codegen-units = 1

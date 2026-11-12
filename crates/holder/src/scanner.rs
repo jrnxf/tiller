@@ -135,6 +135,85 @@ impl Scanner {
     pub fn held(&self) -> &[u8] {
         &self.held
     }
+
+    /// Whether the open sequence passed [`HELD_MAX`]: the next read goes on
+    /// with it, and does not start in the ground state.
+    pub fn overflowed(&self) -> bool {
+        self.overflowed
+    }
+
+    /// Everything the scanner knows, for a live upgrade.
+    pub fn export(&self) -> ScannerState {
+        ScannerState {
+            state: self.state.code(),
+            held: self.held.clone(),
+            intro: self.intro.clone(),
+            overflowed: self.overflowed,
+        }
+    }
+
+    /// A scanner from [`Scanner::export`]. `None` when the state is not one
+    /// this scanner can be in.
+    pub fn import(state: ScannerState) -> Option<Self> {
+        let scanner = Self {
+            state: State::from_code(state.state)?,
+            held: state.held,
+            intro: state.intro,
+            overflowed: state.overflowed,
+        };
+        let held_max = if scanner.overflowed {
+            INTRO_LEN
+        } else {
+            HELD_MAX
+        };
+        (scanner.held.len() <= held_max && scanner.intro.len() <= INTRO_LEN).then_some(scanner)
+    }
+}
+
+/// A scanner's state, as a live upgrade carries it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScannerState {
+    pub state: u8,
+    pub held: Vec<u8>,
+    pub intro: Vec<u8>,
+    pub overflowed: bool,
+}
+
+impl State {
+    fn code(self) -> u8 {
+        match self {
+            Self::Ground => 0,
+            Self::Utf8(left) => left,
+            Self::Esc => 4,
+            Self::EscIntermediate => 5,
+            Self::Csi => 6,
+            Self::Osc => 7,
+            Self::Str => 8,
+            Self::StrEsc => 9,
+        }
+    }
+
+    fn from_code(code: u8) -> Option<Self> {
+        Some(match code {
+            0 => Self::Ground,
+            1..=3 => Self::Utf8(code),
+            4 => Self::Esc,
+            5 => Self::EscIntermediate,
+            6 => Self::Csi,
+            7 => Self::Osc,
+            8 => Self::Str,
+            9 => Self::StrEsc,
+            _ => return None,
+        })
+    }
+}
+
+/// Whether `bytes`, read from the ground state, end in it.
+pub fn ends_in_ground(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .fold(State::Ground, |state, &byte| step(state, byte))
+        == State::Ground
 }
 
 /// The state after `byte`.
@@ -298,5 +377,40 @@ mod tests {
         assert_eq!(scanner.intro, b"\x1b]");
         scanner.split(b"\x07\xe6");
         assert_eq!(scanner.intro, b"\xe6");
+    }
+
+    #[test]
+    fn an_exported_scanner_goes_on_where_it_stopped() {
+        let cuts: [&[u8]; 4] = [
+            b"ab\x1b]0;ti",
+            "\u{2500}".as_bytes().split_at(1).0,
+            b"\x1b[3",
+            b"\x1bP",
+        ];
+        for cut in cuts {
+            let mut whole = Scanner::new();
+            let mut fed = whole.split(cut);
+            let mut moved = Scanner::import(whole.export()).unwrap();
+            assert_eq!(moved.export(), whole.export());
+            fed.extend(moved.split(b"tle\x1b\\z"));
+            assert_eq!(fed, [cut, b"tle\x1b\\z"].concat());
+        }
+        let mut long = Scanner::new();
+        long.split(b"\x1b]0;");
+        long.split(&vec![b'x'; HELD_MAX + 1]);
+        let moved = Scanner::import(long.export()).unwrap();
+        assert_eq!(moved.held(), b"\x1b]");
+        assert!(
+            Scanner::import(ScannerState {
+                state: 10,
+                ..ScannerState::default()
+            })
+            .is_none()
+        );
+        let too_long = ScannerState {
+            held: vec![0; HELD_MAX + 1],
+            ..ScannerState::default()
+        };
+        assert!(Scanner::import(too_long).is_none());
     }
 }

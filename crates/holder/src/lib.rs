@@ -2,6 +2,7 @@
 //! each agent's PTY, a screen model of it and a socket that serves both.
 
 pub mod detach;
+pub mod handover;
 pub mod holder;
 pub mod input;
 pub mod keys;
@@ -18,5 +19,6 @@ pub mod screen;
 pub mod server;
 pub mod snapshot;
 pub mod sync;
+pub mod upgrade;
 
-pub use server::{HolderError, Outcome, run};
+pub use server::{HolderError, Outcome, resume, run};

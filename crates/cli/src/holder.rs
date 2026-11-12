@@ -3,7 +3,7 @@
 //! `$TILLER_HOME/run/holder.sock`. One runs per home: a second one finds the
 //! first and exits 0.
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -23,6 +23,15 @@ pub struct Args {
     /// waits until the holder answers, or says it already runs.
     #[arg(long)]
     detach: bool,
+    /// The live upgrade's preflight: print what this binary takes over
+    #[arg(long, hide = true, conflicts_with_all = ["detach", "dry_run_handover", "resume"])]
+    check_handover: bool,
+    /// The live upgrade's dry run: read a handover record on stdin back
+    #[arg(long, hide = true, conflicts_with_all = ["detach", "resume"])]
+    dry_run_handover: bool,
+    /// The live upgrade's new image: take over from the record behind fd
+    #[arg(long, hide = true, value_name = "FD", conflicts_with = "detach")]
+    resume: Option<i32>,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -43,6 +52,14 @@ pub enum Cmd {
 
 /// `db` is the `--db` or `TILLER_DB` given, if any.
 pub fn run(args: &Args, db: Option<&Path>, json: bool) -> ExitCode {
+    // The live upgrade's two checks print JSON for the old holder to read,
+    // whatever the home.
+    if args.check_handover {
+        return print_json(&tiller_holder::upgrade::Accepts::this_build());
+    }
+    if args.dry_run_handover {
+        return dry_run_handover();
+    }
     let home = crate::app::App::from_env(None).home;
     // The holder keeps no database: a `--db` other than the home's own
     // would suggest a home it does not serve.
@@ -86,7 +103,11 @@ pub fn run(args: &Args, db: Option<&Path>, json: bool) -> ExitCode {
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
         .try_init();
-    match tiller_holder::run(&home) {
+    let ran = match args.resume {
+        Some(fd) => tiller_holder::resume(&home, fd),
+        None => tiller_holder::run(&home),
+    };
+    match ran {
         Ok(Outcome::Stopped) => ExitCode::SUCCESS,
         Ok(Outcome::AlreadyRuns { pid }) => {
             already_runs(pid);
@@ -94,6 +115,41 @@ pub fn run(args: &Args, db: Option<&Path>, json: bool) -> ExitCode {
         }
         Err(error) => {
             eprintln!("tiller holder: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn print_json(value: &impl serde::Serialize) -> ExitCode {
+    match serde_json::to_string(value) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("tiller holder: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Reads a handover record on stdin and prints the checksum of it read
+/// back, or exits 1 with why it does not read.
+fn dry_run_handover() -> ExitCode {
+    let mut bytes = Vec::new();
+    let limit = tiller_holder::handover::RECORD_MAX as u64 + 1;
+    if let Err(error) = std::io::stdin().lock().take(limit).read_to_end(&mut bytes) {
+        eprintln!("tiller holder: the handover record could not be read: {error}");
+        return ExitCode::from(1);
+    }
+    if bytes.len() > tiller_holder::handover::RECORD_MAX {
+        eprintln!("tiller holder: the handover record is over its limit");
+        return ExitCode::from(1);
+    }
+    match tiller_holder::upgrade::dry_run(&bytes) {
+        Ok(read) => print_json(&read),
+        Err(error) => {
+            eprintln!("tiller holder: the handover record does not read back: {error}");
             ExitCode::from(1)
         }
     }
