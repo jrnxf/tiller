@@ -420,6 +420,9 @@
               assert lib.assertMsg (
                 (agent true a).config.KeepAlive.SuccessfulExit == false && (agent true a).config.RunAtLoad
               ) "nix/module.nix: the launchd holder agent does not start at load and restart after a crash";
+              assert lib.assertMsg (
+                (agent true a).config.ProcessType == "Standard"
+              ) "nix/module.nix: the launchd holder agent is throttled: its panes' processes inherit ProcessType";
               # The plist home-manager writes for the agent.
               assert lib.assertMsg
                 (
