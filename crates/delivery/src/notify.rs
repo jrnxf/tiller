@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use std::process::{Command as Process, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -46,6 +47,9 @@ pub struct Report {
 
 /// How long the notify command has to exit 0 (`terminal-holder.md` 7).
 pub const COMMAND_SECS: u64 = 10;
+
+/// How long after the notify command exits its stderr may still arrive.
+const STDERR_GRACE: Duration = Duration::from_millis(200);
 
 /// One notification for the owner.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -141,15 +145,19 @@ impl Notify for Command {
         if let Some(mut stdin) = child.stdin.take() {
             // A command that exits without reading its stdin is its own
             // business: its exit status decides.
-            let _ = stdin.write_all(payload.to_string().as_bytes());
+            let payload = payload.to_string();
+            std::thread::spawn(move || {
+                let _ = stdin.write_all(payload.as_bytes());
+            });
         }
-        let mut stderr = child.stderr.take();
-        let reader = std::thread::spawn(move || {
+        let stderr = child.stderr.take();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
             let mut text = String::new();
-            if let Some(stderr) = stderr.as_mut() {
+            if let Some(stderr) = stderr {
                 let _ = stderr.take(64 * 1024).read_to_string(&mut text);
             }
-            text
+            let _ = sender.send(text);
         });
         let deadline = Instant::now() + self.limit;
         let status = loop {
@@ -165,7 +173,12 @@ impl Notify for Command {
                 }
             }
         };
-        let stderr = reader.join().unwrap_or_default();
+        // A process the command left behind can hold stderr open long after
+        // it exits, so the wait for the text ends with the limit.
+        let grace = deadline
+            .saturating_duration_since(Instant::now())
+            .min(STDERR_GRACE);
+        let stderr = receiver.recv_timeout(grace).unwrap_or_default();
         let stderr = stderr.trim();
         match status {
             Some(status) if status.success() => Ok(()),

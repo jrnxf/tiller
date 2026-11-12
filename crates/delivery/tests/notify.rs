@@ -330,3 +330,24 @@ fn a_notify_command_that_fails_or_hangs_is_a_failed_send() {
     assert!(hung.unwrap_err().contains("did not exit"));
     assert!(Command::new(Vec::new()).is_none());
 }
+
+/// A process the command leaves behind holds its stderr open, and the send
+/// still ends within the limit.
+#[test]
+fn a_notify_command_that_leaves_a_process_behind_returns_within_the_limit() {
+    let limit = std::time::Duration::from_secs(2);
+    let started = std::time::Instant::now();
+    shell("sleep 5 & exit 0")
+        .with_limit(limit)
+        .notify(&note())
+        .unwrap();
+    assert!(started.elapsed() < limit, "{:?}", started.elapsed());
+
+    let started = std::time::Instant::now();
+    let error = shell("echo no display >&2; sleep 5 & exit 3")
+        .with_limit(limit)
+        .notify(&note())
+        .unwrap_err();
+    assert!(started.elapsed() < limit, "{:?}", started.elapsed());
+    assert!(error.contains("exit"), "{error}");
+}
