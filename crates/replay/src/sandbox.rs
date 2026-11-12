@@ -218,6 +218,7 @@ impl Sandbox {
             config: &self.config,
             pool: &self.pool,
             herdr: &self.herdr,
+            panes: None,
             scanner: &self.scanner,
             listeners: &NoListeners,
             tiller: &self.tiller,

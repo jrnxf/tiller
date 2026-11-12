@@ -12,6 +12,7 @@ The `tiller` CLI and the board work on the same state. The CLI writes `state.db`
 | `crates/core` | `state.db`: schema and migrations, ids, domain types, and every state mutation |
 | `crates/daemon`, `herdr`, `delivery`, `observe`, `reconcile`, `agents`, `replay` | The daemon and its parts: board API, herdr client, outbox delivery, observation, reconcile, agent lifecycle, replay |
 | `crates/panes` | The terminal holder's protocol, socket client and `Panes` trait (ADR 0004, `docs/design/terminal-holder.md`). After the holder cutover, `panes`, `poll` (the generic poller) and `holder` (the terminal holder) take the place of `herdr` |
+| `crates/holder` | The terminal holder that `tiller holder` runs: PTYs, the screen model and the socket server. When it is up, the daemon launches new agents in it and serves their terminals from it, while herdr agents keep running |
 | `board/` | The board web app (Vite, React, TanStack Router), built to static files and embedded in the binary |
 | `docs/` | Design docs, the build plan and checklist, and ADRs |
 | `scripts/` | The smoke test and the scrub check |

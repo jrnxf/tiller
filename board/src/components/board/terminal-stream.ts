@@ -29,7 +29,8 @@ export type MirrorStatus =
   | { kind: "connecting" }
   | { kind: "live" }
   | { kind: "reconnecting"; attempt: number }
-  | { kind: "unreachable"; title: string; detail: string }
+  // `mark` names what is away, for the status mark: herdr when unset.
+  | { kind: "unreachable"; title: string; detail: string; mark?: string }
   // The pane closed; the screen keeps its last frame.
   | { kind: "ended"; at: Date }
   | { kind: "forbidden" }
@@ -62,6 +63,10 @@ type Line =
 
 const UNREACHABLE_TITLE = "Can't reach herdr on this machine";
 const UNREACHABLE_DETAIL = "The agent may still be running. Tiller tries again on its own, or now.";
+// An agent in the terminal holder: the daemon could not reach the holder.
+const HOLDER_TITLE = "Can't reach the terminal holder on this machine";
+const HOLDER_DETAIL =
+  "The agent may still be running. Run tiller holder to start the holder. Tiller tries again on its own, or now.";
 // Tries in a row with no live screen before the mirror says herdr is gone
 // rather than that the stream dropped.
 const QUIET_TRIES = 4;
@@ -143,7 +148,7 @@ export interface Mirror {
 
 // Why a stream ended, and what the mirror does next.
 type Outcome =
-  | { next: "retry"; title?: string; detail?: string }
+  | { next: "retry"; title?: string; detail?: string; mark?: string }
   | { next: "stop"; status: MirrorStatus };
 
 export class TerminalStream implements Mirror {
@@ -269,6 +274,7 @@ export class TerminalStream implements Mirror {
         kind: "unreachable",
         title: outcome.title ?? UNREACHABLE_TITLE,
         detail: outcome.detail ?? UNREACHABLE_DETAIL,
+        ...(outcome.mark ? { mark: outcome.mark } : {}),
       });
     } else {
       this.set({ kind: "reconnecting", attempt: this.failures });
@@ -353,6 +359,14 @@ export class TerminalStream implements Mirror {
         next: "retry",
         title: `Can't reach ${this.peer ?? "the peer host"}`,
         detail: "The agent may still be running. Tiller tries again on its own, or now.",
+      };
+    }
+    if (response.status === 503 && error.message.startsWith("the terminal holder is unreachable")) {
+      return {
+        next: "retry",
+        title: HOLDER_TITLE,
+        detail: HOLDER_DETAIL,
+        mark: "holder unreachable",
       };
     }
     if (response.status === 503) {

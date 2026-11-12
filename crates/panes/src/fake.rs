@@ -19,6 +19,9 @@ pub const PANE_LIMIT: usize = 128;
 /// (spec 2.8). The fake does not drop exits by age.
 pub const EXITED_LIMIT: usize = 64;
 
+/// The first fake pid.
+const FIRST_PID: u32 = 1 << 31;
+
 #[derive(Debug)]
 struct World {
     instance: String,
@@ -50,7 +53,9 @@ impl FakePanes {
                 instance: ulid::Ulid::generate().to_string(),
                 panes: Vec::new(),
                 next_num: 1,
-                next_pid: 1000,
+                // Above any real pid (and `i32::MAX`), so code that signals
+                // a fake pane's process group can never reach a real one.
+                next_pid: FIRST_PID,
                 calls: Vec::new(),
                 unreachable: false,
             })),

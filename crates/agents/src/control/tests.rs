@@ -1633,3 +1633,345 @@ fn relaunch_keeps_the_brief_when_the_memory_holds_its_heading() {
     assert_eq!(prompt, first);
     assert_eq!(prompt.matches("A memory paragraph.").count(), 1, "{prompt}");
 }
+
+#[test]
+fn a_relaunch_with_the_terminal_holder_and_no_session_opens_no_herdr_pane() {
+    let mut rig = Rig::new();
+    rig.panes = Some(tiller_panes::FakePanes::new());
+    let card = rig.card(CardKind::Ship, Some(Size::M));
+    let spawned = rig.spawn(&card, RunRole::Builder);
+    rig.fleet
+        .store
+        .session_end(&Ctx::new(Actor::Hook), &spawned.session.id, "logout")
+        .unwrap();
+    let error =
+        relaunch_it(&mut rig, &owner(), &patient(), &spawned.run.id, note("n")).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("A relaunch is not ready yet with the terminal holder"),
+        "{error}"
+    );
+    // Nothing was recorded or opened: no new session, no herdr workspace.
+    let live: Vec<Session> = list(
+        rig.fleet.store.conn(),
+        "run_id = ?1 AND ended_at IS NULL",
+        &[&spawned.run.id],
+    )
+    .unwrap();
+    assert!(live.is_empty(), "{live:?}");
+    assert!(
+        !rig.herdr
+            .calls()
+            .iter()
+            .any(|c| c.starts_with("create_workspace")),
+        "{:?}",
+        rig.herdr.calls()
+    );
+}
+
+fn workspaces_opened(rig: &Rig) -> usize {
+    rig.herdr
+        .calls()
+        .iter()
+        .filter(|c| c.starts_with("create_workspace"))
+        .count()
+}
+
+#[test]
+fn a_relaunch_with_the_terminal_holder_and_its_herdr_pane_gone_opens_no_herdr_pane() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.panes = Some(tiller_panes::FakePanes::new());
+    let opened = workspaces_opened(&rig);
+    rig.herdr.remove_pane(&spawned.pane_id);
+    let ctx = rig.orchestrator();
+
+    let error = relaunch_it(&mut rig, &ctx, &patient(), &spawned.run.id, note("n")).unwrap_err();
+    let text = error.to_string();
+    assert!(
+        text.contains("A relaunch is not ready yet with the terminal holder")
+            && text.contains(&spawned.run.id)
+            && text.contains("no agent was stopped and no pane was opened"),
+        "{text}"
+    );
+    assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
+    assert!(session(&rig, &spawned.session.id).ended_at.is_none());
+    assert_eq!(rig.events("run.relaunched", &spawned.run.id), 0);
+}
+
+#[test]
+fn a_resume_with_the_terminal_holder_and_its_herdr_pane_gone_opens_no_herdr_pane() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.panes = Some(tiller_panes::FakePanes::new());
+    let opened = workspaces_opened(&rig);
+    rig.herdr.remove_pane(&spawned.pane_id);
+
+    let error = resume_it(&mut rig, &owner(), &patient(), &spawned.run.id).unwrap_err();
+    let text = error.to_string();
+    assert!(
+        text.contains("A resume is not ready yet with the terminal holder")
+            && text.contains(&spawned.run.id)
+            && text.contains("no agent was stopped and no pane was opened"),
+        "{text}"
+    );
+    assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
+    let kept = session(&rig, &spawned.session.id);
+    assert_eq!(kept.pane_id.as_deref(), Some(spawned.pane_id.as_str()));
+    assert_eq!(
+        rig.events("session.resume_attempted", &spawned.session.id),
+        0
+    );
+}
+
+#[test]
+fn a_resume_with_the_terminal_holder_goes_on_in_its_live_herdr_pane() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.panes = Some(tiller_panes::FakePanes::new());
+    let opened = workspaces_opened(&rig);
+    rig.herdr.set_screen(&spawned.pane_id, Screen::Shell);
+    let claude = boot(&rig, "resume");
+
+    let done = resume_it(&mut rig, &owner(), &patient(), &spawned.run.id).unwrap();
+    claude.join().unwrap();
+    assert_eq!(done.started, Some(Proof::Confirmed), "{}", done.evidence);
+    assert_eq!(done.pane_id.as_deref(), Some(spawned.pane_id.as_str()));
+    assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
+}
+
+#[test]
+fn a_relaunch_with_the_terminal_holder_and_an_untagged_herdr_pane_leaves_the_agent_running() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.panes = Some(tiller_panes::FakePanes::new());
+    rig.herdr
+        .set_tokens(&spawned.pane_id, std::collections::BTreeMap::new());
+    let opened = workspaces_opened(&rig);
+    let ctx = rig.orchestrator();
+
+    let error = relaunch_it(&mut rig, &ctx, &patient(), &spawned.run.id, note("n")).unwrap_err();
+    let text = error.to_string();
+    assert!(
+        text.contains("A relaunch is not ready yet with the terminal holder")
+            && text.contains("no agent was stopped and no pane was opened"),
+        "{text}"
+    );
+    assert!(!typed(&rig, &spawned.pane_id, "/exit"));
+    assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
+    assert!(session(&rig, &spawned.session.id).ended_at.is_none());
+    assert_eq!(rig.events("run.relaunched", &spawned.run.id), 0);
+}
+
+#[test]
+fn a_relaunch_with_the_terminal_holder_whose_pane_is_not_reused_names_no_retry() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.panes = Some(tiller_panes::FakePanes::new());
+    // Claude records `SessionEnd` but herdr still shows it in the pane.
+    rig.herdr.ignore_exit(&spawned.pane_id);
+    let hook_end = {
+        let herdr = FakeHerdr::open(rig.herdr.path());
+        let mut store = rig.fleet.open();
+        let (session, pane) = (spawned.session.id.clone(), spawned.pane_id.clone());
+        thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                if herdr
+                    .fake_pane(&pane)
+                    .submitted
+                    .iter()
+                    .any(|l| l == "/exit")
+                {
+                    store
+                        .session_end(&Ctx::new(Actor::Hook), &session, "logout")
+                        .unwrap();
+                    return;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        })
+    };
+    let opened = workspaces_opened(&rig);
+    let waits = Waits {
+        exit: Duration::from_secs(1),
+        ..patient()
+    };
+
+    let error = relaunch_it(&mut rig, &owner(), &waits, &spawned.run.id, note("n")).unwrap_err();
+    hook_end.join().unwrap();
+    let text = error.to_string();
+    assert!(
+        text.contains(&format!(
+            "no new pane was opened for run {}",
+            spawned.run.id
+        )) && text.contains("the old agent was stopped and the new session has no agent")
+            && text.contains("a new start of its card"),
+        "{text}"
+    );
+    assert!(!text.contains("tiller agent relaunch"), "{text}");
+    assert!(!text.contains("tiller agent resume"), "{text}");
+    assert!(!text.contains("no agent was stopped"), "{text}");
+    assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
+}
+
+#[test]
+fn a_relaunch_with_the_terminal_holder_that_fails_in_its_kept_pane_names_no_retry() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.panes = Some(tiller_panes::FakePanes::new());
+    // The stop hands the pane back, then the new session's tokens fail.
+    rig.herdr.refuse("report_tokens");
+    let opened = workspaces_opened(&rig);
+    let ctx = rig.orchestrator();
+
+    let error = relaunch_it(&mut rig, &ctx, &patient(), &spawned.run.id, note("n")).unwrap_err();
+    let text = error.to_string();
+    assert!(
+        text.contains("the relaunch is recorded")
+            && text.contains("a relaunch goes on only in a herdr pane the session still owns"),
+        "{text}"
+    );
+    assert!(!text.contains("tiller agent relaunch"), "{text}");
+    assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
+}
+
+#[test]
+fn a_resume_with_the_terminal_holder_refuses_a_herdr_pane_that_is_not_its_own() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.panes = Some(tiller_panes::FakePanes::new());
+    rig.herdr.set_screen(&spawned.pane_id, Screen::Shell);
+    // herdr gave the id to a pane whose tokens name no session of ours.
+    rig.herdr
+        .set_tokens(&spawned.pane_id, std::collections::BTreeMap::new());
+    let opened = workspaces_opened(&rig);
+
+    let error = resume_it(&mut rig, &owner(), &patient(), &spawned.run.id).unwrap_err();
+    let text = error.to_string();
+    assert!(
+        text.contains("A resume is not ready yet with the terminal holder"),
+        "{text}"
+    );
+    let calls = rig.herdr.calls();
+    assert!(!calls.iter().any(|c| c.contains("--resume")), "{calls:?}");
+    assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
+}
+
+#[test]
+fn a_relaunch_with_the_terminal_holder_refuses_a_herdr_pane_another_session_is_bound_to() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.panes = Some(tiller_panes::FakePanes::new());
+    // A second live session took the same pane; the tokens still name ours.
+    rig.fleet.worker(&spawned.pane_id);
+    let ctx = rig.orchestrator();
+
+    let error = relaunch_it(&mut rig, &ctx, &patient(), &spawned.run.id, note("n")).unwrap_err();
+    let text = error.to_string();
+    assert!(
+        text.contains("A relaunch is not ready yet with the terminal holder"),
+        "{text}"
+    );
+    assert!(!typed(&rig, &spawned.pane_id, "/exit"));
+    assert!(session(&rig, &spawned.session.id).ended_at.is_none());
+}
+
+#[test]
+fn a_resume_with_the_terminal_holder_and_no_live_session_names_no_relaunch() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.panes = Some(tiller_panes::FakePanes::new());
+    rig.fleet
+        .store
+        .session_end(&Ctx::new(Actor::Hook), &spawned.session.id, "logout")
+        .unwrap();
+
+    let error = resume_it(&mut rig, &owner(), &patient(), &spawned.run.id).unwrap_err();
+    let text = error.to_string();
+    assert!(
+        text.contains("no live session to resume") && text.contains("terminal holder"),
+        "{text}"
+    );
+    assert!(!text.contains("tiller agent relaunch"), "{text}");
+}
+
+#[test]
+fn a_resume_with_the_terminal_holder_and_no_claude_session_advises_a_relaunch_in_its_own_pane() {
+    let mut rig = Rig::new();
+    let card = rig.card(CardKind::Ship, Some(Size::M));
+    // Spawned, never bound: no Claude session, but the herdr pane is its own.
+    let spawned = rig.spawn(&card, RunRole::Builder);
+    rig.panes = Some(tiller_panes::FakePanes::new());
+
+    let error = resume_it(&mut rig, &owner(), &patient(), &spawned.run.id).unwrap_err();
+    let text = error.to_string();
+    assert!(text.contains("never bound a Claude session"), "{text}");
+    assert!(
+        text.contains(&format!("tiller agent relaunch {}", spawned.run.id)),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_resume_with_the_terminal_holder_and_no_claude_session_in_a_holder_pane_names_no_relaunch() {
+    let mut rig = Rig::new();
+    let card = rig.card(CardKind::Ship, Some(Size::M));
+    let spawned = rig.spawn(&card, RunRole::Builder);
+    rig.panes = Some(tiller_panes::FakePanes::new());
+    // The session runs in a holder pane, which a relaunch refuses until H09.
+    let held = format!("p{}", tiller_core::ids::new_ulid());
+    rig.fleet
+        .store
+        .conn()
+        .execute(
+            "UPDATE sessions SET pane_id = ?1 WHERE id = ?2",
+            [&held, &spawned.session.id],
+        )
+        .unwrap();
+
+    let error = resume_it(&mut rig, &owner(), &patient(), &spawned.run.id).unwrap_err();
+    let text = error.to_string();
+    assert!(text.contains("never bound a Claude session"), "{text}");
+    assert!(text.contains("until H09"), "{text}");
+    assert!(!text.contains("tiller agent relaunch"), "{text}");
+}
+
+#[test]
+fn a_relaunch_of_an_agent_in_a_holder_pane_is_refused_with_the_holder_down_and_resume_says_so() {
+    let mut rig = Rig::new();
+    let card = rig.card(CardKind::Ship, Some(Size::M));
+    let spawned = rig.spawn(&card, RunRole::Builder);
+    // The session ran in a holder pane, and the holder is down now.
+    let held = format!("p{}", tiller_core::ids::new_ulid());
+    rig.fleet
+        .store
+        .conn()
+        .execute(
+            "UPDATE sessions SET pane_id = ?1 WHERE id = ?2",
+            [&held, &spawned.session.id],
+        )
+        .unwrap();
+    assert!(rig.panes.is_none());
+    let opened = workspaces_opened(&rig);
+
+    let advice = resume_it(&mut rig, &owner(), &patient(), &spawned.run.id)
+        .unwrap_err()
+        .to_string();
+    assert!(advice.contains("until H09"), "{advice}");
+    assert!(!advice.contains("tiller agent relaunch"), "{advice}");
+
+    let ctx = rig.orchestrator();
+    let error = relaunch_it(&mut rig, &ctx, &patient(), &spawned.run.id, note("n")).unwrap_err();
+    let text = error.to_string();
+    assert!(
+        text.contains(&format!(
+            "A relaunch is not ready yet for an agent in the terminal holder (pane {held})"
+        )),
+        "{text}"
+    );
+    assert!(!typed(&rig, &spawned.pane_id, "/exit"));
+    assert!(session(&rig, &spawned.session.id).ended_at.is_none());
+    assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
+}

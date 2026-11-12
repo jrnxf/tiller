@@ -48,7 +48,7 @@ pub const MAX_HISTORY: u16 = 1000;
 const INPUT_RATE: f64 = 20.0;
 const INPUT_BURST: f64 = 40.0;
 /// Lines waiting for a browser before its stream is dropped.
-const QUEUE: usize = 64;
+pub(crate) const QUEUE: usize = 64;
 /// The longest line herdr may write; a full frame of a large pane with
 /// heavy styling stays well under it.
 const MAX_LINE: usize = 4 << 20;
@@ -832,7 +832,7 @@ fn sizes(
 }
 
 /// Returns once the daemon is stopping; never when nothing can stop it.
-async fn stopping(stop: &mut watch::Receiver<bool>) {
+pub(crate) async fn stopping(stop: &mut watch::Receiver<bool>) {
     if stop.wait_for(|stop| *stop).await.is_err() {
         std::future::pending::<()>().await;
     }
@@ -885,7 +885,7 @@ struct Observed {
 
 /// Queues one NDJSON line without waiting; false when the browser left or
 /// fell a whole queue behind, which ends its stream.
-fn queue(tx: &mpsc::Sender<Bytes>, message: &TerminalLine) -> bool {
+pub(crate) fn queue(tx: &mpsc::Sender<Bytes>, message: &TerminalLine) -> bool {
     let Ok(mut line) = serde_json::to_vec(message) else {
         return false;
     };
@@ -893,7 +893,7 @@ fn queue(tx: &mpsc::Sender<Bytes>, message: &TerminalLine) -> bool {
     tx.try_send(Bytes::from(line)).is_ok()
 }
 
-fn unavailable(tx: &mpsc::Sender<Bytes>, message: &str) {
+pub(crate) fn unavailable(tx: &mpsc::Sender<Bytes>, message: &str) {
     let message = message.to_owned();
     queue(tx, &TerminalLine::Unavailable { message });
 }

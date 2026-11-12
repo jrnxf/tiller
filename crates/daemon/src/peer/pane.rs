@@ -28,7 +28,7 @@ use tokio::sync::watch;
 use super::nonces;
 use super::serve::{Denied, ServeConfig, ServeError, current_key, refused, skew_ms};
 use super::{Frame, HelloKey};
-use crate::api::{ApiError, pane_error, pane_gone, pane_target, saved_machine};
+use crate::api::{ApiError, herdr_only, pane_error, pane_gone, pane_target, saved_machine};
 use crate::dto::TerminalHistory;
 use crate::mirror::{self, Mirrors};
 
@@ -261,6 +261,7 @@ async fn history(
     session_id: String,
     pane: String,
 ) -> Result<Value, ApiError> {
+    herdr_only(&pane, "A peer's history")?;
     let lines = open.lines.unwrap_or(mirror::MAX_HISTORY);
     if !(1..=mirror::MAX_HISTORY).contains(&lines) {
         return Err(ApiError::usage(format!(
@@ -435,6 +436,9 @@ type Begun = (
 );
 
 async fn begin(config: &ServeConfig, pane: &str) -> Result<Begun, ApiError> {
+    // A peer is not served the holder's panes yet: the view says so, never
+    // that the pane is closed.
+    herdr_only(pane, "A peer's live view")?;
     let mirrors = Mirrors::new(&config.home);
     let viewer = mirrors.viewer().ok_or_else(|| {
         ApiError::new(

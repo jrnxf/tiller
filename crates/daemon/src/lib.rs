@@ -6,6 +6,8 @@ pub mod auth;
 pub mod backups;
 pub mod dto;
 pub mod forge;
+pub mod holder;
+pub mod holder_mirror;
 pub mod memory;
 pub mod mirror;
 pub mod owner;

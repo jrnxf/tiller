@@ -26,6 +26,7 @@ tiller-core.workspace = true
 tiller-delivery.workspace = true
 tiller-herdr.workspace = true
 tiller-observe.workspace = true
+tiller-panes.workspace = true
 tiller-reconcile.workspace = true
 tokio = { workspace = true, features = ["io-std", "io-util", "process"] }
 tracing.workspace = true
@@ -35,6 +36,7 @@ utoipa.workspace = true
 insta.workspace = true
 tempfile.workspace = true
 tiller-herdr = { workspace = true, features = ["testing"] }
+tiller-panes = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["io-util"] }
 tower.workspace = true
 tracing-subscriber.workspace = true

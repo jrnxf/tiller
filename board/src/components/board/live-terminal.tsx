@@ -281,7 +281,7 @@ function StatusMark({ status }: { status: MirrorStatus }) {
             : status.kind === "ended"
               ? ["idle", "Ended"]
               : status.kind === "unreachable"
-                ? ["off", "herdr unreachable"]
+                ? ["off", status.mark ?? "herdr unreachable"]
                 : ["off", "No terminal"];
   return (
     <span className="mir-st">
@@ -629,7 +629,7 @@ export function LiveTerminal({
             size: () => (fittingRef.current ? fitTarget.current : null),
             onUnfit: (detail) => {
               setUnfit(true);
-              showToast("bad", "herdr kept the pane's size", detail);
+              showToast("bad", "The pane kept its own size", detail);
             },
           },
           tail,
@@ -899,7 +899,7 @@ export function LiveTerminal({
     (ended && size !== null);
   const message = screenShown ? null : ended ? (
     <Message icon={<TerminalIcon />} title="The agent's pane is closed">
-      herdr no longer has a pane for this agent.
+      The agent's terminal is gone.
     </Message>
   ) : (
     <NoScreen status={status} onRetry={retry} />
@@ -933,7 +933,7 @@ export function LiveTerminal({
         The stream dropped. Opening it again for a fresh full screen (try {status.attempt}).
       </span>
     ) : status.kind === "connecting" ? (
-      <span className="tx">Waiting for the first screen from herdr.</span>
+      <span className="tx">Waiting for the agent's first screen.</span>
     ) : ended ? (
       <span className="tx">The pane closed {endedAt}. This is its last screen.</span>
     ) : where === "inline" && view !== "inline" ? (
@@ -983,7 +983,7 @@ export function LiveTerminal({
             : "Size the pane in herdr to fill the stage, until you leave it"
         }
         onClick={() => {
-          // After herdr kept the pane's size, a press asks again.
+          // After the pane kept its size, a press asks again.
           setUnfit(false);
           if (!unfit || !fitWanted) toggleFit();
         }}

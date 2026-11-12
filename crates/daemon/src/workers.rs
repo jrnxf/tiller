@@ -114,10 +114,12 @@ pub fn boot_id() -> Option<String> {
     if let Ok(id) = std::fs::read_to_string("/proc/sys/kernel/random/boot_id") {
         return Some(id.trim().to_owned()).filter(|id| !id.is_empty());
     }
-    let output = std::process::Command::new("sysctl")
+    // By its full path: a `sysctl` earlier on PATH may not know the name.
+    let output = std::process::Command::new("/usr/sbin/sysctl")
         .args(["-n", "kern.bootsessionuuid"])
         .output()
-        .ok()?;
+        .ok()
+        .filter(|output| output.status.success())?;
     let id = String::from_utf8(output.stdout).ok()?;
     Some(id.trim().to_owned()).filter(|id| !id.is_empty())
 }
