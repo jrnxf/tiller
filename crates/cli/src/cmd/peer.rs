@@ -79,8 +79,9 @@ pub enum PeerCmd {
         #[arg(long)]
         from: String,
     },
-    /// Serve one pane read only to a paired board host over stdin and
-    /// stdout; the board host's daemon runs it over ssh for each watch
+    /// Serve one pane, and take its signed keys and Fit, to a paired board
+    /// host over stdin and stdout; the board host's daemon runs it over ssh
+    /// for each watch
     Pane {
         /// The board host's label
         #[arg(long)]
