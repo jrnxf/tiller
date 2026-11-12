@@ -8,16 +8,18 @@
 //! pane's subscribers.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
-use alacritty_terminal::event::EventListener;
+use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::term::{Config, Term};
+use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::Processor;
 use tiller_panes::Size;
+use tiller_panes::message::{Format, Read, Screen as ScreenRead};
 
-use crate::repaint;
 use crate::scanner::Scanner;
+use crate::{repaint, screen};
 
 /// How much of the latest input a panic report quotes.
 pub const RECENT_INPUT: usize = 4 * 1024;
@@ -33,12 +35,85 @@ pub const MAX_COLS: u16 = 1024;
 /// The most rows the model takes.
 pub const MAX_ROWS: u16 = 512;
 
-/// The model's event listener. The slice drops every event: query answers
-/// (`PtyWrite`), titles and bells come with H03 and H04.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Quiet;
+/// What the app told its terminal, other than how to draw: the pane's
+/// events (`terminal-holder.md` 2.4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Told {
+    /// The app set its title (OSC 0 or 2), or reset it to empty.
+    Title(String),
+    /// The app rang the bell.
+    Bell,
+    /// The app sent a notification (OSC 9 or OSC 777).
+    Notify { title: String, body: String },
+}
 
-impl EventListener for Quiet {}
+/// The model's event listener: it keeps titles and bells for the pane to
+/// take after each update. Query answers (`PtyWrite`) come with H04.
+#[derive(Clone, Debug, Default)]
+pub struct Listener {
+    told: Arc<Mutex<Vec<Told>>>,
+}
+
+impl Listener {
+    fn push(&self, told: Told) {
+        self.told
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(told);
+    }
+
+    fn take(&self) -> Vec<Told> {
+        std::mem::take(&mut *self.told.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+}
+
+impl EventListener for Listener {
+    fn send_event(&self, event: Event) {
+        match event {
+            Event::Title(title) => self.push(Told::Title(title)),
+            Event::ResetTitle => self.push(Told::Title(String::new())),
+            Event::Bell => self.push(Told::Bell),
+            _ => {}
+        }
+    }
+}
+
+/// The notifications in `bytes`, which hold whole sequences only: OSC 9
+/// (`ESC ] 9 ; body`) and OSC 777 (`ESC ] 777 ; notify ; title ; body`),
+/// each ended by BEL or ST. ConEmu's OSC 9 commands (`9;1` to `9;12`, such
+/// as the progress bar `9;4`) are not notifications.
+fn notifications(bytes: &[u8]) -> Vec<Told> {
+    let mut found = Vec::new();
+    let mut rest = bytes;
+    while let Some(start) = rest.windows(2).position(|pair| pair == b"\x1b]") {
+        rest = &rest[start + 2..];
+        let end = rest
+            .iter()
+            .position(|&b| b == 0x07 || b == 0x1b)
+            .unwrap_or(rest.len());
+        let body = String::from_utf8_lossy(&rest[..end]);
+        rest = &rest[end..];
+        if let Some(text) = body.strip_prefix("9;") {
+            let command = text.split(';').next().unwrap_or_default();
+            let conemu = command
+                .parse::<u8>()
+                .is_ok_and(|n| (1..=12).contains(&n) && !command.starts_with('0'));
+            if !conemu {
+                found.push(Told::Notify {
+                    title: String::new(),
+                    body: text.to_owned(),
+                });
+            }
+        } else if let Some(text) = body.strip_prefix("777;notify;") {
+            let (title, body) = text.split_once(';').unwrap_or((text, ""));
+            found.push(Told::Notify {
+                title: title.to_owned(),
+                body: body.to_owned(),
+            });
+        }
+    }
+    found
+}
 
 /// A size in the form `alacritty_terminal` takes.
 #[derive(Clone, Copy, Debug)]
@@ -69,18 +144,18 @@ pub struct ModelPanic {
 
 /// The terminal state and its parser.
 struct Screen {
-    term: Term<Quiet>,
+    term: Term<Listener>,
     parser: Processor,
 }
 
 impl Screen {
-    fn new(size: Size) -> Self {
+    fn new(size: Size, listener: Listener) -> Self {
         let config = Config {
             kitty_keyboard: true,
             ..Config::default()
         };
         Self {
-            term: Term::new(config, &GridSize(size), Quiet),
+            term: Term::new(config, &GridSize(size), listener),
             parser: Processor::new(),
         }
     }
@@ -93,6 +168,11 @@ pub struct Model {
     size: Size,
     /// The latest bytes fed, for a panic report.
     recent: Vec<u8>,
+    /// What the app told the terminal since the last [`Model::take_told`].
+    listener: Listener,
+    /// Makes the next update panic, for the tests of section 3.5.
+    #[cfg(test)]
+    fault: bool,
 }
 
 impl std::fmt::Debug for Model {
@@ -107,11 +187,15 @@ impl Model {
     /// A blank screen of `size`, which must be between [`MIN_COLS`] by
     /// [`MIN_ROWS`] and [`MAX_COLS`] by [`MAX_ROWS`].
     pub fn new(size: Size) -> Self {
+        let listener = Listener::default();
         Self {
-            screen: Screen::new(size),
+            screen: Screen::new(size, listener.clone()),
             scanner: Scanner::new(),
             size,
             recent: Vec::new(),
+            listener,
+            #[cfg(test)]
+            fault: false,
         }
     }
 
@@ -127,7 +211,27 @@ impl Model {
             return Ok(());
         }
         self.remember(&whole);
+        for told in notifications(&whole) {
+            self.listener.push(told);
+        }
         self.guarded(|screen| screen.parser.advance(&mut screen.term, &whole))
+    }
+
+    /// What the app told the terminal since the last call: titles, bells
+    /// and notifications, in order.
+    pub fn take_told(&self) -> Vec<Told> {
+        self.listener.take()
+    }
+
+    /// The terminal modes the app has on.
+    pub fn mode(&self) -> TermMode {
+        *self.screen.term.mode()
+    }
+
+    /// A `screen` read (section 3.3). `read` must be in range. A panic while
+    /// reading resets the model, as an update does.
+    pub fn screen(&mut self, read: Read, format: Format) -> Result<ScreenRead, ModelPanic> {
+        self.guarded(|screen| screen::read(&screen.term, read, format))
     }
 
     /// When a synchronized update (mode 2026) that the parser holds must
@@ -157,24 +261,30 @@ impl Model {
     /// (section 3.4). A panic while rendering resets the model, as an update
     /// does.
     pub fn repaint(&mut self) -> Result<Vec<u8>, ModelPanic> {
-        let mut out = Vec::new();
-        self.guarded(|screen| out = repaint::render(&screen.term))?;
-        Ok(out)
+        self.guarded(|screen| repaint::render(&screen.term))
     }
 
     /// Runs `update` on the screen. A panic in it leaves a fresh screen at
     /// the same size, and says what panicked.
-    fn guarded(&mut self, update: impl FnOnce(&mut Screen)) -> Result<(), ModelPanic> {
+    fn guarded<R>(&mut self, update: impl FnOnce(&mut Screen) -> R) -> Result<R, ModelPanic> {
         let screen = &mut self.screen;
-        match catch_unwind(AssertUnwindSafe(|| update(screen))) {
-            Ok(()) => Ok(()),
+        #[cfg(test)]
+        let fault = std::mem::take(&mut self.fault);
+        match catch_unwind(AssertUnwindSafe(|| {
+            #[cfg(test)]
+            if fault {
+                panic!("a fault the test asked for");
+            }
+            update(screen)
+        })) {
+            Ok(out) => Ok(out),
             Err(payload) => {
                 let message = payload
                     .downcast_ref::<&str>()
                     .map(|text| (*text).to_owned())
                     .or_else(|| payload.downcast_ref::<String>().cloned())
                     .unwrap_or_else(|| "a panic with no message".to_owned());
-                self.screen = Screen::new(self.size);
+                self.screen = Screen::new(self.size, self.listener.clone());
                 self.scanner = Scanner::new();
                 Err(ModelPanic {
                     message,
@@ -199,8 +309,14 @@ impl Model {
     }
 
     #[cfg(test)]
-    pub(crate) fn term(&self) -> &Term<Quiet> {
+    pub(crate) fn term(&self) -> &Term<Listener> {
         &self.screen.term
+    }
+
+    /// Makes the next update panic inside its `catch_unwind`.
+    #[cfg(test)]
+    pub(crate) fn fail_next(&mut self) {
+        self.fault = true;
     }
 }
 
@@ -244,7 +360,9 @@ mod tests {
     fn a_panic_resets_the_model_at_its_size_and_quotes_the_input() {
         let mut model = Model::new(size());
         model.feed(b"before").unwrap();
-        let err = model.guarded(|_| panic!("the model broke")).unwrap_err();
+        let err = model
+            .guarded::<()>(|_| panic!("the model broke"))
+            .unwrap_err();
         assert_eq!(err.message, "the model broke");
         assert_eq!(err.recent, b"before");
         assert_eq!(row(&model, 0), "");
@@ -258,7 +376,7 @@ mod tests {
         let mut model = Model::new(size());
         model.feed(&vec![b'a'; RECENT_INPUT]).unwrap();
         model.feed(b"\r\nzz").unwrap();
-        let err = model.guarded(|_| panic!("x")).unwrap_err();
+        let err = model.guarded::<()>(|_| panic!("x")).unwrap_err();
         assert_eq!(err.recent.len(), RECENT_INPUT);
         assert!(err.recent.ends_with(b"\r\nzz"));
     }
@@ -274,5 +392,64 @@ mod tests {
         assert!(model.sync_deadline().is_none());
         model.feed(b"\x1b[?2026h more\x1b[?2026l").unwrap();
         assert_eq!(row(&model, 0), "held more");
+    }
+
+    #[test]
+    fn titles_bells_and_notifications_are_told_in_order() {
+        let mut model = Model::new(size());
+        model
+            .feed(b"\x1b]2;build\x07a\x07\x1b]9;done\x1b\\\x1b]777;notify;Claude;needs you\x07")
+            .unwrap();
+        model.feed(b"\x1b]0;\x07").unwrap();
+        assert_eq!(
+            model.take_told(),
+            [
+                // The notifications are found before the parser runs.
+                Told::Notify {
+                    title: String::new(),
+                    body: "done".into()
+                },
+                Told::Notify {
+                    title: "Claude".into(),
+                    body: "needs you".into()
+                },
+                Told::Title("build".into()),
+                Told::Bell,
+                Told::Title(String::new()),
+            ]
+        );
+        assert!(model.take_told().is_empty());
+    }
+
+    #[test]
+    fn conemu_osc_9_commands_are_not_notifications() {
+        let mut model = Model::new(size());
+        model
+            .feed(b"\x1b]9;4;1;50\x07\x1b]9;12\x07\x1b]9;13;x\x07\x1b]9;04\x07")
+            .unwrap();
+        assert_eq!(
+            model.take_told(),
+            [
+                Told::Notify {
+                    title: String::new(),
+                    body: "13;x".into()
+                },
+                Told::Notify {
+                    title: String::new(),
+                    body: "04".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_screen_read_that_panics_resets_the_model() {
+        let mut model = Model::new(size());
+        model.feed(b"before").unwrap();
+        model.fail_next();
+        let err = model.screen(Read::Visible, Format::Text).unwrap_err();
+        assert_eq!(err.message, "a fault the test asked for");
+        let screen = model.screen(Read::Visible, Format::Text).unwrap();
+        assert_eq!(screen.rows_text, ["", "", "", ""]);
     }
 }
