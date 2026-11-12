@@ -327,14 +327,14 @@ pub fn resume(
     require_active(run)?;
     let worktree = worktree_of(run)?;
     let Some(session) = live_session(store.conn(), &run.id)? else {
-        let next = relaunch_advice(store, world, None, run)?;
+        let next = relaunch_advice(store, world, None, run);
         return Err(SpawnError::Refused(format!(
             "run {} has no live session to resume: the last one ended, so {next}",
             run.id
         )));
     };
     let Some(claude_id) = session.claude_session_id.clone() else {
-        let next = relaunch_advice(store, world, Some(&session), run)?;
+        let next = relaunch_advice(store, world, Some(&session), run);
         return Err(SpawnError::Refused(format!(
             "session {} never bound a Claude session, so there is nothing to resume, and {next}",
             session.id
@@ -814,21 +814,23 @@ fn relaunch_held(store: &Store, world: &World<'_>, session: Option<&Session>) ->
 }
 
 /// What a refused resume tells the owner to do next: a relaunch, unless
-/// the terminal holder refuses that too (`relaunch_held`).
+/// the terminal holder refuses that too (`relaunch_held`). When the gate
+/// cannot be read now, the relaunch advice stands, and the relaunch itself
+/// says why it stops, so the resume's own reason is never lost.
 fn relaunch_advice(
     store: &Store,
     world: &World<'_>,
     session: Option<&Session>,
     run: &Run,
-) -> Result<String> {
-    Ok(if relaunch_held(store, world, session)? {
+) -> String {
+    if relaunch_held(store, world, session).unwrap_or(false) {
         "a new session needs a pane of its own, which the terminal holder takes only from H09, so the run waits for that or for a new start of its card".to_owned()
     } else {
         format!(
             "tiller agent relaunch {} --note <progress> starts a new one",
             run.id
         )
-    })
+    }
 }
 
 /// `session`'s herdr pane when it is still open and its own: its tokens
