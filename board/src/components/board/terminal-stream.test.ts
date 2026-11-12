@@ -179,6 +179,35 @@ test("herdr out of reach is shown and tried again", async () => {
   stream.stop();
 });
 
+test("a terminal holder out of reach is named, not taken for herdr, and tried again", async () => {
+  const { request } = opens(
+    refusal(503, "unavailable", "the terminal holder is unreachable: no socket"),
+    ndjson([{ type: "size", cols: 80, rows: 24 }, frame(1, true, "back")]),
+  );
+  const seen: MirrorStatus[] = [];
+  const { screen } = recorder();
+  const stream = new TerminalStream(
+    "s1",
+    screen,
+    (status) => seen.push(status),
+    () => {},
+  );
+  stream.start();
+  await settle();
+  expect(seen.at(-1)).toEqual({
+    kind: "unreachable",
+    title: "Can't reach the terminal holder on this machine",
+    detail:
+      "The agent may still be running. Run tiller holder to start the holder. Tiller tries again on its own, or now.",
+    mark: "holder unreachable",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  await settle();
+  expect(request).toHaveBeenCalledTimes(2);
+  expect(seen.at(-1)?.kind).toBe("live");
+  stream.stop();
+});
+
 test("leaving the mirror drops the request, which ends the observe process", async () => {
   const { signals } = opens(ndjson([{ type: "size", cols: 80, rows: 24 }]));
   const { screen, onStatus } = recorder();
