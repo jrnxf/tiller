@@ -2,22 +2,23 @@
 //!
 //! `alacritty_terminal` has no ANSI output, so this writes its own: bytes
 //! that draw the model's active screen and modes on an empty terminal of the
-//! same size. The repaint is for a viewer. It does not carry the primary
-//! screen under an alternate one, the saved cursor, the scroll region, tab
-//! stops or the charsets: the app's next bytes go to the viewer's own state.
+//! same size, and the scrollback rows asked for above it. The repaint is for
+//! a viewer. It does not carry the primary screen under an alternate one,
+//! the saved cursor, the scroll region, tab stops or the charsets: the
+//! app's next bytes go to the viewer's own state.
 //!
-//! The slice emits the whole pen (`SGR 0` and every attribute) at each pen
-//! change. The near-minimal diff, the scrollback rows and the round-trip
-//! proptest come with H04.
+//! Each pen change writes the shorter of two forms: the attributes and
+//! colors that change, or `SGR 0` and the whole new pen.
 
 use std::fmt::Write as _;
 
-use alacritty_terminal::event::EventListener;
-use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::grid::Row;
+use alacritty_terminal::index::Column;
+use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::{Cell, Flags, Hyperlink};
-use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, CursorStyle, NamedColor};
+
+use crate::snapshot::Snapshot;
 
 /// The start of every repaint. `ESC c` is not used, because it would clear
 /// the outer terminal's own state: a soft reset (`CSI ! p`) and an explicit
@@ -43,6 +44,24 @@ const PEN_FLAGS: Flags = Flags::BOLD
     .union(Flags::INVERSE)
     .union(Flags::HIDDEN)
     .union(Flags::STRIKEOUT);
+
+/// Each underline style and its `SGR` code. Each one clears the others.
+const UNDERLINES: [(Flags, &str); 5] = [
+    (Flags::UNDERLINE, "4"),
+    (Flags::DOUBLE_UNDERLINE, "21"),
+    (Flags::UNDERCURL, "4:3"),
+    (Flags::DOTTED_UNDERLINE, "4:4"),
+    (Flags::DASHED_UNDERLINE, "4:5"),
+];
+
+/// The attributes other than bold, dim and underline: each code that sets
+/// it, and the one that clears it alone.
+const OTHERS: [(Flags, &str, &str); 4] = [
+    (Flags::ITALIC, "3", "23"),
+    (Flags::INVERSE, "7", "27"),
+    (Flags::HIDDEN, "8", "28"),
+    (Flags::STRIKEOUT, "9", "29"),
+];
 
 /// What `SGR` sets: colors and attributes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,33 +89,80 @@ impl Pen {
         }
     }
 
-    /// `SGR 0`, then every part of this pen.
-    fn write(&self, out: &mut String) {
-        out.push_str("\x1b[0");
-        let attributes = [
-            (Flags::BOLD, "1"),
-            (Flags::DIM, "2"),
-            (Flags::ITALIC, "3"),
-            (Flags::UNDERLINE, "4"),
-            (Flags::DOUBLE_UNDERLINE, "21"),
-            (Flags::UNDERCURL, "4:3"),
-            (Flags::DOTTED_UNDERLINE, "4:4"),
-            (Flags::DASHED_UNDERLINE, "4:5"),
-            (Flags::INVERSE, "7"),
-            (Flags::HIDDEN, "8"),
-            (Flags::STRIKEOUT, "9"),
-        ];
-        for (flag, code) in attributes {
-            if self.flags.contains(flag) {
-                out.push(';');
-                out.push_str(code);
+    fn underline_style(&self) -> Flags {
+        self.flags & Flags::ALL_UNDERLINES
+    }
+
+    /// The `SGR` parameters that take a terminal from pen `from` to this
+    /// one, each with a `;` before it.
+    fn change(&self, from: &Pen, out: &mut String) {
+        let gone = from.flags - self.flags;
+        let mut bold_dim = self.flags & (Flags::BOLD | Flags::DIM);
+        // `SGR 22` clears bold and dim both, so the one kept is set again.
+        if gone.intersects(Flags::BOLD | Flags::DIM) {
+            out.push_str(";22");
+        } else {
+            bold_dim -= from.flags;
+        }
+        if bold_dim.contains(Flags::BOLD) {
+            out.push_str(";1");
+        }
+        if bold_dim.contains(Flags::DIM) {
+            out.push_str(";2");
+        }
+        if self.underline_style() != from.underline_style() {
+            match UNDERLINES
+                .iter()
+                .find(|(flag, _)| self.flags.contains(*flag))
+            {
+                Some((_, code)) => {
+                    out.push(';');
+                    out.push_str(code);
+                }
+                None => out.push_str(";24"),
             }
         }
-        color(out, self.fg, Layer::Fg);
-        color(out, self.bg, Layer::Bg);
-        if let Some(underline) = self.underline {
-            color(out, underline, Layer::Underline);
+        for (flag, set, clear) in OTHERS {
+            match (from.flags.contains(flag), self.flags.contains(flag)) {
+                (false, true) => {
+                    out.push(';');
+                    out.push_str(set);
+                }
+                (true, false) => {
+                    out.push(';');
+                    out.push_str(clear);
+                }
+                _ => {}
+            }
         }
+        if self.fg != from.fg {
+            color(out, self.fg, Layer::Fg);
+        }
+        if self.bg != from.bg {
+            color(out, self.bg, Layer::Bg);
+        }
+        if self.underline != from.underline {
+            match self.underline {
+                Some(underline) => color(out, underline, Layer::Underline),
+                None => out.push_str(";59"),
+            }
+        }
+    }
+
+    /// The shorter `SGR` that takes a terminal from pen `from` to this one:
+    /// the changes alone, or `SGR 0` and the whole pen.
+    fn write(&self, from: &Pen, out: &mut String) {
+        let mut changes = String::new();
+        self.change(from, &mut changes);
+        let mut whole = String::from(";0");
+        self.change(&Pen::DEFAULT, &mut whole);
+        let params = if changes.len() < whole.len() {
+            changes
+        } else {
+            whole
+        };
+        out.push_str("\x1b[");
+        out.push_str(&params[1..]);
         out.push('m');
     }
 }
@@ -108,8 +174,8 @@ enum Layer {
     Underline,
 }
 
-/// The `SGR` parameters for one color, after a `;`. A default color writes
-/// nothing, since `SGR 0` came first.
+/// The `SGR` parameters for one color, after a `;`. A default color, and
+/// a color only a renderer uses, is the layer's default.
 fn color(out: &mut String, color: Color, layer: Layer) {
     let extended = match layer {
         Layer::Fg => 38,
@@ -129,16 +195,17 @@ fn color(out: &mut String, color: Color, layer: Layer) {
                 | NamedColor::DimCyan
                 | NamedColor::DimWhite => Some(index - NamedColor::DimBlack as usize),
                 _ if index < 16 => Some(index),
-                // The default colors, and the colors only a renderer uses.
                 _ => None,
             };
-            let Some(base) = base else { return };
-            match layer {
-                Layer::Fg if base < 8 => _ = write!(out, ";{}", 30 + base),
-                Layer::Fg => _ = write!(out, ";{}", 90 + base - 8),
-                Layer::Bg if base < 8 => _ = write!(out, ";{}", 40 + base),
-                Layer::Bg => _ = write!(out, ";{}", 100 + base - 8),
-                Layer::Underline => _ = write!(out, ";58:5:{base}"),
+            match (layer, base) {
+                (Layer::Fg, None) => out.push_str(";39"),
+                (Layer::Bg, None) => out.push_str(";49"),
+                (Layer::Underline, None) => out.push_str(";59"),
+                (Layer::Fg, Some(base)) if base < 8 => _ = write!(out, ";{}", 30 + base),
+                (Layer::Fg, Some(base)) => _ = write!(out, ";{}", 90 + base - 8),
+                (Layer::Bg, Some(base)) if base < 8 => _ = write!(out, ";{}", 40 + base),
+                (Layer::Bg, Some(base)) => _ = write!(out, ";{}", 100 + base - 8),
+                (Layer::Underline, Some(base)) => _ = write!(out, ";58:5:{base}"),
             }
         }
         Color::Indexed(index) => _ = write!(out, ";{extended}:5:{index}"),
@@ -160,7 +227,7 @@ impl Writer {
 
     fn set_pen(&mut self, pen: Pen) {
         if pen != self.pen {
-            pen.write(&mut self.out);
+            pen.write(&self.pen, &mut self.out);
             self.pen = pen;
         }
     }
@@ -188,21 +255,83 @@ impl Writer {
             self.out.extend(zerowidth);
         }
     }
+
+    /// The cells of one row up to `end`, from where the cursor is, and
+    /// whether the drawing wraps into the next row.
+    fn row(&mut self, row: &Row<Cell>, end: usize, wraps: bool) {
+        for col in 0..end {
+            let cell = &row[Column(col)];
+            // A wide character's spacer is drawn by the character, and the
+            // spacer at the end of a row before a wrapped wide character by
+            // the wrap itself. With no wrap drawn, that spacer is a blank.
+            let spacer = if wraps {
+                Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER
+            } else {
+                Flags::WIDE_CHAR_SPACER
+            };
+            if cell.flags.intersects(spacer) {
+                continue;
+            }
+            self.cell(cell);
+        }
+    }
+
+    /// After a row that wraps, the spacer at its end that a wide character
+    /// leaves when it does not fit, if the next row's wide character does
+    /// not draw it: there is none (a line was put in between), or its pen
+    /// is not the spacer's. A wide character drawn there with the spacer's
+    /// pen makes the spacer and the wrap, and it is erased again on the
+    /// next row, where the cursor is left.
+    fn lone_spacer(&mut self, row: &Row<Cell>, next: &Row<Cell>, cols: usize) {
+        let (spacer, first) = (&row[Column(cols - 1)], &next[Column(0)]);
+        if !spacer.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
+            || (first.flags.contains(Flags::WIDE_CHAR)
+                && Pen::of(first) == Pen::of(spacer)
+                && first.hyperlink() == spacer.hyperlink())
+        {
+            return;
+        }
+        self.set_pen(Pen::of(spacer));
+        self.set_link(spacer.hyperlink());
+        self.out.push('\u{3000}');
+        self.set_pen(Pen::DEFAULT);
+        self.out.push_str("\r\x1b[2X");
+    }
+
+    /// A line feed that scrolls a blank row in. The pen is the default
+    /// first, as a terminal fills the new row with the pen's background.
+    fn new_line(&mut self, feed: &str) {
+        self.set_pen(Pen::DEFAULT);
+        self.out.push_str(feed);
+    }
 }
 
 /// Whether a cell draws as nothing on a cleared screen.
 fn blank(cell: &Cell) -> bool {
     (cell.c == ' ' || cell.c == '\t')
         && Pen::of(cell) == Pen::DEFAULT
-        && cell.zerowidth().is_none()
+        && cell.zerowidth().is_none_or(<[char]>::is_empty)
         && cell.hyperlink().is_none()
 }
 
-/// The repaint of `term`'s active screen.
-pub fn render<T: EventListener>(term: &Term<T>) -> Vec<u8> {
-    let grid = term.grid();
-    let mode = *term.mode();
-    let (rows, cols) = (grid.screen_lines(), grid.columns());
+/// Where a row's drawing ends: its last cell when it wraps into the next,
+/// else after its last cell that is not blank.
+fn row_end(row: &Row<Cell>, cols: usize, wraps: bool) -> usize {
+    if wraps {
+        cols
+    } else {
+        (0..cols)
+            .rev()
+            .find(|&col| !blank(&row[Column(col)]))
+            .map_or(0, |col| col + 1)
+    }
+}
+
+/// The repaint of a snapshot: its scrollback rows, which scroll off the
+/// top of the viewer's screen into its scrollback, then its screen.
+pub fn render(snapshot: &Snapshot) -> Vec<u8> {
+    let mode = snapshot.mode;
+    let (rows, cols) = (snapshot.screen_lines(), snapshot.columns());
     let mut w = Writer {
         out: String::from(RESET),
         pen: Pen::DEFAULT,
@@ -215,19 +344,48 @@ pub fn render<T: EventListener>(term: &Term<T>) -> Vec<u8> {
     });
     w.out.push_str("\x1b[H\x1b[2J");
 
+    let history = snapshot.history();
+    if history > 0 {
+        // The viewer's own scrollback goes, so the rows sent are not shown
+        // twice.
+        w.out.push_str("\x1b[3J");
+        // Each scrollback row in turn from the top, joined by a wrap or a
+        // line feed. Then enough line feeds that the last of them is above
+        // the screen, which is blank again for the screen's rows.
+        let first = -i32::try_from(history).unwrap_or(i32::MAX);
+        let mut continues = false;
+        for line in first..0 {
+            let row = snapshot.row(line);
+            let wraps = line + 1 < 0 && row[Column(cols - 1)].flags.contains(Flags::WRAPLINE);
+            let mut end = row_end(row, cols, wraps);
+            if continues {
+                end = end.max(1);
+            }
+            w.row(row, end, wraps);
+            // The wrap into this row scrolled a row in with the pen of its
+            // first cell: the rest of it is cleared with the default.
+            if continues && end < cols {
+                w.set_pen(Pen::DEFAULT);
+                w.out.push_str("\x1b[K");
+            }
+            if wraps {
+                w.lone_spacer(row, snapshot.row(line + 1), cols);
+            } else {
+                w.new_line("\r\n");
+            }
+            continues = wraps;
+        }
+        w.set_link(None);
+        w.new_line(&"\n".repeat(rows - 1));
+        w.out.push_str("\x1b[H");
+    }
+
     let mut continues = false;
     for line in 0..rows {
-        let row = &grid[Line(line as i32)];
+        let row = snapshot.row(i32::try_from(line).unwrap_or(i32::MAX));
         // The last row's flag points below the screen, so it is not kept.
         let wraps = line + 1 < rows && row[Column(cols - 1)].flags.contains(Flags::WRAPLINE);
-        let mut end = if wraps {
-            cols
-        } else {
-            (0..cols)
-                .rev()
-                .find(|&col| !blank(&row[Column(col)]))
-                .map_or(0, |col| col + 1)
-        };
+        let mut end = row_end(row, cols, wraps);
         // A row that the one above wraps into is reached by the wrap, not a
         // cursor move, and draws at least one cell so the wrap happens.
         if continues {
@@ -235,32 +393,28 @@ pub fn render<T: EventListener>(term: &Term<T>) -> Vec<u8> {
         } else if end > 0 {
             w.cup(line, 0);
         }
-        for col in 0..end {
-            let cell = &row[Column(col)];
-            // A wide character's spacer is drawn by the character, and the
-            // spacer at the end of a row before a wrapped wide character by
-            // the wrap itself.
-            if cell
-                .flags
-                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
-            {
-                continue;
-            }
-            w.cell(cell);
+        w.row(row, end, wraps);
+        if wraps {
+            w.lone_spacer(row, snapshot.row(i32::try_from(line + 1).unwrap_or(i32::MAX)), cols);
         }
         continues = wraps;
     }
     w.set_link(None);
 
-    modes(&mut w.out, mode, term.cursor_style());
+    modes(&mut w.out, mode, snapshot.style);
 
     // The cursor last. After a write in the last column the cursor waits to
     // wrap: drawing that cell again puts it in the same state, before
     // insert mode is back on.
-    let cursor = &grid.cursor;
-    let (line, col) = (cursor.point.line.0.max(0) as usize, cursor.point.column.0);
+    let cursor = &snapshot.cursor;
+    let (line, col) = (
+        usize::try_from(cursor.point.line.0).unwrap_or(0),
+        cursor.point.column.0,
+    );
+    // With autowrap off the wait does nothing to the next character, so
+    // the cell is not drawn again.
     if cursor.input_needs_wrap && mode.contains(TermMode::LINE_WRAP) {
-        let row = &grid[Line(line as i32)];
+        let row = snapshot.row(i32::try_from(line).unwrap_or(0));
         let col = if col > 0 && row[Column(col)].flags.contains(Flags::WIDE_CHAR_SPACER) {
             col - 1
         } else {
@@ -358,7 +512,10 @@ fn modes(out: &mut String, mode: TermMode, style: CursorStyle) {
 
 #[cfg(test)]
 mod tests {
-    use alacritty_terminal::index::Point;
+    use alacritty_terminal::grid::Dimensions;
+    use alacritty_terminal::index::{Line, Point};
+    use alacritty_terminal::term::Term;
+    use proptest::prelude::*;
     use tiller_panes::Size;
 
     use super::*;
@@ -377,49 +534,114 @@ mod tests {
         (
             if cell.c == '\t' { ' ' } else { cell.c },
             Pen::of(cell),
-            cell.zerowidth().map(<[char]>::to_vec),
+            // A cell can keep an empty list of them, which draws as none.
+            cell.zerowidth().filter(|chars| !chars.is_empty()).map(<[char]>::to_vec),
             cell.hyperlink().map(|link| link.uri().to_owned()),
             cell.flags & layout,
         )
     }
 
-    /// Feeds `input` to a model, repaints it into a fresh model of the same
-    /// size, and checks that the two show the same thing.
-    fn round_trip(input: &[u8]) {
+    /// Whether every wide character from `first` down has its spacer, every
+    /// spacer its wide character, and every wrap is in the last column. An
+    /// insert or delete in a row (`ICH`, `DCH`) can break that in
+    /// `alacritty_terminal`, and no bytes draw such a state on a fresh
+    /// terminal, so a repaint of it is not compared.
+    fn drawable(term: &Term<crate::query::Listener>, first: i32) -> bool {
+        let grid = term.grid();
+        let cols = grid.columns();
+        (first..i32::try_from(grid.screen_lines()).unwrap()).all(|line| {
+            let row = &grid[Line(line)];
+            (0..cols).all(|col| {
+                let flags = row[Column(col)].flags;
+                let wide = !flags.contains(Flags::WIDE_CHAR)
+                    || (col + 1 < cols
+                        && row[Column(col + 1)].flags.contains(Flags::WIDE_CHAR_SPACER));
+                let spacer = !flags.contains(Flags::WIDE_CHAR_SPACER)
+                    || (col > 0 && row[Column(col - 1)].flags.contains(Flags::WIDE_CHAR));
+                // A wrap, and the spacer before one, are in the last column.
+                let wrap = col + 1 == cols
+                    || !flags.intersects(Flags::WRAPLINE | Flags::LEADING_WIDE_CHAR_SPACER);
+                wide && spacer && wrap
+            })
+        })
+    }
+
+    /// Feeds `input` to a model, repaints it with up to `history` rows of
+    /// its scrollback into a fresh model of the same size, and says how the
+    /// two differ, if they do.
+    fn differs(input: &[u8], history: usize) -> Option<String> {
         let mut source = Model::new(size());
         source.feed(input).unwrap();
-        let repaint = source.repaint().unwrap();
+        let snapshot = source.snapshot(history).unwrap();
+        let taken = snapshot.history();
+        let repaint = render(&snapshot);
         let mut copy = Model::new(size());
         copy.feed(&repaint).unwrap();
         let (a, b) = (source.term(), copy.term());
-        for line in 0..i32::from(size().rows) {
+        let first = -i32::try_from(taken).unwrap();
+        if !drawable(a, first) {
+            return None;
+        }
+        // A cursor waiting to wrap is put back by drawing its cell again.
+        // When the cursor or a line moved with the wait kept (`RI`, `IL`,
+        // `DL`) and that cell is where a row wraps, the drawing ends that
+        // row's wrap: a terminal has no other way to make the cursor wait.
+        let cursor = &a.grid().cursor;
+        let wrap_on = a.mode().contains(TermMode::LINE_WRAP);
+        if cursor.input_needs_wrap
+            && wrap_on
+            && a.grid()[cursor.point]
+                .flags
+                .intersects(Flags::WRAPLINE | Flags::LEADING_WIDE_CHAR_SPACER)
+        {
+            return None;
+        }
+        let shown = || String::from_utf8_lossy(&repaint).escape_debug().to_string();
+        // A clear with no scrollback rows sent may push blank rows into
+        // the copy's scrollback, as `ED 2` does.
+        if taken > 0 && b.grid().history_size() != taken {
+            return Some(format!(
+                "{} scrollback rows, not {taken}: repaint {}",
+                b.grid().history_size(),
+                shown()
+            ));
+        }
+        for line in first..i32::from(size().rows) {
             for col in 0..usize::from(size().cols) {
                 let point = Point::new(Line(line), Column(col));
-                assert_eq!(
-                    visible(&a.grid()[point]),
-                    visible(&b.grid()[point]),
-                    "{input:?} at {point:?}, repaint {:?}",
-                    String::from_utf8_lossy(&repaint)
-                );
+                let (mut want, mut got) = (visible(&a.grid()[point]), visible(&b.grid()[point]));
+                // The last scrollback row's wrap into the screen is not
+                // carried, nor the last screen row's wrap below it, nor the
+                // spacer a wide character leaves before such a wrap.
+                if line == -1 || line == i32::from(size().rows) - 1 {
+                    let wrap = Flags::WRAPLINE | Flags::LEADING_WIDE_CHAR_SPACER;
+                    want.4.remove(wrap);
+                    got.4.remove(wrap);
+                }
+                if want != got {
+                    return Some(format!("at {point:?}: {want:?} != {got:?}, repaint {}", shown()));
+                }
             }
         }
         let (ca, cb) = (&a.grid().cursor, &b.grid().cursor);
-        assert_eq!(ca.point, cb.point, "{input:?}: cursor");
-        assert_eq!(
-            ca.input_needs_wrap, cb.input_needs_wrap,
-            "{input:?}: pending wrap"
-        );
-        assert_eq!(
-            Pen::of(&ca.template),
-            Pen::of(&cb.template),
-            "{input:?}: pen"
-        );
-        assert_eq!(a.mode(), b.mode(), "{input:?}: modes");
-        assert_eq!(
-            a.cursor_style(),
-            b.cursor_style(),
-            "{input:?}: cursor style"
-        );
+        let checks = [
+            (ca.point == cb.point, "cursor"),
+            // With autowrap off a wait does nothing, and is not carried.
+            (!wrap_on || ca.input_needs_wrap == cb.input_needs_wrap, "pending wrap"),
+            (Pen::of(&ca.template) == Pen::of(&cb.template), "pen"),
+            (a.mode() == b.mode(), "modes"),
+            (a.cursor_style() == b.cursor_style(), "cursor style"),
+        ];
+        checks
+            .iter()
+            .find(|(same, _)| !same)
+            .map(|(_, what)| format!("{what} differs, repaint {}", shown()))
+    }
+
+    fn round_trip(input: &[u8]) {
+        if let Some(diff) = differs(input, 0) {
+            panic!("{}: {diff}", String::from_utf8_lossy(input).escape_debug());
+        }
     }
 
     #[test]
@@ -479,5 +701,142 @@ mod tests {
         assert!(!repaint.contains("\x1bc"), "{repaint:?}");
         assert!(repaint.ends_with("\x1b[1;3H\x1b[?25h"), "{repaint:?}");
         assert!(repaint.contains("\x1b[?2004h"), "{repaint:?}");
+    }
+
+    #[test]
+    fn a_pen_change_writes_only_what_changes_when_that_is_shorter() {
+        let pen = |flags: Flags, fg: Color| Pen {
+            fg,
+            flags,
+            ..Pen::DEFAULT
+        };
+        let red = Color::Named(NamedColor::Red);
+        let sgr = |from: Pen, to: Pen| {
+            let mut out = String::new();
+            to.write(&from, &mut out);
+            out
+        };
+        assert_eq!(sgr(Pen::DEFAULT, pen(Flags::BOLD, red)), "\x1b[1;31m");
+        assert_eq!(
+            sgr(pen(Flags::BOLD | Flags::ITALIC, red), pen(Flags::ITALIC, red)),
+            "\x1b[22m"
+        );
+        assert_eq!(
+            sgr(pen(Flags::BOLD | Flags::DIM, red), pen(Flags::DIM, red)),
+            "\x1b[22;2m"
+        );
+        assert_eq!(sgr(pen(Flags::UNDERCURL, red), pen(Flags::UNDERLINE, red)), "\x1b[4m");
+        assert_eq!(sgr(pen(Flags::ITALIC, red), pen(Flags::ITALIC, Pen::DEFAULT.fg)), "\x1b[39m");
+        // Back to the default, `SGR 0` is the shorter.
+        assert_eq!(
+            sgr(pen(Flags::BOLD | Flags::ITALIC | Flags::INVERSE, red), Pen::DEFAULT),
+            "\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn scrollback_rows_go_above_the_screen() {
+        let mut input = Vec::new();
+        for n in 0..30 {
+            input.extend_from_slice(format!("\x1b[3{}mline {n}\r\n", n % 8).as_bytes());
+        }
+        input.extend_from_slice(b"0123456789ABCDEFGHIJKLMNOP\r\nend");
+        for history in [0, 1, 4, 12, 40] {
+            assert_eq!(differs(&input, history), None, "{history} rows");
+        }
+        // The alternate screen has no scrollback.
+        input.extend_from_slice(b"\x1b[?1049halt");
+        assert_eq!(differs(&input, 10), None);
+    }
+
+    /// Bytes an app writes, one piece at a time.
+    fn piece() -> impl Strategy<Value = Vec<u8>> {
+        let text = prop_oneof![
+            "[ -~]{1,8}",
+            Just("日本".to_owned()),
+            Just("e\u{301}".to_owned()),
+            Just("🦀".to_owned()),
+            Just("\t".to_owned()),
+        ]
+        .prop_map(String::into_bytes);
+        let control = prop::sample::select(vec![
+            &b"\r\n"[..],
+            b"\r",
+            b"\n",
+            b"\x08",
+            b"\x1b[K",
+            b"\x1b[1K",
+            b"\x1b[J",
+            b"\x1b[2J",
+            b"\x1b[L",
+            b"\x1b[M",
+            b"\x1b[2@",
+            b"\x1b[P",
+            b"\x1b[X",
+            b"\x1bM",
+            b"\x1b7",
+            b"\x1b8",
+            b"\x1b[?1049h",
+            b"\x1b[?1049l",
+            b"\x1b[?7l",
+            b"\x1b[?7h",
+            b"\x1b[4h",
+            b"\x1b[4l",
+            b"\x1b[?25l",
+            b"\x1b[?2004h",
+            b"\x1b[?1h",
+            b"\x1b=",
+            b"\x1b[?1002h",
+            b"\x1b[?1006h",
+            b"\x1b[>1u",
+            b"\x1b[>3u",
+            b"\x1b[<u",
+            b"\x1b[5 q",
+            b"\x1b]8;;https://example.com\x1b\\",
+            b"\x1b]8;;\x1b\\",
+        ])
+        .prop_map(<[u8]>::to_vec);
+        let sgr = prop::collection::vec(
+            prop_oneof![
+                prop::sample::select(vec![
+                    "0", "1", "2", "3", "4", "4:3", "4:4", "4:5", "21", "7", "8", "9", "22",
+                    "23", "24", "27", "28", "29", "39", "49", "59",
+                ])
+                .prop_map(str::to_owned),
+                (30u8..38).prop_map(|n| n.to_string()),
+                (40u8..48).prop_map(|n| n.to_string()),
+                (90u8..98).prop_map(|n| n.to_string()),
+                (100u8..108).prop_map(|n| n.to_string()),
+                any::<u8>().prop_map(|n| format!("38;5;{n}")),
+                any::<u8>().prop_map(|n| format!("48;5;{n}")),
+                any::<u8>().prop_map(|n| format!("58;5;{n}")),
+                any::<[u8; 3]>().prop_map(|[r, g, b]| format!("38;2;{r};{g};{b}")),
+                any::<[u8; 3]>().prop_map(|[r, g, b]| format!("48;2;{r};{g};{b}")),
+            ],
+            1..4,
+        )
+        .prop_map(|params| format!("\x1b[{}m", params.join(";")).into_bytes());
+        let cup = (1u8..7, 1u8..14).prop_map(|(line, col)| format!("\x1b[{line};{col}H").into_bytes());
+        prop_oneof![4 => text, 2 => control, 2 => sgr, 1 => cup]
+    }
+
+    proptest! {
+        /// A repaint fed to a fresh model gives the same active screen, the
+        /// same scrollback rows asked for, cursor, pen and modes (section
+        /// 3.4).
+        #[test]
+        fn a_repaint_fed_to_a_fresh_model_gives_the_same_screen(
+            pieces in prop::collection::vec(piece(), 0..80),
+            history in 0usize..20,
+        ) {
+            let input = pieces.concat();
+            let diff = differs(&input, history);
+            prop_assert!(
+                diff.is_none(),
+                "{}: {}",
+                String::from_utf8_lossy(&input).escape_debug(),
+                diff.unwrap_or_default()
+            );
+        }
     }
 }

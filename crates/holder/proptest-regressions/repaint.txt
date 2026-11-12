@@ -1,0 +1,16 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 14649ca8a61fa9a8d5bf361faa77134a8e17e04954325b2e4f7e3e22cbe8f3cb # shrinks to pieces = [], history = 0
+cc 994bde575760db7d6887d361aa5f6aaddca5909f4b69df0cad29f6f450074b24 # shrinks to pieces = [[230, 151, 165, 230, 156, 172], [240, 159, 166, 128], [48, 97, 65, 97], [240, 159, 166, 128], [65, 48, 65, 32, 32, 32, 48, 65], [97], [230, 151, 165, 230, 156, 172], [32], [27, 91, 76]], history = 0
+cc 9b57afae448d5208e98540dc43b505b70a0b2bdb49bc6cd7d10e0ddfb8689a33 # shrinks to pieces = [[27, 91, 63, 55, 108], [9], [240, 159, 166, 128], [240, 159, 166, 128]], history = 0
+cc 7800579ca9064870c0369cef761a1bdf2c382d9c8a438ee50a70a7520503f11f # shrinks to pieces = [[48], [9], [230, 151, 165, 230, 156, 172], [27, 91, 50, 64]], history = 0
+cc ae6a64ce3a73e9e562ae20d72fe25c7f104d810b8a1de08f48a6fddc2167846d # shrinks to pieces = [[27, 91, 52, 59, 49, 48, 72], [230, 151, 165, 230, 156, 172], [27, 91, 51, 48, 109], [27, 91, 51, 59, 57, 72], [230, 151, 165, 230, 156, 172], [27, 91, 77]], history = 0
+cc d5bf41865b9909941d5c24cd8d4ca932f544c633000267b09a3c17aae162893d # shrinks to pieces = [[97, 65, 97, 97, 65], [240, 159, 166, 128], [230, 151, 165, 230, 156, 172], [9], [27, 91, 76], [27, 91, 52, 104], [32, 32], [101, 204, 129], [230, 151, 165, 230, 156, 172], [32], [48], [32]], history = 0
+cc 242af44f75ef48cdbf578450b821ff12ad03919b0b4dd9b7c29c19427dcc3ed7 # shrinks to pieces = [[13, 10], [27, 91, 49, 59, 56, 72], [97, 48, 32, 97], [240, 159, 166, 128], [27, 91, 49, 59, 49, 72], [27, 91, 80], [32]], history = 0
+cc 2c92c6e925dd8f4b138df70560902afc25ee9505d141aa3e35c64a625eda35dc # shrinks to pieces = [[27, 91, 53, 59, 50, 72], [97, 48, 65, 97, 32, 32, 97, 32], [65, 65, 32, 65], [27, 91, 49, 48, 48, 109], [27, 77], [9], [32, 48, 65, 65, 48], [27, 91, 50, 74]], history = 6
+cc 8443b827c3487504dee5cce99375a516a8ce2b2ca4365ab01e1bf0bc443cbe7a # shrinks to pieces = [[230, 151, 165, 230, 156, 172], [97], [97, 97, 65, 48], [230, 151, 165, 230, 156, 172], [9], [65, 97, 48, 32, 32], [9], [32, 97, 97, 48, 97], [27, 91, 50, 59, 49, 50, 72], [27, 91, 63, 55, 108], [230, 151, 165, 230, 156, 172]], history = 0
+cc 3ec4193865af03c68a53d82dc6e729412db201dacef34355ef95ecc24639ce46 # shrinks to pieces = [[32], [13, 10], [97, 97, 48], [65, 48, 97, 48], [65, 48, 97, 32, 97, 32], [9], [230, 151, 165, 230, 156, 172], [27, 77]], history = 0

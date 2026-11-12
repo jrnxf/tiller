@@ -10,9 +10,11 @@ pub mod model;
 pub mod outbox;
 pub mod peer;
 pub mod pty;
+pub mod query;
 pub mod repaint;
 pub mod scanner;
 pub mod screen;
+pub mod snapshot;
 pub mod server;
 
 pub use server::{HolderError, Outcome, run};

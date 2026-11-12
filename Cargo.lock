@@ -2017,6 +2017,7 @@ dependencies = [
  "alacritty_terminal",
  "jiff",
  "libc",
+ "proptest",
  "rustix",
  "serde_json",
  "tempfile",

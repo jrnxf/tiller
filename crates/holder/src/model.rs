@@ -6,12 +6,15 @@
 //! update runs inside `catch_unwind`: a panic resets this model only, and
 //! the caller learns of it through [`ModelPanic`] to tell the child and the
 //! pane's subscribers.
+//!
+//! The model answers the app's queries as a terminal does (section 2.7):
+//! its [`Listener`] keeps what the term would write back, and
+//! [`Model::take_answers`] hands those bytes to the caller for the PTY.
 
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Instant;
 
-use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{CursorStyle, Processor};
@@ -19,8 +22,13 @@ use alacritty_terminal::vte::{Params, Parser, Perform};
 use tiller_panes::Size;
 use tiller_panes::message::{Format, Read, Screen as ScreenRead};
 
+use crate::query::Listener;
 use crate::scanner::Scanner;
+use crate::snapshot::Snapshot;
 use crate::{repaint, screen};
+
+/// The scrollback rows the model keeps (section 2.8).
+pub const SCROLLBACK: usize = 10_000;
 
 /// How much of the latest input a panic report quotes.
 pub const RECENT_INPUT: usize = 4 * 1024;
@@ -234,20 +242,21 @@ pub struct ModelPanic {
 
 /// The terminal state and its parsers.
 struct Screen {
-    term: Term<VoidListener>,
+    term: Term<Listener>,
     parser: Processor,
     teller: Teller,
     teller_parser: Parser,
 }
 
 impl Screen {
-    fn new(size: Size) -> Self {
+    fn new(size: Size, listener: Listener) -> Self {
         let config = Config {
             kitty_keyboard: true,
+            scrolling_history: SCROLLBACK,
             ..Config::default()
         };
         Self {
-            term: Term::new(config, &GridSize(size), VoidListener),
+            term: Term::new(config, &GridSize(size), listener),
             parser: Processor::new(),
             teller: Teller::default(),
             teller_parser: Parser::new(),
@@ -256,14 +265,14 @@ impl Screen {
 
     /// A blank screen with `mode` and `style` set. Should setting them
     /// panic, the screen is blank with none.
-    fn with_modes(size: Size, mode: TermMode, style: CursorStyle) -> Self {
+    fn with_modes(size: Size, mode: TermMode, style: CursorStyle, listener: &Listener) -> Self {
         let bytes = repaint::mode_bytes(mode, style);
-        let mut screen = Screen::new(size);
+        let mut screen = Screen::new(size, listener.clone());
         let set = catch_unwind(AssertUnwindSafe(|| {
             screen.parser.advance(&mut screen.term, &bytes);
         }));
         if set.is_err() {
-            screen = Screen::new(size);
+            screen = Screen::new(size, listener.clone());
         }
         screen
     }
@@ -272,6 +281,8 @@ impl Screen {
 /// One pane's screen.
 pub struct Model {
     screen: Screen,
+    /// What the term writes back to the app, shared with `screen.term`.
+    listener: Listener,
     scanner: Scanner,
     size: Size,
     /// The latest bytes fed, for a panic report.
@@ -293,8 +304,10 @@ impl Model {
     /// A blank screen of `size`, which must be between [`MIN_COLS`] by
     /// [`MIN_ROWS`] and [`MAX_COLS`] by [`MAX_ROWS`].
     pub fn new(size: Size) -> Self {
+        let listener = Listener::default();
         Self {
-            screen: Screen::new(size),
+            screen: Screen::new(size, listener.clone()),
+            listener,
             scanner: Scanner::new(),
             size,
             recent: Vec::new(),
@@ -328,15 +341,31 @@ impl Model {
         std::mem::take(&mut self.screen.teller.told)
     }
 
+    /// The bytes that answer the queries fed since the last call, in the
+    /// order they came, for the app's PTY.
+    pub fn take_answers(&mut self) -> Vec<u8> {
+        let size = (self.size.cols, self.size.rows);
+        self.listener.answers(self.screen.term.colors(), size)
+    }
+
     /// The terminal modes the app has on.
     pub fn mode(&self) -> TermMode {
         *self.screen.term.mode()
     }
 
+    /// A copy of the active screen and up to `history` scrollback rows,
+    /// to format away from the pane's lock. A panic while copying resets
+    /// the model, as an update does.
+    pub fn snapshot(&mut self, history: usize) -> Result<Snapshot, ModelPanic> {
+        self.guarded(|screen| Snapshot::of(&screen.term, history))
+    }
+
     /// A `screen` read (section 3.3). `read` must be in range. A panic while
     /// reading resets the model, as an update does.
     pub fn screen(&mut self, read: Read, format: Format) -> Result<ScreenRead, ModelPanic> {
-        self.guarded(|screen| screen::read(&screen.term, read, format))
+        let history = screen::history_for(read, usize::from(self.size.rows));
+        let snapshot = self.snapshot(history)?;
+        Ok(screen::read(&snapshot, read, format))
     }
 
     /// When a synchronized update (mode 2026) that the parser holds must
@@ -366,7 +395,8 @@ impl Model {
     /// (section 3.4). A panic while rendering resets the model, as an update
     /// does.
     pub fn repaint(&mut self) -> Result<Vec<u8>, ModelPanic> {
-        self.guarded(|screen| repaint::render(&screen.term))
+        let snapshot = self.snapshot(0)?;
+        Ok(repaint::render(&snapshot))
     }
 
     /// Runs `update` on the screen. A panic in it leaves a fresh screen at
@@ -400,7 +430,7 @@ impl Model {
                 let mode = *self.screen.term.mode();
                 let style = self.screen.term.cursor_style();
                 let teller = std::mem::take(&mut self.screen.teller);
-                self.screen = Screen::with_modes(self.size, mode, style);
+                self.screen = Screen::with_modes(self.size, mode, style, &self.listener);
                 self.screen.teller = teller;
                 self.scanner = Scanner::new();
                 Err(ModelPanic {
@@ -426,7 +456,7 @@ impl Model {
     }
 
     #[cfg(test)]
-    pub(crate) fn term(&self) -> &Term<VoidListener> {
+    pub(crate) fn term(&self) -> &Term<Listener> {
         &self.screen.term
     }
 
