@@ -243,7 +243,9 @@ in
             # clean stop (exit 0), as a holder that already runs exits.
             KeepAlive.SuccessfulExit = false;
             ThrottleInterval = 10;
-            ProcessType = "Background";
+            # Every pane process is a child of the holder, so background
+            # throttling would slow all agents.
+            ProcessType = "Standard";
             StandardOutPath = holderLog;
             StandardErrorPath = holderLog;
           };

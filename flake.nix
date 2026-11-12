@@ -420,11 +420,13 @@
               assert lib.assertMsg (
                 (agent true a).config.KeepAlive.SuccessfulExit == false && (agent true a).config.RunAtLoad
               ) "nix/module.nix: the launchd holder agent does not start at load and restart after a crash";
+              assert lib.assertMsg ((agent true a).config.ProcessType == "Standard")
+                "nix/module.nix: the launchd holder agent is not a Standard process, so its panes would run throttled";
               # The plist home-manager writes for the agent.
               assert lib.assertMsg
                 (
                   let
-                    plist = lib.generators.toPlist { } (agent true a).config;
+                    plist = lib.generators.toPlist { escape = true; } (agent true a).config;
                   in
                   lib.hasInfix "<key>ProgramArguments</key>" plist
                   && lib.hasInfix "<string>/home/user/.nix-profile/bin/tiller</string>" plist
