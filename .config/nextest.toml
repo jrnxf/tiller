@@ -18,9 +18,9 @@ filter = 'binary(startup) & test(startup_is_under_ten_milliseconds)'
 test-group = "wall-clock"
 threads-required = "num-test-threads"
 
-# The holder flood check (section 9.4) times 200 MiB of output and every ping
-# on the wall clock. Beside other tests on a shared runner it ran past 10 s,
-# so it runs alone too. It checks its group the same way.
+# The holder flood check (section 9.4) gates 200 MiB on a 10 s wall-clock
+# budget and every ping on 50 ms. With neighbours on the cores, a CI run took
+# 10.8 s, so it runs alone too. It checks its group the same way.
 [[profile.default.overrides]]
 filter = 'binary(holder) & test(a_flood_keeps_the_holders_memory_bound_and_every_ping_fast)'
 test-group = "wall-clock"

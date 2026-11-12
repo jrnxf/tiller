@@ -1418,9 +1418,9 @@ fn an_oversize_frame_or_a_malformed_message_ends_only_its_connection() {
 
     let mut oversize = raw_connection(&holder);
     let len = tiller_panes::frame::MAX_FRAME_LEN + 1;
+    // Only the length prefix: the holder ends the connection on it, so a
+    // later write could meet a closed socket.
     std::io::Write::write_all(&mut oversize, &len.to_be_bytes()).unwrap();
-    // The holder may close on the length alone, before this byte arrives.
-    let _ = std::io::Write::write_all(&mut oversize, &[0]);
     ends(&mut oversize);
 
     let mut unknown = raw_connection(&holder);
