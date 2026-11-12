@@ -1913,3 +1913,27 @@ fn a_resume_with_the_terminal_holder_and_no_claude_session_advises_a_relaunch_in
         "{text}"
     );
 }
+
+#[test]
+fn a_resume_with_the_terminal_holder_and_no_claude_session_in_a_holder_pane_names_no_relaunch() {
+    let mut rig = Rig::new();
+    let card = rig.card(CardKind::Ship, Some(Size::M));
+    let spawned = rig.spawn(&card, RunRole::Builder);
+    rig.panes = Some(tiller_panes::FakePanes::new());
+    // The session runs in a holder pane, which a relaunch refuses until H09.
+    let held = format!("p{}", tiller_core::ids::new_ulid());
+    rig.fleet
+        .store
+        .conn()
+        .execute(
+            "UPDATE sessions SET pane_id = ?1 WHERE id = ?2",
+            [&held, &spawned.session.id],
+        )
+        .unwrap();
+
+    let error = resume_it(&mut rig, &owner(), &patient(), &spawned.run.id).unwrap_err();
+    let text = error.to_string();
+    assert!(text.contains("never bound a Claude session"), "{text}");
+    assert!(text.contains("refused until H09"), "{text}");
+    assert!(!text.contains("tiller agent relaunch"), "{text}");
+}

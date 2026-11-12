@@ -329,7 +329,7 @@ pub fn resume(
     let Some(session) = live_session(store.conn(), &run.id)? else {
         let next = relaunch_advice(store, world, None, run);
         return Err(SpawnError::Refused(format!(
-            "run {} has no live session to resume: the last one ended, so {next}",
+            "run {} has no live session to resume: the last one ended, and {next}",
             run.id
         )));
     };
@@ -616,16 +616,15 @@ pub fn relaunch(
             "the relaunch is recorded (run {}, session {}) and nothing was deleted",
             relaunched.run.id, relaunched.session.id
         );
-        // A retry passes the same gate as this relaunch. When the gate
-        // cannot be read now (herdr or the store failing), the retry
-        // advice stands: the retry itself says why it stops.
-        let held = live_session(store.conn(), &relaunched.run.id)
-            .map_err(SpawnError::from)
-            .and_then(|now| relaunch_held(store, world, now.as_ref()))
-            .unwrap_or(false);
+        // A retry passes the same gate as this relaunch (`held_now`).
+        let held = held_now(
+            live_session(store.conn(), &relaunched.run.id)
+                .map_err(SpawnError::from)
+                .and_then(|now| relaunch_held(store, world, now.as_ref())),
+        );
         let notes = if held {
             format!(
-                "{recorded}; the old agent was stopped and the new session has no agent, and with the terminal holder up a relaunch with no herdr pane of its own is refused until H09, so the run waits for that or for a new start of its card"
+                "{recorded}; the old agent was stopped and the new session has no agent, and {HELD}"
             )
         } else {
             format!(
@@ -813,21 +812,36 @@ fn relaunch_held(store: &Store, world: &World<'_>, session: Option<&Session>) ->
         && own_herdr_pane(store, world.herdr, session, "A relaunch")?.is_none())
 }
 
+/// Why a relaunch is refused for now with the terminal holder up
+/// (`relaunch_held`), as the refusals and notes that point past it say.
+const HELD: &str = "with the terminal holder up, a relaunch with no herdr pane of its own is refused until H09, so the run waits for that or for a new start of its card";
+
+/// Whether the gate `relaunch_held` read refuses a relaunch, for the
+/// advice a refusal or a note gives. A refusal from the gate (an agent in a
+/// holder pane) is held. When the gate cannot be read now (herdr or the
+/// store failing), the relaunch advice stands, and the relaunch itself says
+/// why it stops, so the caller's own reason is never lost.
+fn held_now(gate: Result<bool>) -> bool {
+    match gate {
+        Ok(held) => held,
+        Err(SpawnError::Refused(_)) => true,
+        Err(_) => false,
+    }
+}
+
 /// What a refused resume tells the owner to do next: a relaunch, unless
-/// the terminal holder refuses that too (`relaunch_held`). When the gate
-/// cannot be read now, the relaunch advice stands, and the relaunch itself
-/// says why it stops, so the resume's own reason is never lost.
+/// the terminal holder refuses that too.
 fn relaunch_advice(
     store: &Store,
     world: &World<'_>,
     session: Option<&Session>,
     run: &Run,
 ) -> String {
-    if relaunch_held(store, world, session).unwrap_or(false) {
-        "a new session needs a pane of its own, which the terminal holder takes only from H09, so the run waits for that or for a new start of its card".to_owned()
+    if held_now(relaunch_held(store, world, session)) {
+        HELD.to_owned()
     } else {
         format!(
-            "tiller agent relaunch {} --note <progress> starts a new one",
+            "tiller agent relaunch {} --note <progress> starts a new session",
             run.id
         )
     }
