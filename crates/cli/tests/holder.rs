@@ -1299,11 +1299,15 @@ fn wait_exit(holder: &Holder, pane: &Pane) {
 fn a_slow_subscriber_is_held_up_to_its_queue_then_lagged_and_the_app_never_waits() {
     let world = World::new();
     let holder = Holder::start(&world);
-    let numbers = |last: u32| format!("stty -echo; head -c 1 >/dev/null; exec seq 1 {last}");
+    // The input goes only once the shell shows `ready`, so echo is off
+    // and the tty does not echo it into the output.
+    let numbers =
+        |last: u32| format!("stty -echo; echo ready; head -c 1 >/dev/null; exec seq 1 {last}");
 
     // About 2 MiB, which the queue holds.
     let held = 300_000;
     let pane = holder.spawn(&world, &["/bin/sh", "-c", &numbers(held)]);
+    shows(&holder, &pane, "ready");
     let mut socket = raw_connection(&holder);
     raw_subscribe(&mut socket, &pane);
     holder.client.input(&pane.pane, "g\n").unwrap();
@@ -1330,6 +1334,7 @@ fn a_slow_subscriber_is_held_up_to_its_queue_then_lagged_and_the_app_never_waits
 
     // About 15 MiB, which it does not.
     let pane = holder.spawn(&world, &["/bin/sh", "-c", &numbers(2_000_000)]);
+    shows(&holder, &pane, "ready");
     let mut socket = raw_connection(&holder);
     let stream = raw_subscribe(&mut socket, &pane);
     holder.client.input(&pane.pane, "g\n").unwrap();
