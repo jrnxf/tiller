@@ -549,14 +549,11 @@ mod tests {
     }
 
     /// Version 1's bytes stay the same, so a later build reads what this
-    /// one writes. `UPDATE_HANDOVER_FIXTURE=1` writes the file again: do
-    /// that only to add a version, never to make a changed version 1 pass.
+    /// one writes. The version 1 file is never written again. A new
+    /// version adds a fixture file of its own.
     #[test]
     fn version_1_reads_and_writes_the_bytes_it_always_has() {
         let bytes = record().encode().unwrap();
-        if std::env::var_os("UPDATE_HANDOVER_FIXTURE").is_some() {
-            std::fs::write(fixture(), &bytes).unwrap();
-        }
         let golden = std::fs::read(fixture()).unwrap();
         assert_eq!(Record::decode(&golden).unwrap(), record());
         assert_eq!(VERSION, 1, "a new version gets a fixture of its own");
