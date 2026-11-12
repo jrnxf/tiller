@@ -68,6 +68,10 @@ pub enum Frame {
     Mutate(Box<forward::Mutate>),
     /// The one request on a pane link, signed by the board host (10.7).
     PaneOpen(Box<pane::PaneOpen>),
+    /// The owner's keys or paste for an open pane stream, signed (10.7).
+    PaneInput(Box<pane::PaneInput>),
+    /// The board's new size for an open pane stream's Fit, signed (10.7).
+    PaneFit(Box<pane::PaneFit>),
     Result {
         id: String,
         http_status: u16,

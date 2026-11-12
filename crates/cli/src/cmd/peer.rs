@@ -163,6 +163,7 @@ pub fn serve(app: &App, from: String) -> Result<ExitCode, Failure> {
         orchestrators: Some(std::sync::Arc::new(super::spawn::BoardStart {
             app: app.same_caller(),
         })),
+        holder: None,
     };
     let input = std::io::BufReader::new(std::io::stdin());
     match tiller_daemon::peer::serve::serve(&config, input, std::io::stdout().lock()) {
@@ -179,8 +180,9 @@ pub fn serve(app: &App, from: String) -> Result<ExitCode, Failure> {
 }
 
 /// `tiller peer pane --from <label>` (`protocol.md` 10.7): one signed
-/// request, then the pane's mirror lines on stdout until stdin closes. It
-/// has no path into the pane's input.
+/// request, then the pane's mirror lines on stdout until stdin closes. On
+/// a stream, the board host's signed inputs and Fits for that pane come
+/// on stdin, each checked again here and answered with one `result` line.
 pub fn pane(app: &App, from: String) -> Result<ExitCode, Failure> {
     require_sshd_owner("tiller peer pane")?;
     let config = ServeConfig {
@@ -189,6 +191,9 @@ pub fn pane(app: &App, from: String) -> Result<ExitCode, Failure> {
         timing: Timing::default(),
         herdr: Some(super::spawn::configured_herdr(app)?),
         orchestrators: None,
+        holder: Some(std::sync::Arc::new(tiller_daemon::holder::HolderLink::new(
+            &std::path::absolute(&app.home)?,
+        ))),
     };
     match tiller_daemon::peer::pane::serve_stdio(&config) {
         Ok(()) => Ok(ExitCode::SUCCESS),

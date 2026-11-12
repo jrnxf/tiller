@@ -290,6 +290,47 @@ test("a live Fit takes a new size in place, and opens again when it cannot", asy
   stream.stop();
 });
 
+test("a peer pane's keys and Fit name the peer, so the board host signs them to it", async () => {
+  const sent: { path: string; body: string }[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (path: string, init: RequestInit) => {
+      sent.push({ path, body: String(init.body) });
+      if (path.endsWith("/terminal")) {
+        return ndjson([{ type: "size", cols: 100, rows: 30 }, frame(1, true, "fitted")]);
+      }
+      return new Response("{}", { status: 200 });
+    }),
+  );
+  const { screen, onStatus } = recorder();
+  let fit = { cols: 100, rows: 30 };
+  const stream = new TerminalStream(
+    "s1",
+    screen,
+    onStatus,
+    () => {},
+    { size: () => fit, onUnfit: () => {} },
+    "host-d",
+  );
+  stream.start();
+  await settle();
+  fit = { cols: 120, rows: 40 };
+  stream.refit();
+  await settle();
+  const input = new TerminalInput("s1", () => {}, "host-d");
+  input.keys(["l", "s", "enter"]);
+  await settle();
+  expect(sent).toEqual([
+    { path: "/api/v1/agents/s1/terminal", body: '{"fit":{"cols":100,"rows":30},"host":"host-d"}' },
+    { path: "/api/v1/agents/s1/terminal/fit", body: '{"cols":120,"rows":40,"host":"host-d"}' },
+    {
+      path: "/api/v1/agents/s1/terminal/input",
+      body: '{"keys":["l","s","enter"],"host":"host-d"}',
+    },
+  ]);
+  stream.stop();
+});
+
 test("a new Fit waits for a pending retry, and an ended stream stays ended", async () => {
   vi.useFakeTimers();
   const { request } = opens(

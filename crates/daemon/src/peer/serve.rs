@@ -49,6 +49,7 @@ pub enum ServeError {
 }
 
 /// What `peer serve` runs with.
+#[derive(Clone)]
 pub struct ServeConfig {
     /// This host's `~/.tiller`.
     pub home: PathBuf,
@@ -59,6 +60,9 @@ pub struct ServeConfig {
     pub herdr: Option<Cli>,
     /// Starts an orchestrator for a forwarded start; none refuses it 503.
     pub orchestrators: Option<std::sync::Arc<dyn crate::api::OrchestratorStart>>,
+    /// The terminal holder, for a pane link on one of its panes; none
+    /// refuses that view 503.
+    pub holder: Option<std::sync::Arc<dyn crate::holder::Holder>>,
 }
 
 /// Serves one link until the board host hangs up, `input` ends, the
