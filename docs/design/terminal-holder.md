@@ -173,6 +173,8 @@ A subscriber gets one **repaint**, then **passthrough**:
 | Connections | 64 | new connections are closed |
 | Frame size | 16 MiB | the connection ends |
 | Subscriber queue | 4 MiB | the subscriber is cut |
+| One reply frame, against a connection's 4 MiB queue | 4 MiB | the request answers `busy`, and the connection stays |
+| A client's input the app left unread | 4 MiB | `input`, `paste` and `keys` answer `busy`, and raw input cuts the client |
 
 ## 3. The screen model
 
