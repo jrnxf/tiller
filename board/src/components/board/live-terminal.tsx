@@ -104,7 +104,8 @@ const holderFit = fitChoice(HOLDER_FIT_KEY, true);
 // A pane id the terminal holder gave: `p` and a ULID (terminal-holder.md 2.4).
 // Any other pane id is herdr's (`w2:p1`). The session's pane id alone says
 // which of the two runs its pane, as `tiller_core::ids::is_holder_pane` does.
-const HOLDER_PANE = /^p[0-7][0-9A-HJKMNP-TV-Z]{25}$/i;
+// The ULID reads in either case, as Rust's does; the `p` is lower case only.
+const HOLDER_PANE = /^p[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$/;
 
 export function isHolderPane(pane: string | null | undefined): boolean {
   return typeof pane === "string" && HOLDER_PANE.test(pane);
@@ -632,10 +633,10 @@ export function LiveTerminal({
   const fitChoiceFor = holder ? holderFit : herdrFit;
   const fitWanted = useStore(fitChoiceFor.store);
   const stageFont = useStore(stageFontStore);
-  // The stage in full screen: its own element, so a dialog or another
-  // agent's stage never reads as it.
-  const full = usePageFullScreen() && stage;
-  // Whether the stage font sets the pane's size now. Without the Fit, the
+  // The stage in full screen: the page is, and the Agents view pins the
+  // stage's card over it, on a computer only.
+  const full = usePageFullScreen() && stage && !phone;
+  // Whether the stage font sets the text's size now. Without the Fit, the
   // stage's room can set a smaller one, and a larger font changes nothing.
   const [capped, setCapped] = useState(true);
   const visible = useVisible();
@@ -1100,8 +1101,12 @@ export function LiveTerminal({
         Fit pane
       </button>
     ) : null;
-  // The stage's font size, on a computer. A press keeps focus where it was,
-  // so typing goes on.
+  // The stage's font size, on a computer. The Fit sizes the pane to the font,
+  // so any size shows. Without it, the readout is the size that shows, and
+  // Smaller steps down from it. A press keeps focus where it was, so typing
+  // goes on.
+  const larger = fitting || capped;
+  const shownFont = larger ? stageFont : Math.min(stageFont, Math.floor(font));
   const fontControls =
     stage && !phone && screenShown && view === "inline" ? (
       <span className="mir-font" role="group" aria-label="Font size">
@@ -1110,9 +1115,9 @@ export function LiveTerminal({
           className="ib sm"
           title="Smaller text"
           aria-label="Smaller text"
-          disabled={stageFont <= STAGE_FONT_MIN}
+          disabled={shownFont <= STAGE_FONT_MIN}
           onMouseDown={keepFocus}
-          onClick={() => setStageFont(stageFont - 1)}
+          onClick={() => setStageFont(shownFont - 1)}
         >
           <FontSmallerIcon />
         </button>
@@ -1120,30 +1125,32 @@ export function LiveTerminal({
           type="button"
           className="mir-fsz"
           title={
-            stageFont === STAGE_FONT
-              ? `Font size ${stageFont} px, the default`
-              : `Font size ${stageFont} px. Click for the default, ${STAGE_FONT} px`
+            shownFont === STAGE_FONT
+              ? `Font size ${shownFont} px, the default`
+              : `Font size ${shownFont} px. Click for the default, ${STAGE_FONT} px`
           }
           aria-label={
-            stageFont === STAGE_FONT
-              ? `Font size ${stageFont} px, the default`
-              : `Font size ${stageFont} px, back to ${STAGE_FONT} px`
+            shownFont === STAGE_FONT
+              ? `Font size ${shownFont} px, the default`
+              : `Font size ${shownFont} px, back to ${STAGE_FONT} px`
           }
           onMouseDown={keepFocus}
           onClick={() => setStageFont(STAGE_FONT)}
         >
-          {stageFont}
+          {shownFont}
         </button>
         <button
           type="button"
           className="ib sm"
           title={
-            capped
+            larger
               ? "Larger text"
-              : "The pane fills the stage at this size. Fit pane sizes it to the text"
+              : watch
+                ? "The pane fills the stage at this size"
+                : "The pane fills the stage at this size. Fit pane sizes it to the text"
           }
           aria-label="Larger text"
-          disabled={stageFont >= STAGE_FONT_MAX || !capped}
+          disabled={stageFont >= STAGE_FONT_MAX || !larger}
           onMouseDown={keepFocus}
           onClick={() => setStageFont(stageFont + 1)}
         >

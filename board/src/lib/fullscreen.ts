@@ -28,3 +28,10 @@ export function usePageFullScreen(): boolean {
     () => false,
   );
 }
+
+// Leaves the page's full screen, if it is in it.
+export function leavePageFullScreen() {
+  if (document.fullscreenElement === document.documentElement) {
+    void document.exitFullscreen().catch(() => {});
+  }
+}

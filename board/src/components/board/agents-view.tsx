@@ -4,7 +4,7 @@ import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "re
 import type { CSSProperties, KeyboardEvent as KeyEvent, RefObject } from "react";
 
 import type { AgentRow, Machine, PermissionPrompt, Project } from "../../lib/api-types";
-import { usePageFullScreen } from "../../lib/fullscreen";
+import { leavePageFullScreen, usePageFullScreen } from "../../lib/fullscreen";
 import { focusReason, ownerOf, projectKey, shownId } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import {
@@ -530,16 +530,14 @@ function Stage({
 }) {
   const { agent, card } = line;
   // The page in full screen pins this card over it, a switch to another
-  // agent included; leaving the Agents view leaves full screen.
-  const full = usePageFullScreen() && !phone;
-  useEffect(
-    () => () => {
-      if (document.fullscreenElement === document.documentElement) {
-        void document.exitFullscreen().catch(() => {});
-      }
-    },
-    [],
-  );
+  // agent included. Leaving the Agents view, or a turn to the phone layout,
+  // leaves full screen.
+  const pageFull = usePageFullScreen();
+  const full = pageFull && !phone;
+  useEffect(() => {
+    if (pageFull && phone) leavePageFullScreen();
+  }, [pageFull, phone]);
+  useEffect(() => leavePageFullScreen, []);
   const standing = useStanding(agent);
   const ambiguous = useAmbiguousIds();
   const off = focusReason(ownerOf(agent));

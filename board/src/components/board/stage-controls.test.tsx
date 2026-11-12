@@ -138,7 +138,19 @@ afterEach(() => {
 test("a holder pane id is p and a ULID, and a herdr pane id is not", () => {
   expect(isHolderPane("p01ARZ3NDEKTSV4RRFFQ69G5FAV")).toBe(true);
   expect(isHolderPane("p01arz3ndektsv4rrffq69g5fav")).toBe(true);
-  for (const herdr of ["w2:p1", "p1", "p", "", "pane-alpha", "w1:p01ARZ3NDEKTSV4RRFFQ69G5FAV"]) {
+  for (const herdr of [
+    "w2:p1",
+    "p1",
+    "p",
+    "",
+    "pane-alpha",
+    "w1:p01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    // The `p` is lower case only, as in `tiller_core::ids::is_holder_pane`.
+    "P01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    // A ULID has no I, L, O or U, and starts at 7 at most.
+    "p01ARZ3NDEKTSV4RRFFQ69G5FAI",
+    "p81ARZ3NDEKTSV4RRFFQ69G5FAV",
+  ]) {
     expect(isHolderPane(herdr), herdr).toBe(false);
   }
   // A ULID's first digit is 7 at most, and it has no I, L, O or U.
