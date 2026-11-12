@@ -120,8 +120,8 @@
               ./crates/replay/prompts
               # The role matrix core::authority::matrix_matches_spec reads with include_str!.
               ./docs/spec/authority.md
-              # The board's key names, which a tiller-panes key test reads with include_str!.
-              ./board/src/components/board/terminal-keys.ts
+              # The board's key names, which a tiller-panes key test parses.
+              ./crates/panes/tests/fixtures
             ];
           };
           # The version the binary reports. Cargo.toml keeps the base version; the

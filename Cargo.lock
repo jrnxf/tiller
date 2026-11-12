@@ -1967,6 +1967,7 @@ dependencies = [
  "tiller-delivery",
  "tiller-herdr",
  "tiller-observe",
+ "tiller-panes",
  "tiller-reconcile",
  "tokio",
  "toml",
