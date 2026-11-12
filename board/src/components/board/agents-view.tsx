@@ -28,7 +28,7 @@ import { EmptyScope } from "./board-view";
 import { formatAge, formatLisbonMoment } from "./format";
 import { focusCommand, focusTooltip, useHerdrFocus, useOpenKey } from "./herdr";
 import { ChevronLeftIcon, InfoIcon, PaneIcon } from "./icons";
-import { LiveTerminal, usePhone } from "./live-terminal";
+import { LiveTerminal, isHolderPane, usePhone } from "./live-terminal";
 import type { SwitchKey, TerminalControl } from "./live-terminal";
 import { AsOf, HostChip, PeerNote } from "./host-chip";
 import { useAmbiguousIds, useStanding, useNamedProjects } from "./peer-state";
@@ -602,6 +602,7 @@ function Stage({
       // peer link; only a saved machine's is read as a tail.
       machine={remote && !peerHost ? host.label : undefined}
       peer={peerHost}
+      holder={!remote && !peerHost && isHolderPane(agent.pane_id)}
       strip={
         remote || peerHost ? null : (
           <AnswerStrip

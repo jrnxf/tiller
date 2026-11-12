@@ -327,6 +327,47 @@
   margin-left: 0;
 }
 
+/* The stage's font size: smaller, the size (back to the default), larger. */
+.mir-font {
+  display: inline-flex;
+  align-items: center;
+}
+
+.mir-font .ib[disabled] {
+  opacity: 0.4;
+  cursor: default;
+  background: transparent;
+  color: var(--fg-3);
+}
+
+.mir-fsz {
+  min-width: 26px;
+  height: 28px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: var(--r6);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: var(--fs-mini);
+  font-weight: var(--w-medium);
+  font-variant-numeric: tabular-nums;
+}
+
+.mir-fsz:hover {
+  background: var(--bg-hover);
+  color: var(--fg-1);
+}
+
+.mir-f .ib[aria-pressed="true"] {
+  color: var(--accent);
+}
+
+/* The stage in full screen: the screen, its strip and its footer fill it. */
+.mir.stage.full {
+  padding-top: 10px;
+  background: var(--bg-panel);
+}
+
 .mir-sw {
   display: inline-flex;
   align-items: center;
