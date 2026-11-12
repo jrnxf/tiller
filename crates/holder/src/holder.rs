@@ -669,7 +669,13 @@ async fn read_pty(cell: Arc<PaneCell>) {
         };
         match guard.try_io(|fd| rustix::io::read(fd.get_ref(), &mut buf).map_err(io::Error::from)) {
             Ok(Ok(0)) => break,
-            Ok(Ok(len)) => cell.output(&buf[..len]),
+            Ok(Ok(len)) => {
+                cell.output(&buf[..len]);
+                // A flooding app keeps the PTY readable, so this loop never
+                // waits. Yield on budget, or the clients' writer tasks woken
+                // on this worker never run, and their queues fill.
+                tokio::task::consume_budget().await;
+            }
             Ok(Err(err)) if err.kind() == io::ErrorKind::Interrupted => {}
             // EIO: the child and everything else that had the slave open
             // closed it.

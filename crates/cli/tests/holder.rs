@@ -445,3 +445,29 @@ fn a_db_other_than_the_homes_is_refused() {
     assert!(stderr.contains(&home), "{stderr}");
     assert!(!socket_path(&world.home()).exists());
 }
+
+#[test]
+fn a_subscriber_that_reads_all_the_time_on_a_flooding_pane_is_not_cut() {
+    let world = World::new();
+    let holder = Holder::start(&world);
+    let pane = holder.spawn(&world, &["/usr/bin/yes"]);
+    let updates = holder.updates(&pane);
+    assert!(matches!(
+        next(&updates, &holder, "repaint"),
+        Update::Repaint { .. }
+    ));
+    // The reader thread takes every frame as it comes, so its queue never
+    // fills: live output keeps coming, and no cut.
+    let mut seen = 0;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        match updates.rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(Update::Output(bytes)) => seen += bytes.len(),
+            Ok(other) => panic!("unexpected {other:?} after {seen} bytes\n{}", holder.log()),
+            Err(err) => panic!("no output for 1 s ({err}) after {seen} bytes\n{}", holder.log()),
+        }
+    }
+    assert!(seen > 1024 * 1024, "only {seen} bytes in 3 s");
+    assert!(!holder.log().contains("was cut"), "{}", holder.log());
+    drop(updates);
+}
