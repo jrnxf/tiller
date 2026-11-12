@@ -907,7 +907,7 @@ mod tests {
 
     #[test]
     fn a_call_past_its_timeout_is_stopped_with_what_it_started() {
-        use crate::process::tests_support::{eventually, gone, pid_in, reap};
+        use crate::testing::{eventually, gone, pid_in, reap};
         // A call that hangs after starting a child of its own.
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("grandchild.pid");

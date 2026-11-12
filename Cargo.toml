@@ -10,6 +10,7 @@ members = [
     "crates/holder",
     "crates/observe",
     "crates/panes",
+    "crates/poll",
     "crates/reconcile",
     "crates/replay",
 ]
@@ -33,6 +34,7 @@ tiller-herdr = { path = "crates/herdr" }
 tiller-holder = { path = "crates/holder" }
 tiller-observe = { path = "crates/observe" }
 tiller-panes = { path = "crates/panes" }
+tiller-poll = { path = "crates/poll" }
 tiller-reconcile = { path = "crates/reconcile" }
 tiller-replay = { path = "crates/replay" }
 

@@ -1,43 +1,64 @@
 //! The holder socket client (`terminal-holder.md` 2.4, 4.1).
 //!
-//! [`HolderClient`] holds one connection for requests. It sends one request
-//! at a time and waits for its reply, so a reply never has to be matched
-//! against another caller's. Raw input takes only the write side, so a
-//! keystroke never waits for another call's reply. Each [`Subscription`]
-//! has a connection of its own: its kind 1 frames never wait behind a
-//! request, and a size it sets through its lease ends when it is dropped,
-//! because its connection ends. A [`StreamHandle`] resizes or ends a
-//! subscription from another thread while one thread waits in
-//! [`Subscription::recv`].
+//! [`HolderClient`] holds one connection for requests. Requests on it may
+//! overlap: each caller registers its request id, writes its frame, and
+//! waits for its own reply, which one reader thread hands over by id. Raw
+//! input takes only the write side, so a keystroke never waits here for
+//! another call's reply. How soon the holder serves a request is the
+//! holder's part: it serves a connection's frames in order for now (spec
+//! 2.4 allows them to overlap). Each [`Subscription`] and each [`Events`]
+//! has a connection of its own: its frames never wait behind a request,
+//! and a size a
+//! subscription sets through its lease ends when it is dropped, because its
+//! connection ends. A [`StreamHandle`] resizes or ends a subscription from
+//! another thread while one thread waits in [`Subscription::recv`].
 //!
-//! A connection that fails (a timeout, a closed socket, a bad frame)
-//! is not used again: every later call on that client is `Unreachable`, and
-//! the caller connects again. Nothing here retries, so a holder restart is
-//! never hidden behind a quiet reconnect.
+//! A connection that fails (a timeout, a closed socket, a bad frame, a
+//! reply for no request in flight) is not used again: every later call on
+//! that client is `Unreachable`, and the caller connects again. Nothing here
+//! retries, so a holder restart is never hidden behind a quiet reconnect.
 
-use std::collections::VecDeque;
-use std::io::{self, BufReader, Read, Write};
+use std::collections::{HashMap, VecDeque};
+use std::io::{self, BufReader, Write};
 use std::net::Shutdown;
+use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
+use rustix::io::{Errno, ioctl_fionbio};
+#[cfg(not(target_os = "linux"))]
+use rustix::io::{FdFlags, fcntl_setfd};
+#[cfg(not(target_os = "linux"))]
+use rustix::net::socket;
+use rustix::net::{AddressFamily, SocketAddrUnix, SocketType, connect, sockopt};
+#[cfg(target_os = "linux")]
+use rustix::net::{SocketFlags, socket_with};
+
 use crate::error::{PanesError, Result};
-use crate::frame::{Frame, FrameError, encode_input, read_frame};
+use crate::frame::{Frame, encode_input, read_frame};
 use crate::handshake::{Hello, ProtoRange, SUPPORTED, Welcome};
+use crate::keys::Key;
+use crate::live::{Control, EventFeed, Events, Feed, Subscribe, Subscription, Update};
 use crate::message::{
-    ErrorCode, Exit, HolderMessage, Listing, Pane, PaneId, Request, Spawn, SyncMode,
+    ErrorCode, Event, Exit, Format, HolderMessage, Listing, MAX_RECENT, Meta, Pane, PaneId, Read,
+    Request, Screen, Signal, Spawn,
 };
-use crate::panes::Panes;
+use crate::panes::{Live, Panes};
 use crate::paths::check_socket_path;
 
-/// How long the handshake may take in all.
+/// How long the connect and the handshake may take in all.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a request may take in all, from its first byte out to its
 /// reply's last byte in, and how long one frame's write may take.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a connect waits before it tries again, when the holder's
+/// listen queue is full.
+const CONNECT_RETRY: Duration = Duration::from_millis(10);
 
 /// How long a subscription's socket stays open for reads after a broken
 /// resize, so what was buffered still comes. Then it shuts, so a holder that
@@ -78,14 +99,15 @@ impl Timed {
         }
     }
 
-    /// Reads with no limit from here on, as a subscription's do.
+    /// Reads with no limit from here on, as a stream's and the reply
+    /// reader's do.
     fn unlimit_reads(&mut self) -> io::Result<()> {
         self.deadline = None;
         self.stream.set_read_timeout(None)
     }
 }
 
-impl Read for Timed {
+impl io::Read for Timed {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if let Some(left) = self.left()? {
             self.stream.set_read_timeout(Some(left))?;
@@ -151,10 +173,10 @@ fn read_message(reader: &mut BufReader<Timed>) -> Result<HolderMessage> {
     }
 }
 
-/// Reads until the reply to request `id`, before `deadline`. Messages for
-/// nobody (a type from a newer holder) are skipped; an `error` reply is the
-/// error. An `error` with no `id` answers this request, the only one in
-/// flight.
+/// Reads until the reply to request `id`, before `deadline`, on a
+/// connection with one request in flight. Messages for nobody (a type from
+/// a newer holder) are skipped; an `error` reply is the error. An `error`
+/// with no `id` answers this request, the only one in flight.
 fn await_reply(
     reader: &mut BufReader<Timed>,
     name: &'static str,
@@ -183,22 +205,84 @@ fn await_reply(
     }
 }
 
-/// Sends one request's `wire` bytes and reads until its reply, for at most
-/// [`REQUEST_TIMEOUT`] in all. The clock starts once the write side is
-/// taken, so a wait behind another writer does not count against it.
-fn exchange(
-    reader: &mut BufReader<Timed>,
-    writer: &Mutex<Timed>,
-    name: &'static str,
-    id: Option<u64>,
-    wire: &[u8],
-) -> Result<HolderMessage> {
-    let mut writer = lock(writer);
-    let deadline = Instant::now() + REQUEST_TIMEOUT;
-    let sent = send(&mut writer, wire, deadline);
-    drop(writer);
-    sent?;
-    await_reply(reader, name, id, deadline)
+/// A unix stream socket that a child the daemon spawns does not inherit.
+/// Linux sets the flag as it makes the socket, so a fork on another thread
+/// never sees it open. macOS has no such flag and sets it straight after.
+fn cloexec_socket() -> rustix::io::Result<OwnedFd> {
+    #[cfg(target_os = "linux")]
+    {
+        socket_with(
+            AddressFamily::UNIX,
+            SocketType::STREAM,
+            SocketFlags::CLOEXEC,
+            None,
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let fd = socket(AddressFamily::UNIX, SocketType::STREAM, None)?;
+        fcntl_setfd(&fd, FdFlags::CLOEXEC)?;
+        Ok(fd)
+    }
+}
+
+/// Connects to the unix socket at `path`, or fails at `deadline`. A plain
+/// connect has no time limit, and a holder with a full listen queue would
+/// hold it up for as long as it stays full.
+fn connect_by(path: &Path, deadline: Instant) -> Result<UnixStream> {
+    let unreachable = |err: Errno| {
+        PanesError::Unreachable(format!("{}: {}", path.display(), io::Error::from(err)))
+    };
+    let addr = SocketAddrUnix::new(path).map_err(unreachable)?;
+    let fd = cloexec_socket().map_err(io::Error::from)?;
+    ioctl_fionbio(&fd, true).map_err(io::Error::from)?;
+    loop {
+        match connect(&fd, &addr) {
+            // A connect that already went through, after a signal cut the
+            // call short and it ran again.
+            Ok(()) | Err(Errno::ISCONN) => break,
+            Err(Errno::INTR) => {}
+            // Linux: the listen queue is full. Try again until the deadline.
+            Err(Errno::AGAIN) => {
+                let left = time_left(path, deadline)?;
+                std::thread::sleep(CONNECT_RETRY.min(left));
+            }
+            // `ALREADY`: the connect a signal cut short is still going.
+            Err(Errno::INPROGRESS | Errno::ALREADY) => {
+                wait_writable(path, &fd, deadline)?;
+                match sockopt::socket_error(&fd).map_err(io::Error::from)? {
+                    Ok(()) => break,
+                    Err(err) => return Err(unreachable(err)),
+                }
+            }
+            Err(err) => return Err(unreachable(err)),
+        }
+    }
+    ioctl_fionbio(&fd, false).map_err(io::Error::from)?;
+    Ok(UnixStream::from(fd))
+}
+
+fn time_left(path: &Path, deadline: Instant) -> Result<Duration> {
+    match deadline.saturating_duration_since(Instant::now()) {
+        left if left.is_zero() => Err(PanesError::Unreachable(format!(
+            "{}: the holder did not take the connection in time",
+            path.display()
+        ))),
+        left => Ok(left),
+    }
+}
+
+fn wait_writable(path: &Path, fd: &OwnedFd, deadline: Instant) -> Result<()> {
+    loop {
+        let left = time_left(path, deadline)?;
+        let timeout = Timespec::try_from(left).map_err(io::Error::other)?;
+        let mut fds = [PollFd::new(fd, PollFlags::OUT)];
+        match poll(&mut fds, Some(&timeout)) {
+            Ok(0) | Err(Errno::INTR) => {}
+            Ok(_) => return Ok(()),
+            Err(err) => return Err(io::Error::from(err).into()),
+        }
+    }
 }
 
 /// One handshaken connection.
@@ -213,13 +297,12 @@ impl Conn {
         // A path too long for the socket address is a setup mistake, not a
         // holder that is down: say so, and do not leave the caller retrying.
         check_socket_path(path).map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
-        let stream = UnixStream::connect(path)
-            .map_err(|err| PanesError::Unreachable(format!("{}: {err}", path.display())))?;
+        let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+        let stream = connect_by(path, deadline)?;
         let mut conn = Conn {
             writer: Mutex::new(Timed::new(stream.try_clone()?)),
             reader: BufReader::new(Timed::new(stream)),
         };
-        let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
         let hello = encode_request("hello", &Request::Hello(Hello::new(client)))?;
         send(&mut lock(&conn.writer), &hello, deadline)?;
         let welcome = match await_reply(&mut conn.reader, "hello", None, deadline)? {
@@ -251,10 +334,13 @@ impl Conn {
         Ok((conn, welcome))
     }
 
-    /// Sends `request` and reads until its reply, as [`exchange`].
+    /// Sends `request` and reads until its reply, for at most
+    /// [`REQUEST_TIMEOUT`].
     fn call(&mut self, name: &'static str, request: &Request) -> Result<HolderMessage> {
         let wire = encode_request(name, request)?;
-        exchange(&mut self.reader, &self.writer, name, request.id(), &wire)
+        let deadline = Instant::now() + REQUEST_TIMEOUT;
+        send(&mut lock(&self.writer), &wire, deadline)?;
+        await_reply(&mut self.reader, name, request.id(), deadline)
     }
 }
 
@@ -328,19 +414,127 @@ fn keeps_connection(err: &PanesError) -> bool {
     )
 }
 
+/// The same error for another caller. Only the kinds a broken connection
+/// has are kept: a holder that broke the protocol broke it for every call
+/// in flight. Anything else is `Unreachable` with its text.
+fn copy(err: &PanesError) -> PanesError {
+    match err {
+        PanesError::Protocol(why) => PanesError::Protocol(why.clone()),
+        PanesError::Unreachable(why) => PanesError::Unreachable(why.clone()),
+        err => PanesError::Unreachable(err.to_string()),
+    }
+}
+
+/// What a caller gets when the reply reader went away without answering.
+fn stopped(name: &'static str) -> Result<HolderMessage> {
+    Err(PanesError::Unreachable(format!(
+        "the reply reader stopped during {name}"
+    )))
+}
+
+/// The instant `wait` from now. A wait too long to add, such as a huge
+/// close grace, waits a year, which no call outlives.
+fn after(wait: Duration) -> Instant {
+    let now = Instant::now();
+    now.checked_add(wait)
+        .or_else(|| now.checked_add(Duration::from_secs(365 * 86_400)))
+        .unwrap_or(now)
+}
+
+/// A caller waiting for its reply.
+struct Waiter {
+    name: &'static str,
+    reply: SyncSender<Result<HolderMessage>>,
+}
+
+/// What the callers and the reply reader share.
+struct Shared {
+    /// Why the request connection is no longer used, once it is not.
+    retired: OnceLock<String>,
+    /// The request connection's socket, to shut it when it is retired.
+    socket: UnixStream,
+    /// The requests in flight, by id.
+    waiters: Mutex<HashMap<u64, Waiter>>,
+}
+
+impl Shared {
+    fn waiters(&self) -> MutexGuard<'_, HashMap<u64, Waiter>> {
+        lock(&self.waiters)
+    }
+
+    /// Stops using the request connection, shuts its socket, and ends every
+    /// wait: each caller still waiting gets `err`.
+    ///
+    /// The reason is set before the waiters are taken, and a caller checks
+    /// it after it adds its waiter, so no caller is left waiting.
+    fn retire(&self, err: &PanesError) {
+        let _ = self.retired.set(brief(&err.to_string()));
+        let _ = self.socket.shutdown(Shutdown::Both);
+        let waiters: Vec<Waiter> = self.waiters().drain().map(|(_, waiter)| waiter).collect();
+        for waiter in waiters {
+            let _ = waiter.reply.send(Err(copy(err)));
+        }
+    }
+
+    /// The id of the one request in flight, when there is exactly one.
+    fn only(&self) -> Option<u64> {
+        let waiters = self.waiters();
+        match waiters.len() {
+            1 => waiters.keys().next().copied(),
+            _ => None,
+        }
+    }
+}
+
+/// Hands each reply on the request connection to its caller, until the
+/// connection fails or is retired. Messages for nobody (a type from a newer
+/// holder) are skipped. An `error` with no `id` goes to the request in
+/// flight when there is just one. Any other message that answers no
+/// request in flight breaks the protocol.
+fn read_replies(shared: &Shared, mut reader: BufReader<Timed>) {
+    loop {
+        let message = match read_message(&mut reader) {
+            Ok(HolderMessage::Unknown) => continue,
+            Ok(message) => message,
+            Err(err) => return shared.retire(&err),
+        };
+        let id = match &message {
+            HolderMessage::Error { id: None, .. } => shared.only(),
+            message => message.reply_to(),
+        };
+        let Some(waiter) = id.and_then(|id| shared.waiters().remove(&id)) else {
+            return shared.retire(&PanesError::Protocol(format!(
+                "a message that answers no request in flight: {}",
+                brief_debug(&message)
+            )));
+        };
+        let reply = match message {
+            HolderMessage::Error { code, message, .. } => {
+                Err(PanesError::from_reply(waiter.name, code, message))
+            }
+            reply => Ok(reply),
+        };
+        let _ = waiter.reply.send(reply);
+    }
+}
+
+/// How the holder answered `upgrade`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Upgrade {
+    /// The holder re-executes now; this connection ends.
+    Upgrading,
+    /// The holder will not re-execute, and keeps running as it is.
+    Refused(String),
+}
+
 /// A client of the terminal holder.
 pub struct HolderClient {
     path: PathBuf,
     client: String,
     welcome: Welcome,
-    /// Why the request connection is no longer used, once it is not.
-    retired: OnceLock<String>,
-    /// Held for a whole request and its reply, so one call is in flight.
-    reader: Mutex<BufReader<Timed>>,
+    shared: Arc<Shared>,
     /// Held only while one frame is written.
     writer: Mutex<Timed>,
-    /// The request connection's socket, to shut it when it is retired.
-    socket: UnixStream,
     next_id: AtomicU64,
 }
 
@@ -350,8 +544,15 @@ impl std::fmt::Debug for HolderClient {
             .field("path", &self.path)
             .field("client", &self.client)
             .field("welcome", &self.welcome)
-            .field("retired", &self.retired.get())
+            .field("retired", &self.shared.retired.get())
             .finish_non_exhaustive()
+    }
+}
+
+impl Drop for HolderClient {
+    fn drop(&mut self) {
+        // Ends the reply reader's wait, and with it the thread.
+        let _ = self.shared.socket.shutdown(Shutdown::Both);
     }
 }
 
@@ -364,15 +565,25 @@ impl HolderClient {
         let path = path.into();
         let client = client.into();
         let (conn, welcome) = Conn::open(&path, &client)?;
-        let socket = lock(&conn.writer).stream.try_clone()?;
+        let Conn { mut reader, writer } = conn;
+        // A reply may take as long as its request allows, and the reader
+        // waits between requests too: each caller keeps its own deadline.
+        reader.get_mut().unlimit_reads()?;
+        let shared = Arc::new(Shared {
+            retired: OnceLock::new(),
+            socket: reader.get_ref().stream.try_clone()?,
+            waiters: Mutex::new(HashMap::new()),
+        });
+        let theirs = Arc::clone(&shared);
+        std::thread::Builder::new()
+            .name("tiller-panes-replies".into())
+            .spawn(move || read_replies(&theirs, reader))?;
         Ok(Self {
             path,
             client,
             welcome,
-            retired: OnceLock::new(),
-            socket,
-            reader: Mutex::new(conn.reader),
-            writer: conn.writer,
+            shared,
+            writer,
             next_id: AtomicU64::new(1),
         })
     }
@@ -388,7 +599,7 @@ impl HolderClient {
 
     /// `Unreachable` once the request connection is retired.
     fn check(&self) -> Result<()> {
-        match self.retired.get() {
+        match self.shared.retired.get() {
             None => Ok(()),
             Some(why) => Err(PanesError::Unreachable(format!(
                 "the connection to the holder failed earlier ({why}); connect again"
@@ -396,44 +607,90 @@ impl HolderClient {
         }
     }
 
-    /// Stops using the request connection, and shuts its socket so a call
-    /// waiting on it ends now.
-    fn retire(&self, why: String) {
-        let _ = self.retired.set(brief(&why));
-        let _ = self.socket.shutdown(Shutdown::Both);
-    }
-
-    /// Retires the request connection when `result` broke it. When another
-    /// call retired it first, and so cut this one, the error says why.
+    /// Retires the request connection when `result` broke it.
     fn settle<T>(&self, result: Result<T>) -> Result<T> {
         if let Err(err) = &result
             && !keeps_connection(err)
         {
-            if let Some(why) = self.retired.get() {
-                return Err(PanesError::Unreachable(format!(
-                    "the connection to the holder failed during this call ({why}); connect again"
-                )));
-            }
-            self.retire(err.to_string());
+            self.shared.retire(err);
         }
         result
     }
 
-    /// Sends `request` and picks the value out of its reply. A reply of a
-    /// type this request does not take ([`unexpected`]) breaks the protocol,
-    /// so `pick`'s error retires the connection as any broken reply does.
+    /// Sends `request`, waits up to `wait` for its reply, and picks the
+    /// value out of it. A reply of a type this request does not take
+    /// ([`unexpected`]) breaks the protocol, so `pick`'s error retires the
+    /// connection as any broken reply does.
     fn call<T>(
         &self,
         name: &'static str,
         request: Request,
+        wait: Duration,
         pick: impl FnOnce(HolderMessage) -> Result<T>,
     ) -> Result<T> {
         self.check()?;
         let wire = encode_request(name, &request)?;
-        let mut reader = lock(&self.reader);
-        self.check()?;
-        let result = exchange(&mut reader, &self.writer, name, request.id(), &wire).and_then(pick);
+        let id = request.id().ok_or_else(|| refused(name, "it has no id"))?;
+        let result = self.exchange(name, id, &wire, wait).and_then(pick);
         self.settle(result)
+    }
+
+    /// Sends one request's `wire` bytes and waits for its reply, for at most
+    /// `wait` in all. The clock starts once the write side is taken, so a
+    /// wait behind another writer does not count against it.
+    fn exchange(
+        &self,
+        name: &'static str,
+        id: u64,
+        wire: &[u8],
+        wait: Duration,
+    ) -> Result<HolderMessage> {
+        let (reply, answer) = mpsc::sync_channel(1);
+        let mut writer = lock(&self.writer);
+        // The waiter is in place before the bytes leave, so a fast reply
+        // finds it, and only once this request holds the write side, so the
+        // waiters are the requests sent or being sent: an error with no id
+        // never goes to a request still waiting to be written.
+        if self
+            .shared
+            .waiters()
+            .insert(id, Waiter { name, reply })
+            .is_some()
+        {
+            return Err(PanesError::Protocol(format!("request id {id} used twice")));
+        }
+        let forget = || {
+            self.shared.waiters().remove(&id);
+        };
+        // After the insert: a retire that drained the waiters before it
+        // shows here.
+        if let Err(err) = self.check() {
+            forget();
+            return Err(err);
+        }
+        // The write holds the writer, so it gets the usual bound even when
+        // the reply may take a close's grace longer.
+        let deadline = after(wait);
+        let sent = send(&mut writer, wire, deadline.min(after(REQUEST_TIMEOUT)));
+        drop(writer);
+        if let Err(err) = sent {
+            forget();
+            return Err(err);
+        }
+        match answer.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(reply) => reply,
+            Err(RecvTimeoutError::Timeout) => {
+                if self.shared.waiters().remove(&id).is_some() {
+                    return Err(PanesError::Unreachable(format!(
+                        "the holder did not answer {name} in time"
+                    )));
+                }
+                // The reader or a retire took the waiter just as the wait
+                // ran out, and it sends next: that answer is used.
+                answer.recv().unwrap_or_else(|_| stopped(name))
+            }
+            Err(RecvTimeoutError::Disconnected) => stopped(name),
+        }
     }
 
     /// Writes raw bytes to the pane with this `num` (a kind 2 frame), as
@@ -450,25 +707,206 @@ impl HolderClient {
         self.settle(sent)
     }
 
-    /// Subscribes to a pane's output on a connection of its own. The
-    /// [`Subscription`] yields one repaint, then live output. A retired
-    /// client subscribes to nothing, as it does nothing else.
+    /// Asks the holder to re-execute from `binary` (`terminal-holder.md`
+    /// 6.2). With `dry_run`, it checks and answers, and does not.
+    pub fn upgrade(&self, binary: &str, dry_run: bool) -> Result<Upgrade> {
+        let request = Request::Upgrade {
+            id: self.id(),
+            binary: binary.to_owned(),
+            dry_run,
+        };
+        self.call("upgrade", request, REQUEST_TIMEOUT, |reply| match reply {
+            HolderMessage::Upgrading { .. } => Ok(Upgrade::Upgrading),
+            HolderMessage::UpgradeRefused { reason, .. } => Ok(Upgrade::Refused(reason)),
+            reply => Err(unexpected("upgrade", &reply)),
+        })
+    }
+
+    /// A health check: the holder answers.
+    pub fn ping(&self) -> Result<()> {
+        let request = Request::Ping { id: self.id() };
+        self.call("ping", request, REQUEST_TIMEOUT, |reply| match reply {
+            HolderMessage::Pong { .. } => Ok(()),
+            reply => Err(unexpected("ping", &reply)),
+        })
+    }
+
+    /// A new connection for a stream, from the same holder instance.
     ///
     /// A holder with another `instance` than [`HolderClient::welcome`]'s
     /// started after this client connected, and none of the panes this
     /// client knows are in it (R21). That is `Unreachable`, and the client
     /// is retired, so the caller connects again and sees the new instance.
-    pub fn subscribe(&self, pane: &PaneId, opts: Subscribe) -> Result<Subscription> {
+    fn open_stream(&self) -> Result<Conn> {
         self.check()?;
-        let (mut conn, welcome) = Conn::open(&self.path, &self.client)?;
+        let (conn, welcome) = Conn::open(&self.path, &self.client)?;
         if welcome.instance != self.welcome.instance {
             let why = format!(
                 "the terminal holder restarted: instance {} is now {}",
                 self.welcome.instance, welcome.instance
             );
-            self.retire(why.clone());
+            self.shared.retire(&PanesError::Unreachable(why.clone()));
             return Err(PanesError::Unreachable(format!("{why}; connect again")));
         }
+        Ok(conn)
+    }
+
+    /// A request that the holder answers with a bare `ok`.
+    fn ok(&self, name: &'static str, request: Request) -> Result<()> {
+        self.call(name, request, REQUEST_TIMEOUT, |reply| match reply {
+            HolderMessage::Ok { .. } => Ok(()),
+            reply => Err(unexpected(name, &reply)),
+        })
+    }
+
+    /// A request that the holder answers with a `pane`.
+    fn pane(&self, name: &'static str, request: Request) -> Result<Pane> {
+        self.call(name, request, REQUEST_TIMEOUT, |reply| match reply {
+            HolderMessage::Pane { pane, .. } => Ok(pane),
+            reply => Err(unexpected(name, &reply)),
+        })
+    }
+}
+
+impl Panes for HolderClient {
+    fn spawn(&self, req: &Spawn) -> Result<Pane> {
+        let request = Request::Spawn {
+            id: self.id(),
+            spawn: req.clone(),
+        };
+        self.pane("spawn", request)
+    }
+
+    fn list(&self) -> Result<Listing> {
+        let request = Request::List { id: self.id() };
+        self.call("list", request, REQUEST_TIMEOUT, |reply| match reply {
+            HolderMessage::Panes { listing, .. } => Ok(listing),
+            reply => Err(unexpected("list", &reply)),
+        })
+    }
+
+    fn get(&self, pane: &PaneId) -> Result<Option<Pane>> {
+        let request = Request::Get {
+            id: self.id(),
+            pane: pane.clone(),
+        };
+        match self.pane("get", request) {
+            Ok(pane) => Ok(Some(pane)),
+            Err(PanesError::NotFound(_)) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn screen(&self, pane: &PaneId, read: Read, format: Format) -> Result<Screen> {
+        if !read.in_range() {
+            return Err(refused(
+                "screen",
+                format_args!("recent takes 1 to {MAX_RECENT} rows, not {read:?}"),
+            ));
+        }
+        let request = Request::Screen {
+            id: self.id(),
+            pane: pane.clone(),
+            read,
+            format,
+        };
+        self.call("screen", request, REQUEST_TIMEOUT, |reply| match reply {
+            HolderMessage::Screen { screen, .. } => Ok(screen),
+            reply => Err(unexpected("screen", &reply)),
+        })
+    }
+
+    fn input(&self, pane: &PaneId, text: &str) -> Result<()> {
+        let request = Request::Input {
+            id: self.id(),
+            pane: pane.clone(),
+            text: text.to_owned(),
+        };
+        self.ok("input", request)
+    }
+
+    fn paste(&self, pane: &PaneId, text: &str) -> Result<()> {
+        let request = Request::Paste {
+            id: self.id(),
+            pane: pane.clone(),
+            text: text.to_owned(),
+        };
+        self.ok("paste", request)
+    }
+
+    fn keys(&self, pane: &PaneId, keys: &[Key]) -> Result<()> {
+        let request = Request::Keys {
+            id: self.id(),
+            pane: pane.clone(),
+            keys: keys.to_vec(),
+        };
+        self.ok("keys", request)
+    }
+
+    fn set_meta(&self, pane: &PaneId, set: &Meta, remove: &[&str]) -> Result<Pane> {
+        let request = Request::Meta {
+            id: self.id(),
+            pane: pane.clone(),
+            set: set.clone(),
+            remove: remove.iter().map(|key| (*key).to_owned()).collect(),
+        };
+        self.pane("meta", request)
+    }
+
+    fn signal(&self, pane: &PaneId, signal: Signal) -> Result<()> {
+        let request = Request::Signal {
+            id: self.id(),
+            pane: pane.clone(),
+            signal,
+        };
+        self.ok("signal", request)
+    }
+
+    /// The wait for the reply is [`REQUEST_TIMEOUT`] past `grace`, since the
+    /// holder answers once the child is reaped.
+    fn close(&self, pane: &PaneId, grace: Duration) -> Result<Exit> {
+        let grace_ms = u64::try_from(grace.as_millis()).unwrap_or(u64::MAX);
+        let request = Request::Close {
+            id: self.id(),
+            pane: pane.clone(),
+            grace_ms,
+        };
+        let wait = REQUEST_TIMEOUT.saturating_add(grace);
+        let ours = pane.clone();
+        self.call("close", request, wait, move |reply| match reply {
+            HolderMessage::Exited { pane, exit, .. } if pane == ours => Ok(exit),
+            reply => Err(unexpected("close", &reply)),
+        })
+    }
+
+    fn forget(&self, pane: &PaneId) -> Result<()> {
+        let request = Request::Forget {
+            id: self.id(),
+            pane: pane.clone(),
+        };
+        self.ok("forget", request)
+    }
+
+    fn switch(&self, pane: &PaneId) -> Result<usize> {
+        let request = Request::Switch {
+            id: self.id(),
+            pane: pane.clone(),
+        };
+        self.call("switch", request, REQUEST_TIMEOUT, |reply| match reply {
+            HolderMessage::Ok {
+                clients: Some(clients),
+                ..
+            } => Ok(clients),
+            reply => Err(unexpected("switch", &reply)),
+        })
+    }
+}
+
+impl Live for HolderClient {
+    /// Subscribes on a connection of its own. A retired client subscribes
+    /// to nothing, as it does nothing else.
+    fn subscribe(&self, pane: &PaneId, opts: Subscribe) -> Result<Subscription> {
+        let mut conn = self.open_stream()?;
         let id = self.id();
         let request = Request::Subscribe {
             id,
@@ -484,76 +922,110 @@ impl HolderClient {
         // Output may be quiet for hours: reads have no limit from here.
         let Conn { mut reader, writer } = conn;
         reader.get_mut().unlimit_reads()?;
-        let socket = reader.get_ref().stream.try_clone()?;
-        Ok(Subscription {
+        let side = Arc::new(StreamSide {
+            pane: pane.clone(),
+            lease: format!("stream-{stream}"),
+            socket: reader.get_ref().stream.try_clone()?,
+            closed: Mutex::new(None),
+            writer,
+            next_id: AtomicU64::new(id + 1),
+            pending: Mutex::new(VecDeque::new()),
+        });
+        let feed = SocketFeed {
             stream,
-            cols,
-            rows,
             reader,
-            handle: StreamHandle(Arc::new(StreamSide {
-                pane: pane.clone(),
-                lease: format!("stream-{stream}"),
-                socket,
-                closed: Mutex::new(None),
-                writer,
-                next_id: AtomicU64::new(id + 1),
-                pending: Mutex::new(VecDeque::new()),
-            })),
+            side: Arc::clone(&side),
             state: StreamState::AwaitingRepaint,
-            exited: false,
-        })
-    }
-}
-
-impl Panes for HolderClient {
-    fn spawn(&self, req: &Spawn) -> Result<Pane> {
-        let request = Request::Spawn {
-            id: self.id(),
-            spawn: req.clone(),
         };
-        self.call("spawn", request, |reply| match reply {
-            HolderMessage::Pane { pane, .. } => Ok(pane),
-            reply => Err(unexpected("spawn", &reply)),
-        })
+        Ok(Subscription::from_parts(
+            pane.clone(),
+            stream,
+            (cols, rows),
+            side.lease.clone(),
+            Box::new(feed),
+            side,
+        ))
     }
 
-    fn list(&self) -> Result<Listing> {
-        self.call(
-            "list",
-            Request::List { id: self.id() },
-            |reply| match reply {
-                HolderMessage::Panes { listing, .. } => Ok(listing),
-                reply => Err(unexpected("list", &reply)),
-            },
-        )
+    /// Watches on a connection of its own.
+    fn watch(&self) -> Result<Events> {
+        let mut conn = self.open_stream()?;
+        let request = Request::Watch { id: self.id() };
+        match conn.call("watch", &request)? {
+            HolderMessage::Watching { .. } => {}
+            reply => return Err(unexpected("watch", &reply)),
+        }
+        // Events may be quiet for hours: reads have no limit from here.
+        let Conn { mut reader, .. } = conn;
+        reader.get_mut().unlimit_reads()?;
+        let socket = reader.get_ref().stream.try_clone()?;
+        let ended = Arc::new(AtomicBool::new(false));
+        let feed = SocketEvents {
+            reader,
+            ended: Arc::clone(&ended),
+            done: false,
+        };
+        let end = move || {
+            ended.store(true, Ordering::SeqCst);
+            let _ = socket.shutdown(Shutdown::Both);
+        };
+        Ok(Events::from_parts(Box::new(feed), Arc::new(end)))
     }
 }
 
-/// How to subscribe.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Subscribe {
-    pub sync: SyncMode,
+/// A watch connection's events.
+struct SocketEvents {
+    reader: BufReader<Timed>,
+    /// Whether this side ended the watch, so the close that follows is not
+    /// read as the holder's.
+    ended: Arc<AtomicBool>,
+    /// Whether the watch is over, by an end or an error.
+    done: bool,
 }
 
-/// What a subscription yields.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Update {
-    /// The first frame: bytes that draw the whole screen on an empty
-    /// terminal of this size.
-    Repaint {
-        cols: u16,
-        rows: u16,
-        bytes: Vec<u8>,
-    },
-    /// The PTY's bytes, as the child wrote them.
-    Output(Vec<u8>),
-    /// The holder took a [`Subscription::resize`]: the PTY's size now.
-    Resized { cols: u16, rows: u16 },
-    /// The pane's child was reaped.
-    Exited(Exit),
-    /// The holder cut this subscription because it fell behind its queue.
-    /// Nothing more comes; subscribe again for a fresh repaint.
-    Lagged,
+impl EventFeed for SocketEvents {
+    fn recv(&mut self) -> Result<Option<Event>> {
+        if self.done || self.ended.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        let result = self.read_event();
+        if self.ended.load(Ordering::SeqCst) {
+            self.done = true;
+            return Ok(None);
+        }
+        if result.is_err() {
+            // The watch is over: close it, so the holder stops sending to
+            // a socket nobody reads.
+            self.done = true;
+            let _ = self.reader.get_ref().stream.shutdown(Shutdown::Both);
+        }
+        result.map(Some)
+    }
+}
+
+impl SocketEvents {
+    fn read_event(&mut self) -> Result<Event> {
+        loop {
+            let message = match read_message(&mut self.reader)?.into_event() {
+                Ok(event) => return Ok(event),
+                Err(message) => *message,
+            };
+            match message {
+                HolderMessage::Unknown => {}
+                HolderMessage::Error {
+                    id: None,
+                    code,
+                    message,
+                } => return Err(PanesError::from_reply("watch", code, message)),
+                other => {
+                    return Err(PanesError::Protocol(format!(
+                        "an unexpected message on the watch: {}",
+                        brief_debug(&other)
+                    )));
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -568,45 +1040,23 @@ enum StreamState {
     Ended,
 }
 
-/// A pane's output on a connection of its own. Dropping it ends the
-/// connection, and with it any size it set, even while a [`StreamHandle`] lives.
-pub struct Subscription {
-    stream: u32,
-    cols: u16,
-    rows: u16,
-    reader: BufReader<Timed>,
-    handle: StreamHandle,
-    state: StreamState,
-    /// Whether the pane's `exited` came, after which a close is the end.
-    exited: bool,
+/// What a subscription asked on its connection and has no answer to yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Asked {
+    Resize,
+    Release,
 }
 
-impl std::fmt::Debug for Subscription {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Subscription")
-            .field("pane", &self.handle.0.pane)
-            .field("stream", &self.stream)
-            .field("cols", &self.cols)
-            .field("rows", &self.rows)
-            .field("state", &self.state)
-            .finish_non_exhaustive()
+impl Asked {
+    fn name(self) -> &'static str {
+        match self {
+            Asked::Resize => "resize",
+            Asked::Release => "release",
+        }
     }
 }
 
-impl Drop for Subscription {
-    fn drop(&mut self) {
-        // A StreamHandle holds the same socket; shut it so the holder sees the
-        // subscription end now, and a later resize fails.
-        self.handle.end();
-    }
-}
-
-/// Resizes or ends a [`Subscription`]. It is `Send` and `Clone`, so one
-/// thread can use it while another waits in [`Subscription::recv`]. The
-/// holder's answers come through `recv`.
-#[derive(Clone)]
-pub struct StreamHandle(Arc<StreamSide>);
-
+/// A subscription connection's write side, shared by its handles.
 struct StreamSide {
     pane: PaneId,
     /// The lease id this subscription's resizes name.
@@ -618,61 +1068,8 @@ struct StreamSide {
     closed: Mutex<Option<Closed>>,
     writer: Mutex<Timed>,
     next_id: AtomicU64,
-    /// The ids of resizes sent and not yet answered.
-    pending: Mutex<VecDeque<u64>>,
-}
-
-impl std::fmt::Debug for StreamHandle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StreamHandle")
-            .field("pane", &self.0.pane)
-            .field("lease", &self.0.lease)
-            .finish_non_exhaustive()
-    }
-}
-
-impl StreamHandle {
-    /// Asks the holder to set the PTY to this size, under the subscription's
-    /// lease (the board's Fit). The answer comes through
-    /// [`Subscription::recv`] as [`Update::Resized`], or as an error.
-    pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        let side = &self.0;
-        let id = side.next_id.fetch_add(1, Ordering::Relaxed);
-        let request = Request::Resize {
-            id,
-            pane: side.pane.clone(),
-            cols,
-            rows,
-            lease: side.lease.clone(),
-        };
-        let wire = encode_request("resize", &request)?;
-        let mut writer = lock(&side.writer);
-        if let Some(closed) = side.closed() {
-            return Err(side.closed_error(closed));
-        }
-        // The id is pending before its bytes leave, so a fast answer finds it.
-        side.pending().push_back(id);
-        let sent = send(&mut writer, &wire, Instant::now() + REQUEST_TIMEOUT);
-        if let Err(err) = &sent {
-            side.pending().retain(|pending| *pending != id);
-            // Part of the frame may be out, so nothing more can follow it on
-            // this socket. Shut it: the stream ends, and later resizes fail
-            // at once.
-            side.close(Closed::Broken(format!("a resize failed: {err}")));
-            // An end on another thread may be what cut the write.
-            if let Some(closed @ Closed::Ended) = side.closed() {
-                return Err(side.closed_error(closed));
-            }
-        }
-        sent
-    }
-
-    /// Ends the subscription from any thread: the connection closes, the
-    /// holder drops its lease, and a [`Subscription::recv`] waiting now
-    /// returns `None`. Later resizes fail.
-    pub fn end(&self) {
-        self.0.close(Closed::Ended);
-    }
+    /// The requests sent and not yet answered.
+    pending: Mutex<VecDeque<(u64, Asked)>>,
 }
 
 /// Why this side closed a subscription's connection.
@@ -684,21 +1081,66 @@ enum Closed {
     Broken(String),
 }
 
+impl Control for StreamSide {
+    fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        self.ask(Asked::Resize, |id| Request::Resize {
+            id,
+            pane: self.pane.clone(),
+            cols,
+            rows,
+            lease: self.lease.clone(),
+        })
+    }
+
+    fn release(&self) -> Result<()> {
+        self.ask(Asked::Release, |id| Request::Release {
+            id,
+            pane: self.pane.clone(),
+            lease: self.lease.clone(),
+        })
+    }
+
+    fn end(&self) {
+        self.close(Closed::Ended);
+    }
+}
+
 impl StreamSide {
-    fn pending(&self) -> MutexGuard<'_, VecDeque<u64>> {
+    fn pending(&self) -> MutexGuard<'_, VecDeque<(u64, Asked)>> {
         lock(&self.pending)
     }
 
-    /// Takes the pending resize with this `id`. False when none is pending.
-    fn take_pending(&self, id: u64) -> bool {
-        let mut pending = self.pending();
-        match pending.iter().position(|pending| *pending == id) {
-            Some(at) => {
-                pending.remove(at);
-                true
-            }
-            None => false,
+    /// Sends the request `request` builds, with a new id, and records it as
+    /// pending.
+    fn ask(&self, asked: Asked, request: impl FnOnce(u64) -> Request) -> Result<()> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let wire = encode_request(asked.name(), &request(id))?;
+        let mut writer = lock(&self.writer);
+        if let Some(closed) = self.closed() {
+            return Err(self.closed_error(closed));
         }
+        // The id is pending before its bytes leave, so a fast answer finds it.
+        self.pending().push_back((id, asked));
+        let sent = send(&mut writer, &wire, Instant::now() + REQUEST_TIMEOUT);
+        if let Err(err) = &sent {
+            self.pending().retain(|(pending, _)| *pending != id);
+            // Part of the frame may be out, so nothing more can follow it on
+            // this socket. Shut it: the stream ends, and later requests fail
+            // at once.
+            self.close(Closed::Broken(format!("a {} failed: {err}", asked.name())));
+            // An end on another thread may be what cut the write.
+            if let Some(closed @ Closed::Ended) = self.closed() {
+                return Err(self.closed_error(closed));
+            }
+        }
+        sent
+    }
+
+    /// Takes the pending request with this `id`, if one is pending.
+    fn take_pending(&self, id: u64) -> Option<Asked> {
+        let mut pending = self.pending();
+        let at = pending.iter().position(|(pending, _)| *pending == id)?;
+        pending.remove(at).map(|(_, asked)| asked)
     }
 
     /// Why this side closed the stream, if it did.
@@ -706,7 +1148,7 @@ impl StreamSide {
         lock(&self.closed).clone()
     }
 
-    /// The error for a resize on a stream this side closed.
+    /// The error for a request on a stream this side closed.
     fn closed_error(&self, closed: Closed) -> PanesError {
         PanesError::Unreachable(match closed {
             Closed::Ended => format!("the subscription {} has ended", self.lease),
@@ -751,39 +1193,16 @@ impl StreamSide {
     }
 }
 
-impl Subscription {
-    pub fn pane(&self) -> &PaneId {
-        &self.handle.0.pane
-    }
+/// A subscription connection's read side.
+struct SocketFeed {
+    stream: u32,
+    reader: BufReader<Timed>,
+    side: Arc<StreamSide>,
+    state: StreamState,
+}
 
-    /// The `stream` number on this subscription's kind 1 frames.
-    pub fn stream(&self) -> u32 {
-        self.stream
-    }
-
-    /// The PTY's size when the subscription started.
-    pub fn size(&self) -> (u16, u16) {
-        (self.cols, self.rows)
-    }
-
-    /// A handle that resizes or ends this subscription from another thread.
-    pub fn handle(&self) -> StreamHandle {
-        self.handle.clone()
-    }
-
-    /// [`StreamHandle::resize`] on this subscription.
-    pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        self.handle.resize(cols, rows)
-    }
-
-    /// The next update. `None` once the stream has ended: after
-    /// [`Update::Lagged`], after a close that follows [`Update::Exited`],
-    /// after [`StreamHandle::end`], or after an earlier error ended it. A
-    /// close at any other time is `Unreachable`: the holder may have died,
-    /// so the pane's state is unknown, not gone. An `error` reply to a
-    /// `resize` is an error that leaves the stream open; any other error
-    /// ends it.
-    pub fn recv(&mut self) -> Result<Option<Update>> {
+impl Feed for SocketFeed {
+    fn recv(&mut self) -> Result<Option<Update>> {
         if self.state == StreamState::Ended {
             return Ok(None);
         }
@@ -791,11 +1210,11 @@ impl Subscription {
         // read error or close the shutdown causes, are not news. After a
         // broken resize, what is buffered still comes (an exit, a lag), and
         // the read that fails then says why.
-        let result = match self.handle.0.closed() {
+        let result = match self.side.closed() {
             Some(Closed::Ended) => Ok(None),
             _ => self.read_update(),
         };
-        let result = match (result, self.handle.0.closed()) {
+        let result = match (result, self.side.closed()) {
             (_, Some(Closed::Ended)) => Ok(None),
             (Err(PanesError::Unreachable(_) | PanesError::Io(_)), Some(Closed::Broken(why))) => {
                 Err(PanesError::Unreachable(why))
@@ -803,7 +1222,7 @@ impl Subscription {
             (result, _) => result,
         };
         let ends = match &result {
-            Ok(None | Some(Update::Lagged)) => true,
+            Ok(None | Some(Update::Lagged | Update::Exited(_))) => true,
             Ok(Some(_)) => false,
             Err(err) => !keeps_connection(err),
         };
@@ -813,31 +1232,19 @@ impl Subscription {
         }
         result
     }
+}
 
+impl SocketFeed {
     /// Ends the stream, and its connection, so the holder drops the
-    /// subscriber and its lease now, not when this value is dropped.
+    /// subscriber and its lease now, not when the subscription is dropped.
     fn end(&mut self) {
         self.state = StreamState::Ended;
-        self.handle.0.close(Closed::Ended);
+        self.side.close(Closed::Ended);
     }
 
     fn read_update(&mut self) -> Result<Option<Update>> {
         loop {
-            // After the exit, a holder that closes with a resize it never
-            // read resets the connection: that is the end too. A frame cut
-            // short is still an error.
-            let read = match read_frame(&mut self.reader) {
-                Err(FrameError::Io(err))
-                    if self.exited && err.kind() == io::ErrorKind::ConnectionReset =>
-                {
-                    Ok(None)
-                }
-                read => read.map_err(PanesError::from_frame),
-            };
-            let Some(frame) = read? else {
-                if self.exited {
-                    return Ok(None);
-                }
+            let Some(frame) = read_frame(&mut self.reader).map_err(PanesError::from_frame)? else {
                 return Err(PanesError::Unreachable(format!(
                     "the holder closed stream {} before the pane exited",
                     self.stream
@@ -876,22 +1283,30 @@ impl Subscription {
                         }
                         self.state = StreamState::Repainting { cols, rows };
                     }
-                    HolderMessage::Ok { id, cols, rows } => {
-                        if !self.handle.0.take_pending(id) {
+                    HolderMessage::Ok { id, cols, rows, .. } => {
+                        let Some(asked) = self.side.take_pending(id) else {
                             return Err(PanesError::Protocol(format!(
-                                "an ok (id {id}) that answers no resize of stream {}",
+                                "an ok (id {id}) that answers no request of stream {}",
                                 self.stream
                             )));
-                        }
+                        };
                         let (Some(cols), Some(rows)) = (cols, rows) else {
                             return Err(PanesError::Protocol(format!(
-                                "the ok to resize {id} has no size"
+                                "the ok to {} {id} has no size",
+                                asked.name()
                             )));
                         };
                         return Ok(Some(Update::Resized { cols, rows }));
                     }
-                    HolderMessage::Exited { pane, exit } if pane == *self.pane() => {
-                        self.exited = true;
+                    // Another lease set the size (`terminal-holder.md` 2.6).
+                    HolderMessage::Resized { pane, cols, rows } if pane == self.side.pane => {
+                        return Ok(Some(Update::Resized { cols, rows }));
+                    }
+                    HolderMessage::Exited {
+                        id: None,
+                        pane,
+                        exit,
+                    } if pane == self.side.pane => {
                         return Ok(Some(Update::Exited(exit)));
                     }
                     HolderMessage::Lagged { stream } if stream == self.stream => {
@@ -913,14 +1328,14 @@ impl Subscription {
                         code,
                         message,
                     } => {
-                        if !self.handle.0.take_pending(id) {
+                        let Some(asked) = self.side.take_pending(id) else {
                             return Err(PanesError::Protocol(format!(
-                                "an error (id {id}) that answers no resize of stream {}: {code}: {}",
+                                "an error (id {id}) that answers no request of stream {}: {code}: {}",
                                 self.stream,
                                 brief(&message)
                             )));
-                        }
-                        return Err(PanesError::from_reply("resize", code, message));
+                        };
+                        return Err(PanesError::from_reply(asked.name(), code, message));
                     }
                     HolderMessage::Unknown => {}
                     other => {
@@ -940,27 +1355,32 @@ impl Subscription {
 mod tests {
     use super::*;
 
-    /// A live subscription to stream 1 on `ours`.
-    fn live(ours: UnixStream) -> Subscription {
-        let socket = ours.try_clone().unwrap();
-        let writer = Mutex::new(Timed::new(ours.try_clone().unwrap()));
-        Subscription {
+    /// A live subscription to stream 1 on `ours`, and its write side.
+    fn live(ours: UnixStream) -> (Subscription, Arc<StreamSide>) {
+        let side = Arc::new(StreamSide {
+            pane: "p1".into(),
+            lease: "stream-1".into(),
+            socket: ours.try_clone().unwrap(),
+            closed: Mutex::new(None),
+            writer: Mutex::new(Timed::new(ours.try_clone().unwrap())),
+            next_id: AtomicU64::new(1),
+            pending: Mutex::new(VecDeque::new()),
+        });
+        let feed = SocketFeed {
             stream: 1,
-            cols: 80,
-            rows: 24,
             reader: BufReader::new(Timed::new(ours)),
-            handle: StreamHandle(Arc::new(StreamSide {
-                pane: "p1".into(),
-                lease: "stream-1".into(),
-                socket,
-                closed: Mutex::new(None),
-                writer,
-                next_id: AtomicU64::new(1),
-                pending: Mutex::new(VecDeque::new()),
-            })),
+            side: Arc::clone(&side),
             state: StreamState::Live,
-            exited: false,
-        }
+        };
+        let subscription = Subscription::from_parts(
+            "p1".into(),
+            1,
+            (80, 24),
+            "stream-1".into(),
+            Box::new(feed),
+            side.clone(),
+        );
+        (subscription, side)
     }
 
     /// A holder on `theirs` that sends output to stream 1 until it cannot.
@@ -980,33 +1400,13 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_cut_short_after_the_exit_is_still_an_error() {
-        let (ours, mut theirs) = UnixStream::pair().unwrap();
-        let mut subscription = live(ours);
-        subscription.exited = true;
-        let mut wire = Vec::new();
-        Frame::Output {
-            stream: 1,
-            bytes: b"the last bytes".to_vec(),
-        }
-        .encode(&mut wire)
-        .unwrap();
-        theirs.write_all(&wire[..wire.len() - 3]).unwrap();
-        drop(theirs);
-        let got = subscription.recv();
-        assert!(matches!(got, Err(PanesError::Unreachable(_))), "{got:?}");
-    }
-
-    #[test]
     fn an_end_after_a_break_is_still_the_end() {
         let (ours, theirs) = UnixStream::pair().unwrap();
         let holder = chatty(theirs);
-        let mut subscription = live(ours);
+        let (mut subscription, side) = live(ours);
         assert!(matches!(subscription.recv(), Ok(Some(Update::Output(_)))));
         let handle = subscription.handle();
-        handle
-            .0
-            .close(Closed::Broken("a resize failed: test".into()));
+        side.close(Closed::Broken("a resize failed: test".into()));
         handle.end();
         assert_eq!(subscription.recv().unwrap(), None);
         let err = handle.resize(100, 30).unwrap_err();
@@ -1018,17 +1418,14 @@ mod tests {
     #[test]
     fn a_read_that_waits_on_a_silent_holder_ends_soon_after_a_break() {
         let (ours, theirs) = UnixStream::pair().unwrap();
-        let mut subscription = live(ours);
-        let handle = subscription.handle();
+        let (mut subscription, side) = live(ours);
         let (done, finished) = std::sync::mpsc::channel();
         let reader = std::thread::spawn(move || {
             let _ = done.send(subscription.recv());
         });
         // Let the read start waiting, then break the stream.
         std::thread::sleep(Duration::from_millis(100));
-        handle
-            .0
-            .close(Closed::Broken("a resize failed: test".into()));
+        side.close(Closed::Broken("a resize failed: test".into()));
         let got = finished.recv_timeout(BROKEN_GRACE * 3).unwrap();
         let Err(PanesError::Unreachable(why)) = got else {
             panic!("expected the break's reason, got {got:?}");
@@ -1042,13 +1439,10 @@ mod tests {
     fn a_broken_stream_ends_soon_while_the_holder_keeps_sending() {
         let (ours, theirs) = UnixStream::pair().unwrap();
         let holder = chatty(theirs);
-        let mut subscription = live(ours);
+        let (mut subscription, side) = live(ours);
         assert!(matches!(subscription.recv(), Ok(Some(Update::Output(_)))));
         let started = Instant::now();
-        subscription
-            .handle
-            .0
-            .close(Closed::Broken("a resize failed: test".into()));
+        side.close(Closed::Broken("a resize failed: test".into()));
         let end = loop {
             match subscription.recv() {
                 Ok(Some(Update::Output(_))) => {
@@ -1064,6 +1458,53 @@ mod tests {
         assert_eq!(subscription.recv().unwrap(), None);
         drop(subscription);
         holder.join().unwrap();
+    }
+
+    /// A listener whose queue is full on Linux: backlog 0 holds one
+    /// connection that nobody accepts, and the next connect would wait.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_connect_to_a_full_listen_queue_gives_up_at_its_deadline() {
+        use rustix::net::{bind, listen, socket};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("full.sock");
+        let fd = socket(AddressFamily::UNIX, SocketType::STREAM, None).unwrap();
+        bind(&fd, &SocketAddrUnix::new(&path).unwrap()).unwrap();
+        listen(&fd, 0).unwrap();
+        // Fill the queue: these connect and are never accepted.
+        let mut held = Vec::new();
+        let full = loop {
+            match connect_by(&path, Instant::now() + Duration::from_millis(200)) {
+                Ok(stream) => held.push(stream),
+                Err(err) => break err,
+            }
+            assert!(held.len() < 16, "the queue never filled");
+        };
+        let PanesError::Unreachable(why) = &full else {
+            panic!("expected Unreachable, got {full:?}");
+        };
+        assert!(why.contains("in time"), "{why}");
+        let started = Instant::now();
+        let err = connect_by(&path, Instant::now() + Duration::from_millis(100)).unwrap_err();
+        assert!(matches!(err, PanesError::Unreachable(_)), "{err:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        drop(fd);
+    }
+
+    #[test]
+    fn a_connect_to_no_socket_is_unreachable_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = connect_by(
+            &dir.path().join("none.sock"),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert!(matches!(err, PanesError::Unreachable(_)), "{err:?}");
     }
 
     #[test]

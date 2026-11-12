@@ -67,6 +67,34 @@ function control(code: number): string | null {
   return null;
 }
 
+// The keys a phone lacks, which the stage shows as buttons.
+export const SOFT_KEYS = ["esc", "tab", "ctrl+c", "left", "up", "down", "right", "enter"] as const;
+export type SoftKey = (typeof SOFT_KEYS)[number];
+
+// Every name the board sends: what `typedKeys` reads, which takes in each
+// soft key, but a printable character past ASCII, which goes as itself (and
+// with alt+). tiller-panes parses each name in
+// crates/panes/tests/fixtures/board-key-names.json, and a test here keeps
+// that file equal to this list.
+export function keyNames(): string[] {
+  const prefixes = Array.from({ length: 8 }, (_, value) => modifiers(String(value + 1)));
+  const modified = new Set([
+    ...Object.values(ARROWS),
+    ...Object.values(SS3_F),
+    ...Object.values(TILDE),
+  ]);
+  const named = [...modified].flatMap((key) => prefixes.map((prefix) => prefix + key));
+  const controls: string[] = [];
+  for (let code = 0; code < 0x80; code++) {
+    const key = control(code);
+    if (key) controls.push(key);
+  }
+  const chars: string[] = [];
+  for (let code = 0x20; code < 0x7f; code++) chars.push(printable(String.fromCharCode(code)));
+  const alts = [...controls, ...chars].map((key) => `alt+${key}`);
+  return [...named, "shift+tab", "esc", ...controls, ...chars, ...alts];
+}
+
 // One escape sequence at the start of `rest` (which begins with ESC): its
 // length and what it means.
 function escape(rest: string): { length: number; key?: string; unsent?: string } {

@@ -283,17 +283,17 @@ pub trait Live: Send + Sync {
 ```
 
 - `Subscription` yields `Repaint { cols, rows, bytes }`, then `Output(bytes)`, `Resized`, `Exited` and `Lagged`. It holds an optional size lease, so `subscription.resize(cols, rows)` is the board's Fit.
-- `PanesError` (with `thiserror`) has `NotFound`, `Exited`, `Unreachable`, `Refused { code }`, `Protocol` and `Io`. `Unreachable` means "unknown, never gone", as `HerdrError::Unreachable` does today (`herdr/src/client.rs:28`).
+- `PanesError` (with `thiserror`) has `NotFound`, `Exited`, `Unreachable`, `Refused { request, code, message }`, `Version { client, holder, message }`, `Protocol` and `Io`. `Unreachable` means "unknown, never gone", as `HerdrError::Unreachable` does today (`herdr/src/client.rs:28`).
 - `Notify` is not on the trait. It is its own trait in `tiller-delivery` (section 7).
 
 ### 4.3 Key names
 
 The board and the CLI send key names. Today they are "named as `herdr pane send-keys` names them" (`dto.rs:2139`). They become Tiller's own list, with the same spelling, so the board does not change:
 - The names `board/src/components/board/terminal-keys.ts` and `daemon/src/prompt.rs` send today, all lowercase: `enter`, `esc`, `tab`, `backspace`, `space`, `up`, `down`, `left`, `right`, and the rest of that file's table.
-- Modifier prefixes `ctrl+`, `alt+` and `shift+`, in that order, as in `ctrl+c` and `shift+tab`.
+- Modifier prefixes `ctrl+`, `alt+` and `shift+`, as in `ctrl+c` and `shift+tab`. A name prints them in that order, but parses them in any order, each at most once, because the board sends `alt+ctrl+x`.
 - A single printable character.
 
-The holder encodes each name for the app's current mode: legacy, application cursor keys, or the kitty keyboard flags that the app pushed. The list lives in `tiller-panes::keys`. H02 builds it from those two files, not from this summary, and a test checks that every name they can emit parses.
+The holder encodes each name for the app's current mode: legacy, application cursor keys, or the kitty keyboard flags that the app pushed. The list lives in `tiller-panes::keys`. H02 builds it from those two files, not from this summary, and tests check that every name they can emit parses. No test reads their source as text: `terminal-keys.ts` exports `keyNames()`, a board test keeps it equal to what `typedKeys` sends and to the committed `crates/panes/tests/fixtures/board-key-names.json`, and `tiller-panes` parses each name in that fixture. The daemon's prompt test parses each name `Dialog::keys` sends.
 
 ### 4.4 Every herdr call path, mapped
 
@@ -328,7 +328,7 @@ The holder encodes each name for the app's current mode: legacy, application cur
 | `tiller admin` `stop_herdr` | `cli/cmd/admin.rs:386-450` | `close` for each of the project's panes |
 | Peer pane link | `daemon/peer/pane.rs` | `Live::subscribe` and `screen({recent})` on the peer's own holder. The frames do not change |
 | Replay sandbox | `replay/sandbox.rs`, `replay/audit.rs` | `FakePanes`. The audit counts verbs from `FakePanes::calls()` |
-| The generic poller | `herdr/poller.rs` (`Source`, `PollError`, `Registry`, `Poller`, `backoff`), used by `daemon/src/{forge.rs,forge/gate.rs,memory/watch.rs,owner.rs,quota.rs,server.rs,sse.rs,workers.rs}`, `delivery/src/sources.rs` and `cli/src/daemon.rs` | Moves to `tiller-poll` unchanged. Only the import path changes |
+| The generic poller | `herdr/poller.rs` (`Source`, `PollError`, `Registry`, `Poller`, `backoff`), used by `daemon/src/{forge.rs,forge/gate.rs,memory/watch.rs,owner.rs,quota.rs,server.rs,sse.rs,workers.rs}`, `delivery/src/sources.rs` and `cli/src/daemon.rs` | Moves to `tiller-poll`. The import path changes, and `PollError::Herdr` becomes `PollError::Source`, made with `PollError::from_source`, because `tiller-poll` cannot name herdr's error |
 | Test helpers | `herdr/testing.rs` (`Fleet`, `Pty`), `herdr/fake.rs`, used across the daemon, delivery, agents and reconcile tests | `tiller-panes::testing` over `FakePanes`. Each test keeps what it checks, and the herdr-only checks (layout, tokens) go |
 | Terminal launcher | `herdr/front.rs` (`Terminal`, `MacApp`, `Opened`, `open_agent`) | `tiller-panes::open`, launching `tiller attach` in place of herdr (section 5.3) |
 | Child process helper | `cli/cmd/learn.rs:21` (`process::{Ended, Interrupt}`) | Moves to `tiller-panes::process` unchanged |
