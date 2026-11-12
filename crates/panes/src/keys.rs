@@ -52,7 +52,7 @@ impl Named {
         }
         let n = name.strip_prefix('f')?;
         // `f01` is not a name: the number has no leading zero.
-        if n.starts_with('0') {
+        if n.starts_with('0') || !n.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }
         n.parse()
@@ -412,6 +412,8 @@ mod tests {
             "f0",
             "f13",
             "f01",
+            "f+1",
+            "ctrl+f+12",
             "home",
             "ctrl+ab",
             "super+a",
