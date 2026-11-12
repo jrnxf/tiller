@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tiller_panes::frame::{Decoder, Frame};
+use tiller_panes::frame::{Decoder, Frame, FrameError};
 use tiller_panes::handshake::{self, Hello, Refused, SUPPORTED};
 use tiller_panes::message::{ErrorCode, HolderMessage, Request};
 use tiller_panes::paths::{SocketPathTooLong, check_socket_path};
@@ -508,30 +508,30 @@ fn send_reply(conn: &Conn, id: Option<u64>, reply: Result<HolderMessage, (ErrorC
             );
         }
     };
-    // Measured before it is framed: a frame past the frame limit would not
-    // encode at all.
-    if text.len() >= OUTBOX_CAP {
-        return reply_error(
-            conn,
-            id,
-            ErrorCode::Busy,
-            format!(
-                "the reply is {} bytes, more than a connection's {OUTBOX_CAP}-byte queue holds",
-                text.len()
-            ),
-        );
-    }
-    match Frame::Message(text).to_bytes() {
-        Ok(frame) => {
+    let frame_len = match Frame::Message(text).to_bytes() {
+        Ok(frame) if frame.len() <= OUTBOX_CAP => {
             conn.send(frame);
+            return;
         }
-        Err(err) => reply_error(
-            conn,
-            id,
-            ErrorCode::Internal,
-            format!("the reply would not encode: {err}"),
+        Ok(frame) => frame.len() as u64,
+        Err(FrameError::TooLarge { len }) => len + 4,
+        Err(err) => {
+            return reply_error(
+                conn,
+                id,
+                ErrorCode::Internal,
+                format!("the reply would not encode: {err}"),
+            );
+        }
+    };
+    reply_error(
+        conn,
+        id,
+        ErrorCode::Busy,
+        format!(
+            "the reply frame is {frame_len} bytes, more than a connection's {OUTBOX_CAP}-byte queue holds"
         ),
-    }
+    );
 }
 
 fn reply_error(conn: &Conn, id: Option<u64>, code: ErrorCode, message: String) {
@@ -600,8 +600,21 @@ mod tests {
             modes: Vec::new(),
             rows_text: Vec::new(),
         };
-        // Past the queue, and past the frame limit too.
-        let rows = [OUTBOX_CAP, MAX_FRAME_LEN as usize];
+        let json_len = |row: usize| {
+            let screen = tiller_panes::message::Screen {
+                rows_text: vec!["x".repeat(row)],
+                ..screen.clone()
+            };
+            serde_json::to_string(&HolderMessage::Screen { id: 7, screen })
+                .unwrap()
+                .len()
+        };
+        // A message just under the queue whose length and kind push its
+        // frame past it, one past the queue, and one past the frame limit.
+        let overhead = json_len(0);
+        let under = OUTBOX_CAP - 2 - overhead;
+        assert!(json_len(under) < OUTBOX_CAP && json_len(under) + 5 > OUTBOX_CAP);
+        let rows = [under, OUTBOX_CAP, MAX_FRAME_LEN as usize];
         for (id, len) in (7..).zip(rows) {
             let screen = tiller_panes::message::Screen {
                 rows_text: vec!["x".repeat(len)],
