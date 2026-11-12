@@ -10,15 +10,15 @@
 //! Each pane runs a shell loop that writes `SEQ <key> e<epoch> <n>`, with
 //! `n` up by one each time. The harness keeps, per pane, the last number it
 //! verified. A read of the pane's scrollback must then hold every number
-//! from that one on, once and in order. A number that is missing, repeated
-//! or older than the last one is a gap, and the soak stops with it. The
-//! newest line of a read is left for the next read, because a read may land
-//! inside a line. A pane that makes no progress within `STALL` after an
-//! event is a gap too. The holder kill is the one event that ends an epoch:
-//! its panes are gone (spec 6.4), so the harness starts new panes with the
-//! next epoch, as the ladder resumes a session. The numbers the old epoch
-//! wrote after the last read are lost with the holder, and the report says
-//! so.
+//! from that one on (from 1 in a new epoch), once and in order. A number
+//! that is missing, repeated or older than the last one is a gap, and the
+//! soak stops with it. The newest line of a read is left for the next read,
+//! because a read may land inside a line. A pane that makes no progress
+//! within `STALL` after an event is a gap too. The holder kill is the one
+//! event that ends an epoch: its panes are gone (spec 6.4), so the harness
+//! starts new panes with the next epoch, as the ladder resumes a session.
+//! The numbers the old epoch wrote after the last read are lost with the
+//! holder, and the report says so.
 //!
 //! # How to run
 //!
