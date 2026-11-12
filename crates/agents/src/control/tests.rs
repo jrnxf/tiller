@@ -1669,3 +1669,74 @@ fn a_relaunch_with_the_terminal_holder_and_no_session_opens_no_herdr_pane() {
         rig.herdr.calls()
     );
 }
+
+fn workspaces_opened(rig: &Rig) -> usize {
+    rig.herdr
+        .calls()
+        .iter()
+        .filter(|c| c.starts_with("create_workspace"))
+        .count()
+}
+
+#[test]
+fn a_relaunch_with_the_terminal_holder_and_its_herdr_pane_gone_opens_no_herdr_pane() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.panes = Some(tiller_panes::FakePanes::new());
+    let opened = workspaces_opened(&rig);
+    rig.herdr.remove_pane(&spawned.pane_id);
+    let ctx = rig.orchestrator();
+
+    let error = relaunch_it(&mut rig, &ctx, &patient(), &spawned.run.id, note("n")).unwrap_err();
+    let text = error.to_string();
+    assert!(
+        text.contains("A relaunch is not ready yet with the terminal holder")
+            && text.contains(&spawned.run.id)
+            && text.contains("nothing was changed"),
+        "{text}"
+    );
+    assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
+    assert!(session(&rig, &spawned.session.id).ended_at.is_none());
+    assert_eq!(rig.events("run.relaunched", &spawned.run.id), 0);
+}
+
+#[test]
+fn a_resume_with_the_terminal_holder_and_its_herdr_pane_gone_opens_no_herdr_pane() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.panes = Some(tiller_panes::FakePanes::new());
+    let opened = workspaces_opened(&rig);
+    rig.herdr.remove_pane(&spawned.pane_id);
+
+    let error = resume_it(&mut rig, &owner(), &patient(), &spawned.run.id).unwrap_err();
+    let text = error.to_string();
+    assert!(
+        text.contains("A resume is not ready yet with the terminal holder")
+            && text.contains(&spawned.run.id)
+            && text.contains("nothing was changed"),
+        "{text}"
+    );
+    assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
+    let kept = session(&rig, &spawned.session.id);
+    assert_eq!(kept.pane_id.as_deref(), Some(spawned.pane_id.as_str()));
+    assert_eq!(
+        rig.events("session.resume_attempted", &spawned.session.id),
+        0
+    );
+}
+
+#[test]
+fn a_resume_with_the_terminal_holder_goes_on_in_its_live_herdr_pane() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.panes = Some(tiller_panes::FakePanes::new());
+    let opened = workspaces_opened(&rig);
+    rig.herdr.set_screen(&spawned.pane_id, Screen::Shell);
+    let claude = boot(&rig, "resume");
+
+    let done = resume_it(&mut rig, &owner(), &patient(), &spawned.run.id).unwrap();
+    claude.join().unwrap();
+    assert_eq!(done.started, Some(Proof::Confirmed), "{}", done.evidence);
+    assert_eq!(done.pane_id.as_deref(), Some(spawned.pane_id.as_str()));
+    assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
+}

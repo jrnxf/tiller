@@ -345,6 +345,12 @@ pub fn resume(
         }
         None => None,
     };
+    // With no herdr pane to go on in, the resume would open a new one, and a
+    // new pane belongs in the terminal holder, which takes a resume only once
+    // its stop and forget land (H09).
+    if pane.is_none() && world.panes.is_some() {
+        return Err(holder_not_ready("A resume", run));
+    }
     // A manual resume clears the run's pause (`run.unpause`). The key is
     // `session.resume`'s alone, so the unpause goes unkeyed.
     let unkeyed = ctx.unkeyed();
@@ -561,13 +567,10 @@ pub fn relaunch(
     let old = live_session(store.conn(), &run.id)?;
     // With no herdr pane to go on in, the relaunch would open a new one, and
     // a new pane belongs in the terminal holder, which takes a relaunch only
-    // once its stop and forget land (H09). An agent in herdr goes on there.
-    let in_herdr = old.as_ref().and_then(|s| s.pane_id.as_deref()).is_some();
-    if !in_herdr && world.panes.is_some() {
-        return Err(SpawnError::Refused(format!(
-            "A relaunch is not ready yet with the terminal holder (run {}); nothing was changed",
-            run.id
-        )));
+    // once its stop and forget land (H09). An agent whose herdr pane is still
+    // its own goes on there.
+    if world.panes.is_some() && !herdr_pane_left(store, world.herdr, old.as_ref())? {
+        return Err(holder_not_ready("A relaunch", run));
     }
     let (stop_proof, old_pane) = match &old {
         Some(session) => {
@@ -763,6 +766,35 @@ fn ready_to_stop(
         }
     }
     Ok(Ready::Exit(pane_id))
+}
+
+/// Refuses `what` for a run that would need a new pane while the terminal
+/// holder is up: herdr opens no new pane then, and the holder takes it only
+/// in its own slice (H09).
+fn holder_not_ready(what: &str, run: &Run) -> SpawnError {
+    SpawnError::Refused(format!(
+        "{what} is not ready yet with the terminal holder (run {}); nothing was changed",
+        run.id
+    ))
+}
+
+/// Whether `session`'s herdr pane is still open and its own, so a stop
+/// leaves it for the next session to go on in.
+fn herdr_pane_left(store: &Store, herdr: &dyn Herdr, session: Option<&Session>) -> Result<bool> {
+    let Some(session) = session else {
+        return Ok(false);
+    };
+    let Some(pane_id) = session.pane_id.as_deref() else {
+        return Ok(false);
+    };
+    herdr_only(pane_id, "A relaunch")?;
+    let Some(pane) = herdr.pane(pane_id)? else {
+        return Ok(false);
+    };
+    if pane_holder(store, &pane, &session.id)?.is_some() {
+        return Ok(false);
+    }
+    Ok(pane.agent.is_some() || tagged(&pane, &session.id))
 }
 
 /// Another session that holds `pane`: a live row bound to it, or the
@@ -1315,6 +1347,12 @@ fn start_again(
 
 /// Opens a worker workspace for the run in its worktree; returns its pane.
 fn open_pane(world: &World<'_>, card: &Card, run: &Run, worktree: &Path) -> Result<String> {
+    if world.panes.is_some() {
+        return Err(SpawnError::Refused(format!(
+            "run {} has no herdr pane left to go on in, and a new pane would belong in the terminal holder, which is not ready for it yet",
+            run.id
+        )));
+    }
     let label = layout::worker_label(&card.display_id, run.role, true);
     Ok(world
         .herdr
