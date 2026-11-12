@@ -633,8 +633,10 @@ impl HolderClient {
             forget();
             return Err(err);
         }
+        // The write holds the writer, so it gets the usual bound even when
+        // the reply may take a close's grace longer.
         let deadline = after(wait);
-        let sent = send(&mut writer, wire, deadline);
+        let sent = send(&mut writer, wire, deadline.min(after(REQUEST_TIMEOUT)));
         drop(writer);
         if let Err(err) = sent {
             forget();

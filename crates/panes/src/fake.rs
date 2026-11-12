@@ -6,7 +6,7 @@
 //! are channels, and a test drives them with [`FakePanes::output`],
 //! [`FakePanes::exit`], [`FakePanes::emit`] and [`FakePanes::lag`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -68,6 +68,8 @@ struct World {
     unreachable: bool,
     /// What each pane's screen shows, top row first.
     screens: HashMap<PaneId, Vec<String>>,
+    /// The exited panes, oldest exit first, whatever their clock says.
+    exits: VecDeque<PaneId>,
     /// Each pane's size leases, the top one last.
     leases: HashMap<PaneId, Vec<(String, u16, u16)>>,
     attach_clients: usize,
@@ -167,23 +169,16 @@ impl World {
             pane: pane.clone(),
             exit,
         });
-        let exited = |p: &Pane| p.state == PaneState::Exited;
-        if self.panes.iter().filter(|p| exited(p)).count() > EXITED_LIMIT {
-            let oldest = self
-                .panes
-                .iter()
-                .enumerate()
-                .filter(|(_, p)| exited(p))
-                .min_by_key(|(_, p)| p.exit.map(|exit| exit.at))
-                .map(|(at, _)| at);
-            if let Some(at) = oldest {
-                let gone = self.panes.remove(at).pane;
-                self.screens.remove(&gone);
-                self.emit(&Event::Forgotten {
-                    pane: gone,
-                    reason: "limit".into(),
-                });
-            }
+        self.exits.push_back(pane.clone());
+        if self.exits.len() > EXITED_LIMIT
+            && let Some(gone) = self.exits.pop_front()
+        {
+            self.panes.retain(|p| p.pane != gone);
+            self.screens.remove(&gone);
+            self.emit(&Event::Forgotten {
+                pane: gone,
+                reason: "limit".into(),
+            });
         }
         true
     }
@@ -229,6 +224,7 @@ impl FakePanes {
                 calls: Vec::new(),
                 unreachable: false,
                 screens: HashMap::new(),
+                exits: VecDeque::new(),
                 leases: HashMap::new(),
                 attach_clients: 0,
                 subscribers: Vec::new(),
@@ -516,6 +512,7 @@ impl Panes for FakePanes {
         }
         world.panes.retain(|p| &p.pane != pane);
         world.screens.remove(pane);
+        world.exits.retain(|p| p != pane);
         world.emit(&Event::Forgotten {
             pane: pane.clone(),
             reason: "forget".into(),
@@ -831,12 +828,14 @@ mod tests {
         let panes: Vec<Pane> = (0..=EXITED_LIMIT)
             .map(|n| fake.spawn(&spawn(&format!("k{n}"))).unwrap())
             .collect();
-        for pane in &panes {
+        // The exits run newest pane first, so the first exit is not the
+        // first pane in the list, and their clocks may tie.
+        for pane in panes.iter().rev() {
             assert!(fake.exit(&pane.pane, Some(0), None));
         }
         let kept = fake.list().unwrap().panes;
         assert_eq!(kept.len(), EXITED_LIMIT);
-        assert!(kept.iter().all(|p| p.pane != panes[0].pane));
+        assert!(kept.iter().all(|p| p.pane != panes[EXITED_LIMIT].pane));
         assert!(fake.spawn(&spawn("again")).is_ok());
     }
 
