@@ -10,7 +10,7 @@
 use std::io;
 use std::os::fd::OwnedFd;
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -65,24 +65,13 @@ fn frame_bytes(frame: &Frame) -> Option<Vec<u8>> {
 }
 
 /// One client connection, as the panes see it.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Conn {
-    /// Unique within the holder's run, never reused.
-    id: u64,
     pub outbox: Outbox,
+    /// This connection, as the panes' input queues see it.
+    sender: Arc<input::Sender>,
     /// This connection's subscriptions: each stream and its pane.
     streams: Mutex<Vec<(u32, Arc<PaneCell>)>>,
-}
-
-impl Default for Conn {
-    fn default() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        Self {
-            id: NEXT.fetch_add(1, Ordering::Relaxed),
-            outbox: Outbox::default(),
-            streams: Mutex::default(),
-        }
-    }
 }
 
 impl Conn {
@@ -131,6 +120,7 @@ impl Conn {
             .iter()
             .filter_map(|(stream, _)| message_frame(&HolderMessage::Lagged { stream: *stream }))
             .collect();
+        self.sender.cut();
         self.outbox.cut(last)
     }
 
@@ -555,7 +545,7 @@ impl Holder {
             tracing::debug!(pane = %cell.id, "raw input for an exited pane");
             return;
         }
-        match cell.input.push(conn.id, bytes) {
+        match cell.input.push(&conn.sender, bytes) {
             Ok(()) => {}
             Err(input::Refused::Full(unread)) => {
                 if conn.cut() {
@@ -565,7 +555,7 @@ impl Holder {
                         "the pane's app left {INPUT_CAP} bytes of a client's raw input unread, so the client was cut when it sent more"
                     );
                 }
-                cell.input.drop_conn(conn.id);
+                cell.input.drop_cut();
             }
             Err(input::Refused::Closed) => {
                 tracing::debug!(pane = %cell.id, "raw input for a pane whose PTY is closed");
@@ -575,7 +565,7 @@ impl Holder {
 
     /// A connection ended: its subscriptions end with it.
     /// A cut connection's unwritten input goes too, as the client knows
-    /// it has a gap. A connection that closed keeps its input.
+    /// it has a gap. A connection that closed or broke off keeps its input.
     pub fn drop_conn(&self, conn: &Arc<Conn>) {
         for (stream, cell) in conn.take_streams() {
             let mut inner = cell.inner();
@@ -583,7 +573,7 @@ impl Holder {
         }
         if conn.outbox.cut_at().is_some() {
             for cell in self.panes() {
-                cell.input.drop_conn(conn.id);
+                cell.input.drop_cut();
             }
         }
     }
@@ -691,12 +681,11 @@ async fn write_input(cell: Arc<PaneCell>) {
 async fn write_all_input(cell: &PaneCell) {
     let mut ended = cell.output_ended.subscribe();
     loop {
-        let chunk = tokio::select! {
+        let mut chunk = tokio::select! {
             chunk = cell.input.next() => chunk,
             _ = ended.wait_for(|ended| *ended) => return,
         };
-        let mut rest = chunk.bytes.as_slice();
-        while !rest.is_empty() {
+        while !chunk.rest().is_empty() {
             let writable = tokio::select! {
                 writable = cell.master.writable() => writable,
                 _ = ended.wait_for(|ended| *ended) => return,
@@ -704,13 +693,16 @@ async fn write_all_input(cell: &PaneCell) {
             let Ok(mut guard) = writable else {
                 return;
             };
+            let rest = chunk.rest();
             match guard.try_io(|fd| rustix::io::write(fd.get_ref(), rest).map_err(io::Error::from))
             {
-                Ok(Ok(len)) => rest = &rest[len..],
+                Ok(Ok(len)) => chunk.wrote(len),
                 Ok(Err(err)) if err.kind() == io::ErrorKind::Interrupted => {}
                 Ok(Err(err)) => {
-                    tracing::debug!(pane = %cell.id, %err, "raw input was dropped");
-                    break;
+                    // The PTY takes no input: none may be written after a
+                    // gap, so the queue closes.
+                    tracing::warn!(pane = %cell.id, %err, "the PTY refused raw input; the pane takes no more");
+                    return;
                 }
                 Err(_would_block) => {}
             }

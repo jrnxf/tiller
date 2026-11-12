@@ -384,9 +384,18 @@ fn a_client_cut_for_a_stuck_pane_leaves_other_clients_and_panes_alone() {
         Update::Repaint { .. }
     ));
 
-    // Another client fills the stuck pane's queue and is cut for it.
+    // Two clients each leave 3 MiB unread in the stuck pane: past the cap
+    // together, but each under it, so neither is cut.
     let flooder = HolderClient::connect(&holder.socket, "daemon").unwrap();
     let chunk = b"0123456789abcdef\n".repeat(4 * 1024);
+    for client in [&flooder, &holder.client] {
+        for _ in 0..45 {
+            client.raw_input(stuck.num, &chunk).unwrap();
+        }
+    }
+    flooder.list().unwrap();
+    holder.client.list().unwrap();
+    // The flooder goes on past its own cap and is cut for it alone.
     for _ in 0..100 {
         if flooder.raw_input(stuck.num, &chunk).is_err() {
             break;
@@ -395,12 +404,6 @@ fn a_client_cut_for_a_stuck_pane_leaves_other_clients_and_panes_alone() {
     let err = flooder.list().unwrap_err();
     assert!(matches!(err, PanesError::Unreachable(_)), "{err}");
 
-    // A paste from this client to the stuck pane counts apart from the
-    // flood, so it does not cut this client, though the two pass the cap.
-    holder
-        .client
-        .raw_input(stuck.num, &b"y".repeat(256 * 1024))
-        .unwrap();
     // Its input to the pane that reads still goes through.
     holder
         .client
