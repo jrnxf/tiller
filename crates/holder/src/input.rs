@@ -12,9 +12,9 @@
 //! - Once the pane's app has left [`INPUT_CAP`] of the client's input
 //!   unread, its next frame to the pane cuts the client, so a gap in its
 //!   input is never silent.
-//! - A cut client's input is written no further, from the next write on,
-//!   and what waits is dropped, so a client cut again and again does not
-//!   grow the queue. A client that closes, or breaks off, keeps the input
+//! - A cut client's frames that wait are dropped, so a client cut again
+//!   and again does not grow the queue. A frame being written is written
+//!   to its end, so no other client's input follows half a sequence. A client that closes, or breaks off, keeps the input
 //!   it sent, which is written as the app reads: the holder had all of it.
 //!
 //! H04 puts back-pressure in place of this.
@@ -34,7 +34,7 @@ pub const INPUT_CAP: usize = crate::outbox::OUTBOX_CAP;
 pub struct Sender {
     /// Unique within the holder's run, never reused.
     id: u64,
-    /// Set once the client is cut: its input is written no further.
+    /// Set once the client is cut: its waiting input is dropped.
     cut: AtomicBool,
 }
 
@@ -49,13 +49,13 @@ impl Default for Sender {
 }
 
 impl Sender {
-    /// The client was cut. Each queue drops its input as it comes to it,
-    /// and stops one being written at its next write.
+    /// The client was cut. Each queue drops its waiting input as it comes
+    /// to it, or at [`InputQueue::drop_cut`].
     pub fn cut(&self) {
         self.cut.store(true, Ordering::Release);
     }
 
-    fn is_cut(&self) -> bool {
+    pub fn is_cut(&self) -> bool {
         self.cut.load(Ordering::Acquire)
     }
 }
@@ -68,6 +68,9 @@ pub enum Refused {
     Full(usize),
     /// The PTY closed.
     Closed,
+    /// A write to the PTY failed while it was open: input to the pane has
+    /// a gap, and none is taken after it.
+    Broken,
 }
 
 /// A pane's unwritten input.
@@ -85,33 +88,36 @@ struct State {
     /// hands. Only clients with input waiting: a count that falls to 0
     /// goes.
     by_sender: HashMap<u64, usize>,
-    /// The PTY closed: no more is taken.
-    closed: bool,
+    /// The PTY closed or broke: no more is taken.
+    closed: Option<Refused>,
+}
+
+fn give_back(by_sender: &mut HashMap<u64, usize>, sender: u64, len: usize) {
+    if let Some(mine) = by_sender.get_mut(&sender) {
+        *mine = mine.saturating_sub(len);
+        if *mine == 0 {
+            by_sender.remove(&sender);
+        }
+    }
 }
 
 impl State {
     fn give_back(&mut self, sender: u64, len: usize) {
-        if let Some(mine) = self.by_sender.get_mut(&sender) {
-            *mine = mine.saturating_sub(len);
-            if *mine == 0 {
-                self.by_sender.remove(&sender);
-            }
-        }
+        give_back(&mut self.by_sender, sender, len);
     }
 
     /// Drops the waiting input of every cut client.
     fn drop_cut(&mut self) {
-        let mut dropped = Vec::new();
-        self.chunks.retain(|(sender, bytes)| {
-            let cut = sender.is_cut();
-            if cut {
-                dropped.push((sender.id, bytes.len()));
+        let Self {
+            chunks, by_sender, ..
+        } = self;
+        chunks.retain(|(sender, bytes)| {
+            if !sender.is_cut() {
+                return true;
             }
-            !cut
+            give_back(by_sender, sender.id, bytes.len());
+            false
         });
-        for (sender, len) in dropped {
-            self.give_back(sender, len);
-        }
     }
 }
 
@@ -126,11 +132,8 @@ pub struct InFlight<'a> {
 }
 
 impl InFlight<'_> {
-    /// The bytes still to write, or none once the client was cut.
+    /// The bytes still to write.
     pub fn rest(&self) -> &[u8] {
-        if self.sender.is_cut() {
-            return &[];
-        }
         self.bytes.get(self.written..).unwrap_or_default()
     }
 
@@ -158,8 +161,8 @@ impl InputQueue {
     /// sender's unwritten input is under [`INPUT_CAP`].
     pub fn push(&self, sender: &Arc<Sender>, bytes: Vec<u8>) -> Result<(), Refused> {
         let mut state = self.state();
-        if state.closed {
-            return Err(Refused::Closed);
+        if let Some(refused) = state.closed {
+            return Err(refused);
         }
         if bytes.is_empty() {
             return Ok(());
@@ -183,8 +186,17 @@ impl InputQueue {
 
     /// Takes no more input and drops what waits: the PTY closed.
     pub fn close(&self) {
+        self.close_as(Refused::Closed);
+    }
+
+    /// Takes no more input and drops what waits: a write to the PTY failed.
+    pub fn break_off(&self) {
+        self.close_as(Refused::Broken);
+    }
+
+    fn close_as(&self, refused: Refused) {
         let mut state = self.state();
-        state.closed = true;
+        state.closed.get_or_insert(refused);
         let chunks = std::mem::take(&mut state.chunks);
         for (sender, bytes) in chunks {
             state.give_back(sender.id, bytes.len());
@@ -198,8 +210,14 @@ impl InputQueue {
             let wake = self.wake.notified();
             let next = {
                 let mut state = self.state();
-                state.drop_cut();
-                state.chunks.pop_front()
+                loop {
+                    match state.chunks.pop_front() {
+                        Some((sender, bytes)) if sender.is_cut() => {
+                            state.give_back(sender.id, bytes.len());
+                        }
+                        next => break next,
+                    }
+                }
             };
             if let Some((sender, bytes)) = next {
                 return InFlight {
@@ -271,15 +289,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_cut_client_s_input_is_written_no_further_and_the_rest_stays() {
+    async fn a_cut_client_s_waiting_input_goes_and_the_rest_stays() {
         let queue = InputQueue::default();
         let (one, two) = senders();
         queue.push(&one, b"a1".to_vec()).unwrap();
         queue.push(&two, b"b1".to_vec()).unwrap();
         queue.push(&one, b"a2".to_vec()).unwrap();
+        queue.push(&one, b"a3".to_vec()).unwrap();
         let in_flight = queue.next().await;
         one.cut();
-        assert!(in_flight.rest().is_empty());
+        // The frame being written is written to its end.
+        assert_eq!(in_flight.rest(), b"a1");
         queue.drop_cut();
         // The frame in flight counts until the writer lets it go.
         assert_eq!(queue.queued(), 4);
@@ -287,6 +307,14 @@ mod tests {
         assert_eq!(queue.next().await.rest(), b"b1");
         assert_eq!(queue.queued(), 0);
         assert!(queue.state().by_sender.is_empty());
+        // Frames queued after the sweep are dropped as the writer comes
+        // to them.
+        let three = Arc::new(Sender::default());
+        queue.push(&three, b"c1".to_vec()).unwrap();
+        queue.push(&two, b"b2".to_vec()).unwrap();
+        three.cut();
+        assert_eq!(queue.next().await.rest(), b"b2");
+        assert_eq!(queue.queued(), 0);
     }
 
     #[tokio::test]
@@ -298,5 +326,9 @@ mod tests {
         queue.close();
         assert_eq!(queue.queued(), 0);
         assert_eq!(queue.push(&one, vec![0; 1]), Err(Refused::Closed));
+        let broken = InputQueue::default();
+        broken.break_off();
+        broken.close();
+        assert_eq!(broken.push(&one, vec![0; 1]), Err(Refused::Broken));
     }
 }

@@ -120,8 +120,11 @@ impl Conn {
             .iter()
             .filter_map(|(stream, _)| message_frame(&HolderMessage::Lagged { stream: *stream }))
             .collect();
-        self.sender.cut();
-        self.outbox.cut(last)
+        let cut = self.outbox.cut(last);
+        if cut {
+            self.sender.cut();
+        }
+        cut
     }
 
     /// Drops one subscription from this connection's list.
@@ -560,6 +563,14 @@ impl Holder {
             Err(input::Refused::Closed) => {
                 tracing::debug!(pane = %cell.id, "raw input for a pane whose PTY is closed");
             }
+            Err(input::Refused::Broken) => {
+                if conn.cut() {
+                    tracing::warn!(
+                        pane = %cell.id,
+                        "raw input for a pane whose PTY refused input, so the client was cut"
+                    );
+                }
+            }
         }
     }
 
@@ -571,7 +582,7 @@ impl Holder {
             let mut inner = cell.inner();
             inner.subscribers.retain(|sub| sub.stream != stream);
         }
-        if conn.outbox.cut_at().is_some() {
+        if conn.sender.is_cut() {
             for cell in self.panes() {
                 cell.input.drop_cut();
             }
@@ -690,7 +701,10 @@ async fn write_all_input(cell: &PaneCell) {
                 writable = cell.master.writable() => writable,
                 _ = ended.wait_for(|ended| *ended) => return,
             };
-            let Ok(mut guard) = writable else {
+            let Ok(mut guard) = writable.inspect_err(|err| {
+                tracing::warn!(pane = %cell.id, %err, "the PTY cannot be polled for raw input; the pane takes no more");
+                cell.input.break_off();
+            }) else {
                 return;
             };
             let rest = chunk.rest();
@@ -699,9 +713,10 @@ async fn write_all_input(cell: &PaneCell) {
                 Ok(Ok(len)) => chunk.wrote(len),
                 Ok(Err(err)) if err.kind() == io::ErrorKind::Interrupted => {}
                 Ok(Err(err)) => {
-                    // The PTY takes no input: none may be written after a
-                    // gap, so the queue closes.
+                    // None may be written after a gap: every client that
+                    // sends more is cut.
                     tracing::warn!(pane = %cell.id, %err, "the PTY refused raw input; the pane takes no more");
+                    cell.input.break_off();
                     return;
                 }
                 Err(_would_block) => {}

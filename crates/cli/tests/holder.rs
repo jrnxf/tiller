@@ -403,6 +403,9 @@ fn a_client_cut_for_a_stuck_pane_leaves_other_clients_and_panes_alone() {
     }
     let err = flooder.list().unwrap_err();
     assert!(matches!(err, PanesError::Unreachable(_)), "{err}");
+    // The other client's input to the stuck pane still counts as its own.
+    holder.client.raw_input(stuck.num, &chunk).unwrap();
+    holder.client.list().unwrap();
 
     // Its input to the pane that reads still goes through.
     holder
