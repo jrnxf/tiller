@@ -12,7 +12,9 @@
 // two sizes; the stream answers it with a `size` line and a full screen.
 // On a holder pane the daemon resizes the pane for the Fit, one view at a
 // time, and gives it back its size when the stream ends; a second Fit on the
-// pane, or a resize the holder refuses, is `unfit` the same way.
+// pane, or a resize the holder refuses, is `unfit` the same way. A paired
+// peer's pane works the same way through the board host (protocol.md 10.7):
+// every request names the peer as its `host`.
 
 export const terminalPath = (sessionId: string) => `/api/v1/agents/${sessionId}/terminal`;
 const terminalInputPath = (sessionId: string) => `${terminalPath(sessionId)}/input`;
@@ -240,7 +242,7 @@ export class TerminalStream implements Mirror {
       const response = await fetch(this.fitPath, {
         method: "POST",
         headers: { "content-type": "application/json", accept: "application/json" },
-        body: JSON.stringify(size),
+        body: JSON.stringify({ ...size, ...(this.peer ? { host: this.peer } : {}) }),
       });
       sent = response.ok;
     } catch {
@@ -540,13 +542,20 @@ export function pasteChunks(text: string): string[] {
 export class TerminalInput {
   private readonly path: string;
   private readonly onRefused: (title: string, detail: string) => void;
+  // The paired peer the pane runs on: the board host signs the keys to it.
+  private readonly peer: string | undefined;
   private readonly queue: Input[] = [];
   private busy = false;
   private closed = false;
 
-  constructor(sessionId: string, onRefused: (title: string, detail: string) => void) {
+  constructor(
+    sessionId: string,
+    onRefused: (title: string, detail: string) => void,
+    peer?: string,
+  ) {
     this.path = terminalInputPath(sessionId);
     this.onRefused = onRefused;
+    this.peer = peer;
   }
 
   keys(keys: string[]) {
@@ -597,7 +606,7 @@ export class TerminalInput {
         response = await fetch(this.path, {
           method: "POST",
           headers: { "content-type": "application/json", accept: "application/json" },
-          body: JSON.stringify(input),
+          body: JSON.stringify({ ...input, ...(this.peer ? { host: this.peer } : {}) }),
         });
       } catch {
         this.onRefused("Keys not sent", "The daemon did not answer.");

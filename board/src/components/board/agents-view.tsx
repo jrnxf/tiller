@@ -649,7 +649,7 @@ function Stage({
       // peer link; only a saved machine's is read as a tail.
       machine={remote && !peerHost ? host.label : undefined}
       peer={peerHost}
-      holder={!remote && !peerHost && isHolderPane(agent.pane_id)}
+      holder={(!remote || !!peerHost) && isHolderPane(agent.pane_id)}
       full={full}
       strip={
         remote || peerHost ? null : (
@@ -807,7 +807,8 @@ function Stage({
         {body}
         {
           // Steer and interrupt reach a pane on this machine only: a peer's
-          // pane is watch only, and a saved machine's pane is read as a tail.
+          // pane takes keys and the Fit alone, and a saved machine's pane is
+          // read as a tail.
           remote || peerHost ? null : (
             <SteerBar
               key={`${agent.session_id}:steer`}
