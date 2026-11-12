@@ -113,7 +113,7 @@ Every keyed repair uses a pass key (`reconcile:<row>:...`). Any actor can store 
 | R19 | Guard breach found after the fact | scrub on `pr.link` and `pr.refresh`; a head that is not a descendant of the last one; a default branch moved by anything but `tiller land` | `guard.breach` event; approvals blocked while the scrub fails; no rematch on a force-push; note with the lines | fix the PR body; tell the builder to merge, not rebase | a leak on a public repo, a force-push, a default-branch move: `recovery` on the card at once | `reconcile::pr::force_push_after_approval_is_flagged_and_stale` |
 | R20 | Owner marker names another system | `~/.tiller/owner` at every store write, board mutation, worker poll and pass | refuse every mutation; the daemon's workers hold; serve reads with a banner; on the flip back, a full pass that rebinds live evidence | nothing | nothing is asked; the flip is the owner's command | `core::owner::mutations_refused_when_marker_names_other_system`, `daemon::owner::board_mutations_refused_while_marker_names_other_system` |
 | R21 | Holder lost [H] | a `welcome` with a new `instance` while the boot id is the same | the ladder's agent probe for every session whose pane is gone; dead sessions resumed as in R04 steps (2) to (4); `meta.holder_instance` written last; event `holder.lost` | a summary note per project, as in R04 | one notification: "the terminal holder on <host> restarted, N of M agents resumed"; the Machines row shows the restart for 24 h | `reconcile::recovery::lost_holder_resumes_sessions_and_notifies_once` (H10) |
-| R22 | Holder upgrade refused [H] | `upgrade_refused {reason}`: a failed preflight, dry run or `execve` | nothing changes: the old holder keeps running and serving every pane | nothing | a Health warning with the reason until an upgrade succeeds | `holder::upgrade::a_refused_upgrade_keeps_the_old_holder_serving` (H05), `reconcile::holder::a_refused_upgrade_is_a_health_warning` (H10) |
+| R22 | Holder upgrade refused [H] | `upgrade_refused {reason}`: a busy holder or requester, or a failed preflight, version check, record, dry run or `execve` | nothing changes: the old holder keeps running and serving every pane | nothing | a Health warning with the reason until an upgrade succeeds | `holder_upgrade::every_refused_upgrade_leaves_the_old_holder_serving_its_panes` (H05), `reconcile::holder::a_refused_upgrade_is_a_health_warning` (H10) |
 
 R01 to R11 are the scenarios the build plan names. R12 to R20 are seeded from the bundle's `regressions.md` (section 7) and from Firstmate's hold-lifecycle, supervision and agent-control contracts. R21 and R22 come from ADR 0004 (`terminal-holder.md` sections 6.2 and 6.4).
 
@@ -391,12 +391,12 @@ The host is mid-cutover, or the owner fell back to Firstmate (M6), so `~/.tiller
 
 [H] The daemon asked the holder to upgrade (at start or after `config.changed`, when the holder's binary differs from the stable profile path), or the owner ran `tiller holder upgrade`, and the holder answered `upgrade_refused` (`terminal-holder.md` 6.2).
 
-- **Detection.** The `upgrade_refused {reason}` reply: the new binary's preflight refused the handover version or failed, the dry run failed, or `execve` failed.
+- **Detection.** The `upgrade_refused {reason}` reply. The reason starts with the step that refused: `busy`, `preflight`, `version`, `record`, `dry_run`, `requester` or `exec` (`terminal-holder.md` 6.2).
 - **Invariants.** Nothing changes. The old holder keeps running and answers every request after the refusal, with every pane, child, model and lease it had. No pane is closed and no session is resumed.
 - **Automatic.** The daemon records the reason and shows it as a Health warning. It tries again only at its next start or `config.changed`, never in a loop.
 - **To the orchestrator.** Nothing.
 - **To the developer.** Nothing is asked. The Health warning "holder upgrade refused: <reason>" stays until an upgrade succeeds, and `tiller doctor` warns that the holder runs another version than the daemon (`protocol.md` 6.4).
-- **Tests.** `holder::upgrade::a_refused_upgrade_keeps_the_old_holder_serving` (H05, the failure tests of `terminal-holder.md` 9.3); `reconcile::holder::a_refused_upgrade_is_a_health_warning` (H10).
+- **Tests.** `holder_upgrade::every_refused_upgrade_leaves_the_old_holder_serving_its_panes` (H05, the failure tests of `terminal-holder.md` 9.3); `reconcile::holder::a_refused_upgrade_is_a_health_warning` (H10).
 - **Seeds.** ADR 0004; `terminal-holder.md` 6.2.
 
 ## 6. Unlanded work: the check
