@@ -5,7 +5,7 @@ import type { CSSProperties, KeyboardEvent as KeyEvent, RefObject } from "react"
 
 import type { AgentRow, Machine, PermissionPrompt, Project } from "../../lib/api-types";
 import { leavePageFullScreen, usePageFullScreen } from "../../lib/fullscreen";
-import { holdInertOutside } from "../../lib/inert";
+import { focusIsFree, holdInertOutside } from "../../lib/inert";
 import { focusReason, ownerOf, projectKey, shownId } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import {
@@ -553,9 +553,7 @@ function Stage({
         : null;
     const release = holdInertOutside(cardBox);
     // Focus on nothing, as after a click on the button, goes there too.
-    if (outside || !before || before === document.body) {
-      cardBox.querySelector<HTMLElement>("[data-full-screen]")?.focus();
-    }
+    if (outside || focusIsFree()) control.current?.focusWayOut();
     return () => {
       release();
       // Only from where this effect put it: focus the owner moved, such as
@@ -564,7 +562,7 @@ function Stage({
       const lost = !now || now === document.body || now.hasAttribute("data-full-screen");
       if (outside?.isConnected && lost) outside.focus();
     };
-  }, [full]);
+  }, [full, control]);
   // The details drawer opens under the header, which wraps on a narrow stage.
   const headRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {

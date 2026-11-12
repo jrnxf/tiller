@@ -14,6 +14,7 @@ import {
 import type { MouseEvent as ReactMouseEvent, ReactNode, Ref } from "react";
 
 import { canFullScreen, leavePageFullScreen } from "../../lib/fullscreen";
+import { focusIsFree } from "../../lib/inert";
 import { shortcutsBlocked } from "../../lib/shortcuts";
 import { createStore, useStore } from "../../lib/store";
 import { CloseIcon } from "../shell/icons";
@@ -120,12 +121,6 @@ function loadStageFont(): number {
 
 const stageFontStore = createStore<number>(loadStageFont());
 
-// No control holds focus, as when the one that did left the page.
-function focusIsFree(): boolean {
-  const now = document.activeElement;
-  return !now || now === document.body;
-}
-
 // What the stage's room makes of the font: the size that shows, and whether
 // one size larger fits.
 export interface RoomFont {
@@ -135,11 +130,10 @@ export interface RoomFont {
 
 // The font controls' reading of the stage. The readout is the size that
 // shows, and its name says the stored size, chosen or the default, when the
-// two differ. The Fit sizes
-// the pane to the chosen size, so with it the steps go from that choice, and
-// the text follows once the pane takes its new size. Without it, Smaller
-// steps down from the size that shows, and Larger waits until one size
-// larger fits.
+// two differ. The Fit sizes the pane to the chosen size, so with it the steps
+// go from that choice, and the text follows once the pane takes its new size.
+// Without it, Smaller steps down from the size that shows, and Larger waits
+// until one size larger fits.
 export function fontReadout(stageFont: number, fitted: boolean, room: RoomFont) {
   const shown = room.shown > 0 ? room.shown : stageFont;
   const fontText = `Font size ${shown} px`;
@@ -461,6 +455,8 @@ function switchKey(event: KeyboardEvent): SwitchKey | null {
 // What the Agents view asks of its terminal: start typing to the agent.
 export interface TerminalControl {
   type(): void;
+  // Focus the way out of full screen, unless a carry waits to type here.
+  focusWayOut(): void;
 }
 
 // One terminal with its stream and its keys, wired to the host it draws in.
@@ -772,13 +768,16 @@ export function LiveTerminal({
     };
   }, [sessionId, host, closeHistory, tail, peer]);
 
-  // A switch to another agent in full screen mounts this terminal, and focus
-  // on the old one's controls drops to the page: it goes to this one's way
-  // out. A switch from typing carries focus here once live instead, so a key
-  // typed before then does not press the way out.
+  // The way out of full screen. A carry that waits to type here keeps focus
+  // free for itself, so a key typed before the pane is live does not press it.
   const wayOut = useRef<HTMLButtonElement>(null);
+  const focusWayOut = useCallback(() => {
+    if (!typeWhenLive.current) wayOut.current?.focus();
+  }, []);
+  // A switch to another agent in full screen mounts this terminal, and focus
+  // on the old one's controls drops to the page: it goes to this way out.
   const focusWayOutOnMount = useEffectEvent(() => {
-    if (full && !autoType && focusIsFree()) wayOut.current?.focus();
+    if (full && focusIsFree()) focusWayOut();
   });
   useEffect(() => focusWayOutOnMount(), []);
 
@@ -926,7 +925,7 @@ export function LiveTerminal({
       term.focus();
     } else if (typeWhenLive.current && !term.options.disableStdin) {
       typeWhenLive.current = false;
-      if (focusIsFree() || term.element?.contains(document.activeElement)) term.focus();
+      term.focus();
     }
   }, [box, ready, host, label, layout, watch]);
 
@@ -1050,8 +1049,9 @@ export function LiveTerminal({
         } else if (term?.element && !term.options.disableStdin) term.focus();
         else typeWhenLive.current = true;
       },
+      focusWayOut,
     }),
-    [phone, expand, watch],
+    [phone, expand, watch, focusWayOut],
   );
 
   const ended = status.kind === "ended";

@@ -366,48 +366,78 @@ test("a switch to another agent stays in full screen, and a toast shows in it", 
   expect(screen.getByTestId("toast").textContent).toContain("The pane kept its own size");
 });
 
+// Terminal streams that go live only when the test says: a carry gives the
+// new terminal focus then. A stream the mirror stops is gone, as a real
+// fetch's is.
+function holdStreams() {
+  const api = globalThis.fetch;
+  const encode = (line: unknown) => new TextEncoder().encode(`${JSON.stringify(line)}\n`);
+  const streams = new Set<ReadableStreamDefaultController<Uint8Array>>();
+  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+    if (!String(input).endsWith("/terminal")) return api(input, init);
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        if (init?.signal?.aborted) return;
+        streams.add(controller);
+        init?.signal?.addEventListener(
+          "abort",
+          () => {
+            streams.delete(controller);
+            controller.error(init.signal?.reason);
+          },
+          { once: true },
+        );
+      },
+    });
+    return Promise.resolve(new Response(body, { status: 200 }));
+  });
+  return {
+    goLive() {
+      act(() => {
+        for (const controller of streams) {
+          controller.enqueue(encode({ type: "size", cols: 80, rows: 24 }));
+          controller.enqueue(encode({ type: "frame", seq: 0, full: true, bytes: btoa("$ ") }));
+        }
+      });
+    },
+  };
+}
+
+const typing = () => screen.getByRole("textbox", { name: /^Type to / });
+
+// Types in the stage's terminal and switches with Option-J, as a carry does.
+async function switchFromTyping() {
+  const first = typing();
+  first.focus();
+  const streams = holdStreams();
+  fireEvent.keyDown(first, { key: "∆", code: "KeyJ", altKey: true });
+  await waitFor(() => expect(typing()).not.toBe(first));
+  return streams;
+}
+
 test("a switch from typing in full screen leaves focus to the new terminal, not the way out", async () => {
   stubFullScreen();
   await renderStage("holder");
   fireEvent.click(footer().getByRole("button", { name: "Full screen" }));
   await footer().findByRole("button", { name: "Full screen", pressed: true });
-  const typing = () => screen.getByRole("textbox", { name: /^Type to / });
-  const first = typing();
-  first.focus();
-  // The next agent's stream goes live when the test says, which is when the
-  // carry gives it focus.
-  const api = globalThis.fetch;
-  const encode = (line: unknown) => new TextEncoder().encode(`${JSON.stringify(line)}\n`);
-  const streams: ReadableStreamDefaultController<Uint8Array>[] = [];
-  const goLive = () => {
-    for (const controller of streams) {
-      controller.enqueue(encode({ type: "size", cols: 80, rows: 24 }));
-      controller.enqueue(encode({ type: "frame", seq: 0, full: true, bytes: btoa("$ ") }));
-    }
-  };
-  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
-    if (!String(input).endsWith("/terminal")) return api(input, init);
-    const body = new ReadableStream<Uint8Array>({
-      start(controller) {
-        // A stream the mirror stops is gone, as a real fetch's is.
-        if (init?.signal?.aborted) return;
-        streams.push(controller);
-        init?.signal?.addEventListener("abort", () => {
-          streams.splice(streams.indexOf(controller), 1);
-          controller.error(init.signal?.reason);
-        });
-      },
-    });
-    return Promise.resolve(new Response(body, { status: 200 }));
-  });
-  fireEvent.keyDown(first, { key: "∆", code: "KeyJ", altKey: true });
-  await waitFor(() => expect(typing()).not.toBe(first));
+  const streams = await switchFromTyping();
   // Before it is live, focus waits on the page, so a key typed on does not
   // press the way out.
   expect(document.activeElement).toBe(document.body);
-  act(() => goLive());
+  streams.goLive();
   await waitFor(() => expect(document.activeElement).toBe(typing()));
   expect(document.fullscreenElement).toBe(document.documentElement);
+});
+
+test("full screen that starts while a carry waits leaves focus to the carry", async () => {
+  stubFullScreen();
+  await renderStage("holder");
+  const streams = await switchFromTyping();
+  fireEvent.click(footer().getByRole("button", { name: "Full screen" }));
+  await footer().findByRole("button", { name: "Full screen", pressed: true });
+  expect(document.activeElement).toBe(document.body);
+  streams.goLive();
+  await waitFor(() => expect(document.activeElement).toBe(typing()));
 });
 
 test("a turn to the phone layout, or leaving the Agents view, leaves full screen", async () => {
