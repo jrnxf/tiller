@@ -523,8 +523,8 @@ ADR 0004, accepted Wednesday 2026-11-11. A holder process per host owns the agen
 ### S1c The minimal daemon wiring (first slice, `holder-port`)
 `opus` medium - 1.5 h - after S1a; its end-to-end test after S1b
 
-- [ ] `holder-port` created from `main`; new agents launch in the holder; the agent record keeps the pane id; the terminal and input endpoints use the holder; the daemon finds its panes after a restart
-- [ ] Check: the daemon restarts with the holder up, and the endpoint serves the same pane and takes input (a first restart test; H09 adds `fake-agent` and the tests of 9.2)
+- [x] `holder-port` created from `main`; new agents launch in the holder; the agent record keeps the pane id; the terminal and input endpoints use the holder; the daemon finds its panes after a restart
+- [x] Check: the daemon restarts with the holder up, and the endpoint serves the same pane and takes input (a first restart test; H09 adds `fake-agent` and the tests of 9.2)
 - [ ] Delivered
 
 ### S1P Preview of the first slice
