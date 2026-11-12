@@ -326,33 +326,20 @@ pub fn resume(
     require_local(store, run)?;
     require_active(run)?;
     let worktree = worktree_of(run)?;
-    // A relaunch with no pane to go on in is refused with the terminal
-    // holder up, so the advice names it only without the holder.
-    let held = "a new session needs a new pane, which the terminal holder takes only from H09";
-    let session = live_session(store.conn(), &run.id)?.ok_or_else(|| {
-        SpawnError::Refused(match world.panes {
-            Some(_) => format!(
-                "run {} has no live session to resume: the last one ended, and {held}",
-                run.id
-            ),
-            None => format!(
-                "run {} has no live session to resume: the last one ended, so start a new one with tiller agent relaunch {} --note <progress>",
-                run.id, run.id
-            ),
-        })
-    })?;
-    let claude_id = session.claude_session_id.clone().ok_or_else(|| {
-        SpawnError::Refused(match world.panes {
-            Some(_) => format!(
-                "session {} never bound a Claude session, so there is nothing to resume, and {held}",
-                session.id
-            ),
-            None => format!(
-                "session {} never bound a Claude session, so there is nothing to resume; tiller agent relaunch {} --note <progress> starts one",
-                session.id, run.id
-            ),
-        })
-    })?;
+    let Some(session) = live_session(store.conn(), &run.id)? else {
+        let next = relaunch_advice(store, world, None, run)?;
+        return Err(SpawnError::Refused(format!(
+            "run {} has no live session to resume: the last one ended, so {next}",
+            run.id
+        )));
+    };
+    let Some(claude_id) = session.claude_session_id.clone() else {
+        let next = relaunch_advice(store, world, Some(&session), run)?;
+        return Err(SpawnError::Refused(format!(
+            "session {} never bound a Claude session, so there is nothing to resume, and {next}",
+            session.id
+        )));
+    };
     // With the terminal holder up, the resume goes on only in a herdr pane
     // that is still the session's own: a new pane belongs in the holder,
     // which takes a resume only once its stop and forget land (H09).
@@ -588,9 +575,7 @@ pub fn relaunch(
     // a new pane belongs in the terminal holder, which takes a relaunch only
     // once its stop and forget land (H09). An agent whose herdr pane is still
     // its own goes on there.
-    if world.panes.is_some()
-        && own_herdr_pane(store, world.herdr, old.as_ref(), "A relaunch")?.is_none()
-    {
+    if relaunch_held(store, world, old.as_ref())? {
         return Err(holder_not_ready("A relaunch", run));
     }
     let (stop_proof, old_pane) = match &old {
@@ -627,32 +612,30 @@ pub fn relaunch(
         &mut events,
     )
     .map_err(|error| {
-        // With the holder up, a retry goes on only in a herdr pane the new
-        // session already owns; without one it is refused like any relaunch
-        // with no pane.
-        let retry_refused = world.panes.is_some()
-            && live_session(store.conn(), &relaunched.run.id)
-                .ok()
-                .flatten()
-                .and_then(|now| {
-                    own_herdr_pane(store, world.herdr, Some(&now), "A relaunch")
-                        .ok()
-                        .flatten()
-                })
-                .is_none();
-        SpawnError::Undone {
-        error: Box::new(error),
-        notes: if retry_refused {
+        let recorded = format!(
+            "the relaunch is recorded (run {}, session {}) and nothing was deleted",
+            relaunched.run.id, relaunched.session.id
+        );
+        // A retry passes the same gate as this relaunch. When the gate
+        // cannot be read now (herdr or the store failing), the retry
+        // advice stands: the retry itself says why it stops.
+        let held = live_session(store.conn(), &relaunched.run.id)
+            .map_err(SpawnError::from)
+            .and_then(|now| relaunch_held(store, world, now.as_ref()))
+            .unwrap_or(false);
+        let notes = if held {
             format!(
-                "the relaunch is recorded (run {}, session {}) and nothing was deleted; the old agent was stopped and the new session has no agent, and with the terminal holder up a relaunch without a pane is refused until H09, so the run waits for that or for a new start of its card",
-                relaunched.run.id, relaunched.session.id
+                "{recorded}; the old agent was stopped and the new session has no agent, and with the terminal holder up a relaunch with no herdr pane of its own is refused until H09, so the run waits for that or for a new start of its card"
             )
         } else {
             format!(
-                "the relaunch is recorded (run {}, session {}) and nothing was deleted; start its session with tiller agent relaunch {} --note <progress> --key <a new key>, since this key replays",
-                relaunched.run.id, relaunched.session.id, relaunched.run.id
+                "{recorded}; start its session with tiller agent relaunch {} --note <progress> --key <a new key>, since this key replays",
+                relaunched.run.id
             )
-        },
+        };
+        SpawnError::Undone {
+            error: Box::new(error),
+            notes,
         }
     })?;
     let (since, pane_id, warning) = launched;
@@ -819,6 +802,33 @@ fn holder_not_ready(what: &str, run: &Run) -> SpawnError {
         "{what} is not ready yet with the terminal holder (run {}); no agent was stopped and no pane was opened",
         run.id
     ))
+}
+
+/// Whether a relaunch of a run whose live session is `session` is refused
+/// for now: with the terminal holder up, a relaunch goes on only in a herdr
+/// pane that is still the session's own, as the holder takes a new pane for
+/// a relaunch only once its stop and forget land (H09).
+fn relaunch_held(store: &Store, world: &World<'_>, session: Option<&Session>) -> Result<bool> {
+    Ok(world.panes.is_some()
+        && own_herdr_pane(store, world.herdr, session, "A relaunch")?.is_none())
+}
+
+/// What a refused resume tells the owner to do next: a relaunch, unless
+/// the terminal holder refuses that too (`relaunch_held`).
+fn relaunch_advice(
+    store: &Store,
+    world: &World<'_>,
+    session: Option<&Session>,
+    run: &Run,
+) -> Result<String> {
+    Ok(if relaunch_held(store, world, session)? {
+        "a new session needs a pane of its own, which the terminal holder takes only from H09, so the run waits for that or for a new start of its card".to_owned()
+    } else {
+        format!(
+            "tiller agent relaunch {} --note <progress> starts a new one",
+            run.id
+        )
+    })
 }
 
 /// `session`'s herdr pane when it is still open and its own: its tokens

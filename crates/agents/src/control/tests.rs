@@ -1830,7 +1830,7 @@ fn a_relaunch_with_the_terminal_holder_that_fails_in_its_kept_pane_names_no_retr
     let text = error.to_string();
     assert!(
         text.contains("the relaunch is recorded")
-            && text.contains("with the terminal holder up a relaunch without a pane is refused"),
+            && text.contains("a relaunch with no herdr pane of its own is refused until H09"),
         "{text}"
     );
     assert!(!text.contains("tiller agent relaunch"), "{text}");
@@ -1895,4 +1895,21 @@ fn a_resume_with_the_terminal_holder_and_no_live_session_names_no_relaunch() {
         "{text}"
     );
     assert!(!text.contains("tiller agent relaunch"), "{text}");
+}
+
+#[test]
+fn a_resume_with_the_terminal_holder_and_no_claude_session_advises_a_relaunch_in_its_own_pane() {
+    let mut rig = Rig::new();
+    let card = rig.card(CardKind::Ship, Some(Size::M));
+    // Spawned, never bound: no Claude session, but the herdr pane is its own.
+    let spawned = rig.spawn(&card, RunRole::Builder);
+    rig.panes = Some(tiller_panes::FakePanes::new());
+
+    let error = resume_it(&mut rig, &owner(), &patient(), &spawned.run.id).unwrap_err();
+    let text = error.to_string();
+    assert!(text.contains("never bound a Claude session"), "{text}");
+    assert!(
+        text.contains(&format!("tiller agent relaunch {}", spawned.run.id)),
+        "{text}"
+    );
 }
