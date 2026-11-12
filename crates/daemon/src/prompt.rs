@@ -255,7 +255,7 @@ fn option(row: &str) -> Option<(u8, &str)> {
 mod tests {
     use super::*;
 
-    const BASH: &str = include_str!("../../herdr/tests/fixtures/claude/permission-dialog.ansi");
+    const BASH: &str = include_str!("../../panes/tests/fixtures/claude/permission-dialog.ansi");
     const EDIT: &str = include_str!("../tests/fixtures/prompt/edit.txt");
 
     /// The Bash dialog without its colors, to change a row of it.
@@ -300,7 +300,7 @@ mod tests {
         // The trust dialog is a cursor menu, never a permission dialog.
         for name in ["working", "trust-dialog", "draft", "exited-after-popup"] {
             let screen = std::fs::read_to_string(format!(
-                "{}/../herdr/tests/fixtures/claude/{name}.ansi",
+                "{}/../panes/tests/fixtures/claude/{name}.ansi",
                 env!("CARGO_MANIFEST_DIR")
             ))
             .unwrap();
@@ -360,7 +360,7 @@ mod tests {
         assert_ne!(parse(&changed, "Bash").unwrap().screen, screen);
     }
 
-    const TRUST: &str = include_str!("../../herdr/tests/fixtures/claude/trust-dialog.ansi");
+    const TRUST: &str = include_str!("../../panes/tests/fixtures/claude/trust-dialog.ansi");
 
     /// The trust dialog without its colors, to change a row of it.
     fn trust_rows() -> String {
