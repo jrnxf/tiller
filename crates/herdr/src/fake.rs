@@ -3,7 +3,7 @@
 //! child process killed mid-call leaves exactly what a real pane would show.
 //!
 //! The screens are drawn the way Claude Code 2.1 draws them (see
-//! `tests/fixtures/claude`), so delivery reads them through the real
+//! `crates/panes/tests/fixtures/claude`), so delivery reads them through the real
 //! [`composer::classify`](crate::composer::classify).
 
 use std::collections::BTreeMap;

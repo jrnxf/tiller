@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tiller_panes::frame::{Decoder, Frame};
+use tiller_panes::frame::{Decoder, Frame, FrameError};
 use tiller_panes::handshake::{self, Hello, Refused, SUPPORTED};
 use tiller_panes::message::{ErrorCode, HolderMessage, Request};
 use tiller_panes::paths::{SocketPathTooLong, check_socket_path};
@@ -18,8 +18,9 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 
-use crate::holder::{Conn, Holder};
+use crate::holder::{Conn, Holder, ok};
 use crate::lock::{Acquired, HolderLock, lock_path};
+use crate::outbox::OUTBOX_CAP;
 use crate::peer::{self, PeerCred};
 
 /// How long a client has to send `hello`.
@@ -245,7 +246,7 @@ async fn read_loop(holder: &Arc<Holder>, conn: &Arc<Conn>, mut input: OwnedReadH
                 }
             };
             let next = if greeted {
-                frame_in(holder, conn, frame).await
+                frame_in(holder, conn, frame)
             } else {
                 greeted = true;
                 hello(holder, conn, frame)
@@ -326,7 +327,7 @@ fn hello(holder: &Holder, conn: &Conn, frame: Frame) -> Next {
 }
 
 /// A frame after the handshake.
-async fn frame_in(holder: &Arc<Holder>, conn: &Arc<Conn>, frame: Frame) -> Next {
+fn frame_in(holder: &Arc<Holder>, conn: &Arc<Conn>, frame: Frame) -> Next {
     match frame {
         Frame::Input { num, bytes } => {
             holder.input(conn, num, bytes);
@@ -343,7 +344,7 @@ async fn frame_in(holder: &Arc<Holder>, conn: &Arc<Conn>, frame: Frame) -> Next 
         }
         Frame::Message(text) => match Request::decode(&text) {
             Ok(request) => {
-                request_in(holder, conn, request).await;
+                request_in(holder, conn, request);
                 Next::Go
             }
             Err(undecodable) => {
@@ -354,28 +355,55 @@ async fn frame_in(holder: &Arc<Holder>, conn: &Arc<Conn>, frame: Frame) -> Next 
     }
 }
 
-/// One request, answered on its connection. The connection's next frame
-/// waits for the answer, so its replies come in order.
-async fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
+/// One request, answered on its connection. A request that waits, for a
+/// spawn, a long screen read or a child's exit, is answered from a task of
+/// its own, so it holds up none of the connection's other replies (section
+/// 2.4). The rest are answered before the next frame is read, so text typed with `input`,
+/// `paste` or `keys` keeps its place among the raw input frames.
+fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
     let request_id = request.id();
     let reply = match request {
         Request::Hello(_) => Err((ErrorCode::BadRequest, "hello comes once, first".to_owned())),
         Request::Spawn { id, spawn } => {
-            let spawner = holder.clone();
-            match tokio::task::spawn_blocking(move || spawner.spawn(spawn)).await {
-                Ok(spawned) => {
-                    spawned.map(|(pane, existing)| HolderMessage::Pane { id, pane, existing })
-                }
-                Err(err) => Err((ErrorCode::Internal, format!("the spawn failed: {err}"))),
-            }
+            let holder = holder.clone();
+            answer_later(conn, id, async move {
+                let (pane, existing) = holder.spawn(spawn).await?;
+                Ok(HolderMessage::Pane { id, pane, existing })
+            });
+            return;
         }
         Request::List { id } => Ok(HolderMessage::Panes {
             id,
             listing: holder.list(),
         }),
+        Request::Get { id, pane } => holder.get(&pane).map(|pane| HolderMessage::Pane {
+            id,
+            pane,
+            existing: false,
+        }),
+        Request::Screen {
+            id,
+            pane,
+            read,
+            format,
+        } => {
+            let holder = holder.clone();
+            answer_later(conn, id, async move {
+                let screen = holder.screen_read(pane, read, format).await?;
+                Ok(HolderMessage::Screen { id, screen })
+            });
+            return;
+        }
+        Request::Input { id, pane, text } => holder.input_text(conn, &pane, text).map(|()| ok(id)),
+        Request::Paste { id, pane, text } => holder.paste(conn, &pane, text).map(|()| ok(id)),
+        Request::Keys { id, pane, keys } => holder.keys(conn, &pane, &keys).map(|()| ok(id)),
         // `sync` is `pass` for every subscriber: this holder does not offer
         // `sync_buffer` (H04), so a client does not ask for it.
         Request::Subscribe { id, pane, sync: _ } => match holder.subscribe(conn, id, &pane) {
+            Ok(()) => return,
+            Err(failure) => Err(failure),
+        },
+        Request::Unsubscribe { id, stream } => match holder.unsubscribe(conn, id, stream) {
             Ok(()) => return,
             Err(failure) => Err(failure),
         },
@@ -387,26 +415,123 @@ async fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
             lease: _,
         } => holder
             .resize(&pane, tiller_panes::Size { cols, rows })
-            .map(|size| HolderMessage::Ok {
+            .map(|size| ok_size(id, size)),
+        Request::Release { id, pane, lease: _ } => {
+            holder.release(&pane).map(|size| ok_size(id, size))
+        }
+        Request::Meta {
+            id,
+            pane,
+            set,
+            remove,
+        } => holder
+            .meta(&pane, set, &remove)
+            .map(|pane| HolderMessage::Pane {
                 id,
-                cols: Some(size.cols),
-                rows: Some(size.rows),
-                clients: None,
+                pane,
+                existing: false,
             }),
+        Request::Signal { id, pane, signal } => holder.signal(&pane, signal).map(|()| ok(id)),
+        Request::Close { id, pane, grace_ms } => {
+            let holder = holder.clone();
+            answer_later(conn, id, async move {
+                let exit = holder.close(&pane, Duration::from_millis(grace_ms)).await?;
+                Ok(HolderMessage::Exited {
+                    id: Some(id),
+                    pane,
+                    exit,
+                })
+            });
+            return;
+        }
+        Request::Forget { id, pane } => holder.forget(&pane).map(|()| ok(id)),
+        Request::Watch { id } => {
+            holder.watch(conn, id);
+            return;
+        }
+        Request::Switch { id, pane } => holder.switch(&pane).map(|clients| HolderMessage::Ok {
+            id,
+            cols: None,
+            rows: None,
+            clients: Some(clients),
+        }),
         Request::Ping { id } => Ok(HolderMessage::Pong { id }),
-        // The rest of the protocol comes with the holder's later tasks
-        // (H04 and on).
-        request => Err((
+        // The holder's upgrade comes with H05.
+        request @ Request::Upgrade { .. } => Err((
             ErrorCode::Unsupported,
             format!("this holder does not serve {} yet", request.kind()),
         )),
     };
-    match reply {
-        Ok(message) => {
-            conn.send_message(&message);
-        }
-        Err((code, message)) => reply_error(conn, request_id, code, message),
+    send_reply(conn, request_id, reply);
+}
+
+/// Answers request `id` from a task of its own, once `reply` is ready.
+fn answer_later(
+    conn: &Arc<Conn>,
+    id: u64,
+    reply: impl Future<Output = Result<HolderMessage, (ErrorCode, String)>> + Send + 'static,
+) {
+    let conn = conn.clone();
+    tokio::spawn(async move {
+        let reply = reply.await;
+        send_reply(&conn, Some(id), reply);
+    });
+}
+
+/// The bare `ok` with the pane's size after the request.
+fn ok_size(id: u64, size: tiller_panes::Size) -> HolderMessage {
+    HolderMessage::Ok {
+        id,
+        cols: Some(size.cols),
+        rows: Some(size.rows),
+        clients: None,
     }
+}
+
+/// Queues a reply. A reply that no connection's queue could hold, such as
+/// a long `ansi` screen read, is refused with `busy`, so the client learns
+/// of it and the connection is not cut.
+fn send_reply(conn: &Conn, id: Option<u64>, reply: Result<HolderMessage, (ErrorCode, String)>) {
+    let message = match reply {
+        Ok(message) => message,
+        Err((code, message)) => return reply_error(conn, id, code, message),
+    };
+    let text = match serde_json::to_string(&message) {
+        Ok(text) => text,
+        Err(err) => {
+            tracing::error!(%err, "a reply would not encode");
+            return reply_error(
+                conn,
+                id,
+                ErrorCode::Internal,
+                format!("the reply would not encode: {err}"),
+            );
+        }
+    };
+    let frame_len = match Frame::Message(text).to_bytes() {
+        Ok(frame) if frame.len() <= OUTBOX_CAP => {
+            conn.send(frame);
+            return;
+        }
+        Ok(frame) => frame.len() as u64,
+        Err(FrameError::TooLarge { len }) => len + 4,
+        Err(err) => {
+            return reply_error(
+                conn,
+                id,
+                ErrorCode::Internal,
+                format!("the reply would not encode: {err}"),
+            );
+        }
+    };
+    reply_error(
+        conn,
+        id,
+        ErrorCode::Busy,
+        format!(
+            "the reply frame is {frame_len} bytes, more than a connection's {OUTBOX_CAP}-byte queue holds"
+        ),
+    );
 }
 
 fn reply_error(conn: &Conn, id: Option<u64>, code: ErrorCode, message: String) {
@@ -415,6 +540,8 @@ fn reply_error(conn: &Conn, id: Option<u64>, code: ErrorCode, message: String) {
 
 #[cfg(test)]
 mod tests {
+    use tiller_panes::PaneId;
+    use tiller_panes::frame::MAX_FRAME_LEN;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
@@ -459,6 +586,53 @@ mod tests {
         assert_eq!(reply["type"], "welcome", "{reply}");
     }
 
+    #[tokio::test]
+    async fn a_reply_no_queue_could_hold_is_refused_and_the_connection_stays() {
+        let conn = Conn::default();
+        let screen = tiller_panes::message::Screen {
+            cols: 80,
+            rows: 24,
+            cursor: tiller_panes::message::Cursor {
+                col: 0,
+                row: 0,
+                visible: true,
+            },
+            modes: Vec::new(),
+            rows_text: Vec::new(),
+        };
+        let json_len = |row: usize| {
+            let screen = tiller_panes::message::Screen {
+                rows_text: vec!["x".repeat(row)],
+                ..screen.clone()
+            };
+            serde_json::to_string(&HolderMessage::Screen { id: 7, screen })
+                .unwrap()
+                .len()
+        };
+        // A message just under the queue whose length and kind push its
+        // frame past it, one past the queue, and one past the frame limit.
+        let overhead = json_len(0);
+        let under = OUTBOX_CAP - 2 - overhead;
+        assert!(json_len(under) < OUTBOX_CAP && json_len(under) + 5 > OUTBOX_CAP);
+        let rows = [under, OUTBOX_CAP, MAX_FRAME_LEN as usize];
+        for (id, len) in (7..).zip(rows) {
+            let screen = tiller_panes::message::Screen {
+                rows_text: vec!["x".repeat(len)],
+                ..screen.clone()
+            };
+            send_reply(&conn, Some(id), Ok(HolderMessage::Screen { id, screen }));
+            assert!(conn.outbox.cut_at().is_none(), "the connection was cut");
+            let frame = conn.outbox.next().await.unwrap();
+            // The length and the kind come before the message.
+            let reply: serde_json::Value = serde_json::from_slice(&frame[5..]).unwrap();
+            assert_eq!(
+                (&reply["type"], &reply["id"], &reply["code"]),
+                (&"error".into(), &id.into(), &"busy".into()),
+                "{reply}"
+            );
+        }
+    }
+
     async fn read_message(stream: &mut UnixStream) -> serde_json::Value {
         let mut len = [0; 4];
         stream.read_exact(&mut len).await.unwrap();
@@ -468,6 +642,180 @@ mod tests {
         serde_json::from_slice(&body[1..]).unwrap()
     }
 
+    /// A client's end of a connection, read frame by frame.
+    struct Client {
+        stream: UnixStream,
+        decoder: Decoder,
+    }
+
+    impl Client {
+        async fn connect(holder: &Arc<Holder>) -> Client {
+            let (theirs, stream) = UnixStream::pair().unwrap();
+            admit(holder, theirs, peer::own_uid());
+            let mut client = Client {
+                stream,
+                decoder: Decoder::new(),
+            };
+            client.send(Request::Hello(Hello::new("daemon"))).await;
+            let welcome = client.message(|_| true).await;
+            assert_eq!(welcome["type"], "welcome");
+            client
+        }
+
+        async fn send(&mut self, request: Request) {
+            let text = serde_json::to_string(&request).unwrap();
+            self.stream
+                .write_all(&Frame::Message(text).to_bytes().unwrap())
+                .await
+                .unwrap();
+        }
+
+        /// The frames up to the first `wanted` takes, which it returns.
+        async fn until(&mut self, mut wanted: impl FnMut(&Frame) -> bool) -> Frame {
+            let read = async {
+                loop {
+                    while let Some(frame) = self.decoder.next_frame().unwrap() {
+                        if wanted(&frame) {
+                            return frame;
+                        }
+                    }
+                    let mut buf = [0; 4096];
+                    let len = self.stream.read(&mut buf).await.unwrap();
+                    assert_ne!(len, 0, "the holder closed the connection");
+                    self.decoder.push(&buf[..len]);
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(10), read)
+                .await
+                .unwrap()
+        }
+
+        /// The first message `wanted` takes.
+        async fn message(
+            &mut self,
+            mut wanted: impl FnMut(&serde_json::Value) -> bool,
+        ) -> serde_json::Value {
+            let frame = self
+                .until(|frame| match frame {
+                    Frame::Message(text) => wanted(&serde_json::from_str(text).unwrap()),
+                    _ => false,
+                })
+                .await;
+            let Frame::Message(text) = frame else {
+                unreachable!()
+            };
+            serde_json::from_str(&text).unwrap()
+        }
+
+        async fn reply(&mut self, id: u64) -> serde_json::Value {
+            self.message(|message| message["id"] == id).await
+        }
+
+        /// Output on `stream` up to the first read that holds `text`.
+        async fn output(&mut self, stream: u32, text: &str) {
+            self.until(|frame| match frame {
+                Frame::Output { stream: on, bytes } => {
+                    *on == stream && String::from_utf8_lossy(bytes).contains(text)
+                }
+                _ => false,
+            })
+            .await;
+        }
+
+        async fn spawn_cat(&mut self, id: u64, key: &str) -> PaneId {
+            self.send(Request::Spawn {
+                id,
+                spawn: tiller_panes::Spawn {
+                    key: key.to_owned(),
+                    argv: vec!["/bin/cat".to_owned()],
+                    cwd: "/".to_owned(),
+                    env: std::collections::BTreeMap::new(),
+                    size: None,
+                    meta: tiller_panes::Meta::new(),
+                },
+            })
+            .await;
+            let reply = self.reply(id).await;
+            assert_eq!(reply["type"], "pane", "{reply}");
+            serde_json::from_value(reply["pane"]["pane"].clone()).unwrap()
+        }
+
+        async fn subscribe(&mut self, id: u64, pane: &PaneId) -> u32 {
+            self.send(Request::Subscribe {
+                id,
+                pane: pane.clone(),
+                sync: tiller_panes::message::SyncMode::Pass,
+            })
+            .await;
+            let reply = self.reply(id).await;
+            assert_eq!(reply["type"], "subscribed", "{reply}");
+            u32::try_from(reply["stream"].as_u64().unwrap()).unwrap()
+        }
+
+        async fn input(&mut self, id: u64, pane: &PaneId, text: &str) {
+            self.send(Request::Input {
+                id,
+                pane: pane.clone(),
+                text: text.to_owned(),
+            })
+            .await;
+            assert_eq!(self.reply(id).await["type"], "ok");
+        }
+    }
+
+    // Section 3.5: a model that panics resets its own pane. That pane's
+    // subscribers are cut and its watchers told, while its child, the
+    // other panes and the holder go on.
+    #[tokio::test]
+    async fn a_panicking_model_resets_its_pane_and_the_holder_and_other_panes_live_on() {
+        let holder = Holder::new();
+        tokio::spawn(holder.clone().reaper(signal(SignalKind::child()).unwrap()));
+        let mut watcher = Client::connect(&holder).await;
+        watcher.send(Request::Watch { id: 1 }).await;
+        assert_eq!(watcher.reply(1).await["type"], "watching");
+        let mut client = Client::connect(&holder).await;
+        let a = client.spawn_cat(2, "a").await;
+        let b = client.spawn_cat(3, "b").await;
+        let on_a = client.subscribe(4, &a).await;
+        let on_b = client.subscribe(5, &b).await;
+
+        holder.fail_next(&a);
+        // `cat`'s terminal echoes the text, and the echo goes into the model.
+        client.input(6, &a, "boom\r").await;
+        let lagged = client.message(|message| message["type"] == "lagged").await;
+        assert_eq!(lagged, serde_json::json!({"type":"lagged","stream":on_a}));
+        let reset = watcher
+            .message(|message| message["type"] == "model_reset")
+            .await;
+        assert_eq!(reset["pane"], a.as_str());
+
+        client.input(7, &b, "still\r").await;
+        client.output(on_b, "still").await;
+        client.send(Request::Ping { id: 8 }).await;
+        assert_eq!(client.reply(8).await["type"], "pong");
+        client
+            .send(Request::Get {
+                id: 9,
+                pane: a.clone(),
+            })
+            .await;
+        assert_eq!(client.reply(9).await["pane"]["state"], "running");
+        let again = client.subscribe(10, &a).await;
+        client.input(11, &a, "again\r").await;
+        client.output(again, "again").await;
+
+        for (id, pane) in [(12, &a), (13, &b)] {
+            client
+                .send(Request::Close {
+                    id,
+                    pane: pane.clone(),
+                    grace_ms: 3_000,
+                })
+                .await;
+            assert_eq!(client.reply(id).await["type"], "exited");
+        }
+    }
+
     #[tokio::test]
     async fn a_request_this_holder_does_not_serve_yet_is_unsupported_and_a_ping_is_answered() {
         let holder = Holder::new();
@@ -475,9 +823,10 @@ mod tests {
         admit(&holder, theirs, peer::own_uid());
         for request in [
             Request::Hello(Hello::new("daemon")),
-            Request::Forget {
+            Request::Upgrade {
                 id: 7,
-                pane: "p1".into(),
+                binary: "/home/user/tiller".into(),
+                dry_run: false,
             },
             Request::Ping { id: 8 },
         ] {
@@ -491,7 +840,7 @@ mod tests {
         assert_eq!(
             unsupported,
             serde_json::json!({"type":"error","id":7,"code":"unsupported",
-                "message":"this holder does not serve forget yet"})
+                "message":"this holder does not serve upgrade yet"})
         );
         assert_eq!(
             read_message(&mut ours).await,

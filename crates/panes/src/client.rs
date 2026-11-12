@@ -4,13 +4,12 @@
 //! overlap: each caller registers its request id, writes its frame, and
 //! waits for its own reply, which one reader thread hands over by id. Raw
 //! input takes only the write side, so a keystroke never waits here for
-//! another call's reply. How soon the holder serves a request is the
-//! holder's part: it serves a connection's frames in order for now (spec
-//! 2.4 allows them to overlap). Each [`Subscription`] and each [`Events`]
-//! has a connection of its own: its frames never wait behind a request,
-//! and a size a
-//! subscription sets through its lease ends when it is dropped, because its
-//! connection ends. A [`StreamHandle`] resizes or ends a subscription from
+//! another call's reply. The holder answers a request that waits, such as
+//! a spawn or a close, from a task of its own, so the connection's other
+//! replies do not wait behind it (spec 2.4). Each [`Subscription`] and
+//! each [`Events`] has a connection of its own: its frames never wait
+//! behind a request, and a size a subscription sets through its lease ends
+//! when it is dropped, because its connection ends. A [`StreamHandle`] resizes or ends a subscription from
 //! another thread while one thread waits in [`Subscription::recv`].
 //!
 //! A connection that fails (a timeout, a closed socket, a bad frame, a

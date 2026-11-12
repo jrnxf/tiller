@@ -282,6 +282,28 @@ pub fn render<T: EventListener>(term: &Term<T>) -> Vec<u8> {
     w.out.into_bytes()
 }
 
+/// The bytes that set `mode` and `style` on a fresh terminal, with no
+/// screen content: the alternate screen first, then every mode a repaint
+/// sets, and the modes on from the start that the app turned off.
+pub(crate) fn mode_bytes(mode: TermMode, style: CursorStyle) -> Vec<u8> {
+    let mut out = String::new();
+    if mode.contains(TermMode::ALT_SCREEN) {
+        out.push_str("\x1b[?1049h");
+    }
+    modes(&mut out, mode, style);
+    // On in a fresh terminal, so it is set only when the app turned it off.
+    if !mode.contains(TermMode::ALTERNATE_SCROLL) {
+        out.push_str("\x1b[?1007l");
+    }
+    if mode.contains(TermMode::INSERT) {
+        out.push_str("\x1b[4h");
+    }
+    if !mode.contains(TermMode::SHOW_CURSOR) {
+        out.push_str("\x1b[?25l");
+    }
+    out.into_bytes()
+}
+
 /// The modes the app turned on, other than insert mode and the cursor's
 /// visibility, which come after the cursor.
 fn modes(out: &mut String, mode: TermMode, style: CursorStyle) {

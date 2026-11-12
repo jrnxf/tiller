@@ -211,9 +211,9 @@ mod tests {
     use super::*;
 
     fn fixture(name: &str) -> Composer {
-        // The fixtures stay with the herdr crate's frozen snapshots of them.
+        // The herdr crate keeps the frozen snapshots of these fixtures.
         let path = format!(
-            "{}/../herdr/tests/fixtures/claude/{name}.ansi",
+            "{}/tests/fixtures/claude/{name}.ansi",
             env!("CARGO_MANIFEST_DIR")
         );
         classify(&std::fs::read_to_string(path).unwrap())

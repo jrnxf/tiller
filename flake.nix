@@ -112,15 +112,15 @@
               ./crates/daemon/tests/fixtures
               # The committed OpenAPI contract a daemon test compares against.
               ./contract
-              # Claude Code viewport reads the composer classifier is tested on.
-              ./crates/herdr/tests/fixtures
               # Embedded by crates/agents with include_str!.
               ./roles
               # Embedded by crates/replay with include_str!.
               ./crates/replay/prompts
               # The role matrix core::authority::matrix_matches_spec reads with include_str!.
               ./docs/spec/authority.md
-              # The board's key names, which a tiller-panes key test parses.
+              # The board's key names, which a tiller-panes key test parses, and
+              # the Claude Code viewport reads the composer, the prompt parser
+              # and the holder's model gate are tested on.
               ./crates/panes/tests/fixtures
             ];
           };
