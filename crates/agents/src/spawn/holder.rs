@@ -218,6 +218,64 @@ mod tests {
             }
             Ok(listing)
         }
+
+        fn get(&self, pane: &PaneId) -> tiller_panes::Result<Option<Pane>> {
+            self.inner.get(pane)
+        }
+
+        fn screen(
+            &self,
+            pane: &PaneId,
+            read: tiller_panes::message::Read,
+            format: tiller_panes::message::Format,
+        ) -> tiller_panes::Result<tiller_panes::message::Screen> {
+            self.inner.screen(pane, read, format)
+        }
+
+        fn input(&self, pane: &PaneId, text: &str) -> tiller_panes::Result<()> {
+            self.inner.input(pane, text)
+        }
+
+        fn paste(&self, pane: &PaneId, text: &str) -> tiller_panes::Result<()> {
+            self.inner.paste(pane, text)
+        }
+
+        fn keys(&self, pane: &PaneId, keys: &[tiller_panes::Key]) -> tiller_panes::Result<()> {
+            self.inner.keys(pane, keys)
+        }
+
+        fn set_meta(
+            &self,
+            pane: &PaneId,
+            set: &tiller_panes::message::Meta,
+            remove: &[&str],
+        ) -> tiller_panes::Result<Pane> {
+            self.inner.set_meta(pane, set, remove)
+        }
+
+        fn signal(
+            &self,
+            pane: &PaneId,
+            signal: tiller_panes::message::Signal,
+        ) -> tiller_panes::Result<()> {
+            self.inner.signal(pane, signal)
+        }
+
+        fn close(
+            &self,
+            pane: &PaneId,
+            grace: std::time::Duration,
+        ) -> tiller_panes::Result<tiller_panes::message::Exit> {
+            self.inner.close(pane, grace)
+        }
+
+        fn forget(&self, pane: &PaneId) -> tiller_panes::Result<()> {
+            self.inner.forget(pane)
+        }
+
+        fn switch(&self, pane: &PaneId) -> tiller_panes::Result<usize> {
+            self.inner.switch(pane)
+        }
     }
 
     #[test]

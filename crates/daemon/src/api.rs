@@ -4811,7 +4811,7 @@ async fn holder_input(
     let holder = linked(holder)?;
     spend_input(mirrors)?;
     let id = tiller_panes::PaneId::from(pane);
-    on_holder(holder, move |holder| holder.input(&id, &bytes))
+    on_holder(holder, move |holder| holder.raw_input(&id, &bytes))
         .await?
         .map_err(|error| holder_error(pane, &error))?;
     Ok(sent)

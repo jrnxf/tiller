@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use common::{Running, World, git_only_daemon};
 use serde_json::Value;
-use tiller_panes::{HolderClient, PaneState, Panes, socket_path};
+use tiller_panes::{HolderClient, Live as _, PaneState, Panes, socket_path};
 
 /// How long the test waits for anything the holder or the daemon does.
 const WAIT: Duration = Duration::from_secs(20);
