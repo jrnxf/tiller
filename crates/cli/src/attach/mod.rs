@@ -388,12 +388,21 @@ impl Session<'_> {
     fn keys(&mut self, keys: Vec<Key>) -> Result<Flow, Failure> {
         let mut send = Vec::new();
         for key in keys {
+            // The help and the switcher take every key they get.
+            if !matches!(self.view, View::Pane) && key.kind != Kind::Release {
+                self.prefixed.swallow(&key);
+            }
             match &mut self.view {
                 // A kitty key's release is no key press: the release of the
-                // `?` that opened the help must not close it. A modifier
-                // pressed alone is none either.
-                View::Help | View::Switcher(_)
-                    if matches!(key.kind, Kind::Release | Kind::Modifier) => {}
+                // `?` that opened the help must not close it, and only the
+                // release of a key the pane got goes to the pane.
+                View::Help | View::Switcher(_) if key.kind == Kind::Release => {
+                    if let Some(Act::Send(bytes)) = self.prefixed.on_key(key) {
+                        self.send(&bytes)?;
+                    }
+                }
+                // A modifier pressed alone is no key press either.
+                View::Help | View::Switcher(_) if key.kind == Kind::Modifier => {}
                 // Any key closes the help, and is swallowed.
                 View::Help => self.repaint()?,
                 View::Switcher(switcher) => match key.kind {
@@ -549,7 +558,7 @@ impl Session<'_> {
         };
         self.generation += 1;
         self.view = View::Pane;
-        self.prefixed = Prefixed::default();
+        self.prefixed.disarm();
         self.screens.reset();
         let subscribed = self.client.subscribe(
             &pane.pane,

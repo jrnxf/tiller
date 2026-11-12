@@ -84,6 +84,23 @@ pub enum Kind {
 pub struct Key {
     pub kind: Kind,
     pub bytes: Vec<u8>,
+    /// Which key it is, the same for its press and its kitty release.
+    id: Option<Id>,
+}
+
+/// A key as kitty names it in a release: its unshifted code, or 1 for a
+/// key such as Up, and the final byte of its sequence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Id {
+    code: u32,
+    last: u8,
+}
+
+impl Id {
+    fn char(code: u32) -> Self {
+        let code = char::from_u32(code).map_or(code, |c| u32::from(unshifted(c)));
+        Self { code, last: b'u' }
+    }
 }
 
 /// Splits the owner's bytes into keys. A sequence cut at the end of a read
@@ -121,10 +138,9 @@ impl Reader {
         while at < buf.len() {
             match self.next_key(&buf[at..]) {
                 Some((kind, len)) => {
-                    keys.push(Key {
-                        kind,
-                        bytes: buf[at..at + len].to_vec(),
-                    });
+                    let bytes = buf[at..at + len].to_vec();
+                    let id = self.id(&bytes);
+                    keys.push(Key { kind, bytes, id });
                     at += len;
                 }
                 None => {
@@ -147,7 +163,40 @@ impl Reader {
             ([ESC], false) => Kind::Escape,
             _ => Kind::Other,
         };
-        vec![Key { kind, bytes }]
+        let id = self.id(&bytes);
+        vec![Key { kind, bytes, id }]
+    }
+
+    /// Which key `bytes` is, or None for a paste's bytes.
+    fn id(&self, bytes: &[u8]) -> Option<Id> {
+        if self.paste {
+            return None;
+        }
+        match bytes {
+            [byte] => Some(Id::char(match *byte {
+                0 => 32,
+                byte @ 1..=26 if !matches!(byte, 8 | 9 | 13) => u32::from(byte) + 96,
+                byte @ 28..=31 => u32::from(byte) + 64,
+                byte => u32::from(byte),
+            })),
+            [ESC, b'O', last] => Some(Id {
+                code: 1,
+                last: *last,
+            }),
+            [ESC, b'[', params @ .., last] => {
+                let code = params
+                    .split(|byte| matches!(byte, b';' | b':'))
+                    .next()
+                    .and_then(|code| std::str::from_utf8(code).ok()?.parse().ok())
+                    .unwrap_or(1);
+                Some(match last {
+                    b'u' => Id::char(code),
+                    _ => Id { code, last: *last },
+                })
+            }
+            [ESC, byte] => Some(Id::char(u32::from(*byte))),
+            _ => None,
+        }
     }
 
     /// The first key in `buf` and its length, or None when `buf` holds only
@@ -204,7 +253,6 @@ impl Reader {
                 "201" => self.paste = false,
                 _ => {}
             }
-            return Kind::Other;
         }
         if self.paste {
             return Kind::Other;
@@ -251,11 +299,20 @@ impl Reader {
     }
 }
 
+const PLAIN: &str = "`1234567890-=[]\\;',./";
+const SHIFTED: &str = "~!@#$%^&*()_+{}|:\"<>?";
+
+/// The key that gives `c` on a US layout, with no Shift.
+fn unshifted(c: char) -> char {
+    SHIFTED
+        .find(c)
+        .and_then(|at| PLAIN.chars().nth(at))
+        .unwrap_or(c.to_ascii_lowercase())
+}
+
 impl Kind {
     /// The key Shift gives on a US layout.
     fn shifted(self) -> Self {
-        const PLAIN: &str = "`1234567890-=[]\\;',./";
-        const SHIFTED: &str = "~!@#$%^&*()_+{}|:\"<>?";
         match self {
             Kind::Char(c) => Kind::Char(
                 PLAIN
@@ -309,29 +366,47 @@ pub enum Act {
     Help,
 }
 
-/// Whether the prefix came and waits for its key.
+/// Whether the prefix came and waits for its key, and which keys attach
+/// used up: the pane gets a kitty release only when it got the press.
 #[derive(Debug, Default)]
 pub struct Prefixed {
     armed: bool,
+    used: Vec<Id>,
 }
 
 impl Prefixed {
     pub fn on_key(&mut self, key: Key) -> Option<Act> {
+        if key.kind == Kind::Release {
+            let at = self.used.iter().position(|id| Some(*id) == key.id);
+            return match at {
+                Some(at) => {
+                    self.used.swap_remove(at);
+                    None
+                }
+                None => Some(Act::Send(key.bytes)),
+            };
+        }
         if !self.armed {
             if key.kind == Kind::Prefix {
                 self.armed = true;
+                self.swallow(&key);
                 return None;
             }
+            self.sent(&key);
             return Some(Act::Send(key.bytes));
         }
-        // The prefix's own release, and a Shift held for `?`, come before
-        // the next key.
-        if matches!(key.kind, Kind::Release | Kind::Modifier) {
+        // A Shift held for `?` comes before the next key.
+        if key.kind == Kind::Modifier {
+            self.swallow(&key);
             return None;
         }
         self.armed = false;
+        if key.kind == Kind::Prefix {
+            self.sent(&key);
+            return Some(Act::Send(key.bytes));
+        }
+        self.swallow(&key);
         match key.kind {
-            Kind::Prefix => Some(Act::Send(key.bytes)),
             Kind::Char('d') => Some(Act::Detach),
             Kind::Char('s') => Some(Act::Switcher),
             Kind::Char('n') => Some(Act::Next),
@@ -339,6 +414,25 @@ impl Prefixed {
             Kind::Char('?') => Some(Act::Help),
             _ => None,
         }
+    }
+
+    /// A key the help or the switcher took: its release is dropped too.
+    pub fn swallow(&mut self, key: &Key) {
+        if let Some(id) = key.id
+            && !self.used.contains(&id)
+        {
+            self.used.push(id);
+        }
+    }
+
+    /// The prefix no longer waits for its key, as when another pane shows.
+    pub fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    /// A key the pane got: its release goes there too.
+    fn sent(&mut self, key: &Key) {
+        self.used.retain(|id| Some(*id) != key.id);
     }
 }
 
@@ -464,6 +558,65 @@ mod tests {
             .filter_map(|key| prefixed.on_key(key))
             .collect();
         assert_eq!(acts, [Act::Help]);
+    }
+
+    #[test]
+    fn only_the_release_of_a_key_the_pane_got_goes_to_the_pane() {
+        let mut reader = Reader::default();
+        let mut prefixed = Prefixed::default();
+        let mut acts = |bytes: &[u8]| -> Vec<Act> {
+            reader
+                .feed(bytes)
+                .into_iter()
+                .filter_map(|key| prefixed.on_key(key))
+                .collect()
+        };
+        // A key the pane got: its release follows it.
+        assert_eq!(
+            acts(b"a\x1b[97;1:3u"),
+            [
+                Act::Send(b"a".to_vec()),
+                Act::Send(b"\x1b[97;1:3u".to_vec())
+            ]
+        );
+        // The prefix, Shift and `?` open the help, and their releases,
+        // in any order, do not reach the pane.
+        assert_eq!(
+            acts(b"\x1b[92;5u\x1b[57441;2u?\x1b[92;5:3u\x1b[63;2:3u\x1b[57441;1:3u"),
+            [Act::Help]
+        );
+        // The commands' keys, legacy and kitty, and their late releases.
+        assert_eq!(
+            acts(b"\x1cn\x1b[92;1:3u\x1b[110;1:3u\x1b[92;5u\x1b[112u\x1b[92;5:3u\x1b[112;1:3u"),
+            [Act::Next, Act::Prev]
+        );
+        // The prefix twice: the pane gets the second press and its release.
+        assert_eq!(
+            acts(b"\x1c\x1b[92;5:3u\x1c\x1b[92;5:3u"),
+            [
+                Act::Send(b"\x1c".to_vec()),
+                Act::Send(b"\x1b[92;5:3u".to_vec())
+            ]
+        );
+    }
+
+    #[test]
+    fn the_release_of_a_key_the_help_took_is_dropped() {
+        let mut reader = Reader::default();
+        let mut prefixed = Prefixed::default();
+        // The help is open. `x` closes it, Escape closes the switcher, and
+        // a key the pane got before is still released there.
+        for key in reader.feed(b"x\x1b[27u") {
+            prefixed.swallow(&key);
+        }
+        let acts: Vec<_> = reader
+            .feed(b"\x1b[120;1:3u\x1b[27;1:3u\x1b[1;1:3A")
+            .into_iter()
+            .filter_map(|key| prefixed.on_key(key))
+            .collect();
+        assert_eq!(acts, [Act::Send(b"\x1b[1;1:3A".to_vec())]);
+        // A function key's release is a release too.
+        assert_eq!(kinds(&mut reader, b"\x1b[15;1:3~"), [Kind::Release]);
     }
 
     #[test]
