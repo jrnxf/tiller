@@ -335,8 +335,8 @@ struct Inner {
     /// The reaper has collected the child. Its exit goes into the record
     /// once its last output is in.
     reaped: bool,
-    /// A close hung up the child's group: what is left of it when the
-    /// pane is forgotten is killed.
+    /// A close hung up the child's group and has not killed it yet: what is
+    /// left of it when the pane is forgotten is killed.
     closing: bool,
     /// Takes the queries the model answers out of the subscribers' bytes.
     filter: QueryFilter,
@@ -661,8 +661,10 @@ impl PaneCell {
     /// still holds the PTY after the child was reaped: the rest of its
     /// group, which outlived it. Says whether it did. The group's id stays
     /// taken while any process of the group lives, so it is not another's.
+    /// A close's kill is spent once this runs.
     fn kill_what_is_left(&self) -> Result<bool, Failure> {
-        let inner = self.live()?;
+        let mut inner = self.live()?;
+        inner.closing = false;
         let left = inner.running() || (inner.reaped && !*self.output_ended.borrow());
         if left {
             self.signal(Signal::KILL);
