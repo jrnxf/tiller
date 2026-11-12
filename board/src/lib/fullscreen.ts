@@ -67,13 +67,28 @@ function releaseEsc() {
 export async function enterPageFullScreen(): Promise<void> {
   await document.documentElement.requestFullscreen();
   const keyboard = keyboardLock();
-  if (!keyboard) return;
+  // Each way the lock fails goes to the console, so a tap of Esc that leaves
+  // full screen has its reason in the developer tools.
+  if (!keyboard) {
+    console.debug("tiller: Esc is not held in full screen: this browser has no Keyboard Lock");
+    return;
+  }
+  if (window.top !== window) {
+    console.debug(
+      "tiller: Esc may not hold in full screen: the board is in a frame, and the browser locks keys only for a top-level page",
+    );
+  }
   try {
     await keyboard.lock(["Escape"]);
-  } catch {
+  } catch (error) {
+    console.debug(
+      "tiller: Esc is not held in full screen: the browser refused the Keyboard Lock",
+      error,
+    );
     return;
   }
   if (document.fullscreenElement !== document.documentElement) {
+    console.debug("tiller: Esc is not held: full screen ended before the Keyboard Lock took");
     keyboard.unlock();
     return;
   }

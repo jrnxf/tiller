@@ -80,15 +80,13 @@ function storedChoice(key: string, unset: boolean) {
 
 const terminalOpen = storedChoice(OPEN_KEY, false);
 
-// Whether the Agents view's stage fits the pane to itself, one choice per
-// kind of pane. A herdr pane is off until the owner turns it on, since the Fit
-// changes the pane for herdr's own window too. A pane in the terminal holder
-// has no other window, so it fits until the owner turns it off.
+// Whether the Agents view's stage fits a herdr pane to itself. It is off
+// until the owner turns it on, since the Fit changes the pane for herdr's own
+// window too. A pane in the terminal holder always fits, with no choice: H11
+// decides how several viewers share its size.
 export const FIT_KEY = "tiller-terminal-fit";
-export const HOLDER_FIT_KEY = "tiller-terminal-fit-holder";
 
 const herdrFit = storedChoice(FIT_KEY, false);
-const holderFit = storedChoice(HOLDER_FIT_KEY, true);
 
 // A pane id the terminal holder gave: `p` and a ULID (terminal-holder.md 2.4).
 // Any other pane id is herdr's (`w2:p1`). The session's pane id alone says
@@ -164,7 +162,6 @@ export function fontReadout(stageFont: number, fitted: boolean, room: RoomFont) 
 // Reads the stage's choices from storage again, as a new tab would: for tests.
 export function reloadTerminalPrefs() {
   herdrFit.store.set(herdrFit.load());
-  holderFit.store.set(holderFit.load());
   stageFontStore.set(loadStageFont());
 }
 
@@ -307,6 +304,30 @@ function advance(): number {
 // line height floored. Null where the canvas cannot say.
 type Cell = { width: number; height: number };
 const measured = new Map<string, Cell>();
+// The cell, in device pixels, that shows the pane's grid in the room: from
+// `cell` down, no wider than the room's width over the grid's columns (when
+// the view fits), and with the grid's rows inside `room` (in CSS pixels, as
+// `rowsHigh` gives them). Under the stage's Fit the cell is `pinned`: the
+// grid on screen is the old one while the pane's new size is on its way, so
+// the stage clips it until the repaint lands, and the text never scales down
+// to it.
+export function gridCell(view: {
+  cell: number;
+  least: number;
+  width: number;
+  cols: number;
+  room: number;
+  rowsHigh: (cell: number) => number;
+  fit: boolean;
+  pinned: boolean;
+}): number {
+  let cell = view.cell;
+  if (view.fit && !view.pinned) cell = Math.min(cell, Math.floor(view.width / view.cols));
+  cell = Math.max(view.least, cell);
+  while (!view.pinned && cell > view.least && view.rowsHigh(cell) > view.room) cell -= 1;
+  return cell;
+}
+
 function cellAt(fontSize: number, dpr: number): Cell | null {
   const key = `${fontSize}@${dpr}`;
   const known = measured.get(key);
@@ -624,8 +645,7 @@ export function LiveTerminal({
   // The paired peer host the agent runs on. Its board host relays the
   // stream, read only: no keys, no Fit.
   peer?: string;
-  // The pane is in the terminal holder, not herdr: the stage fits it by
-  // default, since no other window shows it.
+  // The pane is in the terminal holder, not herdr: the stage always fits it.
   holder?: boolean;
   // The page is in full screen, and the Agents view pins the stage's card
   // over it. The view decides, so the card and its stage always agree.
@@ -659,20 +679,28 @@ export function LiveTerminal({
   const [view, setView] = useState<View>(popup ? (phone ? "sheet" : "dialog") : "inline");
   const [scale, setScale] = useState<Scale>(popup && phone ? "one" : "fit");
   const [font, setFont] = useState(BASE_FONT);
-  // The Fit is the stage's on a computer, while the board is on screen, the
-  // stage is not expanded, and herdr has not refused it for this agent.
-  const fitChoiceFor = holder ? holderFit : herdrFit;
-  const fitWanted = useStore(fitChoiceFor.store);
-  // The phone has no font controls, so its stage keeps the default.
-  const stored = useStore(stageFontStore);
-  const stageFont = phone ? STAGE_FONT : stored;
+  // The Fit is the stage's while the board is on screen, the stage is not
+  // expanded, and the pane has not refused it. A holder pane always fits,
+  // on a phone too, where the sheet keeps the stage's size so the pane does
+  // not resize each time the owner types. A herdr pane fits on the owner's
+  // switch, on a computer only.
+  const herdrFitWanted = useStore(herdrFit.store);
+  const fitWanted = holder || herdrFitWanted;
+  const stageFont = useStore(stageFontStore);
   // Without the Fit, the stage's room can hold the text smaller than the
   // stage font: the size it shows, and whether one size larger still fits.
   const [roomFont, setRoomFont] = useState<RoomFont>({ shown: 0, next: true });
   const visible = useVisible();
   const [unfit, setUnfit] = useState(false);
   // A tail or a peer's pane is never fitted: its stream has no Fit.
-  const fitting = stage && !phone && !watch && fitWanted && !unfit && visible && view === "inline";
+  const fitting =
+    stage &&
+    (holder || !phone) &&
+    !watch &&
+    fitWanted &&
+    !unfit &&
+    visible &&
+    (view === "inline" || (holder && view === "sheet"));
   const fittingRef = useRef(fitting);
   // The stage's room in cells at the stage's font, kept up by the layout.
   const fitTarget = useRef<TerminalSize | null>(null);
@@ -853,15 +881,20 @@ export function LiveTerminal({
     // A hair over the cell, so xterm's own rounding lands on it.
     const sized = (cells: number) => (cells + 0.05) / ratio;
     const inStage = stage && view === "inline";
+    // The answer strip borrows its height from the stage: the pane keeps
+    // its size under it, since a resize redraws the dialog it answers.
+    const lent = inStage ? (stripBox.current?.offsetHeight ?? 0) : 0;
+    // Under the Fit the text stays at the chosen size: a pane whose new size
+    // is still on its way shows clipped by the stage, never scaled down to
+    // its old grid. Only the strip's loan shrinks it, so the dialog under the
+    // strip stays in view.
+    const pinned = inStage && fitting && lent === 0;
     // What the stage holds at its own font, for the Fit. A new size waits
     // for the stage to settle, so a drag of the window opens the stream once.
     if (inStage) {
       const stageCell = Math.floor(stageFont * ratio);
       const metrics = cellAt(sized(stageCell), dpr);
       const high = metrics?.height ?? (screen.offsetHeight / term.rows) * dpr;
-      // The answer strip borrows its height from the stage: the pane keeps
-      // its size under it, since a resize redraws the dialog it answers.
-      const lent = stripBox.current?.offsetHeight ?? 0;
       const target = clampFit(
         Math.floor((width * dpr) / stageCell),
         Math.floor(((box.clientHeight + lent - PAD * 2) * dpr) / high),
@@ -886,18 +919,24 @@ export function LiveTerminal({
     };
     // On the stage, one size over the font, so the readout knows whether
     // Larger shows.
-    let cell = Math.floor((inStage ? stageFont + 1 : most) * ratio);
-    if (fit) cell = Math.min(cell, Math.floor((width * dpr) / term.cols));
-    cell = Math.max(least, cell);
-    while (cell > least && rowsHigh(cell) > room) cell -= 1;
     // The largest cell the room holds this pane at, before any rounding
     // step below, so a pixel off never reads as a full room.
-    const roomCell = cell;
+    const roomCell = gridCell({
+      cell: Math.floor((inStage ? stageFont + 1 : most) * ratio),
+      least,
+      width: width * dpr,
+      cols: term.cols,
+      room,
+      rowsHigh,
+      fit,
+      pinned,
+    });
+    let cell = roomCell;
     if (inStage) cell = Math.max(least, Math.min(cell, Math.floor(stageFont * ratio)));
     if (sized(cell) !== current) term.options.fontSize = sized(cell);
     // A measure off by a pixel can still come out wide: step down until it
     // is inside.
-    if (fit) {
+    if (fit && !pinned) {
       for (
         let tries = 0;
         tries < 4 && screen.offsetWidth > width + 0.5 && cell > least;
@@ -910,11 +949,11 @@ export function LiveTerminal({
     setFont(term.options.fontSize ?? BASE_FONT);
     if (inStage) {
       const fits = (px: number) => Math.floor(px * ratio) <= roomCell;
-      const shown = fits(stageFont) ? stageFont : Math.floor(sized(roomCell));
+      const shown = pinned || fits(stageFont) ? stageFont : Math.floor(sized(roomCell));
       const next = fits(stageFont + 1);
       setRoomFont((was) => (was.shown === shown && was.next === next ? was : { shown, next }));
     }
-  }, [host, box, view, scale, stage, stageFont]);
+  }, [host, box, view, scale, stage, stageFont, fitting]);
 
   // Put the one xterm in the view that shows it, opening it there the first
   // time (xterm measures its cells on open, so the host must be on the page),
@@ -1150,39 +1189,37 @@ export function LiveTerminal({
         <ExpandIcon />
       </button>
     ) : null;
+  // A holder pane always fits, so only a herdr pane has the switch.
   const fitButton =
-    stage && !phone && !watch && screenShown && !ended && view === "inline" ? (
+    stage && !holder && !phone && !watch && screenShown && !ended && view === "inline" ? (
       <button
         type="button"
         className="btn sm mir-tog"
         aria-pressed={fitWanted && !unfit}
         title={
-          holder
-            ? fitWanted && !unfit
-              ? "Stop sizing the pane to the stage"
-              : "Size the pane to fill the stage"
-            : fitWanted && !unfit
-              ? "Give the pane back its herdr size"
-              : "Size the pane in herdr to fill the stage, until you leave it"
+          fitWanted && !unfit
+            ? "Give the pane back its herdr size"
+            : "Size the pane in herdr to fill the stage, until you leave it"
         }
         onClick={() => {
           // After the pane kept its size, a press asks again.
           setUnfit(false);
-          if (!unfit || !fitWanted) fitChoiceFor.toggle();
+          if (!unfit || !fitWanted) herdrFit.toggle();
         }}
       >
         <FitIcon />
         Fit pane
       </button>
     ) : null;
-  // The stage's font size, on a computer. A press keeps focus where it was,
+  // The stage's font size. A press keeps focus where it was,
   // so typing goes on.
   const readout = fontReadout(stageFont, fitting && !ended, roomFont);
-  const roomHint = watch
-    ? "The pane fills the stage at this size"
-    : "The pane fills the stage at this size. Fit pane sizes it to the text";
+  const roomHint =
+    watch || holder
+      ? "The pane fills the stage at this size"
+      : "The pane fills the stage at this size. Fit pane sizes it to the text";
   const fontControls =
-    stage && !phone && screenShown && view === "inline" ? (
+    stage && screenShown && view === "inline" ? (
       <span className="mir-font" role="group" aria-label="Font size">
         <button
           type="button"

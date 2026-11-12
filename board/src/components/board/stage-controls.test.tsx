@@ -13,12 +13,12 @@ import { createTestQueryClient, loadRouteChunks } from "../../test-app";
 import {
   FIT_KEY,
   FONT_KEY,
-  HOLDER_FIT_KEY,
   STAGE_FONT,
   STAGE_FONT_MAX,
   STAGE_FONT_MIN,
   clampStageFont,
   fontReadout,
+  gridCell,
   isHolderPane,
   reloadTerminalPrefs,
 } from "./live-terminal";
@@ -186,26 +186,13 @@ test("a holder pane id is p and a ULID, and a herdr pane id is not", () => {
   expect(isHolderPane(undefined)).toBe(false);
 });
 
-test("a holder pane fits the stage by default, and the owner's choice holds", async () => {
-  const bar = await renderStage("holder");
-  const fit = bar.getByRole("button", { name: "Fit pane" });
-  expect(fit.getAttribute("aria-pressed")).toBe("true");
-  expect(fit.getAttribute("title")).toBe("Stop sizing the pane to the stage");
-
-  fireEvent.click(fit);
-  await waitFor(() => expect(fit.getAttribute("aria-pressed")).toBe("false"));
-  expect(fit.getAttribute("title")).toBe("Size the pane to fill the stage");
-  expect(localStorage.getItem(HOLDER_FIT_KEY)).toBe("0");
-  // The herdr choice is its own.
-  expect(localStorage.getItem(FIT_KEY)).toBeNull();
-
-  // A new tab reads the stored choice.
+test("a holder pane always fits the stage, so it has no Fit pane switch", async () => {
+  localStorage.setItem(FIT_KEY, "0");
   reloadTerminalPrefs();
-  cleanup();
-  const again = await renderStage("holder");
-  expect(again.getByRole("button", { name: "Fit pane" }).getAttribute("aria-pressed")).toBe(
-    "false",
-  );
+  const bar = await renderStage("holder");
+  expect(bar.queryByRole("button", { name: "Fit pane" })).toBeNull();
+  // The font steps from the choice, which the Fit keeps on screen.
+  expect(bar.getByRole("button", { name: /^Font size / }).textContent).toBe(String(STAGE_FONT));
 });
 
 test("a herdr pane keeps its own size until the owner fits it", async () => {
@@ -217,8 +204,14 @@ test("a herdr pane keeps its own size until the owner fits it", async () => {
   );
   fireEvent.click(fit);
   await waitFor(() => expect(fit.getAttribute("aria-pressed")).toBe("true"));
+  expect(fit.getAttribute("title")).toBe("Give the pane back its herdr size");
   expect(localStorage.getItem(FIT_KEY)).toBe("1");
-  expect(localStorage.getItem(HOLDER_FIT_KEY)).toBeNull();
+
+  // A new tab reads the stored choice.
+  reloadTerminalPrefs();
+  cleanup();
+  const again = await renderStage("default");
+  expect(again.getByRole("button", { name: "Fit pane" }).getAttribute("aria-pressed")).toBe("true");
 });
 
 test("the font size steps by one pixel, clamps, persists, and goes back to the default", async () => {
@@ -309,6 +302,31 @@ test("the font readout shows the size on screen, and names the choice when they 
   });
 });
 
+// How high a grid's rows are at a cell, on a 2x screen with rows 1.2 cells high.
+const rowsHigh = (rows: number) => (its: number) => (its / 2) * 1.2 * rows;
+
+test("under the Fit the font size stays fixed across a stage resize", () => {
+  // A 14 px font on a 2x screen: a 28 px cell, and rows 17 CSS px high.
+  const cell = 14 * 2;
+  // The pane's grid is still 150 by 40 from the wide stage.
+  const grid = { cell, least: 12, cols: 150, rowsHigh: rowsHigh(40), fit: true };
+  const wide = { ...grid, width: 150 * cell, room: 40 * 17 };
+  // The window goes narrower and lower: half the width and two thirds the height.
+  const narrow = { ...grid, width: 75 * cell, room: 27 * 17 };
+
+  // Under the Fit the cell stays at the chosen font while the new size is on
+  // its way: the stage clips the old grid.
+  expect(gridCell({ ...wide, pinned: true })).toBe(cell);
+  expect(gridCell({ ...narrow, pinned: true })).toBe(cell);
+  expect(fontReadout(STAGE_FONT, true, room(STAGE_FONT)).shown).toBe(STAGE_FONT);
+
+  // Without the Fit the text scales down so the old grid shows whole.
+  expect(gridCell({ ...wide, pinned: false })).toBe(cell);
+  const scaled = gridCell({ ...narrow, pinned: false });
+  expect(scaled).toBeLessThanOrEqual(Math.floor((75 * cell) / 150));
+  expect(rowsHigh(40)(scaled)).toBeLessThanOrEqual(narrow.room);
+});
+
 test("full screen pins the agent's card over the page, and a second press or Esc leaves it", async () => {
   const { request, exit, leave } = stubFullScreen();
   const bar = await renderStage("holder");
@@ -385,13 +403,20 @@ test("where the browser locks Esc, a tap goes to the pane and a held Esc leaves"
   await bar.findByRole("button", { name: "Full screen", pressed: false });
 });
 
-test("a lock the browser refuses keeps the browser's own Esc", async () => {
+test("a lock the browser refuses keeps the browser's own Esc, and says why in the console", async () => {
   stubFullScreen();
   const { lock, unlock } = stubKeyboardLock(true);
+  const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
   const bar = await renderStage("holder");
   fireEvent.click(bar.getByRole("button", { name: "Full screen" }));
   const leaveButton = await bar.findByRole("button", { name: "Full screen", pressed: true });
   await waitFor(() => expect(lock).toHaveBeenCalledTimes(1));
+  await waitFor(() =>
+    expect(debug).toHaveBeenCalledWith(
+      "tiller: Esc is not held in full screen: the browser refused the Keyboard Lock",
+      expect.anything(),
+    ),
+  );
   expect(leaveButton.getAttribute("title")).toBe("Leave full screen (Esc)");
   // No toast: full screen opened.
   expect(screen.queryByText("Full screen did not open")).toBeNull();
@@ -538,11 +563,16 @@ test("with no Fullscreen API the button is not there, and Expand still is", asyn
   expect(bar.getByRole("button", { name: "Larger text" })).toBeTruthy();
 });
 
-test("on a phone the stage has no font or full screen buttons, which the sheet stands for", async () => {
+test("on a phone the stage has the font buttons, and no full screen, which the sheet stands for", async () => {
   stubFullScreen();
   stubMedia(true);
   const bar = await renderStage("holder", true);
   expect(bar.queryByRole("button", { name: "Full screen" })).toBeNull();
-  expect(bar.queryByRole("button", { name: "Larger text" })).toBeNull();
+  expect(bar.queryByRole("button", { name: "Fit pane" })).toBeNull();
+  const size = () => bar.getByRole("button", { name: /^Font size / });
+  expect(size().textContent).toBe(String(STAGE_FONT));
+  fireEvent.click(bar.getByRole("button", { name: "Smaller text" }));
+  await waitFor(() => expect(size().textContent).toBe(String(STAGE_FONT - 1)));
+  expect(localStorage.getItem(FONT_KEY)).toBe(String(STAGE_FONT - 1));
   expect(bar.getByRole("button", { name: "Expand the terminal" })).toBeTruthy();
 });
