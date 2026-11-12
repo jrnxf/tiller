@@ -1,6 +1,7 @@
 //! The terminal holder (`terminal-holder.md` 2, 3): `tiller holder` keeps
 //! each agent's PTY, a screen model of it and a socket that serves both.
 
+pub mod detach;
 pub mod holder;
 pub mod input;
 pub mod keys;

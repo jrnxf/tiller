@@ -30,6 +30,7 @@ tiller-daemon.workspace = true
 tiller-herdr.workspace = true
 tiller-holder.workspace = true
 tiller-observe.workspace = true
+tiller-panes.workspace = true
 tiller-reconcile.workspace = true
 toml.workspace = true
 tracing.workspace = true
@@ -42,7 +43,6 @@ rsa.workspace = true
 tempfile.workspace = true
 tiller-core = { workspace = true, features = ["test-owner"] }
 tiller-herdr = { workspace = true, features = ["testing"] }
-tiller-panes.workspace = true
 
 [lints]
 workspace = true

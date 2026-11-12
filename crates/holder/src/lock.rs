@@ -67,6 +67,14 @@ impl HolderLock {
     }
 }
 
+/// The pid the lock file at `path` names, when it is a live process. One
+/// read, no wait, and the lock is not taken: a read only probe of whether a
+/// holder runs.
+pub fn live_pid(path: &Path) -> Option<u32> {
+    let pid = std::fs::read_to_string(path).ok()?.trim().parse().ok()?;
+    is_alive(pid).then_some(pid)
+}
+
 /// The pid in a taken lock's file, once it names a live process.
 fn holder_pid(file: &mut File) -> std::io::Result<Option<u32>> {
     for read in 0..PID_READS {
