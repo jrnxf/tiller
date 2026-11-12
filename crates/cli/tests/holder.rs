@@ -464,7 +464,10 @@ fn a_subscriber_that_reads_all_the_time_on_a_flooding_pane_is_not_cut() {
         match updates.rx.recv_timeout(Duration::from_secs(1)) {
             Ok(Update::Output(bytes)) => seen += bytes.len(),
             Ok(other) => panic!("unexpected {other:?} after {seen} bytes\n{}", holder.log()),
-            Err(err) => panic!("no output for 1 s ({err}) after {seen} bytes\n{}", holder.log()),
+            Err(err) => panic!(
+                "no output for 1 s ({err}) after {seen} bytes\n{}",
+                holder.log()
+            ),
         }
     }
     assert!(seen > 1024 * 1024, "only {seen} bytes in 3 s");
