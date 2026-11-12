@@ -10,7 +10,7 @@
 use std::io;
 use std::os::fd::OwnedFd;
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -23,6 +23,7 @@ use tiller_panes::{Exit, Listing, Pane, PaneId, PaneState, Size, Spawn};
 use tokio::io::unix::AsyncFd;
 use tokio::sync::{Notify, mpsc, watch};
 
+use crate::input::{Chunk, INPUT_CAP, InputQueue, PANE_INPUT_CAP};
 use crate::model::{MAX_COLS, MAX_ROWS, MIN_COLS, MIN_ROWS, Model, ModelPanic};
 use crate::outbox::{Outbox, Refused};
 use crate::pty;
@@ -30,11 +31,6 @@ use crate::pty;
 /// How long an exit waits for the child's last output before `exited` is
 /// sent, when something else still holds the PTY open.
 pub const EXIT_DRAIN: Duration = Duration::from_millis(250);
-
-/// The most raw input bytes that may wait for a pane's app to read them.
-/// Input past it cuts the connection that sent it, so a gap in a paste is
-/// never silent. One frame is taken whole when no input waits.
-pub const INPUT_CAP: usize = 1024 * 1024;
 
 /// The most a PTY read takes at once.
 const READ_CHUNK: usize = 64 * 1024;
@@ -69,11 +65,24 @@ fn frame_bytes(frame: &Frame) -> Option<Vec<u8>> {
 }
 
 /// One client connection, as the panes see it.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Conn {
+    /// Unique within the holder's run, never reused.
+    id: u64,
     pub outbox: Outbox,
     /// This connection's subscriptions: each stream and its pane.
     streams: Mutex<Vec<(u32, Arc<PaneCell>)>>,
+}
+
+impl Default for Conn {
+    fn default() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self {
+            id: NEXT.fetch_add(1, Ordering::Relaxed),
+            outbox: Outbox::default(),
+            streams: Mutex::default(),
+        }
+    }
 }
 
 impl Conn {
@@ -198,10 +207,9 @@ pub struct PaneCell {
     /// The child's pid, which is also its process group's id.
     pid: Pid,
     master: AsyncFd<OwnedFd>,
-    input: mpsc::UnboundedSender<Vec<u8>>,
-    /// Raw input bytes queued or being written, at most [`INPUT_CAP`] but
-    /// for one whole frame.
-    input_queued: AtomicUsize,
+    input: mpsc::UnboundedSender<Chunk>,
+    /// The raw input not yet written, and its caps.
+    input_queue: Arc<InputQueue>,
     inner: Mutex<Inner>,
     /// True once the PTY read ends: every holder of the slave closed it.
     output_ended: watch::Sender<bool>,
@@ -416,7 +424,7 @@ impl Holder {
             pid: started.pid,
             master,
             input,
-            input_queued: AtomicUsize::new(0),
+            input_queue: Arc::default(),
             inner: Mutex::new(Inner {
                 record: record.clone(),
                 model: Model::new(size),
@@ -539,8 +547,7 @@ impl Holder {
     /// A kind 2 frame from `conn`: raw bytes for the pane `num`, with no
     /// reply. Input for a pane that is gone or has exited is dropped. Input
     /// is never waited for, as that would hold up every other request on
-    /// the connection: past the pane's [`INPUT_CAP`], `conn` is cut. Its
-    /// input to other panes counts apart, so it is not cut for them.
+    /// the connection: input past a cap of `crate::input` cuts `conn`.
     pub fn input(&self, conn: &Conn, num: u32, bytes: Vec<u8>) {
         let Some(cell) = self.by_num(num) else {
             tracing::debug!(num, "raw input for no pane");
@@ -550,23 +557,16 @@ impl Holder {
             tracing::debug!(pane = %cell.id, "raw input for an exited pane");
             return;
         }
-        let len = bytes.len();
-        let taken = cell
-            .input_queued
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-                (queued == 0 || queued + len <= INPUT_CAP).then_some(queued + len)
-            });
-        if taken.is_err() {
+        let Some(chunk) = cell.input_queue.take(conn.id, bytes) else {
             if conn.cut() {
                 tracing::warn!(
                     pane = %cell.id,
-                    "the pane's app left {INPUT_CAP} bytes of raw input unread, so the client that sent more was cut"
+                    "the pane's app left raw input unread past a cap ({INPUT_CAP} bytes for one client, {PANE_INPUT_CAP} in all), so the client that sent more was cut"
                 );
             }
             return;
-        }
-        if cell.input.send(bytes).is_err() {
-            cell.input_queued.fetch_sub(len, Ordering::AcqRel);
+        };
+        if cell.input.send(chunk).is_err() {
             tracing::debug!(pane = %cell.id, "raw input for a pane whose PTY is closed");
         }
     }
@@ -673,15 +673,12 @@ async fn read_pty(cell: Arc<PaneCell>) {
 /// Writes raw input to a pane's PTY, in order, as fast as it takes it.
 /// It ends once the PTY's output ends: with the slave closed, the master
 /// takes a few KiB and then is never writable again.
-/// A chunk counts toward the pane's [`INPUT_CAP`] until it is written.
-async fn write_input(cell: Arc<PaneCell>, mut input: mpsc::UnboundedReceiver<Vec<u8>>) {
+/// A chunk counts toward the pane's input caps until it is written, or
+/// dropped with the rest of the queue when this ends.
+async fn write_input(cell: Arc<PaneCell>, mut input: mpsc::UnboundedReceiver<Chunk>) {
     let mut ended = cell.output_ended.subscribe();
-    while let Some(bytes) = input.recv().await {
-        let _counted = Counted {
-            queued: &cell.input_queued,
-            len: bytes.len(),
-        };
-        let mut rest = bytes.as_slice();
+    while let Some(chunk) = input.recv().await {
+        let mut rest = chunk.bytes.as_slice();
         while !rest.is_empty() {
             let writable = tokio::select! {
                 writable = cell.master.writable() => writable,
@@ -701,18 +698,6 @@ async fn write_input(cell: Arc<PaneCell>, mut input: mpsc::UnboundedReceiver<Vec
                 Err(_would_block) => {}
             }
         }
-    }
-}
-
-/// Input bytes that count toward a pane's queue until this drops.
-struct Counted<'a> {
-    queued: &'a AtomicUsize,
-    len: usize,
-}
-
-impl Drop for Counted<'_> {
-    fn drop(&mut self) {
-        self.queued.fetch_sub(self.len, Ordering::AcqRel);
     }
 }
 
@@ -792,8 +777,9 @@ fn spawn_failure(req: &Spawn, err: &io::Error) -> Failure {
 
 /// This boot's id, so a client can tell a reboot from a holder restart:
 /// Linux's `boot_id`, or macOS's boot session id. Empty when the system
-/// reports neither. The daemon reads the same two (`workers::boot_id`);
-/// the two move to one place once the daemon runs on the holder.
+/// reports neither. The daemon reads the same two, the same way
+/// (`workers::boot_id`); the two move to one place once the daemon runs on
+/// the holder.
 fn boot_id() -> String {
     if let Ok(id) = std::fs::read_to_string("/proc/sys/kernel/random/boot_id") {
         return id.trim().to_owned();

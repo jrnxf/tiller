@@ -180,8 +180,10 @@ async fn connection(holder: Arc<Holder>, stream: UnixStream) {
     tokio::select! {
         () = &mut writer => {
             // The writer ends first on a cut or a broken socket. The reader
-            // goes on taking what the client still sends, for a short time,
-            // so the client reads the close and not a reset.
+            // runs nothing more, but takes what the client still sends for a
+            // short time, so a client that stops sends in time reads the
+            // close and not a reset.
+            conn.outbox.close();
             let _ = tokio::time::timeout(CLOSE_FLUSH, &mut reader).await;
         }
         () = &mut reader => {
@@ -228,6 +230,12 @@ async fn read_loop(holder: &Arc<Holder>, conn: &Arc<Conn>, mut input: OwnedReadH
     let handshake_by = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
     loop {
         loop {
+            // A cut connection runs nothing more, so no input comes after a
+            // gap.
+            if conn.outbox.is_closed() {
+                discard(&mut input, &mut buf).await;
+                return;
+            }
             let frame = match decoder.next_frame() {
                 Ok(Some(frame)) => frame,
                 Ok(None) => break,
@@ -236,12 +244,6 @@ async fn read_loop(holder: &Arc<Holder>, conn: &Arc<Conn>, mut input: OwnedReadH
                     return;
                 }
             };
-            // A cut connection takes nothing more, so no input comes after
-            // a gap. Its frames are still read, so the socket closes clean
-            // once its last frames are out.
-            if conn.outbox.is_closed() {
-                continue;
-            }
             let next = if greeted {
                 frame_in(holder, conn, frame).await
             } else {
@@ -266,6 +268,15 @@ async fn read_loop(holder: &Arc<Holder>, conn: &Arc<Conn>, mut input: OwnedReadH
         match read {
             Ok(0) | Err(_) => return,
             Ok(len) => decoder.push(&buf[..len]),
+        }
+    }
+}
+
+/// Reads and drops what a closing client still sends, until it closes.
+async fn discard(input: &mut OwnedReadHalf, buf: &mut [u8]) {
+    while let Ok(len) = input.read(buf).await {
+        if len == 0 {
+            return;
         }
     }
 }

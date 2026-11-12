@@ -2,6 +2,7 @@
 //! each agent's PTY, a screen model of it and a socket that serves both.
 
 pub mod holder;
+pub mod input;
 pub mod lock;
 pub mod model;
 pub mod outbox;

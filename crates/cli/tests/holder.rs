@@ -373,7 +373,7 @@ fn input_past_the_cap_for_an_app_that_reads_none_cuts_that_client_only() {
 }
 
 #[test]
-fn a_client_cut_for_a_stuck_pane_leaves_input_to_other_panes_alone() {
+fn a_client_cut_for_a_stuck_pane_leaves_other_clients_and_panes_alone() {
     let world = World::new();
     let holder = Holder::start(&world);
     let stuck = holder.spawn(&world, &["/bin/sh", "-c", "sleep 30"]);
@@ -395,7 +395,13 @@ fn a_client_cut_for_a_stuck_pane_leaves_input_to_other_panes_alone() {
     let err = flooder.list().unwrap_err();
     assert!(matches!(err, PanesError::Unreachable(_)), "{err}");
 
-    // This client's input to the pane that reads still goes through.
+    // A paste from this client to the stuck pane counts apart from the
+    // flood, so it does not cut this client, though the two pass the cap.
+    holder
+        .client
+        .raw_input(stuck.num, &b"y".repeat(256 * 1024))
+        .unwrap();
+    // Its input to the pane that reads still goes through.
     holder
         .client
         .raw_input(reading.num, b"cross-pane\n")
@@ -429,5 +435,7 @@ fn a_db_other_than_the_homes_is_refused() {
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("do not apply to the holder"), "{stderr}");
+    let home = world.home().display().to_string();
+    assert!(stderr.contains(&home), "{stderr}");
     assert!(!socket_path(&world.home()).exists());
 }

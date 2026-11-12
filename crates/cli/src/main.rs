@@ -326,16 +326,7 @@ fn main() -> ExitCode {
         };
     }
     if let Command::Holder = &cli.command {
-        // The holder keeps no database: a `--db` other than the home's own
-        // would suggest a home it does not serve.
-        if daemon::refuse_db(cli.db.as_deref()).is_some() {
-            eprintln!(
-                "tiller holder: --db and TILLER_DB do not apply to the holder: it serves the home {}. Set TILLER_HOME to choose another.",
-                App::from_env(None).home.display()
-            );
-            return ExitCode::from(2);
-        }
-        return holder::run();
+        return holder::run(cli.db.as_deref());
     }
     if let Command::Daemon(args) = &cli.command {
         if let Some(message) = daemon::refuse_db(cli.db.as_deref()) {
