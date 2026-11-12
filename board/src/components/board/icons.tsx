@@ -163,13 +163,6 @@ export const SendIcon = () => (
   </Glyph>
 );
 
-// Interrupt: the Escape that stops the agent's step.
-export const EscIcon = () => (
-  <Glyph>
-    <path d="M8 2.5v6M4.7 4.6a5 5 0 1 0 6.6 0" {...stroke} strokeWidth={1.4} {...round} />
-  </Glyph>
-);
-
 // Stop agent: the pane closes and its session ends.
 export const StopIcon = () => (
   <Glyph>

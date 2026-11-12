@@ -18,6 +18,8 @@ import { serverNow } from "../../lib/clock";
 import { LIMITS, isTooLong } from "../../lib/limits";
 import { lisbonDate, lisbonInstant } from "../../lib/lisbon-input";
 import { agentsPath, queryKeyFor } from "../../lib/queries";
+import { receiptView, receiptsStore } from "../../lib/receipts";
+import { useStore } from "../../lib/store";
 import { ActionFailure } from "../attention/action-failure";
 import { ActionError, sendMutation } from "../attention/api";
 import { PauseIcon, PlayIcon, ReopenIcon } from "../attention/icons";
@@ -27,8 +29,7 @@ import { useAction } from "../attention/use-action";
 import { Modal } from "../ui/modal";
 import type { ActivityView } from "./activity";
 import { formatLisbonMoment } from "./format";
-import { ChevronDownIcon, PaneIcon, StopIcon } from "./icons";
-import { SteerState } from "./steer-bar";
+import { ChevronDownIcon, PaneIcon, QueuedIcon, StopIcon } from "./icons";
 import { showToast } from "./toast";
 import "../attention/card-lifecycle.css";
 import "./run-menu.css";
@@ -603,6 +604,45 @@ export function PausedNote({ pause, receiptKey }: { pause: PauseInfo; receiptKey
         </p>
       )}
     </div>
+  );
+}
+
+// Where the "go on" line is: queued until the pane is idle, then typed.
+function SteerState({ receiptKey, text }: { receiptKey: string; text: string }) {
+  const state = useStore(receiptsStore);
+  const receipt = state.byKey[receiptKey];
+  if (!receipt) return <span>Typed when the pane is idle.</span>;
+  const view = receiptView(receipt, state);
+  const pill = (
+    <span className="q" title={text}>
+      <QueuedIcon />
+      <span>{text}</span>
+    </span>
+  );
+  if (view.stage === "failed") {
+    return (
+      <span className="av-steer-line" role="alert" data-state="failed">
+        <b>Not typed.</b>
+        {pill}
+        <span>Delivery failed, so the daemon opened a recovery item for it.</span>
+      </span>
+    );
+  }
+  if (view.stage === "recorded") {
+    return (
+      <span className="av-steer-line" role="status" data-state="queued">
+        <b>Queued.</b>
+        {pill}
+        <span>Typed when the pane is idle.</span>
+      </span>
+    );
+  }
+  return (
+    <span className="av-steer-line" role="status" data-state="typed">
+      <b>Typed.</b>
+      {pill}
+      <span>Into the pane at {formatLisbonMoment(view.deliveredAt) ?? "an unknown time"}.</span>
+    </span>
   );
 }
 

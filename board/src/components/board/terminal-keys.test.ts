@@ -4,7 +4,7 @@ import { env } from "node:process";
 
 import { expect, test } from "vitest";
 
-import { SOFT_KEYS, keyNames, pressTypes, typedKeys } from "./terminal-keys";
+import { SOFT_KEYS, keyNames, pressTypes, typedKeys, unsentNote } from "./terminal-keys";
 
 test.each([
   ["a", ["a"]],
@@ -51,6 +51,34 @@ test.each([
   ["\x1b[2~", "Insert"],
 ])("%j is a key herdr cannot send, so it is reported as %s", (data, name) => {
   expect(typedKeys(data)).toEqual({ keys: [], unsent: [name] });
+});
+
+// xterm sets its meta bit (8) for Cmd on a Mac. A key name has no Meta, and
+// the key without it is another key, so it is reported, never sent bare.
+test.each([
+  ["\x1b[1;9A", "Meta+Up"],
+  ["\x1b[1;10B", "Meta+Down"],
+  ["\x1b[1;13D", "Meta+Left"],
+  ["\x1b[1;16C", "Meta+Right"],
+  ["\x1b[1;9P", "Meta+F1"],
+  ["\x1b[15;9~", "Meta+F5"],
+])("%j has the meta bit, so it is reported as %s and not sent", (data, name) => {
+  expect(typedKeys(data)).toEqual({ keys: [], unsent: [name] });
+});
+
+test("Meta+Up between two keys sends the two keys and not Up", () => {
+  expect(typedKeys("a\x1b[1;9Ab")).toEqual({ keys: ["a", "b"], unsent: ["Meta+Up"] });
+});
+
+test("a holder pane's unsent keys point at tiller attach, a herdr pane's at herdr", () => {
+  expect(unsentNote(["Meta+Up"], true)).toEqual({
+    title: "The board can't send Meta+Up",
+    detail: "Nothing was sent for that key. Use tiller attach for it.",
+  });
+  expect(unsentNote(["Meta+Up", "F13", "Meta+F1"], false)).toEqual({
+    title: "herdr can't send Meta+Up, F13 and Meta+F1",
+    detail: "Nothing was sent for that key. Use herdr itself for it.",
+  });
 });
 
 test.each([

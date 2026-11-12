@@ -602,3 +602,15 @@ test("on a phone the stage has the font buttons, and no full screen, which the s
   expect(localStorage.getItem(FONT_KEY)).toBe(String(STAGE_FONT - 1));
   expect(bar.getByRole("button", { name: "Expand the terminal" })).toBeTruthy();
 });
+
+test("a holder pane the daemon has not read yet says so, with no 'observed never'", async () => {
+  await renderStage("holder");
+  const rows = await screen.findAllByTestId(/^agent-/);
+  const fresh = rows.filter((row) => row.textContent?.includes("Not observed yet"));
+  expect(fresh).toHaveLength(1);
+  expect(document.body.textContent).not.toMatch(/observed never|Unknown/);
+  fireEvent.click(fresh[0] as HTMLElement);
+  await waitFor(() =>
+    expect(document.querySelector(".av-card-h .av-who-2")?.textContent).toBe("Not observed yet"),
+  );
+});

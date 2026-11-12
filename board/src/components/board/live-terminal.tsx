@@ -45,7 +45,7 @@ import {
   TerminalIcon,
   WarnIcon,
 } from "./icons";
-import { SOFT_KEYS, type SoftKey, pressTypes, typedKeys } from "./terminal-keys";
+import { SOFT_KEYS, type SoftKey, pressTypes, typedKeys, unsentNote } from "./terminal-keys";
 import { TerminalInput, TerminalStream, TerminalTail, readHistory } from "./terminal-stream";
 import type { Fitting, Mirror, MirrorStatus, Screen, TerminalSize } from "./terminal-stream";
 import { showToast } from "./toast";
@@ -404,11 +404,6 @@ const SOFT_FACES: Record<SoftKey, readonly [ReactNode, string, boolean]> = {
   enter: [<EnterIcon key="e" />, "Enter", true],
 };
 
-function list(names: string[]): string {
-  if (names.length < 2) return names.join("");
-  return `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
-}
-
 function StatusMark({ status }: { status: MirrorStatus }) {
   useTick();
   // A tail's dot goes stale with its age, as its footer does.
@@ -549,6 +544,7 @@ function mountTerminal(
   fitting: Fitting,
   tail: boolean,
   peer: string | undefined,
+  holder: boolean,
 ): { input: TerminalInput | null; stream: Mirror; dispose: () => void } {
   const screen: Screen = {
     reset(cols, rows) {
@@ -586,11 +582,8 @@ function mountTerminal(
     const { keys, unsent } = typedKeys(typed);
     input.keys(keys);
     if (unsent.length > 0) {
-      showToast(
-        "bad",
-        `herdr can't send ${list(unsent)}`,
-        "Nothing was sent for that key. Use herdr itself for it.",
-      );
+      const note = unsentNote(unsent, holder);
+      showToast("bad", note.title, note.detail);
     }
   });
   // A paste goes as one piece of text, not as typed keys.
@@ -808,6 +801,7 @@ export function LiveTerminal({
           },
           tail,
           peer,
+          holder,
         );
         termRef.current = term;
         inputRef.current = mounted.input;
@@ -837,7 +831,7 @@ export function LiveTerminal({
       setUnfit(false);
       closeHistory();
     };
-  }, [sessionId, host, closeHistory, tail, peer]);
+  }, [sessionId, host, closeHistory, tail, peer, holder]);
 
   // The way out of full screen takes focus from the page under the card, or
   // from nowhere. A carry that waits to type here, on a pane that can still go

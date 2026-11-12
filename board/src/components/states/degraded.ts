@@ -39,7 +39,7 @@ export function laneHealth(
       kind: "stale",
       since: formatLisbonMoment(orchestrator.activity_observed_at, now),
       ago: agoText(orchestrator.activity_observed_at, now),
-      at: orchestrator.activity_observed_at,
+      at: orchestrator.activity_observed_at ?? "",
     };
   }
   return { kind: "ok" };

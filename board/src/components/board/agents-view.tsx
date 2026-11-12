@@ -35,7 +35,6 @@ import type { SwitchKey, TerminalControl } from "./live-terminal";
 import { AsOf, HostChip, PeerNote } from "./host-chip";
 import { useAmbiguousIds, useStanding, useNamedProjects } from "./peer-state";
 import { StaleChip } from "./stale-sessions";
-import { NO_RUN, NOT_WORKING, SteerBar } from "./steer-bar";
 import { RestartOrchestratorDialog } from "./orchestrator-start";
 import {
   PausedNote,
@@ -445,7 +444,11 @@ function Details({
         <dt>Freshness</dt>
         <dd>
           <i className={`ld ${activity.dot}`} />
-          <Ago at={agent.activity_observed_at} prefix="observed" oldAfter={300} />
+          {agent.activity_observed_at ? (
+            <Ago at={agent.activity_observed_at} prefix="observed" oldAfter={300} />
+          ) : (
+            "Not observed yet"
+          )}
         </dd>
         {agent.last_output_at ? (
           <>
@@ -582,7 +585,7 @@ function Stage({
   const activity = hostAwareActivity(agent, host);
   const needs = activity.dot === "waiting";
   const remote = host?.kind === "remote";
-  // The run's controls act on a pane on this machine only, as steer does.
+  // The run's controls act on a pane on this machine only.
   const local = !remote && !peerHost;
   const state = runStateOf(agent, activity);
   const orchestrator = agent.role === "orchestrator";
@@ -700,12 +703,17 @@ function Stage({
           <div className="av-who-2" data-s={needs ? "needs" : activity.dot}>
             <span className="lb">{activity.label}</span>
             {detail ? ` · ${detail}` : null}
-            {" · "}
             {standing.dim ? (
-              <AsOf asOf={standing.asOf} />
-            ) : (
-              <Ago at={agent.activity_observed_at} prefix="observed" oldAfter={300} />
-            )}
+              <>
+                {" · "}
+                <AsOf asOf={standing.asOf} />
+              </>
+            ) : agent.activity_observed_at ? (
+              <>
+                {" · "}
+                <Ago at={agent.activity_observed_at} prefix="observed" oldAfter={300} />
+              </>
+            ) : null}
           </div>
         </div>
         <div className="av-acts">
@@ -805,19 +813,6 @@ function Stage({
       ) : null}
       <div className="av-card-b" ref={bodyRef}>
         {body}
-        {
-          // Steer and interrupt reach a pane on this machine only: a peer's
-          // pane takes keys and the Fit alone, and a saved machine's pane is
-          // read as a tail.
-          remote || peerHost ? null : (
-            <SteerBar
-              key={`${agent.session_id}:steer`}
-              sessionId={agent.session_id}
-              name={line.name}
-              off={!agent.run_id ? NO_RUN : activity.dot === "live" ? null : NOT_WORKING}
-            />
-          )
-        }
       </div>
       <Details
         line={line}

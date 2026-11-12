@@ -28,7 +28,7 @@ type Answer =
   | {
       kind: "sent";
       at: string;
-      seen: string;
+      seen: string | null;
       n: number;
       text: string;
       // A cursor menu takes arrow keys, not the digit, so the receipt names no key.
@@ -84,7 +84,8 @@ export function AnswerStrip({
 }: {
   sessionId: string;
   waiting: boolean;
-  observedAt: string;
+  // Null while the daemon has not read the pane: there is no wait to answer.
+  observedAt: string | null;
   agent?: StripAgent | null;
   // What shows in the strip's place once a read found no dialog to answer.
   fallback?: ReactNode;
@@ -103,7 +104,8 @@ export function AnswerStrip({
   // hook did) keeps it; a later one after an answer went is the next wait.
   const [wait, setWait] = useState<string | null>(null);
   const answered = answer?.kind === "sent" && answer.at === wait && answer.seen !== observedAt;
-  const next = waiting ? (wait === null || answered ? observedAt : wait) : null;
+  const next =
+    waiting && observedAt !== null ? (wait === null || answered ? observedAt : wait) : null;
   if (next !== wait) setWait(next);
   const read = useQuery({
     queryKey: ["prompt", sessionId, next],
@@ -128,7 +130,9 @@ export function AnswerStrip({
   const dialog = waiting && !read.isError ? read.data?.prompt : null;
 
   const tap = async (shown: PromptDialog, n: number, text: string) => {
-    const at = wait ?? observedAt;
+    // A dialog shows only for a wait the strip has named.
+    if (wait === null) return;
+    const at = wait;
     const seen = observedAt;
     const digit = shown.layout === "permission";
     setAnswer({ kind: "sending", at, n });

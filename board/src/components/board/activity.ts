@@ -81,7 +81,10 @@ export function agentActivity(
     case "stale":
       return { dot: "stale", label: "Stale", old: true };
     default:
-      return { dot: "unknown", label: "Unknown", old: false };
+      // A pane the daemon has not read yet has no activity to call unknown.
+      return age === null
+        ? { dot: "unknown", label: "Not observed yet", old: false }
+        : { dot: "unknown", label: "Unknown", old: false };
   }
 }
 
