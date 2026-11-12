@@ -411,7 +411,7 @@ impl Panes for FakePanes {
 
     fn screen(&self, pane: &PaneId, read: Read, format: Format) -> Result<Screen> {
         let world = self.call(format!("screen {pane} {read:?} {format:?}"))?;
-        let record = world.pane(pane)?;
+        // Before the pane, as the client refuses it before it is sent.
         if !read.in_range() {
             return Err(PanesError::Refused {
                 request: "screen",
@@ -419,6 +419,7 @@ impl Panes for FakePanes {
                 message: format!("recent takes 1 to {MAX_RECENT} rows, not {read:?}"),
             });
         }
+        let record = world.pane(pane)?;
         // The visible screen is the last `rows` rows, with no scrollback.
         let lines = match read {
             Read::Visible => usize::from(record.rows),
