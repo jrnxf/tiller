@@ -14,10 +14,12 @@
 //!   input is never silent.
 //! - A cut client's frames that wait are dropped, so a client cut again
 //!   and again does not grow the queue. A frame being written is written
-//!   to its end, so no other client's input follows half a sequence. A client that closes, or breaks off, keeps the input
-//!   it sent, which is written as the app reads: the holder had all of it.
+//!   to its end, so no other client's input follows half a sequence. A
+//!   client that closes, or breaks off, keeps the input it sent, which is
+//!   written as the app reads: the holder had all of it.
 //!
-//! H04 puts back-pressure in place of this.
+//! This is the cap of `terminal-holder.md` 2.8 on input the app left
+//! unread. Output has its own queues ([`crate::outbox`]).
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

@@ -99,3 +99,15 @@ opt-level = 3
 # arithmetic makes each one take seconds.
 [profile.dev.package.num-bigint-dig]
 opt-level = 3
+
+# The holder parses every byte a pane writes, through generic code that is
+# built in the holder crate. At -O0 it takes a flood at a third of the
+# rate the fault tests ask for (terminal-holder.md 9.4).
+[profile.dev.package.tiller-holder]
+opt-level = 2
+
+[profile.dev.package.alacritty_terminal]
+opt-level = 2
+
+[profile.dev.package.vte]
+opt-level = 2

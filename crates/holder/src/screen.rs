@@ -9,13 +9,14 @@
 
 use std::fmt::Write as _;
 
-use alacritty_terminal::event::EventListener;
-use alacritty_terminal::grid::{Dimensions, Row};
-use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::grid::Row;
+use alacritty_terminal::index::Column;
+use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::{Cell, Flags};
-use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
 use tiller_panes::message::{Cursor, Format, Read, Screen};
+
+use crate::snapshot::Snapshot;
 
 /// The modes a `screen` reply names, in this order.
 const MODES: &[(TermMode, &str)] = &[
@@ -174,9 +175,8 @@ fn row(row: &Row<Cell>, cols: usize, format: Format) -> String {
     out
 }
 
-/// The modes `term` has on, by name.
-pub fn modes<T: EventListener>(term: &Term<T>) -> Vec<String> {
-    let mode = *term.mode();
+/// The modes in `mode` that a reply names, by name.
+pub fn modes(mode: TermMode) -> Vec<String> {
     MODES
         .iter()
         .filter(|(flag, _)| mode.contains(*flag))
@@ -184,17 +184,26 @@ pub fn modes<T: EventListener>(term: &Term<T>) -> Vec<String> {
         .collect()
 }
 
-/// A `screen` read of `term`. `read` must be in range
+/// The scrollback rows a `read` takes, at most, on a screen of
+/// `screen_lines`.
+pub fn history_for(read: Read, screen_lines: usize) -> usize {
+    match read {
+        Read::Visible => 0,
+        Read::Recent(n) => usize::from(n).saturating_sub(screen_lines),
+    }
+}
+
+/// A `screen` read of `snapshot`, which holds the scrollback rows
+/// [`history_for`] names, or all there are. `read` must be in range
 /// ([`Read::in_range`]). A `recent` read is the last rows up to the
 /// screen's bottom, scrollback first, as many as there are.
-pub fn read<T: EventListener>(term: &Term<T>, read: Read, format: Format) -> Screen {
-    let grid = term.grid();
-    let (screen_lines, cols) = (grid.screen_lines(), grid.columns());
+pub fn read(snapshot: &Snapshot, read: Read, format: Format) -> Screen {
+    let (screen_lines, cols) = (snapshot.screen_lines(), snapshot.columns());
     let first = match read {
         Read::Visible => 0,
         Read::Recent(n) => {
-            let above = usize::from(n).saturating_sub(screen_lines);
-            let above = above.min(grid.history_size());
+            let above = history_for(read, screen_lines);
+            let above = above.min(snapshot.history());
             let below = usize::from(n).min(screen_lines);
             // The first row read: `above` rows into the scrollback, or
             // `below` rows up from the screen's bottom when the read is
@@ -207,18 +216,18 @@ pub fn read<T: EventListener>(term: &Term<T>, read: Read, format: Format) -> Scr
         }
     };
     let rows_text = (first..screen_lines as i32)
-        .map(|line| row(&grid[Line(line)], cols, format))
+        .map(|line| row(snapshot.row(line), cols, format))
         .collect();
-    let cursor = &grid.cursor.point;
+    let cursor = &snapshot.cursor.point;
     Screen {
         cols: u16::try_from(cols).unwrap_or(u16::MAX),
         rows: u16::try_from(screen_lines).unwrap_or(u16::MAX),
         cursor: Cursor {
             col: u16::try_from(cursor.column.0).unwrap_or(u16::MAX),
             row: u16::try_from(cursor.line.0.max(0)).unwrap_or(u16::MAX),
-            visible: term.mode().contains(TermMode::SHOW_CURSOR),
+            visible: snapshot.mode.contains(TermMode::SHOW_CURSOR),
         },
-        modes: modes(term),
+        modes: modes(snapshot.mode),
         rows_text,
     }
 }
@@ -231,6 +240,11 @@ mod tests {
 
     use super::*;
 
+    /// A read of `model` with all its scrollback at hand.
+    fn read(model: &Model, read: Read, format: Format) -> Screen {
+        super::read(&Snapshot::of(model.term(), usize::MAX), read, format)
+    }
+
     fn model(cols: u16, rows: u16, bytes: &[u8]) -> Model {
         let mut model = Model::new(Size { cols, rows });
         model.feed(bytes).unwrap();
@@ -240,7 +254,7 @@ mod tests {
     #[test]
     fn a_text_read_trims_each_row_and_skips_wide_spacers() {
         let model = model(12, 3, "a  b   \r\n日本 x\t\r\ne\u{301}".as_bytes());
-        let screen = read(model.term(), Read::Visible, Format::Text);
+        let screen = read(&model, Read::Visible, Format::Text);
         assert_eq!(screen.rows_text, ["a  b", "日本 x", "e\u{301}"]);
         assert_eq!((screen.cols, screen.rows), (12, 3));
         assert_eq!(
@@ -260,7 +274,7 @@ mod tests {
             2,
             b"\x1b[1;38;5;0;48;5;3mhost\x1b[0m \x1b[2;38;2;1;2;3mdim\x1b[0m\r\n\x1b[31;104mred\x1b[4:3;58;5;9mx",
         );
-        let screen = read(model.term(), Read::Visible, Format::Ansi);
+        let screen = read(&model, Read::Visible, Format::Ansi);
         assert_eq!(
             screen.rows_text,
             [
@@ -273,29 +287,29 @@ mod tests {
     #[test]
     fn an_ansi_row_keeps_trailing_cells_that_have_a_color() {
         let model = model(10, 1, b"a\x1b[44m  \x1b[0m   ");
-        let screen = read(model.term(), Read::Visible, Format::Ansi);
+        let screen = read(&model, Read::Visible, Format::Ansi);
         assert_eq!(screen.rows_text, ["a\x1b[0m\x1b[44m  \x1b[0m"]);
-        let screen = read(model.term(), Read::Visible, Format::Text);
+        let screen = read(&model, Read::Visible, Format::Text);
         assert_eq!(screen.rows_text, ["a"]);
     }
 
     #[test]
     fn a_recent_read_takes_scrollback_and_the_screen_up_to_its_bottom() {
         let model = model(10, 2, b"one\r\ntwo\r\nthree\r\nfour");
-        let text = |n| read(model.term(), Read::Recent(n), Format::Text).rows_text;
+        let text = |n| read(&model, Read::Recent(n), Format::Text).rows_text;
         assert_eq!(text(1), ["four"]);
         assert_eq!(text(2), ["three", "four"]);
         assert_eq!(text(3), ["two", "three", "four"]);
         // No more than there is.
         assert_eq!(text(100), ["one", "two", "three", "four"]);
-        let visible = read(model.term(), Read::Visible, Format::Text);
+        let visible = read(&model, Read::Visible, Format::Text);
         assert_eq!(visible.rows_text, ["three", "four"]);
     }
 
     #[test]
     fn modes_are_named() {
         let model = model(10, 2, b"\x1b[?2004h\x1b[?1h\x1b[>1u\x1b[?25l");
-        let screen = read(model.term(), Read::Visible, Format::Text);
+        let screen = read(&model, Read::Visible, Format::Text);
         assert_eq!(
             screen.modes,
             // Alternate scroll is on from the start, as in xterm.

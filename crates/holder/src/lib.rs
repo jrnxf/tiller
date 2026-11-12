@@ -5,14 +5,18 @@ pub mod detach;
 pub mod holder;
 pub mod input;
 pub mod keys;
+pub mod lease;
 pub mod lock;
 pub mod model;
 pub mod outbox;
 pub mod peer;
 pub mod pty;
+pub mod query;
 pub mod repaint;
 pub mod scanner;
 pub mod screen;
 pub mod server;
+pub mod snapshot;
+pub mod sync;
 
 pub use server::{HolderError, Outcome, run};

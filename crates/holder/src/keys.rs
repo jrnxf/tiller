@@ -6,9 +6,9 @@
 //! only "disambiguate" on, Enter, Tab and Backspace with no modifiers, and
 //! text with at most Shift, stay as they were; Esc and every other key with
 //! Ctrl or Alt become `CSI code ; mods u`. With "report all keys" on, every
-//! key does, and "associated text" adds the text it types. The holder
-//! answers no kitty query yet (H04), so apps learn the mode from their own
-//! pushes only.
+//! key does, and "associated text" adds the text it types. The model
+//! answers the kitty query `CSI ? u` with the flags the app pushed
+//! ([`crate::query`]).
 
 use std::fmt::Write as _;
 
