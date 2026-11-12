@@ -1763,3 +1763,55 @@ fn a_relaunch_with_the_terminal_holder_and_an_untagged_herdr_pane_leaves_the_age
     assert!(session(&rig, &spawned.session.id).ended_at.is_none());
     assert_eq!(rig.events("run.relaunched", &spawned.run.id), 0);
 }
+
+#[test]
+fn a_relaunch_with_the_terminal_holder_whose_pane_is_not_reused_names_no_retry() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.panes = Some(tiller_panes::FakePanes::new());
+    // Claude records `SessionEnd` but herdr still shows it in the pane.
+    rig.herdr.ignore_exit(&spawned.pane_id);
+    let hook_end = {
+        let herdr = FakeHerdr::open(rig.herdr.path());
+        let mut store = rig.fleet.open();
+        let (session, pane) = (spawned.session.id.clone(), spawned.pane_id.clone());
+        thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                if herdr
+                    .fake_pane(&pane)
+                    .submitted
+                    .iter()
+                    .any(|l| l == "/exit")
+                {
+                    store
+                        .session_end(&Ctx::new(Actor::Hook), &session, "logout")
+                        .unwrap();
+                    return;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        })
+    };
+    let opened = workspaces_opened(&rig);
+    let waits = Waits {
+        exit: Duration::from_secs(1),
+        ..patient()
+    };
+
+    let error = relaunch_it(&mut rig, &owner(), &waits, &spawned.run.id, note("n")).unwrap_err();
+    hook_end.join().unwrap();
+    let text = error.to_string();
+    assert!(
+        text.contains(&format!(
+            "the old agent of run {} was stopped and its herdr pane cannot be reused, but no new pane was opened",
+            spawned.run.id
+        )) && text.contains("a relaunch with the terminal holder is not ready yet (H09)")
+            && text.contains("a new start of its card"),
+        "{text}"
+    );
+    assert!(!text.contains("tiller agent relaunch"), "{text}");
+    assert!(!text.contains("resume"), "{text}");
+    assert!(!text.contains("nothing was changed"), "{text}");
+    assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
+}

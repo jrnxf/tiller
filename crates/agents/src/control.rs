@@ -579,6 +579,7 @@ pub fn relaunch(
         }
         None => (None, None),
     };
+    let stranded = world.panes.is_some() && old_pane.is_none();
     let relaunched = store.run_relaunch(
         &keyed,
         &run.id,
@@ -607,10 +608,17 @@ pub fn relaunch(
     )
     .map_err(|error| SpawnError::Undone {
         error: Box::new(error),
-        notes: format!(
-            "the relaunch is recorded (run {}, session {}) and nothing was deleted; start its session with tiller agent relaunch {} --note <progress> --key <a new key>, since this key replays",
-            relaunched.run.id, relaunched.session.id, relaunched.run.id
-        ),
+        notes: if stranded {
+            format!(
+                "the relaunch is recorded (run {}, session {}) and nothing was deleted; the old agent was stopped and the run has no pane, and a relaunch with the terminal holder is not ready yet (H09), so the run waits for that or for a new start of its card",
+                relaunched.run.id, relaunched.session.id
+            )
+        } else {
+            format!(
+                "the relaunch is recorded (run {}, session {}) and nothing was deleted; start its session with tiller agent relaunch {} --note <progress> --key <a new key>, since this key replays",
+                relaunched.run.id, relaunched.session.id, relaunched.run.id
+            )
+        },
     })?;
     let (since, pane_id, warning) = launched;
     let (started, evidence) = wait_started(
@@ -1346,7 +1354,7 @@ fn start_again(
 fn open_pane(world: &World<'_>, card: &Card, run: &Run, worktree: &Path) -> Result<String> {
     if world.panes.is_some() {
         return Err(SpawnError::Refused(format!(
-            "the old agent of run {} was stopped and its herdr pane is gone, but no new pane was opened: the terminal holder is not ready for a relaunch yet, so the run needs a new start",
+            "the old agent of run {} was stopped and its herdr pane cannot be reused, but no new pane was opened: the terminal holder is not ready for a relaunch yet, so the run needs a new start",
             run.id
         )));
     }
