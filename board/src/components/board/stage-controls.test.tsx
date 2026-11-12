@@ -260,8 +260,8 @@ test("the stage font clamps to 9 to 24 px in whole pixels", () => {
   expect([STAGE_FONT_MIN, STAGE_FONT_MAX]).toEqual([9, 24]);
 });
 
-test("the font readout shows the size the stage holds, and the Fit's choice until it lands", () => {
-  const room = (shown: number, next = true, settled = false) => ({ shown, next, settled });
+test("the font readout shows the size on screen, and names the choice when they differ", () => {
+  const room = (shown: number, next = true) => ({ shown, next });
   // Before the first measure, the choice.
   expect(fontReadout(16, false, room(0))).toMatchObject({ shown: 16, from: 16, full: false });
   // Without the Fit: the size that shows, and Smaller steps down from it.
@@ -272,7 +272,7 @@ test("the font readout shows the size the stage holds, and the Fit's choice unti
     hint: "Font size 13 px of the chosen 20, as large as the stage holds the pane. Click for the default, 14 px",
   });
   expect(fontReadout(STAGE_FONT, false, room(12, false)).hint).toBe(
-    "Font size 12 px, as large as the stage holds the pane",
+    "Font size 12 px of the chosen 14, as large as the stage holds the pane",
   );
   expect(fontReadout(STAGE_FONT, false, room(STAGE_FONT)).hint).toBe(
     "Font size 14 px, the default",
@@ -280,18 +280,12 @@ test("the font readout shows the size the stage holds, and the Fit's choice unti
   expect(fontReadout(18, false, room(18)).hint).toBe(
     "Font size 18 px. Click for the default, 14 px",
   );
-  // With the Fit: the choice until it lands, as when a strip borrows rows.
-  expect(fontReadout(17, true, room(14, false, false))).toMatchObject({
-    shown: 17,
+  // With the Fit, the steps go from the choice while the pane takes its size.
+  expect(fontReadout(17, true, room(14, false))).toEqual({
+    shown: 14,
     from: 17,
     full: false,
-    hint: "Font size 17 px. Click for the default, 14 px",
-  });
-  // A landed Fit that still cannot hold the font, at its smallest pane.
-  expect(fontReadout(24, true, room(19, false, true))).toMatchObject({
-    shown: 19,
-    from: 24,
-    full: false,
+    hint: "Font size 14 px of the chosen 17. Click for the default, 14 px",
   });
 });
 
@@ -370,9 +364,31 @@ test("a switch from typing in full screen leaves focus to the new terminal, not 
   const typing = () => screen.getByRole("textbox", { name: /^Type to / });
   const first = typing();
   first.focus();
+  // The next agent's stream goes live when the test says, which is when the
+  // carry gives it focus.
+  const api = globalThis.fetch;
+  const encode = (line: unknown) => new TextEncoder().encode(`${JSON.stringify(line)}\n`);
+  let goLive = () => {};
+  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+    if (!String(input).endsWith("/terminal")) return api(input, init);
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        goLive = () => {
+          controller.enqueue(encode({ type: "size", cols: 80, rows: 24 }));
+          controller.enqueue(encode({ type: "frame", seq: 0, full: true, bytes: btoa("$ ") }));
+        };
+      },
+    });
+    return Promise.resolve(new Response(body, { status: 200 }));
+  });
   fireEvent.keyDown(first, { key: "∆", code: "KeyJ", altKey: true });
   await waitFor(() => expect(typing()).not.toBe(first));
-  expect(document.activeElement?.hasAttribute("data-full-screen")).toBe(false);
+  // Before it is live, a key typed on does not press the way out.
+  const wayOut = footer().getByRole("button", { name: "Full screen", pressed: true });
+  expect(document.activeElement).not.toBe(wayOut);
+  act(() => goLive());
+  await waitFor(() => expect(document.activeElement).toBe(typing()));
+  expect(document.fullscreenElement).toBe(document.documentElement);
 });
 
 test("a turn to the phone layout, or leaving the Agents view, leaves full screen", async () => {

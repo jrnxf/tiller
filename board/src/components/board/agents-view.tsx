@@ -548,9 +548,6 @@ function Stage({
   // on it too. Focus left under the card, such as on the rail, moves to the
   // way out, and goes back when full screen ends.
   const cardRef = useRef<HTMLDivElement>(null);
-  // Whether the card's last focus was in the terminal, read as it lands: a
-  // switch unmounts that terminal, and its parts with it.
-  const typing = useRef(false);
   useEffect(() => {
     const cardBox = cardRef.current;
     if (!full || !cardBox) return;
@@ -560,15 +557,8 @@ function Stage({
         ? before
         : null;
     const release = holdInertOutside(cardBox);
-    const inTerminal = (at: unknown) => at instanceof Element && at.closest(".xterm") !== null;
-    typing.current = cardBox.contains(before) && inTerminal(before);
-    const onFocus = (event: FocusEvent) => {
-      typing.current = inTerminal(event.target);
-    };
-    cardBox.addEventListener("focusin", onFocus);
     if (outside) focusWayOut(cardBox);
     return () => {
-      cardBox.removeEventListener("focusin", onFocus);
       release();
       // Only from where this effect put it: focus the owner moved, such as
       // into the terminal to type, stays.
@@ -578,17 +568,16 @@ function Stage({
     };
   }, [full]);
   // A switch to another agent mounts its own terminal, so focus on the old
-  // one's controls drops to the page: it goes to the way out again. Focus
-  // that was in the old terminal is the carry's: the new terminal takes it
-  // once live, and a key typed before then does not press the way out.
+  // one's controls drops to the page: it goes to the way out again. A switch
+  // from typing carries focus to the new terminal once it is live, so a key
+  // typed before then does not press the way out.
   useEffect(() => {
     const cardBox = cardRef.current;
-    if (!full || !cardBox) return;
+    if (!full || !cardBox || carry) return;
     const now = document.activeElement;
     if (now && now !== document.body) return;
-    if (typing.current) return;
     focusWayOut(cardBox);
-  }, [full, agent.session_id]);
+  }, [full, agent.session_id, carry]);
   // The details drawer opens under the header, which wraps on a narrow stage.
   const headRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
