@@ -119,6 +119,44 @@ function loadStageFont(): number {
 
 const stageFontStore = createStore<number>(loadStageFont());
 
+// What the stage's room makes of the font: the size that shows, whether one
+// size larger fits, and whether a Fit has landed with no strip borrowing
+// rows.
+export interface RoomFont {
+  shown: number;
+  next: boolean;
+  settled: boolean;
+}
+
+// The font controls' reading of the stage. The Fit sizes the pane to the
+// chosen font, so until it lands the readout is the choice and the steps go
+// from it. Without the Fit, or where a landed Fit still cannot hold the font,
+// the readout is the size that shows, Smaller steps down from it, and Larger
+// waits until one size larger fits.
+export function fontReadout(stageFont: number, fitted: boolean, room: RoomFont) {
+  const measured = room.shown > 0 && (!fitted || room.settled);
+  const shown = measured ? room.shown : stageFont;
+  const fontText = `Font size ${shown} px`;
+  const back = `Click for the default, ${STAGE_FONT} px`;
+  let hint: string;
+  if (shown < stageFont) {
+    hint =
+      stageFont === STAGE_FONT
+        ? `${fontText}, as large as the stage holds the pane`
+        : `${fontText} of the chosen ${stageFont}, as large as the stage holds the pane. ${back}`;
+  } else {
+    hint = stageFont === STAGE_FONT ? `${fontText}, the default` : `${fontText}. ${back}`;
+  }
+  return {
+    shown,
+    // The size Smaller steps down from.
+    from: fitted ? stageFont : shown,
+    // The room holds no size larger, which a Fit would change.
+    full: !fitted && !room.next,
+    hint,
+  };
+}
+
 // Reads the stage's choices from storage again, as a new tab would: for tests.
 export function reloadTerminalPrefs() {
   herdrFit.store.set(herdrFit.load());
@@ -623,7 +661,7 @@ export function LiveTerminal({
   const stageFont = phone ? STAGE_FONT : stored;
   // Without the Fit, the stage's room can hold the text smaller than the
   // stage font: the size it shows, and whether one size larger still fits.
-  const [roomFont, setRoomFont] = useState({ shown: 0, next: true });
+  const [roomFont, setRoomFont] = useState<RoomFont>({ shown: 0, next: true, settled: false });
   const visible = useVisible();
   const [unfit, setUnfit] = useState(false);
   // A tail or a peer's pane is never fitted: its stream has no Fit.
@@ -784,16 +822,16 @@ export function LiveTerminal({
         : Number.POSITIVE_INFINITY;
     const least = Math.ceil(MIN_FONT * ratio);
     // The large view grows the text at least to the stage's size.
-    const most = grow
-      ? Math.max(MAX_FONT, stage ? stageFont : 0)
-      : stage && view === "inline"
-        ? stageFont
-        : BASE_FONT;
+    const most = grow ? Math.max(MAX_FONT, stage ? stageFont : 0) : BASE_FONT;
     // A hair over the cell, so xterm's own rounding lands on it.
     const sized = (cells: number) => (cells + 0.05) / ratio;
+    const inStage = stage && view === "inline";
+    // Whether the pane is the size the Fit asks for, with no strip borrowing
+    // rows, so the room's size is the Fit's own.
+    let settled = false;
     // What the stage holds at its own font, for the Fit. A new size waits
     // for the stage to settle, so a drag of the window opens the stream once.
-    if (stage && view === "inline") {
+    if (inStage) {
       const stageCell = Math.floor(stageFont * ratio);
       const metrics = cellAt(sized(stageCell), dpr);
       const high = metrics?.height ?? (screen.offsetHeight / term.rows) * dpr;
@@ -806,6 +844,7 @@ export function LiveTerminal({
       );
       const before = fitTarget.current;
       fitTarget.current = target;
+      settled = lent === 0 && target.cols === term.cols && target.rows === term.rows;
       if (before && (before.cols !== target.cols || before.rows !== target.rows)) {
         if (refitTimer.current !== null) clearTimeout(refitTimer.current);
         refitTimer.current = setTimeout(() => {
@@ -822,7 +861,6 @@ export function LiveTerminal({
       if (its) return (its.height * term.rows) / dpr;
       return (screen.offsetHeight / current) * sized(cells);
     };
-    const inStage = stage && view === "inline";
     // On the stage, one size over the font, so the readout knows whether
     // Larger shows.
     let cell = Math.floor((inStage ? stageFont + 1 : most) * ratio);
@@ -851,7 +889,11 @@ export function LiveTerminal({
       const fits = (px: number) => Math.floor(px * ratio) <= roomCell;
       const shown = fits(stageFont) ? stageFont : Math.floor(sized(roomCell));
       const next = fits(stageFont + 1);
-      setRoomFont((was) => (was.shown === shown && was.next === next ? was : { shown, next }));
+      setRoomFont((was) =>
+        was.shown === shown && was.next === next && was.settled === settled
+          ? was
+          : { shown, next, settled },
+      );
     }
   }, [host, box, view, scale, stage, stageFont]);
 
@@ -1111,26 +1153,12 @@ export function LiveTerminal({
         Fit pane
       </button>
     ) : null;
-  // The stage's font size, on a computer. The readout is the size that
-  // shows. The Fit sizes the pane to the font, so the steps go from the
-  // chosen size. Without it, Smaller steps down from the size that shows, and
-  // Larger waits until one size larger fits. A press keeps focus where it
-  // was, so typing goes on.
-  const fitted = fitting && !ended;
-  const shownFont = roomFont.shown === 0 ? stageFont : roomFont.shown;
-  const fromFont = fitted ? stageFont : shownFont;
-  const canLarger = fitted || roomFont.next;
+  // The stage's font size, on a computer. A press keeps focus where it was,
+  // so typing goes on.
+  const readout = fontReadout(stageFont, fitting && !ended, roomFont);
   const roomHint = watch
     ? "The pane fills the stage at this size"
     : "The pane fills the stage at this size. Fit pane sizes it to the text";
-  // The readout's name: a click goes back to the default.
-  const fontText = `Font size ${shownFont} px`;
-  const sizeHint =
-    shownFont === STAGE_FONT && stageFont === STAGE_FONT
-      ? `${fontText}, the default`
-      : stageFont === STAGE_FONT
-        ? `${fontText}, as large as the stage holds the pane`
-        : `${fontText}. Click for the default, ${STAGE_FONT} px`;
   const fontControls =
     stage && !phone && screenShown && view === "inline" ? (
       <span className="mir-font" role="group" aria-label="Font size">
@@ -1139,28 +1167,28 @@ export function LiveTerminal({
           className="ib sm"
           title="Smaller text"
           aria-label="Smaller text"
-          disabled={fromFont <= STAGE_FONT_MIN}
+          disabled={readout.from <= STAGE_FONT_MIN}
           onMouseDown={keepFocus}
-          onClick={() => setStageFont(fromFont - 1)}
+          onClick={() => setStageFont(readout.from - 1)}
         >
           <FontSmallerIcon />
         </button>
         <button
           type="button"
           className="mir-fsz"
-          title={sizeHint}
-          aria-label={sizeHint}
+          title={readout.hint}
+          aria-label={readout.hint}
           onMouseDown={keepFocus}
           onClick={() => setStageFont(STAGE_FONT)}
         >
-          {shownFont}
+          {readout.shown}
         </button>
         <button
           type="button"
           className="ib sm"
-          title={canLarger ? "Larger text" : roomHint}
+          title={readout.full ? roomHint : "Larger text"}
           aria-label="Larger text"
-          disabled={stageFont >= STAGE_FONT_MAX || !canLarger}
+          disabled={stageFont >= STAGE_FONT_MAX || readout.full}
           onMouseDown={keepFocus}
           onClick={() => setStageFont(stageFont + 1)}
         >

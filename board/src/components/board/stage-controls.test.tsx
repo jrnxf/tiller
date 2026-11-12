@@ -18,6 +18,7 @@ import {
   STAGE_FONT_MAX,
   STAGE_FONT_MIN,
   clampStageFont,
+  fontReadout,
   isHolderPane,
   reloadTerminalPrefs,
 } from "./live-terminal";
@@ -259,6 +260,41 @@ test("the stage font clamps to 9 to 24 px in whole pixels", () => {
   expect([STAGE_FONT_MIN, STAGE_FONT_MAX]).toEqual([9, 24]);
 });
 
+test("the font readout shows the size the stage holds, and the Fit's choice until it lands", () => {
+  const room = (shown: number, next = true, settled = false) => ({ shown, next, settled });
+  // Before the first measure, the choice.
+  expect(fontReadout(16, false, room(0))).toMatchObject({ shown: 16, from: 16, full: false });
+  // Without the Fit: the size that shows, and Smaller steps down from it.
+  expect(fontReadout(20, false, room(13, false))).toEqual({
+    shown: 13,
+    from: 13,
+    full: true,
+    hint: "Font size 13 px of the chosen 20, as large as the stage holds the pane. Click for the default, 14 px",
+  });
+  expect(fontReadout(STAGE_FONT, false, room(12, false)).hint).toBe(
+    "Font size 12 px, as large as the stage holds the pane",
+  );
+  expect(fontReadout(STAGE_FONT, false, room(STAGE_FONT)).hint).toBe(
+    "Font size 14 px, the default",
+  );
+  expect(fontReadout(18, false, room(18)).hint).toBe(
+    "Font size 18 px. Click for the default, 14 px",
+  );
+  // With the Fit: the choice until it lands, as when a strip borrows rows.
+  expect(fontReadout(17, true, room(14, false, false))).toMatchObject({
+    shown: 17,
+    from: 17,
+    full: false,
+    hint: "Font size 17 px. Click for the default, 14 px",
+  });
+  // A landed Fit that still cannot hold the font, at its smallest pane.
+  expect(fontReadout(24, true, room(19, false, true))).toMatchObject({
+    shown: 19,
+    from: 24,
+    full: false,
+  });
+});
+
 test("full screen pins the agent's card over the page, and a second press or Esc leaves it", async () => {
   const { request, exit, leave } = stubFullScreen();
   const bar = await renderStage("holder");
@@ -324,6 +360,19 @@ test("a switch to another agent stays in full screen, and a toast shows in it", 
   // The page is in full screen, so a toast shows over the card.
   act(() => showToast("bad", "The pane kept its own size"));
   expect(screen.getByTestId("toast").textContent).toContain("The pane kept its own size");
+});
+
+test("a switch from typing in full screen leaves focus to the new terminal, not the way out", async () => {
+  stubFullScreen();
+  await renderStage("holder");
+  fireEvent.click(footer().getByRole("button", { name: "Full screen" }));
+  await footer().findByRole("button", { name: "Full screen", pressed: true });
+  const typing = () => screen.getByRole("textbox", { name: /^Type to / });
+  const first = typing();
+  first.focus();
+  fireEvent.keyDown(first, { key: "∆", code: "KeyJ", altKey: true });
+  await waitFor(() => expect(typing()).not.toBe(first));
+  expect(document.activeElement?.hasAttribute("data-full-screen")).toBe(false);
 });
 
 test("a turn to the phone layout, or leaving the Agents view, leaves full screen", async () => {
