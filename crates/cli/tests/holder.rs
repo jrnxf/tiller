@@ -90,9 +90,14 @@ impl Holder {
 
     /// The pane's updates on a new subscription.
     fn updates(&self, pane: &Pane) -> Updates {
+        self.updates_with(pane, SyncMode::Pass)
+    }
+
+    /// The pane's updates on a new subscription that asks `sync`.
+    fn updates_with(&self, pane: &Pane, sync: SyncMode) -> Updates {
         let mut subscription = self
             .client
-            .subscribe(&pane.pane, Subscribe::default())
+            .subscribe(&pane.pane, Subscribe { sync })
             .unwrap();
         let handle = subscription.handle();
         let (tx, rx) = mpsc::channel();
@@ -147,7 +152,7 @@ fn a_shell_runs_in_the_holder_and_its_output_shows_in_the_repaint_and_live() {
     let holder = Holder::start(&world);
     let welcome = holder.client.welcome();
     assert_eq!(welcome.proto, 1);
-    assert!(welcome.features.is_empty(), "{welcome:?}");
+    assert_eq!(welcome.features, ["kitty_keys", "sync_buffer"]);
 
     // One socket per home, only for its owner.
     let run = world.home().join("run");
@@ -510,7 +515,7 @@ impl Watch {
     }
 
     /// The first event `wanted` takes, past any others.
-    fn until(&self, holder: &Holder, what: &str, wanted: impl Fn(&Event) -> bool) -> Event {
+    fn until(&self, holder: &Holder, what: &str, mut wanted: impl FnMut(&Event) -> bool) -> Event {
         loop {
             let event = self
                 .rx
@@ -1051,4 +1056,423 @@ fn a_close_that_waits_holds_up_none_of_the_connections_other_replies() {
         let exit = closing.join().unwrap().unwrap();
         assert_eq!(exit.signal, Some(9), "{exit:?}");
     });
+}
+
+/// Live output on `updates` past its repaint, until it holds `text`.
+fn output_until(updates: &Updates, holder: &Holder, text: &str) -> Vec<Vec<u8>> {
+    let mut reads = Vec::new();
+    let mut seen = Vec::new();
+    while !String::from_utf8_lossy(&seen).contains(text) {
+        match next(updates, holder, text) {
+            Update::Output(bytes) => {
+                seen.extend_from_slice(&bytes);
+                reads.push(bytes);
+            }
+            Update::Repaint { .. } => {}
+            other => panic!("unexpected {other:?} before {text:?}"),
+        }
+    }
+    reads
+}
+
+fn holds(bytes: &[u8], part: &[u8]) -> bool {
+    bytes.windows(part.len()).any(|window| window == part)
+}
+
+// Section 2.7: the holder answers each query on the PTY, once, and no
+// subscriber sees it, so a subscriber's terminal does not answer again.
+#[test]
+fn every_query_is_answered_once_on_the_pty_and_never_reaches_a_subscriber() {
+    let world = World::new();
+    let holder = Holder::start(&world);
+    let queries: [&[u8]; 8] = [
+        b"\x1b[c",
+        b"\x1b[>c",
+        b"\x1b[>q",
+        b"\x1b[?2004$p",
+        b"\x1b[?u",
+        b"\x1b]10;?\x07",
+        b"\x1b[18t",
+        b"\x1b[6n",
+    ];
+    // `cat -v` shows the answers the app read, each escape as `^[`, after
+    // the queries went out.
+    let printf: String = queries
+        .iter()
+        .map(|query| {
+            query
+                .iter()
+                .map(|&byte| format!("\\{byte:03o}"))
+                .collect::<String>()
+        })
+        .collect();
+    let script = format!("stty raw -echo; head -c 1 >/dev/null; printf '{printf}'; exec cat -v");
+    let pane = holder.spawn(&world, &["/bin/sh", "-c", &script]);
+    let updates = holder.updates(&pane);
+    assert!(matches!(
+        next(&updates, &holder, "repaint"),
+        Update::Repaint { .. }
+    ));
+    holder.client.input(&pane.pane, "g").unwrap();
+    // The cursor report is the last answer.
+    let seen = output_until(&updates, &holder, "R").concat();
+    for query in queries {
+        assert!(
+            !holds(&seen, query),
+            "a subscriber saw the query {:?}: {:?}",
+            String::from_utf8_lossy(query),
+            String::from_utf8_lossy(&seen)
+        );
+    }
+    let answers = screen_until(&holder, &pane, "the answers", |row| row.contains('R')).concat();
+    let version = env!("CARGO_PKG_VERSION");
+    let expected = [
+        "^[[?6c".to_owned(),
+        "^[[>0;2600;1c".to_owned(),
+        format!("^[P>|tiller {version}^[\\"),
+        "^[[?2004;2$y".to_owned(),
+        "^[[?0u".to_owned(),
+        "^[]10;rgb:c9c9/cece/d6d6^G".to_owned(),
+        "^[[8;40;120t".to_owned(),
+        "^[[1;1R".to_owned(),
+    ];
+    assert_eq!(answers.trim_end(), expected.concat());
+}
+
+// Section 2.7: a subscriber that asks `sync: "buffer"` gets each
+// synchronized frame whole, or what it holds after 150 ms.
+#[test]
+fn a_buffering_subscriber_gets_a_synchronized_frame_whole_or_at_its_deadline() {
+    let world = World::new();
+    let holder = Holder::start(&world);
+    let script = concat!(
+        "stty -echo; head -c 1 >/dev/null;",
+        "printf '\\033[?2026hone'; sleep 0.1; printf 'two\\033[?2026l';",
+        "printf '\\033[?2026hthree'; sleep 1; printf 'four\\033[?2026l';",
+        "exec cat"
+    );
+    let pane = holder.spawn(&world, &["/bin/sh", "-c", script]);
+    let buffered = holder.updates_with(&pane, SyncMode::Buffer);
+    let passed = holder.updates(&pane);
+    for updates in [&buffered, &passed] {
+        assert!(matches!(
+            next(updates, &holder, "repaint"),
+            Update::Repaint { .. }
+        ));
+    }
+    holder.client.input(&pane.pane, "g\n").unwrap();
+    let frame = b"\x1b[?2026honetwo\x1b[?2026l";
+    let reads = output_until(&buffered, &holder, "four");
+    assert!(
+        reads.iter().any(|read| holds(read, frame)),
+        "the frame came in parts: {reads:?}"
+    );
+    // The second frame outlived its deadline, so its first part went out
+    // on its own.
+    let three = reads.iter().find(|read| holds(read, b"three")).unwrap();
+    assert!(
+        !holds(three, b"four"),
+        "the frame was held past its deadline"
+    );
+    // A passing subscriber gets the bytes as they come, markers and all.
+    let reads = output_until(&passed, &holder, "four");
+    assert!(!reads.iter().any(|read| holds(read, frame)), "{reads:?}");
+    assert!(holds(&reads.concat(), b"\x1b[?2026hthree"), "{reads:?}");
+}
+
+/// A raw connection's subscription to `pane`, up to its repaint's bytes.
+fn raw_subscribe(socket: &mut UnixStream, pane: &Pane) -> u32 {
+    send_raw(
+        socket,
+        &Request::Subscribe {
+            id: 2,
+            pane: pane.pane.clone(),
+            sync: SyncMode::Pass,
+        },
+    );
+    let subscribed = read_raw(socket);
+    assert_eq!(subscribed["type"], "subscribed", "{subscribed}");
+    assert_eq!(read_raw(socket)["type"], "repaint");
+    let Some(Frame::Output { .. }) = read_frame(&mut *socket).unwrap() else {
+        panic!("no repaint bytes");
+    };
+    u32::try_from(subscribed["stream"].as_u64().unwrap()).unwrap()
+}
+
+/// Waits for the pane's exit through the holder's own client.
+fn wait_exit(holder: &Holder, pane: &Pane) {
+    let deadline = Instant::now() + WAIT;
+    while holder.client.get(&pane.pane).unwrap().unwrap().state != PaneState::Exited {
+        assert!(Instant::now() < deadline, "the pane did not exit");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+// Section 2.7 and 9.4: a subscriber that reads nothing for a while is held,
+// not dropped, while its queue is under 4 MiB. Past it, it gets `lagged`,
+// and its connection goes on. The app never waits for it.
+#[test]
+fn a_slow_subscriber_is_held_up_to_its_queue_then_lagged_and_the_app_never_waits() {
+    let world = World::new();
+    let holder = Holder::start(&world);
+    let numbers = |last: u32| format!("stty -echo; head -c 1 >/dev/null; exec seq 1 {last}");
+
+    // About 2 MiB, which the queue holds.
+    let held = 300_000;
+    let pane = holder.spawn(&world, &["/bin/sh", "-c", &numbers(held)]);
+    let mut socket = raw_connection(&holder);
+    raw_subscribe(&mut socket, &pane);
+    holder.client.input(&pane.pane, "g\n").unwrap();
+    wait_exit(&holder, &pane);
+    let mut seen = Vec::new();
+    loop {
+        match read_frame(&mut socket).unwrap() {
+            Some(Frame::Output { bytes, .. }) => seen.extend(bytes),
+            Some(Frame::Message(text)) => {
+                let message: serde_json::Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(message["type"], "exited", "{message}");
+                break;
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    let expected: String = (1..=held).map(|n| format!("{n}\r\n")).collect();
+    assert!(
+        seen == expected.as_bytes(),
+        "{} bytes of {} came, or not in order",
+        seen.len(),
+        expected.len()
+    );
+
+    // About 15 MiB, which it does not.
+    let pane = holder.spawn(&world, &["/bin/sh", "-c", &numbers(2_000_000)]);
+    let mut socket = raw_connection(&holder);
+    let stream = raw_subscribe(&mut socket, &pane);
+    holder.client.input(&pane.pane, "g\n").unwrap();
+    wait_exit(&holder, &pane);
+    assert_eq!(
+        read_raw(&mut socket),
+        serde_json::json!({"type":"lagged","stream":stream})
+    );
+    send_raw(&mut socket, &Request::Ping { id: 3 });
+    assert_eq!(
+        read_raw(&mut socket),
+        serde_json::json!({"type":"pong","id":3})
+    );
+    assert!(holder.log().contains("was lagged"), "{}", holder.log());
+}
+
+// Section 9.4: a frame over 16 MiB, or a message that is no JSON, ends
+// that connection only. A message of a type this holder does not know is
+// answered, and its connection goes on.
+#[test]
+fn an_oversize_frame_or_a_malformed_message_ends_only_its_connection() {
+    let world = World::new();
+    let holder = Holder::start(&world);
+    let ends = |socket: &mut UnixStream| loop {
+        match read_frame(&mut *socket) {
+            Ok(Some(Frame::Message(_))) => {}
+            Ok(None) | Err(_) => break,
+            Ok(Some(other)) => panic!("unexpected {other:?}"),
+        }
+    };
+
+    let mut malformed = raw_connection(&holder);
+    write_frame(&mut malformed, &Frame::Message("not json".into())).unwrap();
+    let reply = read_raw(&mut malformed);
+    assert_eq!(reply["code"], "bad_request", "{reply}");
+    ends(&mut malformed);
+
+    let mut oversize = raw_connection(&holder);
+    let len = tiller_panes::frame::MAX_FRAME_LEN + 1;
+    std::io::Write::write_all(&mut oversize, &len.to_be_bytes()).unwrap();
+    std::io::Write::write_all(&mut oversize, &[0]).unwrap();
+    ends(&mut oversize);
+
+    let mut unknown = raw_connection(&holder);
+    let message = r#"{"type":"not_a_request","id":5}"#;
+    write_frame(&mut unknown, &Frame::Message(message.into())).unwrap();
+    assert_eq!(read_raw(&mut unknown)["type"], "error");
+    send_raw(&mut unknown, &Request::Ping { id: 6 });
+    assert_eq!(
+        read_raw(&mut unknown),
+        serde_json::json!({"type":"pong","id":6})
+    );
+    holder.client.ping().unwrap();
+}
+
+// Section 9.4: a socket file that no holder serves is taken over, and of
+// two holders started at once exactly one serves.
+#[test]
+fn a_stale_socket_is_taken_over_and_of_two_holders_started_at_once_one_serves() {
+    let world = World::new();
+    let socket = socket_path(&world.home());
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .create(socket.parent().unwrap())
+        .unwrap();
+    std::fs::set_permissions(
+        socket.parent().unwrap(),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+    assert!(UnixStream::connect(&socket).is_err());
+
+    let start = || {
+        Running::new(
+            world
+                .bare_command()
+                .arg("holder")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        )
+    };
+    let mut holders = [start(), start()];
+    let deadline = Instant::now() + WAIT;
+    let (gone, serving) = loop {
+        let exited: Vec<bool> = holders
+            .iter_mut()
+            .map(|holder| holder.try_wait().unwrap().is_some())
+            .collect();
+        match exited[..] {
+            [true, false] => break (0, 1),
+            [false, true] => break (1, 0),
+            [true, true] => panic!("both holders exited"),
+            [false, false] | [..] => {}
+        }
+        assert!(Instant::now() < deadline, "both holders kept running");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let status = holders[gone].try_wait().unwrap().unwrap();
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(&mut holders[gone].stderr.take().unwrap(), &mut stderr).unwrap();
+    assert_eq!(status.code(), Some(0), "{stderr}");
+    let serving_pid = holders[serving].id();
+    assert!(
+        stderr.contains(&format!("a holder already runs (pid {serving_pid})")),
+        "{stderr}"
+    );
+    let client = HolderClient::connect(&socket, "daemon").unwrap();
+    client.ping().unwrap();
+}
+
+// Without bracketed paste, a terminal pastes each line ended by a carriage
+// return, as Enter sends it, so a line ending is never a bare LF.
+#[test]
+fn a_paste_without_bracketed_paste_ends_each_line_with_a_carriage_return() {
+    let world = World::new();
+    let holder = Holder::start(&world);
+    // With `-icrnl` the terminal does not turn CR into LF, so `cat -v`
+    // shows each as `^M`.
+    let pane = holder.spawn(
+        &world,
+        &[
+            "/bin/sh",
+            "-c",
+            "stty -echo -icrnl -icanon; echo ready; exec cat -v",
+        ],
+    );
+    shows(&holder, &pane, "ready");
+    holder
+        .client
+        .paste(&pane.pane, "one\r\ntwo\nthree")
+        .unwrap();
+    shows(&holder, &pane, "one^Mtwo^Mthree");
+}
+
+// Section 2.8: past a burst, a pane's bells are dropped, and a title waits
+// for the pane's quiet, so its last title still comes.
+#[test]
+fn a_pane_past_its_event_rate_drops_bells_and_its_last_title_still_comes() {
+    let world = World::new();
+    let holder = Holder::start(&world);
+    let watch = Watch::start(&holder);
+    let script = concat!(
+        "stty -echo; head -c 1 >/dev/null;",
+        "i=0; while [ $i -lt 200 ]; do i=$((i+1)); printf '\\033]0;t%d\\007\\007' $i; done;",
+        "exec cat"
+    );
+    let pane = holder.spawn(&world, &["/bin/sh", "-c", script]);
+    holder.client.input(&pane.pane, "g\n").unwrap();
+    let mut bells = 0;
+    let last = watch.until(&holder, "the last title", |event| match event {
+        Event::Bell { .. } => {
+            bells += 1;
+            false
+        }
+        Event::Title { title, .. } => title == "t200",
+        _ => false,
+    });
+    assert!(matches!(last, Event::Title { .. }));
+    assert!((1..100).contains(&bells), "{bells} of 200 bells were sent");
+}
+
+/// The holder's resident memory in KiB, as `ps` reports it.
+fn rss_kib(pid: u32) -> u64 {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0)
+}
+
+// Section 9.4: a flood of 200 MiB, with a subscriber that reads nothing.
+// The holder's memory stays bound, and every `ping` is answered in under
+// 50 ms.
+#[test]
+fn a_flood_keeps_the_holders_memory_bound_and_every_ping_fast() {
+    let world = World::new();
+    let holder = Holder::start(&world);
+    let script = concat!(
+        "stty -echo; head -c 1 >/dev/null;",
+        "yes 'a line of flood output, as a busy build prints it' | head -c 209715200"
+    );
+    let pane = holder.spawn(&world, &["/bin/sh", "-c", script]);
+    let mut stalled = raw_connection(&holder);
+    raw_subscribe(&mut stalled, &pane);
+    let reading = holder.updates(&pane);
+    let pid = holder.running.id();
+    let before = rss_kib(pid);
+    holder.client.input(&pane.pane, "g\n").unwrap();
+    let started = Instant::now();
+    let (mut slowest, mut peak, mut pings) = (Duration::ZERO, before, 0);
+    while holder.client.get(&pane.pane).unwrap().unwrap().state != PaneState::Exited {
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the flood did not end"
+        );
+        let sent = Instant::now();
+        holder.client.ping().unwrap();
+        slowest = slowest.max(sent.elapsed());
+        pings += 1;
+        if pings % 10 == 0 {
+            peak = peak.max(rss_kib(pid));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let took = started.elapsed();
+    eprintln!(
+        "flood: {took:?}, {pings} pings, slowest {slowest:?}, rss {before} KiB to {peak} KiB"
+    );
+    drop(reading);
+    // The app writes as fast as the holder takes it.
+    assert!(
+        took < Duration::from_secs(10),
+        "the holder took 200 MiB in {took:?}"
+    );
+    assert!(
+        slowest < Duration::from_millis(50),
+        "a ping took {slowest:?}"
+    );
+    assert!(
+        peak < before + 64 * 1024,
+        "the holder grew from {before} KiB to {peak} KiB"
+    );
 }

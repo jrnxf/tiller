@@ -254,6 +254,15 @@ impl QueryFilter {
         &self.pending
     }
 
+    /// The bytes held back, as they are, for the pane's end: no more
+    /// output comes to finish them.
+    pub fn flush(&mut self) -> Vec<u8> {
+        self.parser = Parser::new();
+        self.seen = Seen::default();
+        self.after_osc = false;
+        std::mem::take(&mut self.pending)
+    }
+
     /// Filters one read.
     pub fn filter(&mut self, bytes: &[u8]) -> Filtered {
         let mut out = Filtered {

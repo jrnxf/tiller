@@ -395,7 +395,11 @@ pub fn render(snapshot: &Snapshot) -> Vec<u8> {
         }
         w.row(row, end, wraps);
         if wraps {
-            w.lone_spacer(row, snapshot.row(i32::try_from(line + 1).unwrap_or(i32::MAX)), cols);
+            w.lone_spacer(
+                row,
+                snapshot.row(i32::try_from(line + 1).unwrap_or(i32::MAX)),
+                cols,
+            );
         }
         continues = wraps;
     }
@@ -535,7 +539,9 @@ mod tests {
             if cell.c == '\t' { ' ' } else { cell.c },
             Pen::of(cell),
             // A cell can keep an empty list of them, which draws as none.
-            cell.zerowidth().filter(|chars| !chars.is_empty()).map(<[char]>::to_vec),
+            cell.zerowidth()
+                .filter(|chars| !chars.is_empty())
+                .map(<[char]>::to_vec),
             cell.hyperlink().map(|link| link.uri().to_owned()),
             cell.flags & layout,
         )
@@ -570,12 +576,17 @@ mod tests {
     /// its scrollback into a fresh model of the same size, and says how the
     /// two differ, if they do.
     fn differs(input: &[u8], history: usize) -> Option<String> {
-        let mut source = Model::new(size());
+        differs_at(size(), input, history)
+    }
+
+    /// [`differs`] on a model of `size`.
+    fn differs_at(size: Size, input: &[u8], history: usize) -> Option<String> {
+        let mut source = Model::new(size);
         source.feed(input).unwrap();
         let snapshot = source.snapshot(history).unwrap();
         let taken = snapshot.history();
         let repaint = render(&snapshot);
-        let mut copy = Model::new(size());
+        let mut copy = Model::new(size);
         copy.feed(&repaint).unwrap();
         let (a, b) = (source.term(), copy.term());
         let first = -i32::try_from(taken).unwrap();
@@ -606,20 +617,23 @@ mod tests {
                 shown()
             ));
         }
-        for line in first..i32::from(size().rows) {
-            for col in 0..usize::from(size().cols) {
+        for line in first..i32::from(size.rows) {
+            for col in 0..usize::from(size.cols) {
                 let point = Point::new(Line(line), Column(col));
                 let (mut want, mut got) = (visible(&a.grid()[point]), visible(&b.grid()[point]));
                 // The last scrollback row's wrap into the screen is not
                 // carried, nor the last screen row's wrap below it, nor the
                 // spacer a wide character leaves before such a wrap.
-                if line == -1 || line == i32::from(size().rows) - 1 {
+                if line == -1 || line == i32::from(size.rows) - 1 {
                     let wrap = Flags::WRAPLINE | Flags::LEADING_WIDE_CHAR_SPACER;
                     want.4.remove(wrap);
                     got.4.remove(wrap);
                 }
                 if want != got {
-                    return Some(format!("at {point:?}: {want:?} != {got:?}, repaint {}", shown()));
+                    return Some(format!(
+                        "at {point:?}: {want:?} != {got:?}, repaint {}",
+                        shown()
+                    ));
                 }
             }
         }
@@ -627,7 +641,10 @@ mod tests {
         let checks = [
             (ca.point == cb.point, "cursor"),
             // With autowrap off a wait does nothing, and is not carried.
-            (!wrap_on || ca.input_needs_wrap == cb.input_needs_wrap, "pending wrap"),
+            (
+                !wrap_on || ca.input_needs_wrap == cb.input_needs_wrap,
+                "pending wrap",
+            ),
             (Pen::of(&ca.template) == Pen::of(&cb.template), "pen"),
             (a.mode() == b.mode(), "modes"),
             (a.cursor_style() == b.cursor_style(), "cursor style"),
@@ -641,6 +658,32 @@ mod tests {
     fn round_trip(input: &[u8]) {
         if let Some(diff) = differs(input, 0) {
             panic!("{}: {diff}", String::from_utf8_lossy(input).escape_debug());
+        }
+    }
+
+    // Section 9.1: each Claude Code fixture, at the 119 columns and the
+    // rows herdr read it at, repaints to the same screen.
+    #[test]
+    fn every_claude_code_fixture_round_trips() {
+        let dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../panes/tests/fixtures/claude"
+        );
+        let mut fixtures: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "ansi"))
+            .collect();
+        fixtures.sort();
+        assert_eq!(fixtures.len(), 9, "{fixtures:?}");
+        for path in fixtures {
+            let fixture = std::fs::read(&path).unwrap();
+            let rows = fixture.iter().filter(|&&byte| byte == b'\n').count() + 1;
+            let size = Size {
+                cols: 119,
+                rows: u16::try_from(rows).unwrap(),
+            };
+            assert_eq!(differs_at(size, &fixture, 0), None, "{}", path.display());
         }
     }
 
@@ -718,18 +761,30 @@ mod tests {
         };
         assert_eq!(sgr(Pen::DEFAULT, pen(Flags::BOLD, red)), "\x1b[1;31m");
         assert_eq!(
-            sgr(pen(Flags::BOLD | Flags::ITALIC, red), pen(Flags::ITALIC, red)),
+            sgr(
+                pen(Flags::BOLD | Flags::ITALIC, red),
+                pen(Flags::ITALIC, red)
+            ),
             "\x1b[22m"
         );
         assert_eq!(
             sgr(pen(Flags::BOLD | Flags::DIM, red), pen(Flags::DIM, red)),
             "\x1b[22;2m"
         );
-        assert_eq!(sgr(pen(Flags::UNDERCURL, red), pen(Flags::UNDERLINE, red)), "\x1b[4m");
-        assert_eq!(sgr(pen(Flags::ITALIC, red), pen(Flags::ITALIC, Pen::DEFAULT.fg)), "\x1b[39m");
+        assert_eq!(
+            sgr(pen(Flags::UNDERCURL, red), pen(Flags::UNDERLINE, red)),
+            "\x1b[4m"
+        );
+        assert_eq!(
+            sgr(pen(Flags::ITALIC, red), pen(Flags::ITALIC, Pen::DEFAULT.fg)),
+            "\x1b[39m"
+        );
         // Back to the default, `SGR 0` is the shorter.
         assert_eq!(
-            sgr(pen(Flags::BOLD | Flags::ITALIC | Flags::INVERSE, red), Pen::DEFAULT),
+            sgr(
+                pen(Flags::BOLD | Flags::ITALIC | Flags::INVERSE, red),
+                Pen::DEFAULT
+            ),
             "\x1b[0m"
         );
     }
@@ -799,8 +854,8 @@ mod tests {
         let sgr = prop::collection::vec(
             prop_oneof![
                 prop::sample::select(vec![
-                    "0", "1", "2", "3", "4", "4:3", "4:4", "4:5", "21", "7", "8", "9", "22",
-                    "23", "24", "27", "28", "29", "39", "49", "59",
+                    "0", "1", "2", "3", "4", "4:3", "4:4", "4:5", "21", "7", "8", "9", "22", "23",
+                    "24", "27", "28", "29", "39", "49", "59",
                 ])
                 .prop_map(str::to_owned),
                 (30u8..38).prop_map(|n| n.to_string()),
@@ -816,7 +871,8 @@ mod tests {
             1..4,
         )
         .prop_map(|params| format!("\x1b[{}m", params.join(";")).into_bytes());
-        let cup = (1u8..7, 1u8..14).prop_map(|(line, col)| format!("\x1b[{line};{col}H").into_bytes());
+        let cup =
+            (1u8..7, 1u8..14).prop_map(|(line, col)| format!("\x1b[{line};{col}H").into_bytes());
         prop_oneof![4 => text, 2 => control, 2 => sgr, 1 => cup]
     }
 

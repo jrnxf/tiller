@@ -6,6 +6,7 @@ use std::io;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use tiller_panes::frame::{Decoder, Frame, FrameError};
@@ -18,9 +19,9 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 
-use crate::holder::{Conn, Holder, ok};
+use crate::holder::{Conn, ConnSlot, Holder, message_frame, ok};
 use crate::lock::{Acquired, HolderLock, lock_path};
-use crate::outbox::OUTBOX_CAP;
+use crate::outbox::{self, OUTBOX_CAP};
 use crate::peer::{self, PeerCred};
 
 /// How long a client has to send `hello`.
@@ -153,7 +154,7 @@ fn bind(socket: &Path) -> Result<UnixListener, HolderError> {
 }
 
 /// The peer check: a peer of another uid gets no reply, and the socket
-/// closes.
+/// closes. So does a connection past the holder's limit.
 fn admit(holder: &Arc<Holder>, stream: UnixStream, own: u32) {
     let peer = match PeerCred::of(&stream) {
         Ok(peer) => peer,
@@ -166,12 +167,20 @@ fn admit(holder: &Arc<Holder>, stream: UnixStream, own: u32) {
         tracing::warn!(%refusal, "refused");
         return;
     }
+    let Some(slot) = holder.take_conn_slot() else {
+        tracing::warn!(
+            %peer,
+            "the holder has {} connections, its limit; one more is closed",
+            holder.limits().connections
+        );
+        return;
+    };
     tracing::debug!(%peer, "a connection");
-    tokio::spawn(connection(holder.clone(), stream));
+    tokio::spawn(connection(holder.clone(), stream, slot));
 }
 
 /// One connection, from `hello` to its end.
-async fn connection(holder: Arc<Holder>, stream: UnixStream) {
+async fn connection(holder: Arc<Holder>, stream: UnixStream, _slot: ConnSlot) {
     let (read, write) = stream.into_split();
     let conn = Arc::new(Conn::default());
     let writer = write_loop(conn.clone(), write);
@@ -347,9 +356,19 @@ fn frame_in(holder: &Arc<Holder>, conn: &Arc<Conn>, frame: Frame) -> Next {
                 request_in(holder, conn, request);
                 Next::Go
             }
+            // A message that is no JSON object breaks the protocol, and ends
+            // the connection (section 9.4). One of a type or with fields
+            // this build does not know is answered, and the connection goes
+            // on.
             Err(undecodable) => {
                 conn.send_message(&undecodable.reply());
-                Next::Go
+                if serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text)
+                    .is_err()
+                {
+                    Next::End
+                } else {
+                    Next::Go
+                }
             }
         },
     }
@@ -366,7 +385,7 @@ fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
         Request::Hello(_) => Err((ErrorCode::BadRequest, "hello comes once, first".to_owned())),
         Request::Spawn { id, spawn } => {
             let holder = holder.clone();
-            answer_later(conn, id, async move {
+            answer_later(holder.limits().in_flight, conn, id, async move {
                 let (pane, existing) = holder.spawn(spawn).await?;
                 Ok(HolderMessage::Pane { id, pane, existing })
             });
@@ -388,7 +407,7 @@ fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
             format,
         } => {
             let holder = holder.clone();
-            answer_later(conn, id, async move {
+            answer_later(holder.limits().in_flight, conn, id, async move {
                 let screen = holder.screen_read(pane, read, format).await?;
                 Ok(HolderMessage::Screen { id, screen })
             });
@@ -397,9 +416,7 @@ fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
         Request::Input { id, pane, text } => holder.input_text(conn, &pane, text).map(|()| ok(id)),
         Request::Paste { id, pane, text } => holder.paste(conn, &pane, text).map(|()| ok(id)),
         Request::Keys { id, pane, keys } => holder.keys(conn, &pane, &keys).map(|()| ok(id)),
-        // `sync` is `pass` for every subscriber: this holder does not offer
-        // `sync_buffer` (H04), so a client does not ask for it.
-        Request::Subscribe { id, pane, sync: _ } => match holder.subscribe(conn, id, &pane) {
+        Request::Subscribe { id, pane, sync } => match holder.subscribe(conn, id, &pane, sync) {
             Ok(()) => return,
             Err(failure) => Err(failure),
         },
@@ -412,13 +429,13 @@ fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
             pane,
             cols,
             rows,
-            lease: _,
+            lease,
         } => holder
-            .resize(&pane, tiller_panes::Size { cols, rows })
+            .resize(conn, &pane, tiller_panes::Size { cols, rows }, &lease)
             .map(|size| ok_size(id, size)),
-        Request::Release { id, pane, lease: _ } => {
-            holder.release(&pane).map(|size| ok_size(id, size))
-        }
+        Request::Release { id, pane, lease } => holder
+            .release(conn, &pane, &lease)
+            .map(|size| ok_size(id, size)),
         Request::Meta {
             id,
             pane,
@@ -434,7 +451,7 @@ fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
         Request::Signal { id, pane, signal } => holder.signal(&pane, signal).map(|()| ok(id)),
         Request::Close { id, pane, grace_ms } => {
             let holder = holder.clone();
-            answer_later(conn, id, async move {
+            answer_later(holder.limits().in_flight, conn, id, async move {
                 let exit = holder.close(&pane, Duration::from_millis(grace_ms)).await?;
                 Ok(HolderMessage::Exited {
                     id: Some(id),
@@ -466,16 +483,45 @@ fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
 }
 
 /// Answers request `id` from a task of its own, once `reply` is ready.
+/// Past `limit` such requests in flight on the connection, it is `busy`.
 fn answer_later(
+    limit: usize,
     conn: &Arc<Conn>,
     id: u64,
     reply: impl Future<Output = Result<HolderMessage, (ErrorCode, String)>> + Send + 'static,
 ) {
-    let conn = conn.clone();
+    let Some(turn) = InFlight::take(conn, limit) else {
+        return reply_error(
+            conn,
+            Some(id),
+            ErrorCode::Busy,
+            format!("{limit} requests of this connection are in flight, its limit"),
+        );
+    };
     tokio::spawn(async move {
         let reply = reply.await;
-        send_reply(&conn, Some(id), reply);
+        send_reply(&turn.0, Some(id), reply);
     });
+}
+
+/// A request in flight on its connection, counted until it is answered.
+struct InFlight(Arc<Conn>);
+
+impl InFlight {
+    fn take(conn: &Arc<Conn>, limit: usize) -> Option<Self> {
+        conn.in_flight
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |open| {
+                (open < limit).then_some(open + 1)
+            })
+            .ok()
+            .map(|_| Self(conn.clone()))
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// The bare `ok` with the pane's size after the request.
@@ -488,9 +534,9 @@ fn ok_size(id: u64, size: tiller_panes::Size) -> HolderMessage {
     }
 }
 
-/// Queues a reply. A reply that no connection's queue could hold, such as
-/// a long `ansi` screen read, is refused with `busy`, so the client learns
-/// of it and the connection is not cut.
+/// Queues a reply. A reply that the connection's queue cannot hold now,
+/// such as a long `ansi` screen read, is refused with `busy`, so the client
+/// learns of it and the connection is not cut.
 fn send_reply(conn: &Conn, id: Option<u64>, reply: Result<HolderMessage, (ErrorCode, String)>) {
     let message = match reply {
         Ok(message) => message,
@@ -509,11 +555,13 @@ fn send_reply(conn: &Conn, id: Option<u64>, reply: Result<HolderMessage, (ErrorC
         }
     };
     let frame_len = match Frame::Message(text).to_bytes() {
-        Ok(frame) if frame.len() <= OUTBOX_CAP => {
-            conn.send(frame);
-            return;
+        Ok(frame) => {
+            let len = frame.len() as u64;
+            match conn.outbox.push(frame) {
+                Ok(()) | Err(outbox::Refused::Gone) => return,
+                Err(outbox::Refused::Full) => len,
+            }
         }
-        Ok(frame) => frame.len() as u64,
         Err(FrameError::TooLarge { len }) => len + 4,
         Err(err) => {
             return reply_error(
@@ -524,14 +572,20 @@ fn send_reply(conn: &Conn, id: Option<u64>, reply: Result<HolderMessage, (ErrorC
             );
         }
     };
-    reply_error(
-        conn,
+    let busy = HolderMessage::Error {
         id,
-        ErrorCode::Busy,
-        format!(
-            "the reply frame is {frame_len} bytes, more than a connection's {OUTBOX_CAP}-byte queue holds"
+        code: ErrorCode::Busy,
+        message: format!(
+            "the reply frame is {frame_len} bytes, more than this connection's {OUTBOX_CAP}-byte queue holds now"
         ),
-    );
+    };
+    // With room past the cap, so the client learns of it. Past that room
+    // too, the client reads nothing, and is cut.
+    if let Some(frame) = message_frame(&busy)
+        && conn.outbox.push_over(frame) == Err(outbox::Refused::Full)
+    {
+        conn.cut();
+    }
 }
 
 fn reply_error(conn: &Conn, id: Option<u64>, code: ErrorCode, message: String) {
@@ -540,11 +594,13 @@ fn reply_error(conn: &Conn, id: Option<u64>, code: ErrorCode, message: String) {
 
 #[cfg(test)]
 mod tests {
+    use jiff::{SignedDuration, Timestamp};
     use tiller_panes::PaneId;
     use tiller_panes::frame::MAX_FRAME_LEN;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
+    use crate::holder::Limits;
 
     async fn hello_on(stream: &mut UnixStream) -> Vec<u8> {
         let hello = serde_json::to_string(&Request::Hello(Hello::new("daemon"))).unwrap();
@@ -642,6 +698,23 @@ mod tests {
         serde_json::from_slice(&body[1..]).unwrap()
     }
 
+    fn spawn_request(id: u64, key: &str, argv: &[&str]) -> Request {
+        Request::Spawn {
+            id,
+            spawn: tiller_panes::Spawn {
+                key: key.to_owned(),
+                argv: argv.iter().map(|arg| (*arg).to_owned()).collect(),
+                cwd: "/".to_owned(),
+                env: std::collections::BTreeMap::from([(
+                    "PATH".to_owned(),
+                    "/usr/bin:/bin".to_owned(),
+                )]),
+                size: None,
+                meta: tiller_panes::Meta::new(),
+            },
+        }
+    }
+
     /// A client's end of a connection, read frame by frame.
     struct Client {
         stream: UnixStream,
@@ -711,30 +784,29 @@ mod tests {
             self.message(|message| message["id"] == id).await
         }
 
-        /// Output on `stream` up to the first read that holds `text`.
-        async fn output(&mut self, stream: u32, text: &str) {
-            self.until(|frame| match frame {
-                Frame::Output { stream: on, bytes } => {
-                    *on == stream && String::from_utf8_lossy(bytes).contains(text)
-                }
-                _ => false,
-            })
-            .await;
+        /// Output on `stream` up to the first read that holds `text`, which
+        /// it returns.
+        async fn output(&mut self, stream: u32, text: &str) -> String {
+            let frame = self
+                .until(|frame| match frame {
+                    Frame::Output { stream: on, bytes } => {
+                        *on == stream && String::from_utf8_lossy(bytes).contains(text)
+                    }
+                    _ => false,
+                })
+                .await;
+            let Frame::Output { bytes, .. } = frame else {
+                unreachable!()
+            };
+            String::from_utf8_lossy(&bytes).into_owned()
         }
 
         async fn spawn_cat(&mut self, id: u64, key: &str) -> PaneId {
-            self.send(Request::Spawn {
-                id,
-                spawn: tiller_panes::Spawn {
-                    key: key.to_owned(),
-                    argv: vec!["/bin/cat".to_owned()],
-                    cwd: "/".to_owned(),
-                    env: std::collections::BTreeMap::new(),
-                    size: None,
-                    meta: tiller_panes::Meta::new(),
-                },
-            })
-            .await;
+            self.spawn(id, key, &["/bin/cat"]).await
+        }
+
+        async fn spawn(&mut self, id: u64, key: &str, argv: &[&str]) -> PaneId {
+            self.send(spawn_request(id, key, argv)).await;
             let reply = self.reply(id).await;
             assert_eq!(reply["type"], "pane", "{reply}");
             serde_json::from_value(reply["pane"]["pane"].clone()).unwrap()
@@ -845,6 +917,322 @@ mod tests {
         assert_eq!(
             read_message(&mut ours).await,
             serde_json::json!({"type":"pong","id":8})
+        );
+    }
+
+    fn resize(id: u64, pane: &PaneId, cols: u16, rows: u16, lease: &str) -> Request {
+        Request::Resize {
+            id,
+            pane: pane.clone(),
+            cols,
+            rows,
+            lease: lease.to_owned(),
+        }
+    }
+
+    fn release(id: u64, pane: &PaneId, lease: &str) -> Request {
+        Request::Release {
+            id,
+            pane: pane.clone(),
+            lease: lease.to_owned(),
+        }
+    }
+
+    fn sized(id: u64, cols: u16, rows: u16) -> serde_json::Value {
+        serde_json::json!({"type":"ok","id":id,"cols":cols,"rows":rows})
+    }
+
+    /// The pane's size, as `get` reports it.
+    async fn size_of(client: &mut Client, id: u64, pane: &PaneId) -> (u64, u64) {
+        client
+            .send(Request::Get {
+                id,
+                pane: pane.clone(),
+            })
+            .await;
+        let reply = client.reply(id).await;
+        let pane = &reply["pane"];
+        (
+            pane["cols"].as_u64().unwrap(),
+            pane["rows"].as_u64().unwrap(),
+        )
+    }
+
+    // Section 2.6: the top lease sets the size, a release gives it to the
+    // lease under it, and a connection's end drops its leases. With none
+    // left, the size stays.
+    #[tokio::test]
+    async fn the_top_lease_sets_the_size_and_a_release_gives_it_back() {
+        let holder = Holder::new();
+        tokio::spawn(holder.clone().reaper(signal(SignalKind::child()).unwrap()));
+        let mut watcher = Client::connect(&holder).await;
+        watcher.send(Request::Watch { id: 1 }).await;
+        assert_eq!(watcher.reply(1).await["type"], "watching");
+        let mut a = Client::connect(&holder).await;
+        let mut b = Client::connect(&holder).await;
+        let pane = a.spawn_cat(2, "a").await;
+        let resized = |cols: u16, rows: u16| serde_json::json!({"type":"resized","pane":pane.as_str(),"cols":cols,"rows":rows});
+
+        a.send(resize(3, &pane, 100, 30, "fit")).await;
+        assert_eq!(a.reply(3).await, sized(3, 100, 30));
+        assert_eq!(
+            watcher.message(|m| m["type"] == "resized").await,
+            resized(100, 30)
+        );
+        // The same lease id on another connection is another lease.
+        b.send(resize(4, &pane, 90, 20, "fit")).await;
+        assert_eq!(b.reply(4).await, sized(4, 90, 20));
+        assert_eq!(
+            watcher.message(|m| m["type"] == "resized").await,
+            resized(90, 20)
+        );
+        a.send(resize(5, &pane, 110, 35, "attach")).await;
+        assert_eq!(a.reply(5).await, sized(5, 110, 35));
+        assert_eq!(size_of(&mut a, 6, &pane).await, (110, 35));
+
+        // The release gives the size back to the lease under it.
+        a.send(release(7, &pane, "attach")).await;
+        assert_eq!(a.reply(7).await, sized(7, 90, 20));
+        assert_eq!(
+            watcher.message(|m| m["type"] == "resized").await,
+            resized(110, 35)
+        );
+        assert_eq!(
+            watcher.message(|m| m["type"] == "resized").await,
+            resized(90, 20)
+        );
+        // A lease the connection does not hold changes nothing.
+        a.send(release(8, &pane, "attach")).await;
+        assert_eq!(a.reply(8).await, sized(8, 90, 20));
+
+        // The end of b's connection drops its lease, and a's is on top.
+        drop(b);
+        assert_eq!(
+            watcher.message(|m| m["type"] == "resized").await,
+            resized(100, 30)
+        );
+        assert_eq!(size_of(&mut a, 9, &pane).await, (100, 30));
+        // With no lease left, the size stays.
+        a.send(release(10, &pane, "fit")).await;
+        assert_eq!(a.reply(10).await, sized(10, 100, 30));
+        assert_eq!(size_of(&mut a, 11, &pane).await, (100, 30));
+
+        a.send(Request::Close {
+            id: 12,
+            pane: pane.clone(),
+            grace_ms: 3_000,
+        })
+        .await;
+        assert_eq!(a.reply(12).await["type"], "exited");
+        // An exited pane takes no lease.
+        a.send(resize(13, &pane, 80, 24, "fit")).await;
+        assert_eq!(a.reply(13).await["code"], "exited");
+    }
+
+    #[tokio::test]
+    async fn a_pane_holds_at_most_its_limit_of_leases() {
+        let holder = Holder::new();
+        tokio::spawn(holder.clone().reaper(signal(SignalKind::child()).unwrap()));
+        let mut client = Client::connect(&holder).await;
+        let pane = client.spawn_cat(1, "a").await;
+        for n in 0..crate::lease::LEASES_PER_PANE as u64 {
+            client
+                .send(resize(n + 2, &pane, 80, 24, &n.to_string()))
+                .await;
+            assert_eq!(client.reply(n + 2).await["type"], "ok");
+        }
+        client.send(resize(100, &pane, 80, 24, "one more")).await;
+        assert_eq!(client.reply(100).await["code"], "busy");
+        client
+            .send(Request::Close {
+                id: 101,
+                pane: pane.clone(),
+                grace_ms: 3_000,
+            })
+            .await;
+        assert_eq!(client.reply(101).await["type"], "exited");
+    }
+
+    // Section 2.8, with small limits: a pane or a subscriber past its limit
+    // is `busy`, and a connection past it is closed.
+    #[tokio::test]
+    async fn a_pane_a_subscriber_and_a_connection_past_their_limits_are_refused() {
+        let holder = Holder::with_limits(Limits {
+            panes: 1,
+            subscribers: 1,
+            connections: 2,
+            ..Limits::default()
+        });
+        tokio::spawn(holder.clone().reaper(signal(SignalKind::child()).unwrap()));
+        let mut client = Client::connect(&holder).await;
+        let pane = client.spawn_cat(1, "a").await;
+        client.send(spawn_request(2, "b", &["/bin/cat"])).await;
+        assert_eq!(client.reply(2).await["code"], "busy");
+        // The same key is the same pane, not one more.
+        assert_eq!(client.spawn_cat(3, "a").await, pane);
+
+        client.subscribe(4, &pane).await;
+        client
+            .send(Request::Subscribe {
+                id: 5,
+                pane: pane.clone(),
+                sync: tiller_panes::message::SyncMode::Pass,
+            })
+            .await;
+        assert_eq!(client.reply(5).await["code"], "busy");
+
+        let second = Client::connect(&holder).await;
+        let (theirs, mut ours) = UnixStream::pair().unwrap();
+        admit(&holder, theirs, peer::own_uid());
+        assert!(
+            hello_on(&mut ours).await.is_empty(),
+            "a third connection was served"
+        );
+        // A connection's end gives its place back.
+        drop(second);
+        let mut third = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let (theirs, mut ours) = UnixStream::pair().unwrap();
+                admit(&holder, theirs, peer::own_uid());
+                let hello = serde_json::to_string(&Request::Hello(Hello::new("daemon"))).unwrap();
+                let mut len = [0; 4];
+                if ours
+                    .write_all(&Frame::Message(hello).to_bytes().unwrap())
+                    .await
+                    .is_ok()
+                    && ours.read_exact(&mut len).await.is_ok()
+                {
+                    return ours;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        third.shutdown().await.unwrap();
+
+        client
+            .send(Request::Close {
+                id: 6,
+                pane: pane.clone(),
+                grace_ms: 3_000,
+            })
+            .await;
+        assert_eq!(client.reply(6).await["type"], "exited");
+    }
+
+    // A child that leaves its group behind as it exits: the exit is
+    // reported, and what is left of the group, which outlived `hup` and
+    // holds the PTY, is killed at the end of the grace. Past the
+    // connection's limit of requests in flight, one more is `busy`.
+    #[tokio::test]
+    async fn a_close_kills_the_group_its_child_left_and_a_request_past_the_flight_limit_is_busy() {
+        let holder = Holder::with_limits(Limits {
+            in_flight: 1,
+            ..Limits::default()
+        });
+        tokio::spawn(holder.clone().reaper(signal(SignalKind::child()).unwrap()));
+        let mut client = Client::connect(&holder).await;
+        // The sleep ignores `hup`; the shell does not, and exits on it.
+        let pane = client
+            .spawn(
+                1,
+                "a",
+                &[
+                    "/bin/sh",
+                    "-c",
+                    "trap '' HUP; sleep 1000 & trap - HUP; echo \"left $!.\"; wait",
+                ],
+            )
+            .await;
+        let on = client.subscribe(2, &pane).await;
+        let said = client.output(on, ".").await;
+        let left = said
+            .split_once("left ")
+            .and_then(|(_, rest)| rest.split_once('.'))
+            .and_then(|(pid, _)| pid.parse().ok())
+            .and_then(rustix::process::Pid::from_raw)
+            .unwrap_or_else(|| panic!("no pid in {said:?}"));
+        let lives = || rustix::process::test_kill_process(left).is_ok();
+        assert!(lives());
+        let started = std::time::Instant::now();
+        client
+            .send(Request::Close {
+                id: 3,
+                pane: pane.clone(),
+                grace_ms: 1_000,
+            })
+            .await;
+        // The close is in flight until the shell's exit is in.
+        client.send(spawn_request(4, "b", &["/bin/cat"])).await;
+        let busy = client.reply(4).await;
+        assert_eq!(busy["code"], "busy", "{busy}");
+        let exited = client.reply(3).await;
+        assert_eq!(exited["exit"]["signal"], 1, "{exited}");
+        assert!(lives(), "the group was killed before its grace ended");
+        let dead = tokio::time::timeout(Duration::from_secs(5), async {
+            while lives() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(dead.is_ok(), "what the shell left lives on");
+        assert!(
+            started.elapsed() >= Duration::from_millis(900),
+            "the group was killed before its grace ended: {:?}",
+            started.elapsed()
+        );
+        // Its place is free again.
+        client.spawn_cat(5, "b").await;
+    }
+
+    // Section 2.8: past the limit of exited panes the oldest is forgotten,
+    // and so is one past its age.
+    #[tokio::test]
+    async fn exited_panes_past_their_limit_or_their_age_are_forgotten() {
+        let holder = Holder::with_limits(Limits {
+            exited: 1,
+            ..Limits::default()
+        });
+        tokio::spawn(holder.clone().reaper(signal(SignalKind::child()).unwrap()));
+        let mut watcher = Client::connect(&holder).await;
+        watcher.send(Request::Watch { id: 1 }).await;
+        assert_eq!(watcher.reply(1).await["type"], "watching");
+        let mut client = Client::connect(&holder).await;
+        let first = client.spawn(2, "first", &["/bin/sh", "-c", "exit 3"]).await;
+        watcher
+            .message(|m| m["type"] == "exited" && m["pane"] == first.as_str())
+            .await;
+        let second = client
+            .spawn(3, "second", &["/bin/sh", "-c", "exit 4"])
+            .await;
+        let forgotten = watcher.message(|m| m["type"] == "forgotten").await;
+        assert_eq!(
+            forgotten,
+            serde_json::json!({"type":"forgotten","pane":first.as_str(),"reason":"limit"})
+        );
+        client
+            .send(Request::Get {
+                id: 4,
+                pane: first.clone(),
+            })
+            .await;
+        assert_eq!(client.reply(4).await["code"], "not_found");
+
+        // A day later, the second is past its age.
+        holder.prune(Timestamp::now());
+        client
+            .send(Request::Get {
+                id: 5,
+                pane: second.clone(),
+            })
+            .await;
+        assert_eq!(client.reply(5).await["pane"]["state"], "exited");
+        holder.prune(Timestamp::now() + SignedDuration::from_hours(25));
+        let forgotten = watcher.message(|m| m["type"] == "forgotten").await;
+        assert_eq!(
+            forgotten,
+            serde_json::json!({"type":"forgotten","pane":second.as_str(),"reason":"limit"})
         );
     }
 }

@@ -175,6 +175,9 @@ A subscriber gets one **repaint**, then **passthrough**:
 | Subscriber queue | 4 MiB | the subscriber is cut |
 | One reply frame, against a connection's 4 MiB queue | 4 MiB | the request answers `busy`, and the connection stays |
 | A client's input the app left unread | 4 MiB | `input`, `paste` and `keys` answer `busy`, and raw input cuts the client |
+| Leases per pane | 64 | `resize` with a new lease id answers `busy` |
+| Requests of one connection that are answered later (`spawn`, `screen`, `close`) and not answered yet | 64 | the request answers `busy` |
+| A pane's `title`, `bell` and `notify` events | a burst of 20, then one per 50 ms | a title waits for the pane's `quiet`, and a bell or a notification is dropped |
 
 ## 3. The screen model
 
