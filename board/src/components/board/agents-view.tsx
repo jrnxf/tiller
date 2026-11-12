@@ -496,11 +496,6 @@ function Details({
   );
 }
 
-// The full screen card's way out: its Full screen button.
-function focusWayOut(card: HTMLElement) {
-  card.querySelector<HTMLElement>("[data-full-screen]")?.focus();
-}
-
 function Stage({
   line,
   project,
@@ -557,7 +552,10 @@ function Stage({
         ? before
         : null;
     const release = holdInertOutside(cardBox);
-    if (outside) focusWayOut(cardBox);
+    // Focus on nothing, as after a click on the button, goes there too.
+    if (outside || !before || before === document.body) {
+      cardBox.querySelector<HTMLElement>("[data-full-screen]")?.focus();
+    }
     return () => {
       release();
       // Only from where this effect put it: focus the owner moved, such as
@@ -567,20 +565,6 @@ function Stage({
       if (outside?.isConnected && lost) outside.focus();
     };
   }, [full]);
-  // A switch to another agent mounts its own terminal, so focus on the old
-  // one's controls drops to the page: it goes to the way out again. A switch
-  // from typing carries focus to the new terminal once it is live, so a key
-  // typed before then does not press the way out.
-  const stagedId = useRef(agent.session_id);
-  useEffect(() => {
-    const cardBox = cardRef.current;
-    const switched = stagedId.current !== agent.session_id;
-    stagedId.current = agent.session_id;
-    if (!switched || !full || !cardBox || carry) return;
-    const now = document.activeElement;
-    if (now && now !== document.body) return;
-    focusWayOut(cardBox);
-  }, [full, agent.session_id, carry]);
   // The details drawer opens under the header, which wraps on a narrow stage.
   const headRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {

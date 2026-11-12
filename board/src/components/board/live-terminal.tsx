@@ -4,6 +4,7 @@ import "@xterm/xterm/css/xterm.css";
 import {
   useCallback,
   useEffect,
+  useEffectEvent,
   useImperativeHandle,
   useLayoutEffect,
   useRef,
@@ -119,6 +120,12 @@ function loadStageFont(): number {
 
 const stageFontStore = createStore<number>(loadStageFont());
 
+// No control holds focus, as when the one that did left the page.
+function focusIsFree(): boolean {
+  const now = document.activeElement;
+  return !now || now === document.body;
+}
+
 // What the stage's room makes of the font: the size that shows, and whether
 // one size larger fits.
 export interface RoomFont {
@@ -127,7 +134,8 @@ export interface RoomFont {
 }
 
 // The font controls' reading of the stage. The readout is the size that
-// shows, and its name says the chosen size when the two differ. The Fit sizes
+// shows, and its name says the stored size, chosen or the default, when the
+// two differ. The Fit sizes
 // the pane to the chosen size, so with it the steps go from that choice, and
 // the text follows once the pane takes its new size. Without it, Smaller
 // steps down from the size that shows, and Larger waits until one size
@@ -136,11 +144,11 @@ export function fontReadout(stageFont: number, fitted: boolean, room: RoomFont) 
   const shown = room.shown > 0 ? room.shown : stageFont;
   const fontText = `Font size ${shown} px`;
   const chosen = stageFont === STAGE_FONT ? "the default" : "the chosen";
-  // With the Fit, the room can be short only for a while: until the pane
-  // takes its new size, or while a prompt's strip borrows rows.
+  // With the Fit the room is short until the pane takes its new size, while
+  // a prompt's strip borrows rows, or where the smallest pane is too large.
   const base =
     shown < stageFont
-      ? `${fontText} of ${chosen} ${stageFont}, as large as the stage holds the pane${fitted ? " for now" : ""}`
+      ? `${fontText} of ${chosen} ${stageFont}, as large as the stage holds the pane`
       : stageFont === STAGE_FONT
         ? `${fontText}, the default`
         : fontText;
@@ -764,6 +772,16 @@ export function LiveTerminal({
     };
   }, [sessionId, host, closeHistory, tail, peer]);
 
+  // A switch to another agent in full screen mounts this terminal, and focus
+  // on the old one's controls drops to the page: it goes to this one's way
+  // out. A switch from typing carries focus here once live instead, so a key
+  // typed before then does not press the way out.
+  const wayOut = useRef<HTMLButtonElement>(null);
+  const focusWayOutOnMount = useEffectEvent(() => {
+    if (full && !autoType && focusIsFree()) wayOut.current?.focus();
+  });
+  useEffect(() => focusWayOutOnMount(), []);
+
   const live = status.kind === "live";
   useEffect(() => {
     const term = termRef.current;
@@ -773,8 +791,7 @@ export function LiveTerminal({
     else if (typeWhenLive.current && term.element) {
       typeWhenLive.current = false;
       // Unless the owner moved focus while it waited.
-      const now = document.activeElement;
-      if (!now || now === document.body || term.element.contains(now)) term.focus();
+      if (focusIsFree() || term.element.contains(document.activeElement)) term.focus();
     }
   }, [live, peer]);
 
@@ -909,7 +926,7 @@ export function LiveTerminal({
       term.focus();
     } else if (typeWhenLive.current && !term.options.disableStdin) {
       typeWhenLive.current = false;
-      term.focus();
+      if (focusIsFree() || term.element?.contains(document.activeElement)) term.focus();
     }
   }, [box, ready, host, label, layout, watch]);
 
@@ -1198,6 +1215,7 @@ export function LiveTerminal({
         aria-label="Full screen"
         aria-pressed={full}
         data-full-screen=""
+        ref={wayOut}
         onMouseDown={keepFocus}
         onClick={toggleFull}
       >

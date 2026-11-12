@@ -285,13 +285,14 @@ test("the font readout shows the size on screen, and names the choice when they 
     shown: 14,
     from: 17,
     full: false,
-    hint: "Font size 14 px of the chosen 17, as large as the stage holds the pane for now. Click for the default, 14 px",
+    hint: "Font size 14 px of the chosen 17, as large as the stage holds the pane. Click for the default, 14 px",
   });
   // A Fit at its smallest pane that still cannot hold the font.
-  expect(fontReadout(24, true, room(19, false))).toMatchObject({
+  expect(fontReadout(24, true, room(19, false))).toEqual({
     shown: 19,
     from: 24,
     full: false,
+    hint: "Font size 19 px of the chosen 24, as large as the stage holds the pane. Click for the default, 14 px",
   });
 });
 
@@ -327,8 +328,11 @@ test("full screen pins the agent's card over the page, and a second press or Esc
   expect(screen.getAllByRole("option")[0]?.closest("[inert]")).toBeNull();
   expect(document.activeElement).toBe(list);
 
+  // From nothing focused, as after a mouse click, focus goes to the way out.
+  (document.activeElement as HTMLElement | null)?.blur();
   fireEvent.click(bar.getByRole("button", { name: "Full screen" }));
-  await bar.findByRole("button", { name: "Full screen", pressed: true });
+  const again = await bar.findByRole("button", { name: "Full screen", pressed: true });
+  expect(document.activeElement).toBe(again);
   leave();
   await bar.findByRole("button", { name: "Full screen", pressed: false });
   expect(bar.getByRole("button", { name: "Expand the terminal" })).toBeTruthy();
@@ -385,7 +389,13 @@ test("a switch from typing in full screen leaves focus to the new terminal, not 
     if (!String(input).endsWith("/terminal")) return api(input, init);
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
+        // A stream the mirror stops is gone, as a real fetch's is.
+        if (init?.signal?.aborted) return;
         streams.push(controller);
+        init?.signal?.addEventListener("abort", () => {
+          streams.splice(streams.indexOf(controller), 1);
+          controller.error(init.signal?.reason);
+        });
       },
     });
     return Promise.resolve(new Response(body, { status: 200 }));
