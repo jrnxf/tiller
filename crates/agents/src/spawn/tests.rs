@@ -4142,6 +4142,17 @@ fn an_orchestrator_starts_in_the_terminal_holder_with_no_workspace() {
     let listing = tiller_panes::Panes::list(&panes).unwrap();
     assert_eq!(listing.panes[0].meta["role"], "orchestrator");
     assert_eq!(listing.panes[0].cwd, rig.repo.checkout.to_string_lossy());
+
+    // Its agent exits with no session end: a second start returns the live
+    // session, and warns that the holder no longer runs its pane.
+    assert!(panes.exit(&tiller_panes::PaneId::from(pane.as_str()), Some(1), None));
+    let again = start_orchestrator(&mut rig, &homes, &owner()).unwrap();
+    assert_eq!(again.value.session.id, value.session.id);
+    let warning = again.value.warning.unwrap_or_default();
+    assert!(
+        warning.contains("the terminal holder no longer runs pane"),
+        "{warning}"
+    );
 }
 
 #[test]

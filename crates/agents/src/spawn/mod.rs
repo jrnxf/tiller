@@ -92,7 +92,8 @@ pub enum SpawnError {
     State(#[from] tiller_core::Error),
     #[error(transparent)]
     Herdr(#[from] HerdrError),
-    #[error("the terminal holder: {0}")]
+    /// Its text names the terminal holder already.
+    #[error(transparent)]
     Panes(#[from] tiller_panes::PanesError),
     #[error(transparent)]
     Role(#[from] RoleError),

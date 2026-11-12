@@ -99,12 +99,17 @@ pub(crate) fn open(
 ) -> Result<Pane> {
     match panes.spawn(&request(owner, script, cwd)) {
         Ok(pane) => Ok(pane),
-        Err(error) => {
-            // A holder that does not answer the list cannot show a pane to
-            // end; the spawn's own error is the one to report.
-            let _ = end(panes, |p| p.key == owner.session);
-            Err(error.into())
-        }
+        Err(error) => match end(panes, |p| p.key == owner.session) {
+            Ok(()) => Err(error.into()),
+            // The holder may run a pane for the session that nothing ends.
+            Err(note) => Err(super::SpawnError::Undone {
+                error: Box::new(error.into()),
+                notes: format!(
+                    "a pane for session {} may have started in the terminal holder and could not be checked: {note}",
+                    owner.session
+                ),
+            }),
+        },
     }
 }
 
@@ -127,7 +132,16 @@ fn end(panes: &dyn Panes, which: impl Fn(&Pane) -> bool) -> std::result::Result<
         return Ok(());
     };
     let pane = &found.pane;
-    let pid = i32::try_from(found.pid).map_err(|_| format!("pane {pane} has pid {}", found.pid))?;
+    // Pid 0 or 1 would signal this process's own group or init's.
+    let pid = i32::try_from(found.pid)
+        .ok()
+        .filter(|pid| *pid > 1)
+        .ok_or_else(|| {
+            format!(
+                "pane {pane} has pid {}, which is never signalled",
+                found.pid
+            )
+        })?;
     match nix::sys::signal::killpg(
         nix::unistd::Pid::from_raw(pid),
         nix::sys::signal::Signal::SIGKILL,

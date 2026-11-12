@@ -39,7 +39,6 @@ use tiller_core::state::get;
 use tiller_core::state::outbox::live_orchestrator;
 use tiller_core::state::runs::{NewOrchestrator, OrchestratorStarted};
 use tiller_core::{Actor, Applied, Ctx, Store, ids};
-use tiller_herdr::client::Herdr;
 use tiller_herdr::layout;
 
 use super::launch::{self, LaunchSpec, Roots};
@@ -146,7 +145,7 @@ pub fn start(
         // The stored response holds the session as it started: read it now.
         let now: Session = get(store.conn(), "session", &session.id)?;
         if now.ended_at.is_none() {
-            return Ok(replayed(world.herdr, replay, label));
+            return Ok(replayed(world, replay, label));
         }
         ctx.clone()
     } else {
@@ -155,7 +154,7 @@ pub fn start(
     let mut events = Vec::new();
     let mut leftover = None;
     let restarting = match (live_orchestrator(store.conn(), &project.id)?, restart) {
-        (Some(live), None) => return Ok(existing(world.herdr, live, label)),
+        (Some(live), None) => return Ok(existing(world, live, label)),
         (Some(live), Some(waits)) => {
             // The board is the owner signed in on this host, so its Restart
             // and its stale restart record the board all the way through
@@ -287,7 +286,7 @@ pub fn start(
         // The key started one already, in a request that won the race.
         Ok(started) if started.replayed => {
             let notes = opened.clean(Some(&pane_id));
-            let mut found = replayed(world.herdr, started, label);
+            let mut found = replayed(world, started, label);
             found.events.splice(0..0, events);
             found.value.warning = [found.value.warning.take(), leftover]
                 .into_iter()
@@ -304,7 +303,7 @@ pub fn start(
             return match live {
                 Ok(Some(live)) => {
                     // The manifest this start recorded is still written.
-                    let mut found = existing(world.herdr, live, label);
+                    let mut found = existing(world, live, label);
                     found.events = events;
                     Ok(found)
                 }
@@ -394,11 +393,11 @@ fn new_orchestrator(project_id: &str) -> NewOrchestrator {
 /// A keyed start's stored result: its session as recorded, where herdr
 /// shows it now, and its notes.
 fn replayed(
-    herdr: &dyn Herdr,
+    world: &World<'_>,
     replay: Applied<OrchestratorStarted>,
     label: String,
 ) -> Applied<Orchestrator> {
-    let mut found = existing(herdr, replay.value.session, label);
+    let mut found = existing(world, replay.value.session, label);
     found.value.notes = replay.value.notes;
     found.events = replay.events;
     found
@@ -407,14 +406,26 @@ fn replayed(
 /// The live orchestrator, returned as a replay. A pane herdr no longer
 /// shows is only a warning: the liveness ladder decides whether the session
 /// ended (`recovery.md`, section 2), not a start.
-fn existing(herdr: &dyn Herdr, live: Session, label: String) -> Applied<Orchestrator> {
+fn existing(world: &World<'_>, live: Session, label: String) -> Applied<Orchestrator> {
+    let herdr = world.herdr;
     let (workspace_id, warning) = match &live.pane_id {
         None => (
             None,
             Some(format!("orchestrator session {} has no pane", live.id)),
         ),
-        // The holder has no workspaces, and the ladder judges its panes.
-        Some(pane) if ids::is_holder_pane(pane) => (None, None),
+        // The holder has no workspaces. A pane it no longer runs is only a
+        // warning too.
+        Some(pane) if ids::is_holder_pane(pane) => (
+            None,
+            match holder::running(world.panes, pane) {
+                Ok(true) => None,
+                Ok(false) => Some(format!(
+                    "the terminal holder no longer runs pane {pane} of orchestrator session {}",
+                    live.id
+                )),
+                Err(e) => Some(e.to_string()),
+            },
+        ),
         Some(pane) => match herdr.pane(pane) {
             Ok(Some(info)) => (Some(info.workspace_id), None),
             Ok(None) => (

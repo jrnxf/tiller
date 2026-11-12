@@ -280,6 +280,7 @@ fn one_key(key: &str) -> Option<Vec<u8>> {
         "f10" => Some(tilde(21)),
         "f11" => Some(tilde(23)),
         "f12" => Some(tilde(24)),
+        "tab" if shift && alt => Some("\x1b\x1b[Z".to_owned()),
         "tab" if shift => Some("\x1b[Z".to_owned()),
         _ => None,
     };
@@ -289,6 +290,9 @@ fn one_key(key: &str) -> Option<Vec<u8>> {
     let mut bytes = match rest {
         "enter" => vec![b'\r'],
         "tab" => vec![b'\t'],
+        // xterm sends ^H for Ctrl+Backspace, which line editors read apart
+        // from Backspace.
+        "backspace" if ctrl => vec![0x08],
         "backspace" => vec![0x7f],
         "esc" | "escape" => vec![0x1b],
         "space" if ctrl => vec![0],
@@ -360,6 +364,10 @@ mod tests {
         assert_eq!(
             keys(&["f1", "ctrl+f1", "f5", "shift+f12"]).unwrap(),
             b"\x1bOP\x1b[1;5P\x1b[15~\x1b[24;2~"
+        );
+        assert_eq!(
+            keys(&["ctrl+backspace", "alt+shift+tab"]).unwrap(),
+            b"\x08\x1b\x1b[Z"
         );
         assert_eq!(
             keys(&["tab", "backspace", "-", "+", "é"]).unwrap(),
