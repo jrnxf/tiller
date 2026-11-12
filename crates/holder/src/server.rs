@@ -384,7 +384,6 @@ fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
             pane,
             existing: false,
         }),
-        // A long read formats many rows, so it runs on a blocking thread.
         Request::Screen {
             id,
             pane,
@@ -393,14 +392,9 @@ fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
         } => {
             let (holder, conn) = (holder.clone(), conn.clone());
             tokio::spawn(async move {
-                let reply = tokio::task::spawn_blocking(move || holder.screen(&pane, read, format))
+                let reply = holder
+                    .screen_read(pane, read, format)
                     .await
-                    .unwrap_or_else(|err| {
-                        Err((
-                            ErrorCode::Internal,
-                            format!("the screen read failed: {err}"),
-                        ))
-                    })
                     .map(|screen| HolderMessage::Screen { id, screen });
                 send_reply(&conn, Some(id), reply);
             });

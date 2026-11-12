@@ -7,6 +7,7 @@
 //! the caller learns of it through [`ModelPanic`] to tell the child and the
 //! pane's subscribers.
 
+use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Instant;
 
@@ -53,6 +54,22 @@ const TITLE_STACK: usize = 4096;
 /// The most notifications told between two takes.
 pub const NOTIFY_MAX: usize = 8;
 
+/// The most bytes of a title, or of a notification's title or body, that
+/// is told. The rest is cut, so no one app's text fills a watcher's queue.
+pub const TEXT_MAX: usize = 4 * 1024;
+
+/// `text` cut to [`TEXT_MAX`] bytes, at a character's start.
+fn capped(mut text: String) -> String {
+    if text.len() > TEXT_MAX {
+        let mut end = TEXT_MAX;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    text
+}
+
 /// Reads what the app tells its terminal, in the order it tells it, from
 /// the bytes the model parses: titles (OSC 0 and 2, the title stack of
 /// `CSI 22 t` and `CSI 23 t`, and the reset `ESC c`), the bell, and
@@ -64,11 +81,13 @@ pub const NOTIFY_MAX: usize = 8;
 /// One PTY read can tell a flood (`yes $'\a'` rings a bell every two
 /// bytes), and each thing told is an event to every watcher. So between
 /// two takes it keeps the latest title only, one bell and the first
-/// [`NOTIFY_MAX`] notifications.
+/// [`NOTIFY_MAX`] notifications. Its parser splits an OSC at `;` into 16
+/// parts at most, as the model's does, so a body with more than 13 `;` in
+/// it loses its end.
 #[derive(Debug, Default)]
 struct Teller {
     title: String,
-    stack: Vec<String>,
+    stack: VecDeque<String>,
     told: Vec<Told>,
 }
 
@@ -93,6 +112,7 @@ impl Teller {
     }
 
     fn set_title(&mut self, title: String) {
+        let title = capped(title);
         self.title.clone_from(&title);
         self.tell(Told::Title(title));
     }
@@ -140,15 +160,15 @@ impl Perform for Teller {
                 if !conemu {
                     self.tell(Told::Notify {
                         title: String::new(),
-                        body: text(rest),
+                        body: capped(text(rest)),
                     });
                 }
             }
             b"777" => {
                 if let [b"notify", title, body @ ..] = rest {
                     self.tell(Told::Notify {
-                        title: String::from_utf8_lossy(title).into_owned(),
-                        body: text(body),
+                        title: capped(String::from_utf8_lossy(title).into_owned()),
+                        body: capped(text(body)),
                     });
                 }
             }
@@ -163,12 +183,12 @@ impl Perform for Teller {
         match params.iter().next().map_or(0, |param| param[0]) {
             22 => {
                 if self.stack.len() >= TITLE_STACK {
-                    self.stack.remove(0);
+                    self.stack.pop_front();
                 }
-                self.stack.push(self.title.clone());
+                self.stack.push_back(self.title.clone());
             }
             23 => {
-                if let Some(title) = self.stack.pop() {
+                if let Some(title) = self.stack.pop_back() {
                     self.set_title(title);
                 }
             }
@@ -288,7 +308,7 @@ impl Model {
 
     /// What the app told the terminal since the last call: titles, bells
     /// and notifications, in order, with a flood cut down as [`Teller`]
-    /// says. A model panic drops what was not taken.
+    /// says. What the update that panicked told is kept.
     pub fn take_told(&mut self) -> Vec<Told> {
         std::mem::take(&mut self.screen.teller.told)
     }
@@ -354,14 +374,12 @@ impl Model {
                     .map(|text| (*text).to_owned())
                     .or_else(|| payload.downcast_ref::<String>().cloned())
                     .unwrap_or_else(|| "a panic with no message".to_owned());
-                // The app's title is still the one it set: only the screen
-                // is lost.
+                // The teller read the bytes whole, and what it read stands:
+                // only the screen is lost. Its parser starts afresh, as the
+                // model's does.
                 let teller = std::mem::take(&mut self.screen.teller);
                 self.screen = Screen::new(self.size);
-                self.screen.teller = Teller {
-                    told: Vec::new(),
-                    ..teller
-                };
+                self.screen.teller = teller;
                 self.scanner = Scanner::new();
                 Err(ModelPanic {
                     message,
@@ -534,14 +552,36 @@ mod tests {
     }
 
     #[test]
-    fn a_model_reset_keeps_the_title_the_app_set() {
+    fn a_model_reset_keeps_the_title_the_app_set_and_what_it_told() {
         let mut model = Model::new(size());
         model.feed(b"\x1b]2;build\x07\x1b[22t").unwrap();
         model.take_told();
-        model.fail_next();
-        model.feed(b"x").unwrap_err();
+        // The teller reads the update, and then the model's parser panics.
+        model
+            .guarded::<()>(|screen| {
+                screen
+                    .teller_parser
+                    .advance(&mut screen.teller, b"\x1b]2;test\x07");
+                panic!("the model broke");
+            })
+            .unwrap_err();
+        assert_eq!(model.take_told(), [Told::Title("test".into())]);
         model.feed(b"\x1b]2;other\x07\x1b[23t").unwrap();
         assert_eq!(model.take_told(), [Told::Title("build".into())]);
+    }
+
+    #[test]
+    fn a_long_title_or_notification_is_cut_at_a_character() {
+        let mut model = Model::new(size());
+        let long = "é".repeat(TEXT_MAX);
+        model
+            .feed(format!("\x1b]2;{long}\x07\x1b]777;notify;{long};{long}\x07").as_bytes())
+            .unwrap();
+        let cut = "é".repeat(TEXT_MAX / 2);
+        assert_eq!(
+            model.take_told(),
+            [Told::Title(cut.clone()), notify(&cut, &cut)]
+        );
     }
 
     #[test]
@@ -569,7 +609,8 @@ mod tests {
             model.feed(part).unwrap();
         }
         model.feed(b"\x07").unwrap();
-        assert_eq!(model.take_told(), [notify("long", &body)]);
+        // Told once, at its end, cut to the most that is told.
+        assert_eq!(model.take_told(), [notify("long", &body[..TEXT_MAX])]);
     }
 
     #[test]

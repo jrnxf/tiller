@@ -119,7 +119,10 @@ fn legacy(out: &mut String, key: Key, modes: Modes) {
                     alt(out);
                     out.push_str(if modes.newline { "\r\n" } else { "\r" });
                 }
-                Named::Tab if key.shift => out.push_str("\x1b[Z"),
+                Named::Tab if key.shift => {
+                    alt(out);
+                    out.push_str("\x1b[Z");
+                }
                 Named::Tab => {
                     alt(out);
                     out.push('\t');
@@ -282,6 +285,7 @@ mod tests {
             ("enter", "\r"),
             ("tab", "\t"),
             ("shift+tab", "\x1b[Z"),
+            ("alt+shift+tab", "\x1b\x1b[Z"),
             ("backspace", "\x7f"),
             ("ctrl+backspace", "\x08"),
             ("esc", "\x1b"),

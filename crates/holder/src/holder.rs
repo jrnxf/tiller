@@ -44,6 +44,9 @@ const READ_CHUNK: usize = 64 * 1024;
 /// How long a pane is silent after output before its `quiet` event.
 pub const QUIET_AFTER: Duration = Duration::from_millis(500);
 
+/// The `screen` reads that run at once. The rest wait their turn.
+const SCREEN_READS: usize = 2;
+
 /// How long `close` waits for the reaper after `kill`. A killed child ends
 /// at once unless the kernel holds it, so a longer wait is an error.
 const KILL_WAIT: Duration = Duration::from_secs(5);
@@ -435,6 +438,8 @@ pub struct Holder {
     /// was in the table is not missed.
     reap: Notify,
     watchers: Arc<Watchers>,
+    /// The `screen` reads that may run at once, each on a blocking thread.
+    screen_reads: Arc<tokio::sync::Semaphore>,
 }
 
 impl Holder {
@@ -448,6 +453,7 @@ impl Holder {
             next_stream: AtomicU32::new(1),
             reap: Notify::new(),
             watchers: Arc::default(),
+            screen_reads: Arc::new(tokio::sync::Semaphore::new(SCREEN_READS)),
         })
     }
 
@@ -606,6 +612,40 @@ impl Holder {
     /// `get`: one pane.
     pub fn get(&self, pane: &PaneId) -> Result<Pane, Failure> {
         Ok(self.cell(pane)?.live()?.record())
+    }
+
+    /// `screen`, as a request runs it: a long read formats many rows under
+    /// the pane's lock, so it runs on a blocking thread, and at most
+    /// [`SCREEN_READS`] run at once.
+    pub async fn screen_read(
+        self: &Arc<Self>,
+        pane: PaneId,
+        read: Read,
+        format: Format,
+    ) -> Result<Screen, Failure> {
+        let permit = self
+            .screen_reads
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|err| {
+                (
+                    ErrorCode::Internal,
+                    format!("the screen read failed: {err}"),
+                )
+            })?;
+        let holder = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            holder.screen(&pane, read, format)
+        })
+        .await
+        .map_err(|err| {
+            (
+                ErrorCode::Internal,
+                format!("the screen read failed: {err}"),
+            )
+        })?
     }
 
     /// `screen`: a read of the pane's model, running or exited. A model
@@ -1052,11 +1092,11 @@ async fn read_pty(cell: Arc<PaneCell>) {
     let mut quiet_at = None;
     loop {
         let sync_at = cell.sync_deadline();
+        // In this order: a forgotten pane reads no more, and a deadline that
+        // passed is kept even while a flooding app keeps the PTY readable.
         let ready = tokio::select! {
-            // A forgotten pane reads no more, and tells of no quiet.
             biased;
             _ = forgotten.wait_for(|forgotten| *forgotten) => break,
-            ready = cell.master.readable() => ready,
             () = until(sync_at) => {
                 cell.end_sync();
                 continue;
@@ -1066,6 +1106,7 @@ async fn read_pty(cell: Arc<PaneCell>) {
                 cell.quiet();
                 continue;
             }
+            ready = cell.master.readable() => ready,
         };
         let mut guard = match ready {
             Ok(guard) => guard,
