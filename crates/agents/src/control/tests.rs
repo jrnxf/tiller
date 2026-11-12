@@ -1740,3 +1740,26 @@ fn a_resume_with_the_terminal_holder_goes_on_in_its_live_herdr_pane() {
     assert_eq!(done.pane_id.as_deref(), Some(spawned.pane_id.as_str()));
     assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
 }
+
+#[test]
+fn a_relaunch_with_the_terminal_holder_and_an_untagged_herdr_pane_leaves_the_agent_running() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.panes = Some(tiller_panes::FakePanes::new());
+    rig.herdr
+        .set_tokens(&spawned.pane_id, std::collections::BTreeMap::new());
+    let opened = workspaces_opened(&rig);
+    let ctx = rig.orchestrator();
+
+    let error = relaunch_it(&mut rig, &ctx, &patient(), &spawned.run.id, note("n")).unwrap_err();
+    let text = error.to_string();
+    assert!(
+        text.contains("A relaunch is not ready yet with the terminal holder")
+            && text.contains("nothing was changed"),
+        "{text}"
+    );
+    assert!(!typed(&rig, &spawned.pane_id, "/exit"));
+    assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
+    assert!(session(&rig, &spawned.session.id).ended_at.is_none());
+    assert_eq!(rig.events("run.relaunched", &spawned.run.id), 0);
+}

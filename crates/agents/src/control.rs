@@ -791,10 +791,7 @@ fn herdr_pane_left(store: &Store, herdr: &dyn Herdr, session: Option<&Session>) 
     let Some(pane) = herdr.pane(pane_id)? else {
         return Ok(false);
     };
-    if pane_holder(store, &pane, &session.id)?.is_some() {
-        return Ok(false);
-    }
-    Ok(pane.agent.is_some() || tagged(&pane, &session.id))
+    Ok(tagged(&pane, &session.id) && pane_holder(store, &pane, &session.id)?.is_none())
 }
 
 /// Another session that holds `pane`: a live row bound to it, or the
@@ -1349,7 +1346,7 @@ fn start_again(
 fn open_pane(world: &World<'_>, card: &Card, run: &Run, worktree: &Path) -> Result<String> {
     if world.panes.is_some() {
         return Err(SpawnError::Refused(format!(
-            "run {} has no herdr pane left to go on in, and a new pane would belong in the terminal holder, which is not ready for it yet",
+            "the old agent of run {} was stopped and its herdr pane is gone, but no new pane was opened: the terminal holder is not ready for a relaunch yet, so the run needs a new start",
             run.id
         )));
     }
