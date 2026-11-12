@@ -30,8 +30,14 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
-use rustix::io::{Errno, FdFlags, fcntl_setfd, ioctl_fionbio};
-use rustix::net::{AddressFamily, SocketAddrUnix, SocketType, connect, socket, sockopt};
+use rustix::io::{Errno, ioctl_fionbio};
+#[cfg(not(target_os = "linux"))]
+use rustix::io::{FdFlags, fcntl_setfd};
+#[cfg(not(target_os = "linux"))]
+use rustix::net::socket;
+use rustix::net::{AddressFamily, SocketAddrUnix, SocketType, connect, sockopt};
+#[cfg(target_os = "linux")]
+use rustix::net::{SocketFlags, socket_with};
 
 use crate::error::{PanesError, Result};
 use crate::frame::{Frame, FrameError, encode_input, read_frame};
@@ -199,6 +205,27 @@ fn await_reply(
     }
 }
 
+/// A unix stream socket that a child the daemon spawns does not inherit.
+/// Linux sets the flag as it makes the socket, so a fork on another thread
+/// never sees it open. macOS has no such flag and sets it straight after.
+fn cloexec_socket() -> rustix::io::Result<OwnedFd> {
+    #[cfg(target_os = "linux")]
+    {
+        socket_with(
+            AddressFamily::UNIX,
+            SocketType::STREAM,
+            SocketFlags::CLOEXEC,
+            None,
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let fd = socket(AddressFamily::UNIX, SocketType::STREAM, None)?;
+        fcntl_setfd(&fd, FdFlags::CLOEXEC)?;
+        Ok(fd)
+    }
+}
+
 /// Connects to the unix socket at `path`, or fails at `deadline`. A plain
 /// connect has no time limit, and a holder with a full listen queue would
 /// hold it up for as long as it stays full.
@@ -207,8 +234,7 @@ fn connect_by(path: &Path, deadline: Instant) -> Result<UnixStream> {
         PanesError::Unreachable(format!("{}: {}", path.display(), io::Error::from(err)))
     };
     let addr = SocketAddrUnix::new(path).map_err(unreachable)?;
-    let fd = socket(AddressFamily::UNIX, SocketType::STREAM, None).map_err(io::Error::from)?;
-    fcntl_setfd(&fd, FdFlags::CLOEXEC).map_err(io::Error::from)?;
+    let fd = cloexec_socket().map_err(io::Error::from)?;
     ioctl_fionbio(&fd, true).map_err(io::Error::from)?;
     loop {
         match connect(&fd, &addr) {
@@ -397,6 +423,13 @@ fn copy(err: &PanesError) -> PanesError {
         PanesError::Unreachable(why) => PanesError::Unreachable(why.clone()),
         err => PanesError::Unreachable(err.to_string()),
     }
+}
+
+/// What a caller gets when the reply reader went away without answering.
+fn stopped(name: &'static str) -> Result<HolderMessage> {
+    Err(PanesError::Unreachable(format!(
+        "the reply reader stopped during {name}"
+    )))
 }
 
 /// The instant `wait` from now. A wait too long to add, such as a huge
@@ -647,18 +680,16 @@ impl HolderClient {
         match answer.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(reply) => reply,
             Err(RecvTimeoutError::Timeout) => {
-                forget();
-                // The reader may have taken the waiter and sent the reply
-                // just as the wait ran out: a reply that came is used.
-                answer.try_recv().unwrap_or_else(|_| {
-                    Err(PanesError::Unreachable(format!(
+                if self.shared.waiters().remove(&id).is_some() {
+                    return Err(PanesError::Unreachable(format!(
                         "the holder did not answer {name} in time"
-                    )))
-                })
+                    )));
+                }
+                // The reader or a retire took the waiter just as the wait
+                // ran out, and it sends next: that answer is used.
+                answer.recv().unwrap_or_else(|_| stopped(name))
             }
-            Err(RecvTimeoutError::Disconnected) => Err(PanesError::Unreachable(format!(
-                "the reply reader stopped during {name}"
-            ))),
+            Err(RecvTimeoutError::Disconnected) => stopped(name),
         }
     }
 
@@ -964,7 +995,10 @@ impl EventFeed for SocketEvents {
             return Ok(None);
         }
         if result.is_err() {
+            // The watch is over: close it, so the holder stops sending to
+            // a socket nobody reads.
             self.done = true;
+            let _ = self.reader.get_ref().stream.shutdown(Shutdown::Both);
         }
         result.map(Some)
     }
@@ -1472,7 +1506,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_connect_to_a_full_listen_queue_gives_up_at_its_deadline() {
-        use rustix::net::{bind, listen};
+        use rustix::net::{bind, listen, socket};
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("full.sock");

@@ -124,6 +124,9 @@ impl Key {
     }
 }
 
+/// A character a key name may hold as it is: not a space, a C0 control or
+/// DEL, which have names. A C1 control passes, as the board sends what was
+/// typed as it is.
 fn printable(c: char) -> bool {
     c > ' ' && c != '\u{7f}'
 }
