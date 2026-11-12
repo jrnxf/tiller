@@ -173,12 +173,14 @@ A subscriber gets one **repaint**, then **passthrough**:
 | Connections | 64 | new connections are closed |
 | Frame size | 16 MiB | the connection ends |
 | Subscriber queue | 4 MiB | the subscriber is cut |
+| One reply frame, against a connection's 4 MiB queue | 4 MiB | the request answers `busy`, and the connection stays |
+| A client's input the app left unread | 4 MiB | `input`, `paste` and `keys` answer `busy`, and raw input cuts the client |
 
 ## 3. The screen model
 
 ### 3.1 The pick: `alacritty_terminal` 0.26
 
-I compared `vt100` 0.18.1 and `alacritty_terminal` 0.26.0 in a throwaway crate on Wednesday 2026-11-11. Both read the nine Claude Code fixtures in `crates/herdr/tests/fixtures/claude/`. Each fixture was fed in, and the model's screen was read back and given to `composer::classify`.
+I compared `vt100` 0.18.1 and `alacritty_terminal` 0.26.0 in a throwaway crate on Wednesday 2026-11-11. Both read the nine Claude Code fixtures, then in `crates/herdr/tests/fixtures/claude/` and now in `crates/panes/tests/fixtures/claude/`. Each fixture was fed in, and the model's screen was read back and given to `composer::classify`.
 
 | Check | `vt100` 0.18 | `alacritty_terminal` 0.26 |
 |---|---|---|
@@ -234,7 +236,7 @@ The holder feeds the model only whole escape sequences and whole UTF-8 character
 
 Each pane's model update (`vte::ansi::Processor::advance` into the pane's `Term`) runs inside `catch_unwind`. On a panic:
 1. The holder logs the panic and the last 4 KiB of input.
-2. It makes a fresh model at the same size and sends the child `SIGWINCH`, so the app redraws.
+2. It makes a fresh model at the same size, with the modes the app set (the alternate screen, keyboard, mouse, paste and cursor modes), and sends the child `SIGWINCH`, so the app redraws. An app sets its modes once and does not set them again when it redraws.
 3. It cuts every subscriber of that pane (`lagged`), and they subscribe again for a repaint.
 4. It sends the event `model_reset {pane}`. The daemon records it as an observation.
 
@@ -283,17 +285,17 @@ pub trait Live: Send + Sync {
 ```
 
 - `Subscription` yields `Repaint { cols, rows, bytes }`, then `Output(bytes)`, `Resized`, `Exited` and `Lagged`. It holds an optional size lease, so `subscription.resize(cols, rows)` is the board's Fit.
-- `PanesError` (with `thiserror`) has `NotFound`, `Exited`, `Unreachable`, `Refused { code }`, `Protocol` and `Io`. `Unreachable` means "unknown, never gone", as `HerdrError::Unreachable` does today (`herdr/src/client.rs:28`).
+- `PanesError` (with `thiserror`) has `NotFound`, `Exited`, `Unreachable`, `Refused { request, code, message }`, `Version { client, holder, message }`, `Protocol` and `Io`. `Unreachable` means "unknown, never gone", as `HerdrError::Unreachable` does today (`herdr/src/client.rs:28`).
 - `Notify` is not on the trait. It is its own trait in `tiller-delivery` (section 7).
 
 ### 4.3 Key names
 
 The board and the CLI send key names. Today they are "named as `herdr pane send-keys` names them" (`dto.rs:2139`). They become Tiller's own list, with the same spelling, so the board does not change:
 - The names `board/src/components/board/terminal-keys.ts` and `daemon/src/prompt.rs` send today, all lowercase: `enter`, `esc`, `tab`, `backspace`, `space`, `up`, `down`, `left`, `right`, and the rest of that file's table.
-- Modifier prefixes `ctrl+`, `alt+` and `shift+`, in that order, as in `ctrl+c` and `shift+tab`.
+- Modifier prefixes `ctrl+`, `alt+` and `shift+`, as in `ctrl+c` and `shift+tab`. A name prints them in that order, but parses them in any order, each at most once, because the board sends `alt+ctrl+x`.
 - A single printable character.
 
-The holder encodes each name for the app's current mode: legacy, application cursor keys, or the kitty keyboard flags that the app pushed. The list lives in `tiller-panes::keys`. H02 builds it from those two files, not from this summary, and a test checks that every name they can emit parses.
+The holder encodes each name for the app's current mode: legacy, application cursor keys, or the kitty keyboard flags that the app pushed. The list lives in `tiller-panes::keys`. H02 builds it from those two files, not from this summary, and tests check that every name they can emit parses. No test reads their source as text: `terminal-keys.ts` exports `keyNames()`, a board test keeps it equal to what `typedKeys` sends and to the committed `crates/panes/tests/fixtures/board-key-names.json`, and `tiller-panes` parses each name in that fixture. The daemon's prompt test parses each name `Dialog::keys` sends.
 
 ### 4.4 Every herdr call path, mapped
 
@@ -328,7 +330,7 @@ The holder encodes each name for the app's current mode: legacy, application cur
 | `tiller admin` `stop_herdr` | `cli/cmd/admin.rs:386-450` | `close` for each of the project's panes |
 | Peer pane link | `daemon/peer/pane.rs` | `Live::subscribe` and `screen({recent})` on the peer's own holder. The frames do not change |
 | Replay sandbox | `replay/sandbox.rs`, `replay/audit.rs` | `FakePanes`. The audit counts verbs from `FakePanes::calls()` |
-| The generic poller | `herdr/poller.rs` (`Source`, `PollError`, `Registry`, `Poller`, `backoff`), used by `daemon/src/{forge.rs,forge/gate.rs,memory/watch.rs,owner.rs,quota.rs,server.rs,sse.rs,workers.rs}`, `delivery/src/sources.rs` and `cli/src/daemon.rs` | Moves to `tiller-poll` unchanged. Only the import path changes |
+| The generic poller | `herdr/poller.rs` (`Source`, `PollError`, `Registry`, `Poller`, `backoff`), used by `daemon/src/{forge.rs,forge/gate.rs,memory/watch.rs,owner.rs,quota.rs,server.rs,sse.rs,workers.rs}`, `delivery/src/sources.rs` and `cli/src/daemon.rs` | Moves to `tiller-poll`. The import path changes, and `PollError::Herdr` becomes `PollError::Source`, made with `PollError::from_source`, because `tiller-poll` cannot name herdr's error |
 | Test helpers | `herdr/testing.rs` (`Fleet`, `Pty`), `herdr/fake.rs`, used across the daemon, delivery, agents and reconcile tests | `tiller-panes::testing` over `FakePanes`. Each test keeps what it checks, and the herdr-only checks (layout, tokens) go |
 | Terminal launcher | `herdr/front.rs` (`Terminal`, `MacApp`, `Opened`, `open_agent`) | `tiller-panes::open`, launching `tiller attach` in place of herdr (section 5.3) |
 | Child process helper | `cli/cmd/learn.rs:21` (`process::{Ended, Interrupt}`) | Moves to `tiller-panes::process` unchanged |
@@ -507,7 +509,7 @@ This affects the agents' own cards too, because their panes now carry `TILLER_PA
 
 ### 9.1 Parser results must not change
 
-- **H00 freezes today's results** before any code moves. For each fixture in `crates/herdr/tests/fixtures/claude/`, it stores `composer::classify` and the `prompt.rs` parse result as `insta` snapshots, made with today's herdr-era code.
+- **H00 freezes today's results** before any code moves. For each fixture, then in `crates/herdr/tests/fixtures/claude/`, it stores `composer::classify` and the `prompt.rs` parse result as `insta` snapshots, made with today's herdr-era code.
 - **Model gate.** Each fixture is fed into the holder's model at 119 by its row count. The model's `screen(visible, ansi)` then goes to `classify` and to the prompt parser. Both results must equal the frozen snapshots. The fixtures move to `crates/panes/tests/fixtures/claude/`, unchanged.
 - **Raw stream gate (H08).** Raw PTY recordings of real Claude Code sessions: start, a draft, a turn, a permission dialog, a trust dialog, `/exit`, and a 40 to 120 column resize in the middle of a turn. Each recording marks moments with a known verdict. Replayed through the model, each marked moment must give that verdict. The recordings are scrubbed (section 12) before they are committed.
 - **Repaint round trip.** proptest: random byte streams and every fixture, fed in, repainted, and fed into a fresh model, give the same grid.

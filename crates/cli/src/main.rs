@@ -163,7 +163,7 @@ enum Command {
     /// Serve the board on localhost
     Daemon(daemon::Args),
     /// Keep the agents' terminals: PTYs, their screens and the holder socket
-    Holder,
+    Holder(holder::Args),
     /// Record a Claude Code hook event (reads the hook input on stdin)
     Hook(hook::Args),
     /// The PreToolUse backstop for fleet sessions
@@ -227,7 +227,7 @@ fn dispatch(app: &App, command: Command) -> Done {
         Command::Import(args) => import::import(app, args),
         Command::Doctor => doctor::run(app),
         Command::Health(cmd) => health::run(app, cmd),
-        Command::Daemon(_) | Command::Holder | Command::Hook(_) | Command::Guard(_) => {
+        Command::Daemon(_) | Command::Holder(_) | Command::Hook(_) | Command::Guard(_) => {
             Err(Failure::new(
                 "internal",
                 1,
@@ -325,8 +325,8 @@ fn main() -> ExitCode {
             }
         };
     }
-    if let Command::Holder = &cli.command {
-        return holder::run(cli.db.as_deref());
+    if let Command::Holder(args) = &cli.command {
+        return holder::run(args, cli.db.as_deref(), cli.json);
     }
     if let Command::Daemon(args) = &cli.command {
         if let Some(message) = daemon::refuse_db(cli.db.as_deref()) {

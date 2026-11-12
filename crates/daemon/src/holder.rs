@@ -10,10 +10,12 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
+use tiller_panes::message::{Exit, Format, Meta, Read, Screen, Signal};
 use tiller_panes::{
-    HolderClient, Listing, Pane, PaneId, PaneState, Panes, PanesError, Result, Spawn, StreamHandle,
-    Subscribe, Subscription, Update,
+    HolderClient, Key, Listing, Live as _, Pane, PaneId, PaneState, Panes, PanesError, Result,
+    Spawn, StreamHandle, Subscribe, Subscription, Update,
 };
 
 /// The name this daemon gives the holder in its handshake.
@@ -25,7 +27,7 @@ pub trait Holder: Panes {
     /// The pane's output: one repaint, then the PTY's bytes.
     fn subscribe(&self, pane: &PaneId) -> Result<Box<dyn Live>>;
     /// Writes `bytes` to the pane as they are.
-    fn input(&self, pane: &PaneId, bytes: &[u8]) -> Result<()>;
+    fn raw_input(&self, pane: &PaneId, bytes: &[u8]) -> Result<()>;
     /// Sets the pane's PTY to `cols` by `rows`, and returns once the holder
     /// took it. Only the board's Fit resizes a pane (`holder_mirror`). The
     /// holder reports a resize only to the subscription that asked for it,
@@ -99,7 +101,7 @@ impl HolderLink {
 
     /// Stops using `used` after it failed, unless another call has
     /// replaced it already.
-    fn forget(&self, used: &Arc<HolderClient>) {
+    fn drop_client(&self, used: &Arc<HolderClient>) {
         let mut slot = self.client.lock().unwrap_or_else(PoisonError::into_inner);
         if slot
             .as_ref()
@@ -114,19 +116,21 @@ impl HolderLink {
     /// connection broke, fails every call from then on. Only for calls the
     /// holder may take twice.
     fn twice<T>(&self, call: impl Fn(&HolderClient) -> Result<T>) -> Result<T> {
-        let client = self.client()?;
-        match call(&client) {
-            Err(PanesError::Unreachable(_)) => {
-                self.forget(&client);
-                let client = self.client()?;
-                let result = call(&client);
-                if matches!(result, Err(PanesError::Unreachable(_))) {
-                    self.forget(&client);
-                }
-                result
-            }
+        match self.once(&call) {
+            Err(PanesError::Unreachable(_)) => self.once(call),
             result => result,
         }
+    }
+
+    /// Runs `call` on the client once, for a call the holder must not take
+    /// twice, and stops using the client when it did not answer.
+    fn once<T>(&self, call: impl FnOnce(&HolderClient) -> Result<T>) -> Result<T> {
+        let client = self.client()?;
+        let result = call(&client);
+        if matches!(result, Err(PanesError::Unreachable(_))) {
+            self.drop_client(&client);
+        }
+        result
     }
 }
 
@@ -140,6 +144,47 @@ impl Panes for HolderLink {
     fn list(&self) -> Result<Listing> {
         self.twice(Panes::list)
     }
+
+    fn get(&self, pane: &PaneId) -> Result<Option<Pane>> {
+        self.twice(|client| client.get(pane))
+    }
+
+    fn screen(&self, pane: &PaneId, read: Read, format: Format) -> Result<Screen> {
+        self.twice(|client| client.screen(pane, read, format))
+    }
+
+    fn input(&self, pane: &PaneId, text: &str) -> Result<()> {
+        self.once(|client| client.input(pane, text))
+    }
+
+    fn paste(&self, pane: &PaneId, text: &str) -> Result<()> {
+        self.once(|client| client.paste(pane, text))
+    }
+
+    fn keys(&self, pane: &PaneId, keys: &[Key]) -> Result<()> {
+        self.once(|client| client.keys(pane, keys))
+    }
+
+    /// The same merge twice leaves the same metadata.
+    fn set_meta(&self, pane: &PaneId, set: &Meta, remove: &[&str]) -> Result<Pane> {
+        self.twice(|client| client.set_meta(pane, set, remove))
+    }
+
+    fn signal(&self, pane: &PaneId, signal: Signal) -> Result<()> {
+        self.once(|client| client.signal(pane, signal))
+    }
+
+    fn close(&self, pane: &PaneId, grace: Duration) -> Result<Exit> {
+        self.once(|client| client.close(pane, grace))
+    }
+
+    fn forget(&self, pane: &PaneId) -> Result<()> {
+        self.once(|client| Panes::forget(client, pane))
+    }
+
+    fn switch(&self, pane: &PaneId) -> Result<usize> {
+        self.once(|client| client.switch(pane))
+    }
 }
 
 impl Holder for HolderLink {
@@ -152,11 +197,11 @@ impl Holder for HolderLink {
     /// a pane only in the holder instance that gave it. The write is never
     /// sent twice, since the holder sends no reply that would say whether
     /// the first one landed.
-    fn input(&self, pane: &PaneId, bytes: &[u8]) -> Result<()> {
+    fn raw_input(&self, pane: &PaneId, bytes: &[u8]) -> Result<()> {
         let client = self.client()?;
         let (client, listing) = match client.list() {
             Err(PanesError::Unreachable(_)) => {
-                self.forget(&client);
+                self.drop_client(&client);
                 let client = self.client()?;
                 let listing = client.list();
                 (client, listing)
@@ -168,7 +213,7 @@ impl Holder for HolderLink {
             client.raw_input(num, bytes)
         });
         if matches!(result, Err(PanesError::Unreachable(_))) {
-            self.forget(&client);
+            self.drop_client(&client);
         }
         result
     }
@@ -299,7 +344,10 @@ pub(crate) mod fake {
     use std::sync::mpsc::{Receiver, Sender, channel};
     use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-    use tiller_panes::{FakePanes, Listing, Pane, PaneId, Panes, Result, Spawn, Update};
+    use std::time::Duration;
+
+    use tiller_panes::message::{Exit, Format, Meta, Read, Screen, Signal};
+    use tiller_panes::{FakePanes, Key, Listing, Pane, PaneId, Panes, Result, Spawn, Update};
 
     use super::{Holder, Live, LiveControl, running};
 
@@ -421,6 +469,48 @@ pub(crate) mod fake {
             }
             Ok(listing)
         }
+
+        /// With the PTY's size, as [`FakeHolder::list`] gives it.
+        fn get(&self, pane: &PaneId) -> Result<Option<Pane>> {
+            let listing = self.list()?;
+            Ok(listing.panes.into_iter().find(|p| &p.pane == pane))
+        }
+
+        fn screen(&self, pane: &PaneId, read: Read, format: Format) -> Result<Screen> {
+            self.panes.screen(pane, read, format)
+        }
+
+        fn input(&self, pane: &PaneId, text: &str) -> Result<()> {
+            self.panes.input(pane, text)
+        }
+
+        fn paste(&self, pane: &PaneId, text: &str) -> Result<()> {
+            self.panes.paste(pane, text)
+        }
+
+        fn keys(&self, pane: &PaneId, keys: &[Key]) -> Result<()> {
+            self.panes.keys(pane, keys)
+        }
+
+        fn set_meta(&self, pane: &PaneId, set: &Meta, remove: &[&str]) -> Result<Pane> {
+            self.panes.set_meta(pane, set, remove)
+        }
+
+        fn signal(&self, pane: &PaneId, signal: Signal) -> Result<()> {
+            self.panes.signal(pane, signal)
+        }
+
+        fn close(&self, pane: &PaneId, grace: Duration) -> Result<Exit> {
+            self.panes.close(pane, grace)
+        }
+
+        fn forget(&self, pane: &PaneId) -> Result<()> {
+            self.panes.forget(pane)
+        }
+
+        fn switch(&self, pane: &PaneId) -> Result<usize> {
+            self.panes.switch(pane)
+        }
     }
 
     impl Holder for FakeHolder {
@@ -445,7 +535,7 @@ pub(crate) mod fake {
             }))
         }
 
-        fn input(&self, pane: &PaneId, bytes: &[u8]) -> Result<()> {
+        fn raw_input(&self, pane: &PaneId, bytes: &[u8]) -> Result<()> {
             let listing = self.panes.list()?;
             running(&listing, pane)?;
             self.screens().inputs.push((pane.clone(), bytes.to_vec()));

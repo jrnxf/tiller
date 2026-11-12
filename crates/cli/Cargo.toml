@@ -43,7 +43,6 @@ rsa.workspace = true
 tempfile.workspace = true
 tiller-core = { workspace = true, features = ["test-owner"] }
 tiller-herdr = { workspace = true, features = ["testing"] }
-tiller-panes.workspace = true
 
 [lints]
 workspace = true

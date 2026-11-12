@@ -506,3 +506,123 @@ fn no_firstmate_process_is_quiet() {
     let out = world.run(&["doctor"]);
     assert_eq!(check(out.data(), "firstmate")["status"], "ok");
 }
+
+/// The `holder` check in each state (`terminal-holder.md` 2.2): it passes
+/// when a holder answers, warns when none runs, and fails when something is
+/// there that does not answer.
+mod holder_check {
+    use std::os::unix::net::UnixListener;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    use super::*;
+    use common::Running;
+    use tiller_panes::{HolderClient, socket_path};
+
+    fn world() -> World {
+        let world = World::initialized();
+        world_with_tools(&world);
+        world
+    }
+
+    fn run_dir(world: &World) -> std::path::PathBuf {
+        let run = world.home().join("run");
+        fs::create_dir_all(&run).unwrap();
+        run
+    }
+
+    #[test]
+    fn it_passes_when_a_holder_answers() {
+        let world = world();
+        let _holder = Running::new(
+            world
+                .bare_command()
+                .arg("holder")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let socket = socket_path(&world.home());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while HolderClient::connect(&socket, "daemon").is_err() {
+            assert!(Instant::now() < deadline, "the holder did not listen");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let out = world.run(&["doctor"]);
+        assert_eq!(out.code, 0, "{}", out.json);
+        let holder = check(out.data(), "holder");
+        assert_eq!(holder["status"], "ok", "{holder}");
+        assert_eq!(holder["code"], "answers");
+        assert_eq!(holder["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn it_warns_when_no_holder_runs_and_the_report_still_passes() {
+        let world = world();
+        let out = world.run(&["doctor"]);
+        assert_eq!(out.code, 0, "{}", out.json);
+        let holder = check(out.data(), "holder");
+        assert_eq!(holder["status"], "warn", "{holder}");
+        assert_eq!(holder["code"], "not_running");
+        assert!(
+            holder["detail"]
+                .as_str()
+                .unwrap()
+                .contains("tiller holder --detach")
+        );
+    }
+
+    #[test]
+    fn it_warns_about_a_socket_left_by_a_holder_that_crashed() {
+        let world = world();
+        let socket = run_dir(&world).join("holder.sock");
+        // Binding and closing leaves the file, with nobody to answer.
+        drop(UnixListener::bind(&socket).unwrap());
+        let out = world.run(&["doctor"]);
+        assert_eq!(out.code, 0, "{}", out.json);
+        let holder = check(out.data(), "holder");
+        assert_eq!(holder["status"], "warn", "{holder}");
+        assert_eq!(holder["code"], "stale_socket");
+    }
+
+    #[test]
+    fn it_fails_when_a_process_holds_the_lock_and_the_socket_does_not_answer() {
+        let world = world();
+        // A live process named in the lock file, and no socket.
+        fs::write(
+            run_dir(&world).join("holder.lock"),
+            format!("{}\n", std::process::id()),
+        )
+        .unwrap();
+        let out = world.run(&["doctor"]);
+        assert_eq!((out.code, out.error_code()), (5, "refused"), "{}", out.json);
+        let holder = check(&out.json["error"]["current"], "holder");
+        assert_eq!(holder["status"], "fail", "{holder}");
+        assert_eq!(holder["code"], "not_answering");
+        assert!(
+            holder["detail"]
+                .as_str()
+                .unwrap()
+                .contains(&std::process::id().to_string())
+        );
+    }
+
+    #[test]
+    fn it_fails_when_something_that_is_no_holder_listens_on_the_socket() {
+        let world = world();
+        let listener = UnixListener::bind(run_dir(&world).join("holder.sock")).unwrap();
+        // Accepts and hangs up: no handshake.
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                drop(stream);
+            }
+        });
+        let out = world.run(&["doctor"]);
+        assert_eq!((out.code, out.error_code()), (5, "refused"), "{}", out.json);
+        let holder = check(&out.json["error"]["current"], "holder");
+        assert_eq!(holder["status"], "fail", "{holder}");
+        assert_eq!(holder["code"], "broken");
+    }
+}

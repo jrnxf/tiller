@@ -12,7 +12,7 @@ publish = false
 alacritty_terminal.workspace = true
 jiff.workspace = true
 libc.workspace = true
-rustix = { workspace = true, features = ["fs", "process", "pty", "stdio", "termios"] }
+rustix = { workspace = true, features = ["fs", "pipe", "process", "pty", "stdio", "termios"] }
 serde_json.workspace = true
 thiserror.workspace = true
 tiller-panes.workspace = true

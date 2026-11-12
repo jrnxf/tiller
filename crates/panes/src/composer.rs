@@ -211,6 +211,7 @@ mod tests {
     use super::*;
 
     fn fixture(name: &str) -> Composer {
+        // The herdr crate keeps the frozen snapshots of these fixtures.
         let path = format!(
             "{}/tests/fixtures/claude/{name}.ansi",
             env!("CARGO_MANIFEST_DIR")

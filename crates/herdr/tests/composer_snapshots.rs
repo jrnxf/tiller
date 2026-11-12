@@ -12,7 +12,7 @@ use tiller_herdr::composer::classify;
 
 fn fixture(name: &str) -> String {
     let path = format!(
-        "{}/tests/fixtures/claude/{name}.ansi",
+        "{}/../panes/tests/fixtures/claude/{name}.ansi",
         env!("CARGO_MANIFEST_DIR")
     );
     std::fs::read_to_string(path).unwrap()
