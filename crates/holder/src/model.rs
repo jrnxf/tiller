@@ -648,7 +648,7 @@ mod tests {
     fn a_model_reset_keeps_the_modes_the_app_set() {
         let mut model = Model::new(size());
         model
-            .feed(b"\x1b[?1049h\x1b[?2004h\x1b[?1h\x1b[>1u\x1b[?25l\x1b[5 qtext")
+            .feed(b"\x1b[?1049h\x1b[?2004h\x1b[?1h\x1b[>1u\x1b[?25l\x1b[?7l\x1b[?1007l\x1b[5 qtext")
             .unwrap();
         let before = model.mode();
         model.fail_next();

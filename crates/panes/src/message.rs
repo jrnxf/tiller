@@ -186,7 +186,9 @@ pub enum Format {
     Ansi,
 }
 
-/// Where the cursor is, in cells from the top left (0-based).
+/// Where the cursor is, in cells from the top left of the visible screen
+/// (0-based). A `recent` read's rows start above the screen, so its first
+/// row is not row 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cursor {
     pub col: u16,

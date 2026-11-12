@@ -18,7 +18,7 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 
-use crate::holder::{Conn, Holder, message_frame, ok};
+use crate::holder::{Conn, Holder, ok};
 use crate::lock::{Acquired, HolderLock, lock_path};
 use crate::outbox::OUTBOX_CAP;
 use crate::peer::{self, PeerCred};
@@ -496,24 +496,40 @@ fn send_reply(conn: &Conn, id: Option<u64>, reply: Result<HolderMessage, (ErrorC
         Ok(message) => message,
         Err((code, message)) => return reply_error(conn, id, code, message),
     };
-    match message_frame(&message) {
-        Some(frame) if frame.len() <= OUTBOX_CAP => {
-            conn.send(frame);
+    let text = match serde_json::to_string(&message) {
+        Ok(text) => text,
+        Err(err) => {
+            tracing::error!(%err, "a reply would not encode");
+            return reply_error(
+                conn,
+                id,
+                ErrorCode::Internal,
+                format!("the reply would not encode: {err}"),
+            );
         }
-        Some(frame) => reply_error(
+    };
+    // Measured before it is framed: a frame past the frame limit would not
+    // encode at all.
+    if text.len() >= OUTBOX_CAP {
+        return reply_error(
             conn,
             id,
             ErrorCode::Busy,
             format!(
                 "the reply is {} bytes, more than a connection's {OUTBOX_CAP}-byte queue holds",
-                frame.len()
+                text.len()
             ),
-        ),
-        None => reply_error(
+        );
+    }
+    match Frame::Message(text).to_bytes() {
+        Ok(frame) => {
+            conn.send(frame);
+        }
+        Err(err) => reply_error(
             conn,
             id,
             ErrorCode::Internal,
-            "the reply would not encode".to_owned(),
+            format!("the reply would not encode: {err}"),
         ),
     }
 }
@@ -525,6 +541,7 @@ fn reply_error(conn: &Conn, id: Option<u64>, code: ErrorCode, message: String) {
 #[cfg(test)]
 mod tests {
     use tiller_panes::PaneId;
+    use tiller_panes::frame::MAX_FRAME_LEN;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
@@ -581,18 +598,26 @@ mod tests {
                 visible: true,
             },
             modes: Vec::new(),
-            rows_text: vec!["x".repeat(OUTBOX_CAP)],
+            rows_text: Vec::new(),
         };
-        send_reply(&conn, Some(7), Ok(HolderMessage::Screen { id: 7, screen }));
-        assert!(conn.outbox.cut_at().is_none(), "the connection was cut");
-        let frame = conn.outbox.next().await.unwrap();
-        // The length and the kind come before the message.
-        let reply: serde_json::Value = serde_json::from_slice(&frame[5..]).unwrap();
-        assert_eq!(
-            (&reply["type"], &reply["id"], &reply["code"]),
-            (&"error".into(), &7.into(), &"busy".into()),
-            "{reply}"
-        );
+        // Past the queue, and past the frame limit too.
+        let rows = [OUTBOX_CAP, MAX_FRAME_LEN as usize];
+        for (id, len) in (7..).zip(rows) {
+            let screen = tiller_panes::message::Screen {
+                rows_text: vec!["x".repeat(len)],
+                ..screen.clone()
+            };
+            send_reply(&conn, Some(id), Ok(HolderMessage::Screen { id, screen }));
+            assert!(conn.outbox.cut_at().is_none(), "the connection was cut");
+            let frame = conn.outbox.next().await.unwrap();
+            // The length and the kind come before the message.
+            let reply: serde_json::Value = serde_json::from_slice(&frame[5..]).unwrap();
+            assert_eq!(
+                (&reply["type"], &reply["id"], &reply["code"]),
+                (&"error".into(), &id.into(), &"busy".into()),
+                "{reply}"
+            );
+        }
     }
 
     async fn read_message(stream: &mut UnixStream) -> serde_json::Value {
