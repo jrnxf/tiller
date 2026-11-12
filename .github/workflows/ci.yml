@@ -26,8 +26,12 @@ jobs:
         run: nix develop -c cargo fmt --all --check
       - name: Clippy
         run: nix develop -c cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy with the recorder
+        run: nix develop -c cargo clippy -p tiller-cli --all-targets --features record -- -D warnings
       - name: Test
         run: nix develop -c cargo nextest run --workspace
+      - name: Test the recorder
+        run: nix develop -c cargo nextest run -p tiller-cli --features record --test holder_record
 
   board:
     name: board

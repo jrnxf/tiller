@@ -2023,6 +2023,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "tiller-holder",
  "tiller-panes",
  "tokio",
  "tracing",

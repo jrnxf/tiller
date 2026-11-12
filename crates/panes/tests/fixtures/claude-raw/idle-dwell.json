@@ -1,0 +1,69 @@
+{
+  "cols": 120,
+  "description": "Two-file read turn with a 150-word reply, a long idle stretch, a second short turn, and /exit.",
+  "marks": [
+    {
+      "composer": "Empty",
+      "note": "idle composer",
+      "offset": 1494,
+      "prompt": null
+    },
+    {
+      "composer": {
+        "Holds": "Read README.md and src/greet.py, then write about 150 words explaining the project and propose three improvements."
+      },
+      "note": "typed prompt",
+      "offset": 3615,
+      "prompt": null
+    },
+    {
+      "composer": "Busy",
+      "note": "busy reading files",
+      "offset": 5500,
+      "prompt": null
+    },
+    {
+      "composer": "Busy",
+      "note": "busy tool results",
+      "offset": 9000,
+      "prompt": null
+    },
+    {
+      "composer": "Empty",
+      "note": "finished reply after a long idle dwell",
+      "offset": 16000,
+      "prompt": null
+    },
+    {
+      "composer": {
+        "Holds": "Now say hello in French, one short sentence."
+      },
+      "note": "second draft typed",
+      "offset": 16240,
+      "prompt": null
+    },
+    {
+      "composer": "Busy",
+      "note": "busy second turn",
+      "offset": 17000,
+      "prompt": null
+    },
+    {
+      "composer": "Empty",
+      "note": "second reply finished",
+      "offset": 18456,
+      "prompt": null
+    },
+    {
+      "composer": {
+        "Holds": "/exit"
+      },
+      "note": "exit typed",
+      "offset": 19138,
+      "prompt": null
+    }
+  ],
+  "raw": "idle-dwell.raw",
+  "resizes": [],
+  "rows": 40
+}

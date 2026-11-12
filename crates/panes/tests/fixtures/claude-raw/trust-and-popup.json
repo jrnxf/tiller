@@ -1,0 +1,83 @@
+{
+  "cols": 120,
+  "description": "Trust dialog, idle composer, a typed draft, clearing it, the slash popup, and /exit.",
+  "marks": [
+    {
+      "composer": "Dialog",
+      "note": "trust dialog",
+      "offset": 1584,
+      "prompt": {
+        "dialog": {
+          "command": null,
+          "folder": "/home/user/src/code/work/src/code/work/src/code/work/src/code/work/src/code/work/src/code/work/src/c/inkwell",
+          "layout": "trust",
+          "options": [
+            {
+              "n": 1,
+              "text": "No, exit"
+            },
+            {
+              "n": 2,
+              "text": "Yes, I trust this folder"
+            }
+          ],
+          "question": "Is this a project you created or one you trust?",
+          "title": "Accessing workspace:",
+          "tool": ""
+        },
+        "wait": "input"
+      }
+    },
+    {
+      "composer": "Empty",
+      "note": "idle composer",
+      "offset": 4038,
+      "prompt": null
+    },
+    {
+      "composer": {
+        "Holds": "draft: summarise the readme"
+      },
+      "note": "typed draft",
+      "offset": 4350,
+      "prompt": null
+    },
+    {
+      "composer": "Empty",
+      "note": "draft cleared",
+      "offset": 4619,
+      "prompt": null
+    },
+    {
+      "composer": {
+        "Holds": "/he"
+      },
+      "note": "slash popup open",
+      "offset": 5449,
+      "prompt": null
+    },
+    {
+      "composer": "Empty",
+      "note": "popup closed",
+      "offset": 5858,
+      "prompt": null
+    },
+    {
+      "composer": {
+        "Holds": "/exit"
+      },
+      "note": "exit typed",
+      "offset": 6339,
+      "prompt": null
+    },
+    {
+      "composer": "Unknown",
+      "note": "exit screen",
+      "offset": 6607,
+      "prompt": null
+    }
+  ],
+  "raw": "trust-and-popup.raw",
+  "resizes": [],
+  "rows": 40
+}

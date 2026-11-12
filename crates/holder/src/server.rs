@@ -70,15 +70,27 @@ fn io_error(what: &'static str, path: &Path) -> impl FnOnce(io::Error) -> Holder
 
 /// Runs the holder for `home` until `SIGTERM` or `SIGINT`.
 pub fn run(home: &Path) -> Result<Outcome, HolderError> {
+    run_with(home, Holder::new)
+}
+
+/// Runs a holder that records every pane's raw output into `out`
+/// (`terminal-holder.md` 12), until `SIGTERM` or `SIGINT`.
+#[cfg(feature = "record")]
+pub fn run_recording(home: &Path, out: &Path) -> Result<Outcome, HolderError> {
+    let recorder = crate::record::Recorder::create(out).map_err(io_error("create", out))?;
+    run_with(home, || Holder::recording(recorder))
+}
+
+fn run_with(home: &Path, holder: impl FnOnce() -> Arc<Holder>) -> Result<Outcome, HolderError> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("tiller-holder")
         .build()
         .map_err(HolderError::Runtime)?;
-    runtime.block_on(serve(home))
+    runtime.block_on(serve(home, holder))
 }
 
-async fn serve(home: &Path) -> Result<Outcome, HolderError> {
+async fn serve(home: &Path, holder: impl FnOnce() -> Arc<Holder>) -> Result<Outcome, HolderError> {
     let socket = socket_path(home);
     check_socket_path(&socket)?;
     let run = run_dir(home);
@@ -98,7 +110,7 @@ async fn serve(home: &Path) -> Result<Outcome, HolderError> {
     };
     let listener = bind(&socket)?;
 
-    let holder = Holder::new();
+    let holder = holder();
     // The reaper listens before the first spawn, so no exit is missed.
     let sigchld = signal(SignalKind::child()).map_err(HolderError::Runtime)?;
     let mut sigterm = signal(SignalKind::terminate()).map_err(HolderError::Runtime)?;

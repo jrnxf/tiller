@@ -643,10 +643,10 @@ Each step is done by the owner, or by a builder with the owner present, at a che
 
 ## 12. Fixture recording (H08)
 
-- **Recorder.** `tiller holder record --out <dir>` (a test build only) writes each pane's raw PTY output, with timestamps and the size changes, to a file per pane.
+- **Recorder.** `tiller holder record --out <dir>` (a test build only: the `record` feature) writes two files per pane: `<pane>.raw` with the raw PTY output, and `<pane>.jsonl` with the timestamps, byte offsets and size changes (`crates/holder/src/record.rs`).
 - **Who runs it.** A builder, once the owner gives the go. The run starts real Claude Code sessions, so it spends model quota. It needs about 20 minutes of sessions in a scratch project.
 - **Scrub.** Before anything is committed: `scripts/scrub-check.sh` passes, and the builder reads every recording for paths, hostnames, user names and secrets. Paths become `/home/user`, and hosts become `example.com`. A recording that cannot be cleaned is dropped.
-- **Marks.** A sidecar JSON per recording lists byte offsets with the expected composer verdict and prompt parse.
+- **Marks.** A sidecar JSON per recording lists byte offsets with the expected composer verdict and prompt parse. The recordings, their sidecar format and their known limits are in `crates/panes/tests/fixtures/claude-raw/README.md`. `crates/cli/tests/raw_gate.rs` is the gate.
 
 ## 13. Build plan
 

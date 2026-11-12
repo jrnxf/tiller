@@ -1,0 +1,65 @@
+{
+  "cols": 40,
+  "description": "40x30 pane resized to 120x40 mid reply, to 40x30 and back to 120x40. Marks sit only on settled frames.",
+  "marks": [
+    {
+      "composer": "Empty",
+      "note": "narrow idle 40x30",
+      "offset": 908,
+      "prompt": null
+    },
+    {
+      "composer": {
+        "Holds": "Print the numbers 1 to 400, one per\nline, in your reply. Write nothing\nelse."
+      },
+      "note": "narrow typed draft wrapped over 3 rows",
+      "offset": 2171,
+      "prompt": null
+    },
+    {
+      "composer": "Busy",
+      "note": "narrow busy",
+      "offset": 3500,
+      "prompt": null
+    },
+    {
+      "composer": "Empty",
+      "note": "wide again finished long reply",
+      "offset": 13184,
+      "prompt": null
+    },
+    {
+      "composer": "Empty",
+      "note": "wide after second resize",
+      "offset": 16000,
+      "prompt": null
+    },
+    {
+      "composer": {
+        "Holds": "/exit"
+      },
+      "note": "exit typed",
+      "offset": 17210,
+      "prompt": null
+    }
+  ],
+  "raw": "resize.raw",
+  "resizes": [
+    {
+      "cols": 120,
+      "offset": 4922,
+      "rows": 40
+    },
+    {
+      "cols": 40,
+      "offset": 13629,
+      "rows": 30
+    },
+    {
+      "cols": 120,
+      "offset": 14775,
+      "rows": 40
+    }
+  ],
+  "rows": 30
+}

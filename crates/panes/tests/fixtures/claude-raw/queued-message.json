@@ -1,0 +1,63 @@
+{
+  "cols": 120,
+  "description": "A Bash sleep turn with a second message typed and queued while it runs; the queued row and the ctrl+enter hint sit under the spinner.",
+  "marks": [
+    {
+      "composer": "Empty",
+      "note": "idle composer",
+      "offset": 1494,
+      "prompt": null
+    },
+    {
+      "composer": {
+        "Holds": "Run this exact shell command with the Bash tool and then say done: sleep 20"
+      },
+      "note": "typed bash request",
+      "offset": 3309,
+      "prompt": null
+    },
+    {
+      "composer": "Busy",
+      "note": "busy running sleep",
+      "offset": 6000,
+      "prompt": null
+    },
+    {
+      "composer": {
+        "Holds": "After that, say the word queued."
+      },
+      "note": "draft typed while a turn runs (text wins, Holds)",
+      "offset": 9113,
+      "prompt": null
+    },
+    {
+      "composer": "Busy",
+      "note": "queued message row under spinner",
+      "offset": 11416,
+      "prompt": null
+    },
+    {
+      "composer": "Busy",
+      "note": "busy queued still waiting",
+      "offset": 20000,
+      "prompt": null
+    },
+    {
+      "composer": "Empty",
+      "note": "both turns finished",
+      "offset": 32015,
+      "prompt": null
+    },
+    {
+      "composer": {
+        "Holds": "/exit"
+      },
+      "note": "exit typed",
+      "offset": 32690,
+      "prompt": null
+    }
+  ],
+  "raw": "queued-message.raw",
+  "resizes": [],
+  "rows": 40
+}

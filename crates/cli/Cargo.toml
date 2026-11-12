@@ -37,6 +37,15 @@ toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+[features]
+# `tiller holder record`, the fixture recorder (terminal-holder.md 12). A test
+# build only: no release build turns it on.
+record = ["tiller-holder/record"]
+
+[[test]]
+name = "holder_record"
+required-features = ["record"]
+
 [dev-dependencies]
 insta.workspace = true
 nix.workspace = true

@@ -581,7 +581,7 @@ the orchestrator - 30 min - after S1b and S1c
 ### H08 Raw fixture recording
 `sonnet` medium - 3 h - after H04, with the owner's go (given)
 
-- [ ] Recorder, about 20 min of real sessions, scrubbed, with marks; the raw stream gate of 9.1
+- [x] Recorder, about 20 min of real sessions, scrubbed, with marks; the raw stream gate of 9.1
 - [ ] Delivered
 
 ### H09 to H14 The port (`holder-port`, in series)

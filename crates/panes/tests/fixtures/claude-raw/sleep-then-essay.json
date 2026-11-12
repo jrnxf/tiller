@@ -1,0 +1,43 @@
+{
+  "cols": 120,
+  "description": "A Bash sleep turn followed by a 200-word reply. The marks skip the streaming stretch where the spinner row is off screen.",
+  "marks": [
+    {
+      "composer": "Empty",
+      "note": "idle composer",
+      "offset": 1495,
+      "prompt": null
+    },
+    {
+      "composer": {
+        "Holds": "Run exactly this with the Bash tool: sleep 25. Then write about 200 words on why small tools matter."
+      },
+      "note": "typed sleep and essay prompt",
+      "offset": 3289,
+      "prompt": null
+    },
+    {
+      "composer": "Busy",
+      "note": "busy running sleep",
+      "offset": 6000,
+      "prompt": null
+    },
+    {
+      "composer": "Busy",
+      "note": "busy sleep later",
+      "offset": 9000,
+      "prompt": null
+    },
+    {
+      "composer": {
+        "Holds": "/exit"
+      },
+      "note": "exit typed",
+      "offset": 16822,
+      "prompt": null
+    }
+  ],
+  "raw": "sleep-then-essay.raw",
+  "resizes": [],
+  "rows": 40
+}
