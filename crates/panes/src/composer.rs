@@ -71,7 +71,13 @@ pub fn classify(ansi: &str) -> Composer {
         return Composer::Empty;
     }
 
-    let bottom = &rows[rows.len().saturating_sub(16)..];
+    // Claude draws a short dialog under the last reply, not at the screen's
+    // bottom, so count the 16 rows from the last row that holds anything.
+    let end = rows
+        .iter()
+        .rposition(|row| !row.trim().is_empty())
+        .map_or(0, |i| i + 1);
+    let bottom = &rows[end.saturating_sub(16)..end];
     if bottom.iter().any(|row| is_dialog_row(row)) {
         Composer::Dialog
     } else {
@@ -428,5 +434,23 @@ mod tests {
         let tail = "  ⎿  ◻ invented item\n".repeat(SPINNER_REACH);
         let screen = format!("✻ Examining… (2s)\n{tail}{rule}\n❯\u{a0}\n{rule}\n");
         assert_eq!(classify(&screen), Composer::Empty);
+    }
+
+    #[test]
+    fn a_dialog_above_blank_rows_is_a_dialog() {
+        let rule = "─".repeat(40);
+        let blank = "\n".repeat(30);
+        let screen = format!(
+            "❯ Create a file.\n● Write(notes.txt)\n{rule}\n Create file\n notes.txt\n Do you want to create notes.txt?\n ❯ 1. Yes\n   2. No\n Esc to cancel{blank}"
+        );
+        assert_eq!(classify(&screen), Composer::Dialog);
+    }
+
+    #[test]
+    fn a_dialog_row_in_scrollback_far_above_blank_rows_is_unknown() {
+        let blank = "\n".repeat(30);
+        let filler = "● invented reply line\n".repeat(16);
+        let screen = format!(" Esc to cancel\n{filler}{blank}");
+        assert_eq!(classify(&screen), Composer::Unknown);
     }
 }
