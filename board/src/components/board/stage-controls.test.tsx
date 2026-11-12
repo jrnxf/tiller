@@ -248,13 +248,18 @@ test("full screen pins the agent's card over the page, and a second press or Esc
   const card = document.querySelector(".av-card");
   expect(bar.getByRole("button", { name: "Expand the terminal" })).toBeTruthy();
 
+  // Focus on the rail, which the card is about to cover.
+  const list = screen.getByRole("listbox");
+  list.focus();
   fireEvent.click(bar.getByRole("button", { name: "Full screen" }));
   expect(request).toHaveBeenCalledTimes(1);
   // The page goes full screen, so dialogs, menus and toasts still show.
   expect(request.mock.contexts[0]).toBe(document.documentElement);
-  const leaveButton = await bar.findByRole("button", { name: "Leave full screen" });
+  const leaveButton = await bar.findByRole("button", { name: "Full screen", pressed: true });
   expect(leaveButton.getAttribute("aria-pressed")).toBe("true");
   expect(leaveButton.getAttribute("title")).toBe("Leave full screen (Esc)");
+  // Focus moves to the way out, off the covered rail.
+  expect(document.activeElement).toBe(leaveButton);
   expect(card?.classList.contains("full")).toBe(true);
   // The page under the card is inert, so Tab stays on the card.
   expect(screen.getAllByRole("option", { hidden: true })[0]?.closest("[inert]")).toBeTruthy();
@@ -264,14 +269,15 @@ test("full screen pins the agent's card over the page, and a second press or Esc
 
   fireEvent.click(leaveButton);
   expect(exit).toHaveBeenCalledTimes(1);
-  await bar.findByRole("button", { name: "Full screen" });
+  await bar.findByRole("button", { name: "Full screen", pressed: false });
   expect(card?.classList.contains("full")).toBe(false);
   expect(screen.getAllByRole("option")[0]?.closest("[inert]")).toBeNull();
+  expect(document.activeElement).toBe(list);
 
   fireEvent.click(bar.getByRole("button", { name: "Full screen" }));
-  await bar.findByRole("button", { name: "Leave full screen" });
+  await bar.findByRole("button", { name: "Full screen", pressed: true });
   leave();
-  await bar.findByRole("button", { name: "Full screen" });
+  await bar.findByRole("button", { name: "Full screen", pressed: false });
   expect(bar.getByRole("button", { name: "Expand the terminal" })).toBeTruthy();
 });
 
@@ -279,19 +285,19 @@ test("a switch to another agent stays in full screen, and a toast shows in it", 
   const { request } = stubFullScreen();
   await renderStage("holder");
   fireEvent.click(footer().getByRole("button", { name: "Full screen" }));
-  await footer().findByRole("button", { name: "Leave full screen" });
+  await footer().findByRole("button", { name: "Full screen", pressed: true });
   const first = screen
     .getByRole("group", { name: /^Live terminal for / })
     .getAttribute("aria-label");
 
-  const rows = screen.getAllByRole("option");
-  fireEvent.click(rows[1] as HTMLElement);
+  // The rail is under the card and inert, so the view's keys switch.
+  fireEvent.keyDown(window, { key: "j" });
   await waitFor(() =>
     expect(
       screen.getByRole("group", { name: /^Live terminal for / }).getAttribute("aria-label"),
     ).not.toBe(first),
   );
-  expect(await footer().findByRole("button", { name: "Leave full screen" })).toBeTruthy();
+  expect(await footer().findByRole("button", { name: "Full screen", pressed: true })).toBeTruthy();
   expect(request).toHaveBeenCalledTimes(1);
   expect(document.fullscreenElement).toBe(document.documentElement);
   expect(document.querySelector(".av-card")?.classList.contains("full")).toBe(true);

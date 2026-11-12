@@ -5,7 +5,7 @@ import type { CSSProperties, KeyboardEvent as KeyEvent, RefObject } from "react"
 
 import type { AgentRow, Machine, PermissionPrompt, Project } from "../../lib/api-types";
 import { leavePageFullScreen, usePageFullScreen } from "../../lib/fullscreen";
-import { holdInert } from "../../lib/inert";
+import { holdInertOutside } from "../../lib/inert";
 import { focusReason, ownerOf, projectKey, shownId } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import {
@@ -540,25 +540,30 @@ function Stage({
   }, [pageFull, phone]);
   useEffect(() => leavePageFullScreen, []);
   // In full screen the card covers the page, so Tab and assistive tech stay
-  // on it too. A dialog, a menu or a toast opens on the page's body after,
-  // so it stays live.
+  // on it too. Focus left under the card, such as on the rail, moves to the
+  // way out, and goes back when full screen ends.
   const cardRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const card = cardRef.current;
-    if (!full || !card) return;
-    const behind: Element[] = [];
-    for (let at: Element = card; at.parentElement && at !== document.body; at = at.parentElement) {
-      for (const other of at.parentElement.children) if (other !== at) behind.push(other);
-    }
-    return holdInert(behind);
+    const cardBox = cardRef.current;
+    if (!full || !cardBox) return;
+    const before = document.activeElement;
+    const outside = before instanceof HTMLElement && !cardBox.contains(before) ? before : null;
+    const release = holdInertOutside(cardBox);
+    if (outside) cardBox.querySelector<HTMLElement>("[data-full-screen]")?.focus();
+    return () => {
+      release();
+      const now = document.activeElement;
+      const lost = !now || now === document.body || cardBox.contains(now);
+      if (outside?.isConnected && lost) outside.focus();
+    };
   }, [full]);
   // The details drawer opens under the header, which wraps on a narrow stage.
   const headRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const head = headRef.current;
-    const card = cardRef.current;
-    if (!head || !card) return;
-    const measure = () => card.style.setProperty("--av-head", `${head.offsetHeight}px`);
+    const cardBox = cardRef.current;
+    if (!head || !cardBox) return;
+    const measure = () => cardBox.style.setProperty("--av-head", `${head.offsetHeight}px`);
     measure();
     if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(measure);

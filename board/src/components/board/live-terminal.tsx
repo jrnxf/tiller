@@ -959,7 +959,7 @@ export function LiveTerminal({
   const entering = useRef(false);
   const toggleFull = useCallback(() => {
     if (entering.current) return;
-    if (document.fullscreenElement === document.documentElement) {
+    if (full) {
       leavePageFullScreen();
       return;
     }
@@ -980,7 +980,7 @@ export function LiveTerminal({
         );
       },
     );
-  }, []);
+  }, [full]);
 
   const collapse = useCallback(() => {
     termRef.current?.blur();
@@ -1117,37 +1117,44 @@ export function LiveTerminal({
   // goes on.
   const larger = (fitting && !ended) || capped;
   const shownFont = larger ? stageFont : Math.min(stageFont, Math.floor(font));
+  // Without the Fit, the room sets a pane this wide: smaller text only
+  // leaves the stage empty around it, and larger text does not fit.
+  const roomHint = watch
+    ? "The pane fills the stage at this size"
+    : "The pane fills the stage at this size. Fit pane sizes it to the text";
+  // The readout's title and name: a click goes back to the default.
+  const fontText = `Font size ${shownFont} px`;
+  const sizeHint =
+    stageFont !== STAGE_FONT
+      ? {
+          title: `${fontText}. Click for the default, ${STAGE_FONT} px`,
+          label: `${fontText}, back to ${STAGE_FONT} px`,
+        }
+      : shownFont === STAGE_FONT
+        ? { title: `${fontText}, the default`, label: `${fontText}, the default` }
+        : {
+            title: `${fontText}, as large as the stage holds the pane`,
+            label: `${fontText}, as large as the stage holds the pane`,
+          };
   const fontControls =
     stage && !phone && screenShown && view === "inline" ? (
       <span className="mir-font" role="group" aria-label="Font size">
         <button
           type="button"
           className="ib sm"
-          title="Smaller text"
+          title={larger ? "Smaller text" : roomHint}
           aria-label="Smaller text"
-          disabled={shownFont <= STAGE_FONT_MIN}
+          disabled={stageFont <= STAGE_FONT_MIN || !larger}
           onMouseDown={keepFocus}
-          onClick={() => setStageFont(shownFont - 1)}
+          onClick={() => setStageFont(stageFont - 1)}
         >
           <FontSmallerIcon />
         </button>
         <button
           type="button"
           className="mir-fsz"
-          title={
-            stageFont !== STAGE_FONT
-              ? `Font size ${shownFont} px. Click for the default, ${STAGE_FONT} px`
-              : shownFont === STAGE_FONT
-                ? `Font size ${shownFont} px, the default`
-                : `Font size ${shownFont} px, as large as the stage holds the pane`
-          }
-          aria-label={
-            stageFont !== STAGE_FONT
-              ? `Font size ${shownFont} px, back to ${STAGE_FONT} px`
-              : shownFont === STAGE_FONT
-                ? `Font size ${shownFont} px, the default`
-                : `Font size ${shownFont} px, as large as the stage holds the pane`
-          }
+          title={sizeHint.title}
+          aria-label={sizeHint.label}
           onMouseDown={keepFocus}
           onClick={() => setStageFont(STAGE_FONT)}
         >
@@ -1156,13 +1163,7 @@ export function LiveTerminal({
         <button
           type="button"
           className="ib sm"
-          title={
-            larger
-              ? "Larger text"
-              : watch
-                ? "The pane fills the stage at this size"
-                : "The pane fills the stage at this size. Fit pane sizes it to the text"
-          }
+          title={larger ? "Larger text" : roomHint}
           aria-label="Larger text"
           disabled={stageFont >= STAGE_FONT_MAX || !larger}
           onMouseDown={keepFocus}
@@ -1178,9 +1179,11 @@ export function LiveTerminal({
       <button
         type="button"
         className="ib sm"
+        // One name, pressed or not, as a toggle reads.
         title={full ? "Leave full screen (Esc)" : "Full screen"}
-        aria-label={full ? "Leave full screen" : "Full screen"}
+        aria-label="Full screen"
         aria-pressed={full}
+        data-full-screen=""
         onMouseDown={keepFocus}
         onClick={toggleFull}
       >
