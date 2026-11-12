@@ -10457,7 +10457,7 @@ esac"#,
         assert_eq!(calls(), "");
 
         waiting(&fleet, &session, "Bash");
-        let bash = include_str!("../../herdr/tests/fixtures/claude/permission-dialog.ansi");
+        let bash = include_str!("../../panes/tests/fixtures/claude/permission-dialog.ansi");
         std::fs::write(dir.join("screen"), bash).unwrap();
         let shown = send(&app, mutation("POST", &read, json!({}), &owner)).await;
         assert_eq!(shown.status, StatusCode::OK, "{}", shown.body);
@@ -10539,7 +10539,7 @@ esac"#,
                 .map(str::to_owned)
                 .collect::<Vec<_>>()
         };
-        let trust = include_str!("../../herdr/tests/fixtures/claude/trust-dialog.ansi");
+        let trust = include_str!("../../panes/tests/fixtures/claude/trust-dialog.ansi");
         std::fs::write(dir.join("screen"), trust).unwrap();
 
         // No hook asks for the dialog: herdr sees the agent blocked, and the
@@ -10610,7 +10610,7 @@ esac"#,
         let owner = [("cookie", cookie.as_str())];
         let read = format!("/api/v1/agents/{session}/prompt");
         let answer = format!("/api/v1/agents/{session}/prompt/answer");
-        let trust = include_str!("../../herdr/tests/fixtures/claude/trust-dialog.ansi");
+        let trust = include_str!("../../panes/tests/fixtures/claude/trust-dialog.ansi");
         std::fs::write(dir.join("screen"), trust).unwrap();
         fleet
             .open()
@@ -10658,7 +10658,7 @@ esac"#,
         let read = format!("/api/v1/agents/{session}/prompt");
         let answer = format!("/api/v1/agents/{session}/prompt/answer");
         let calls = || std::fs::read_to_string(dir.join("calls")).unwrap_or_default();
-        let trust = include_str!("../../herdr/tests/fixtures/claude/trust-dialog.ansi");
+        let trust = include_str!("../../panes/tests/fixtures/claude/trust-dialog.ansi");
         std::fs::write(dir.join("screen"), trust).unwrap();
         fleet
             .open()
@@ -11217,7 +11217,7 @@ esac"#,
             std::time::Duration::from_secs(60)
         }
         fn poll(&mut self, _now: Timestamp) -> Result<(), tiller_herdr::poller::PollError> {
-            Err(tiller_herdr::poller::PollError::Herdr(
+            Err(tiller_herdr::poller::PollError::from(
                 HerdrError::Unreachable("checks are not read".into()),
             ))
         }

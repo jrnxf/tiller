@@ -9,29 +9,12 @@
 
 use std::ffi::OsString;
 use std::io;
-use std::process::{Command, Stdio};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+pub use tiller_panes::open::{MacApp, Opened, Terminal, Wait};
 
 use crate::client::{Cli, HerdrError};
-
-/// What "Open in herdr" did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Opened {
-    /// herdr focused the pane; no terminal app is configured to raise.
-    Focused,
-    /// herdr focused the pane and the terminal app, already running herdr,
-    /// came to the front.
-    Raised,
-    /// The terminal app opened a new herdr client, which shows the pane.
-    Launched,
-    /// herdr focused the pane, but no herdr client is open on this machine
-    /// and no terminal app is configured to open one.
-    Unseen,
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum OpenError {
@@ -43,16 +26,6 @@ pub enum OpenError {
 
     #[error("no herdr client attached in {app} within {within:?}")]
     NotAttached { app: String, within: Duration },
-}
-
-/// The terminal app herdr runs in.
-pub trait Terminal: Send + Sync {
-    /// The app's name, for answers and errors.
-    fn name(&self) -> &str;
-    /// Brings the running app to the front.
-    fn raise(&self) -> io::Result<()>;
-    /// Opens a new window of the app running `command`.
-    fn open(&self, command: &[OsString]) -> io::Result<()>;
 }
 
 /// The local herdr server the screen shows.
@@ -68,22 +41,6 @@ impl Screen for Cli {
 
     fn attach_command(&self) -> Vec<OsString> {
         Cli::attach_command(self)
-    }
-}
-
-/// How long a launch waits for its client to attach, and how often it looks.
-#[derive(Clone, Copy, Debug)]
-pub struct Wait {
-    pub every: Duration,
-    pub within: Duration,
-}
-
-impl Default for Wait {
-    fn default() -> Self {
-        Self {
-            every: Duration::from_millis(250),
-            within: Duration::from_secs(10),
-        }
     }
 }
 
@@ -143,76 +100,6 @@ pub fn open_agent(
     // client that attached on another one.
     focus()?;
     Ok(Opened::Launched)
-}
-
-/// A macOS app, driven with `open`: `open -a <app>` raises it and
-/// `open -na <app> --args <exec...> <command...>` opens a new instance
-/// running the command. `exec` is what the app takes before a command to
-/// run: `-e` for Ghostty and Alacritty, `start --` for WezTerm.
-#[derive(Clone, Debug)]
-pub struct MacApp {
-    app: String,
-    exec: Vec<OsString>,
-}
-
-impl MacApp {
-    pub fn new(app: impl Into<String>) -> Self {
-        Self {
-            app: app.into(),
-            exec: vec!["-e".into()],
-        }
-    }
-
-    /// The arguments that come before the command, in place of `-e`.
-    pub fn exec(mut self, exec: Vec<OsString>) -> Self {
-        self.exec = exec;
-        self
-    }
-
-    fn raise_command(&self) -> Command {
-        let mut command = Command::new("open");
-        command.arg("-a").arg(&self.app);
-        command
-    }
-
-    fn open_command(&self, run: &[OsString]) -> Command {
-        let mut command = Command::new("open");
-        command
-            .arg("-na")
-            .arg(&self.app)
-            .arg("--args")
-            .args(&self.exec)
-            .args(run);
-        command
-    }
-}
-
-/// Runs `open`, which returns once the app has the request.
-fn launch(mut command: Command) -> io::Result<()> {
-    let output = command.stdin(Stdio::null()).output()?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(io::Error::other(format!(
-        "open exited with {}: {}",
-        output.status,
-        stderr.trim()
-    )))
-}
-
-impl Terminal for MacApp {
-    fn name(&self) -> &str {
-        &self.app
-    }
-
-    fn raise(&self) -> io::Result<()> {
-        launch(self.raise_command())
-    }
-
-    fn open(&self, command: &[OsString]) -> io::Result<()> {
-        launch(self.open_command(command))
-    }
 }
 
 #[cfg(test)]
@@ -449,33 +336,5 @@ mod tests {
         let focuses = Cell::new(0);
         let error = open_agent(&screen, Some(&app), quick(), counted(&focuses)).unwrap_err();
         assert_eq!(error.to_string(), "Ghostty did not open: no such app");
-    }
-
-    #[test]
-    fn mac_app_raises_with_open_a_and_launches_a_new_instance_with_its_command() {
-        let app = MacApp::new("Ghostty");
-        let raise = app.raise_command();
-        assert_eq!(raise.get_program(), "open");
-        assert_eq!(raise.get_args().collect::<Vec<_>>(), ["-a", "Ghostty"]);
-        let command: Vec<OsString> = vec!["/home/user/bin/herdr".into()];
-        let open = app.open_command(&command);
-        assert_eq!(
-            open.get_args().collect::<Vec<_>>(),
-            ["-na", "Ghostty", "--args", "-e", "/home/user/bin/herdr"]
-        );
-        let open = MacApp::new("WezTerm")
-            .exec(vec!["start".into(), "--".into()])
-            .open_command(&command);
-        assert_eq!(
-            open.get_args().collect::<Vec<_>>(),
-            [
-                "-na",
-                "WezTerm",
-                "--args",
-                "start",
-                "--",
-                "/home/user/bin/herdr"
-            ]
-        );
     }
 }

@@ -1,6 +1,10 @@
+import { readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { env } from "node:process";
+
 import { expect, test } from "vitest";
 
-import { pressTypes, typedKeys } from "./terminal-keys";
+import { SOFT_KEYS, keyNames, pressTypes, typedKeys } from "./terminal-keys";
 
 test.each([
   ["a", ["a"]],
@@ -62,6 +66,72 @@ test.each([
 
 test("keys around a dropped report still go through", () => {
   expect(typedKeys("a\x1b[12;40Rb")).toEqual({ keys: ["a", "b"], unsent: [] });
+});
+
+// Every byte alone and after ESC, every SS3 key, and every CSI final with
+// no parameter, a first parameter up to 127 alone or with a modifier
+// parameter, and xterm's three-parameter keys, so a name a new escape path
+// of those shapes sends shows up here.
+function presses(): string[] {
+  const bytes = Array.from({ length: 0x80 }, (_, code) => String.fromCharCode(code));
+  const finals = Array.from({ length: 0x3f }, (_, code) => String.fromCharCode(0x40 + code));
+  // xterm's modifier parameter runs 1 to 8, and to 16 with its meta bit.
+  const mods = Array.from({ length: 16 }, (_, value) => `;${value + 1}`);
+  const params = Array.from({ length: 0x80 }, (_, n) => [
+    `${n}`,
+    ...mods.map((mod) => `${n}${mod}`),
+  ]).flat();
+  const three = mods.flatMap((mod) =>
+    Array.from({ length: 0x80 }, (_, code) => `27${mod};${code}`),
+  );
+  return [
+    ...bytes,
+    ...bytes.map((byte) => `\x1b${byte}`),
+    ...finals.flatMap((final) => [
+      `\x1bO${final}`,
+      `\x1b[${final}`,
+      ...params.map((param) => `\x1b[${param}${final}`),
+    ]),
+    ...three.flatMap((param) => [`\x1b[${param}~`, `\x1b[${param}u`]),
+  ];
+}
+
+test("the key names are every name a key press sends, each once", () => {
+  const names = keyNames();
+  const sent = new Set(presses().flatMap((data) => typedKeys(data).keys));
+  expect(new Set(names).size).toBe(names.length);
+  expect(new Set(names)).toEqual(sent);
+});
+
+// Past ASCII a character goes as itself, so the list leaves it out:
+// tiller-panes parses these same samples.
+test.each(["\u0085", "\u00a0", "é", "ß", "中", "🦀"])("%j goes as itself", (char) => {
+  expect(typedKeys(char).keys).toEqual([char]);
+  expect(typedKeys(`\x1b${char}`).keys).toEqual([`alt+${char}`]);
+});
+
+test("every soft key is a key name", () => {
+  const names = keyNames();
+  for (const key of SOFT_KEYS) expect(names, key).toContain(key);
+});
+
+// tiller-panes parses every name in this file, so it must not fall behind
+// the list. UPDATE_KEY_NAMES=1 rewrites it, but not on CI.
+const FIXTURE = resolve(
+  import.meta.dirname,
+  "../../../../crates/panes/tests/fixtures/board-key-names.json",
+);
+
+test("the key-name fixture tiller-panes parses is the board's list", () => {
+  const list = `${JSON.stringify(keyNames(), null, 2)}\n`;
+  // A checkout with autocrlf has CRLF lines; the names are the same.
+  const committed = readFileSync(FIXTURE, "utf8").replaceAll("\r\n", "\n");
+  const onCi = !!env.CI && env.CI !== "false" && env.CI !== "0";
+  if (committed !== list && env.UPDATE_KEY_NAMES === "1" && !onCi) {
+    writeFileSync(FIXTURE, list);
+    expect.fail("rewrote board-key-names.json: commit it and run the tests again");
+  }
+  expect(committed, "run UPDATE_KEY_NAMES=1 bun run --cwd board test, with CI unset").toBe(list);
 });
 
 function stage(): { root: HTMLElement; term: HTMLElement } {

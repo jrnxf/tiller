@@ -45,7 +45,7 @@ import {
   TerminalIcon,
   WarnIcon,
 } from "./icons";
-import { pressTypes, typedKeys } from "./terminal-keys";
+import { SOFT_KEYS, type SoftKey, pressTypes, typedKeys } from "./terminal-keys";
 import { TerminalInput, TerminalStream, TerminalTail, readHistory } from "./terminal-stream";
 import type { Fitting, Mirror, MirrorStatus, Screen, TerminalSize } from "./terminal-stream";
 import { showToast } from "./toast";
@@ -390,6 +390,19 @@ function fontReady(): Promise<unknown> {
     return Promise.resolve(null);
   }
 }
+
+// What each key a phone lacks shows on its button, its name, and whether
+// its button is wide.
+const SOFT_FACES: Record<SoftKey, readonly [ReactNode, string, boolean]> = {
+  esc: ["Esc", "Esc", false],
+  tab: ["Tab", "Tab", false],
+  "ctrl+c": ["Ctrl-C", "Ctrl-C", true],
+  left: [<ArrowIcon key="l" to="left" />, "Left", false],
+  up: [<ArrowIcon key="u" to="up" />, "Up", false],
+  down: [<ArrowIcon key="d" to="down" />, "Down", false],
+  right: [<ArrowIcon key="r" to="right" />, "Right", false],
+  enter: [<EnterIcon key="e" />, "Enter", true],
+};
 
 function list(names: string[]): string {
   if (names.length < 2) return names.join("");
@@ -1573,31 +1586,23 @@ export function LiveTerminal({
           </div>
           {tail ? null : (
             <div className="mir-keys" role="group" aria-label="Keys a phone lacks">
-              {(
-                [
-                  ["esc", "Esc", "Esc"],
-                  ["tab", "Tab", "Tab"],
-                  ["ctrl+c", "Ctrl-C", "Ctrl-C"],
-                  ["left", <ArrowIcon key="l" to="left" />, "Left"],
-                  ["up", <ArrowIcon key="u" to="up" />, "Up"],
-                  ["down", <ArrowIcon key="d" to="down" />, "Down"],
-                  ["right", <ArrowIcon key="r" to="right" />, "Right"],
-                  ["enter", <EnterIcon key="e" />, "Enter"],
-                ] as const
-              ).map(([key, face, name]) => (
-                <button
-                  key={key}
-                  type="button"
-                  className={`mir-key${key === "ctrl+c" || key === "enter" ? " w" : ""}`}
-                  aria-label={name}
-                  disabled={!live}
-                  // Keep the screen focused, so the phone keyboard stays up.
-                  onPointerDown={(event) => event.preventDefault()}
-                  onClick={() => send(key)}
-                >
-                  {face}
-                </button>
-              ))}
+              {SOFT_KEYS.map((key) => {
+                const [face, name, wide] = SOFT_FACES[key];
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    className={`mir-key${wide ? " w" : ""}`}
+                    aria-label={name}
+                    disabled={!live}
+                    // Keep the screen focused, so the phone keyboard stays up.
+                    onPointerDown={(event) => event.preventDefault()}
+                    onClick={() => send(key)}
+                  >
+                    {face}
+                  </button>
+                );
+              })}
             </div>
           )}
         </Modal>

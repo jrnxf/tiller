@@ -255,7 +255,7 @@ fn option(row: &str) -> Option<(u8, &str)> {
 mod tests {
     use super::*;
 
-    const BASH: &str = include_str!("../../herdr/tests/fixtures/claude/permission-dialog.ansi");
+    const BASH: &str = include_str!("../../panes/tests/fixtures/claude/permission-dialog.ansi");
     const EDIT: &str = include_str!("../tests/fixtures/prompt/edit.txt");
 
     /// The Bash dialog without its colors, to change a row of it.
@@ -300,7 +300,7 @@ mod tests {
         // The trust dialog is a cursor menu, never a permission dialog.
         for name in ["working", "trust-dialog", "draft", "exited-after-popup"] {
             let screen = std::fs::read_to_string(format!(
-                "{}/../herdr/tests/fixtures/claude/{name}.ansi",
+                "{}/../panes/tests/fixtures/claude/{name}.ansi",
                 env!("CARGO_MANIFEST_DIR")
             ))
             .unwrap();
@@ -360,7 +360,7 @@ mod tests {
         assert_ne!(parse(&changed, "Bash").unwrap().screen, screen);
     }
 
-    const TRUST: &str = include_str!("../../herdr/tests/fixtures/claude/trust-dialog.ansi");
+    const TRUST: &str = include_str!("../../panes/tests/fixtures/claude/trust-dialog.ansi");
 
     /// The trust dialog without its colors, to change a row of it.
     fn trust_rows() -> String {
@@ -457,5 +457,53 @@ mod tests {
         assert_eq!(dialog.prompt.folder.as_deref(), Some("/home/user/other"));
         // Output under it means it is not the dialog the pane waits on.
         assert_eq!(read(&format!("{trust}\n● Done.\n"), &Wait::Input), None);
+    }
+
+    #[test]
+    fn every_key_a_dialog_answer_sends_is_a_key_name() {
+        // Every option number a dialog row can carry, with the cursor on
+        // it or not.
+        let mut offered: Vec<PromptOption> = ["   ", " ❯ "]
+            .into_iter()
+            .flat_map(|lead| (0..=99).map(move |n| format!("{lead}{n}. option")))
+            .filter_map(|row| {
+                let (n, text) = option(&row)?;
+                Some(PromptOption {
+                    n,
+                    text: text.to_owned(),
+                })
+            })
+            .collect();
+        offered.sort_by_key(|offered| offered.n);
+        offered.dedup_by_key(|offered| offered.n);
+        let every = |dialog: Dialog| Dialog {
+            prompt: PromptDialog {
+                options: offered.clone(),
+                ..dialog.prompt
+            },
+            ..dialog
+        };
+        let permission = every(read(BASH, &Wait::Permission("Bash".to_owned())).unwrap());
+        let trust = every(read(TRUST, &Wait::Input).unwrap());
+        let mut sent = std::collections::BTreeSet::new();
+        for &PromptOption { n, .. } in &offered {
+            sent.extend(permission.keys(n).unwrap());
+            for cursor in 1..=9 {
+                let moved = Dialog {
+                    cursor,
+                    ..trust.clone()
+                };
+                sent.extend(moved.keys(n).unwrap());
+            }
+        }
+        for name in &sent {
+            let key: tiller_panes::Key = name
+                .parse()
+                .unwrap_or_else(|error| panic!("{name:?}: {error}"));
+            assert_eq!(key.to_string(), *name);
+        }
+        let mut expected: Vec<String> = (1..=9).map(|n: u8| n.to_string()).collect();
+        expected.extend(["down", "enter", "up"].map(String::from));
+        assert_eq!(sent.into_iter().collect::<Vec<_>>(), expected);
     }
 }

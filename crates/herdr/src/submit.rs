@@ -1,155 +1,63 @@
-//! Submitting a line typed into a Claude Code composer, and proving it went.
-//!
-//! Claude Code can read an Enter that arrives right after typed text as part
-//! of it, so the Enter adds a newline instead of submitting; a Claude just
-//! relaunched in the same pane does this every time. Everything that types a
-//! line into a Claude pane and presses Enter shares this: wait [`Pacing::settle`]
-//! between the line and the first Enter, then read the composer back after
-//! each Enter and press again while the line is still there.
-//!
-//! [`Submission`] is the steppable form, for a caller that serves many panes
-//! and waits once for all of them; [`submit`] is the blocking form for one.
+//! Submitting a line typed into a herdr pane: `tiller-panes`'s submit loop,
+//! driven through [`Herdr`].
 
-use std::thread;
-use std::time::Duration;
+use tiller_panes::submit::{self, Target};
+pub use tiller_panes::submit::{PRESSES, Pacing, READS};
 
 use crate::client::{Herdr, HerdrError};
-use crate::composer::{Composer, classify};
+use crate::composer::Composer;
 
-/// How many times one submission presses Enter on a line that stays in the
-/// composer.
-pub const PRESSES: u32 = 4;
-/// How many times one submission reads the composer after an Enter.
-pub const READS: u32 = 2 * PRESSES;
+/// How a typed line's submit went.
+pub type Submit = submit::Submit<HerdrError>;
 
-/// The pauses that let a pane's agent take a typed line as one prompt.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Pacing {
-    /// Between typing the line and the first Enter.
-    pub settle: Duration,
-    /// Between an Enter and the read that checks the line left the composer.
-    pub recheck: Duration,
-}
+/// herdr as a submit target.
+struct Via<'a>(&'a dyn Herdr);
 
-impl Pacing {
-    /// No pauses, for tests against a fake herdr.
-    pub const INSTANT: Self = Self {
-        settle: Duration::ZERO,
-        recheck: Duration::ZERO,
-    };
-}
+impl Target for Via<'_> {
+    type Error = HerdrError;
 
-impl Default for Pacing {
-    fn default() -> Self {
-        Self {
-            settle: Duration::from_millis(500),
-            recheck: Duration::from_millis(500),
-        }
+    fn press_enter(&self, pane: &str) -> Result<(), HerdrError> {
+        self.0.send_enter(pane)
+    }
+
+    fn read_visible(&self, pane: &str) -> Result<String, HerdrError> {
+        self.0.read_visible(pane)
     }
 }
 
-/// How a typed line's submit went.
+/// One line being submitted (see [`submit::Submission`]).
 #[derive(Debug)]
-pub enum Submit {
-    /// The line left the composer, or the caller's own evidence says so.
-    Left,
-    /// The line is still in the composer after every press.
-    Held,
-    /// herdr failed, so the composer could not be checked.
-    Failed(HerdrError),
-}
-
-/// One line being submitted: the first Enter is pressed, and each
-/// [`Submission::check`] reads the composer back.
-#[derive(Debug)]
-pub struct Submission {
-    pane_id: String,
-    presses: u32,
-    reads: u32,
-    failed: Option<HerdrError>,
-}
+pub struct Submission(submit::Submission<HerdrError>);
 
 impl Submission {
     /// Presses the first Enter.
     pub fn begin(herdr: &dyn Herdr, pane_id: &str) -> Result<Self, HerdrError> {
-        herdr.send_enter(pane_id)?;
-        Ok(Self {
-            pane_id: pane_id.to_owned(),
-            presses: 1,
-            reads: 0,
-            failed: None,
-        })
+        submit::Submission::begin(&Via(herdr), pane_id).map(Self)
     }
 
     pub fn pane_id(&self) -> &str {
-        &self.pane_id
+        self.0.pane_id()
     }
 
-    /// One look, a [`Pacing::recheck`] after the last Enter. `left` is the
-    /// caller's own evidence the line went (an ack, a session gone); `shows`
-    /// says whether a composer holds exactly the line, which only is pressed
-    /// again, never other text. Only a composer read as empty, busy or
-    /// behind a dialog shows the line left; other text or an unreadable
-    /// screen is read again. `None` while the line is still in doubt.
+    /// One look, as [`submit::Submission::check`].
     pub fn check(
         &mut self,
         herdr: &dyn Herdr,
         left: bool,
         shows: impl Fn(&Composer) -> bool,
     ) -> Option<Submit> {
-        if left {
-            return Some(Submit::Left);
-        }
-        self.reads += 1;
-        let composer = match herdr.read_visible(&self.pane_id) {
-            Ok(screen) => classify(&screen),
-            Err(error) => {
-                self.failed = Some(error);
-                return self.spent();
-            }
-        };
-        self.failed = None;
-        match composer {
-            Composer::Empty | Composer::Busy | Composer::Dialog => return Some(Submit::Left),
-            held if shows(&held) => {
-                if self.presses == PRESSES {
-                    return Some(Submit::Held);
-                }
-                if let Err(error) = herdr.send_enter(&self.pane_id) {
-                    return Some(Submit::Failed(error));
-                }
-                self.presses += 1;
-            }
-            Composer::Holds(_) | Composer::Unknown => {}
-        }
-        self.spent()
-    }
-
-    /// The verdict once every read is used.
-    fn spent(&mut self) -> Option<Submit> {
-        (self.reads >= READS).then(|| self.failed.take().map_or(Submit::Held, Submit::Failed))
+        self.0.check(&Via(herdr), left, shows)
     }
 }
 
 /// Presses Enter on a line already typed into `pane_id` and waits until it
-/// has left the composer, at most [`PRESSES`] presses and [`READS`] reads.
-/// `left` is polled before each read; an error from it ends the wait.
+/// has left the composer, as [`submit::submit`].
 pub fn submit<E>(
     herdr: &dyn Herdr,
     pane_id: &str,
     pacing: Pacing,
     shows: impl Fn(&Composer) -> bool,
-    mut left: impl FnMut() -> Result<bool, E>,
+    left: impl FnMut() -> Result<bool, E>,
 ) -> Result<Submit, E> {
-    let mut submission = match Submission::begin(herdr, pane_id) {
-        Ok(submission) => submission,
-        Err(error) => return Ok(Submit::Failed(error)),
-    };
-    loop {
-        thread::sleep(pacing.recheck);
-        let gone = left()?;
-        if let Some(done) = submission.check(herdr, gone, &shows) {
-            return Ok(done);
-        }
-    }
+    submit::submit(&Via(herdr), pane_id, pacing, shows, left)
 }

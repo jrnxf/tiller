@@ -10,6 +10,14 @@
 # daemon running. `checks.moduleRestartsDaemon` in the flake guards this, and
 # the service PATH (Homebrew on macOS only).
 #
+# The holder (`programs.tiller.holder.enable`, off by default until the
+# cutover) is a second, separate service: a sibling of the daemon, never its
+# child, because the daemon's restarts must not take the agents' terminals
+# with them (`terminal-holder.md` 2.2, 11.2). Its definition holds no store
+# path, so a rebuild leaves it as it was and it keeps running; the new binary
+# reaches it through `tiller holder upgrade`. `checks.moduleHolderService` in
+# the flake guards this.
+#
 # Both service managers restart the daemon when it dies (a crash, a kill, or
 # exit 3 for a database newer than the binary, `recovery.md` R11) and leave it
 # down after a clean exit 0: a stop, or a second instance that found the first
@@ -34,12 +42,13 @@ let
     "--allow-host"
     host
   ]) cfg.daemon.allowHosts;
-  environment = {
-    # herdr, git, gh and quota-axi come from the profile, extraPath, the
-    # nix-darwin and NixOS system profiles, Homebrew (macOS) or the system.
-    PATH = lib.concatStringsSep ":" (
+  # herdr, git, gh and quota-axi come from the profile, extraPath, the
+  # nix-darwin and NixOS system profiles, Homebrew (macOS) or the system.
+  servicePath =
+    extraPath:
+    lib.concatStringsSep ":" (
       [ profileBin ]
-      ++ cfg.daemon.extraPath
+      ++ extraPath
       ++ [
         "/etc/profiles/per-user/${config.home.username}/bin"
         "/run/current-system/sw/bin"
@@ -53,6 +62,8 @@ let
         "/sbin"
       ]
     );
+  environment = {
+    PATH = servicePath cfg.daemon.extraPath;
   }
   // cfg.daemon.environment
   // {
@@ -61,6 +72,19 @@ let
     TILLER_PACKAGE = "${cfg.package}";
   };
   log = "${config.home.homeDirectory}/Library/Logs/tiller-daemon.log";
+
+  # The holder: the profile's `tiller`, by its stable path. Its environment
+  # is the shells' and agents' too, since every pane's child inherits it, and
+  # it has no TILLER_PACKAGE: nothing in it names a store path.
+  holderCommand = [
+    "${profileBin}/tiller"
+    "holder"
+  ];
+  holderEnvironment = {
+    PATH = servicePath cfg.holder.extraPath;
+  }
+  // cfg.holder.environment;
+  holderLog = "${config.home.homeDirectory}/Library/Logs/tiller-holder.log";
 in
 {
   options.programs.tiller = {
@@ -128,6 +152,44 @@ in
         description = "Extra environment for the daemon, such as `TILLER_LOG` or `TILLER_HOME`.";
       };
     };
+    holder = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Run `tiller holder` as a user service of its own: a launchd agent
+          on macOS, a systemd user unit on Linux. The holder keeps the
+          agents' terminals. Off until the cutover to the holder
+          (`terminal-holder.md` 11.2), so a rebuild before it starts none on
+          a live host.
+
+          A rebuild never restarts or stops it, whatever changes in the
+          package: its definition names the profile's `tiller` and no store
+          path. A new binary reaches the running holder through
+          `tiller holder upgrade`.
+        '';
+      };
+      extraPath = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        example = [ "/home/user/.local/bin" ];
+        description = ''
+          Directories on the holder's PATH after the home-manager profile.
+          Every pane's shell and agent inherits it.
+        '';
+      };
+      environment = lib.mkOption {
+        type = lib.types.attrsOf lib.types.str;
+        default = { };
+        example = {
+          TILLER_LOG = "debug";
+        };
+        description = ''
+          Extra environment for the holder, such as `TILLER_LOG`, or the
+          `TILLER_HOME` the daemon runs with. Panes inherit it.
+        '';
+      };
+    };
   };
 
   config = lib.mkIf cfg.enable (
@@ -165,6 +227,51 @@ in
             Environment = lib.mapAttrsToList (name: value: "\"${name}=${value}\"") environment;
             Restart = "on-failure";
             RestartSec = 2;
+          };
+          Install.WantedBy = [ "default.target" ];
+        };
+      })
+
+      (lib.mkIf (cfg.holder.enable && pkgs.stdenv.hostPlatform.isDarwin) {
+        launchd.agents.tiller-holder = {
+          enable = true;
+          config = {
+            ProgramArguments = holderCommand;
+            EnvironmentVariables = holderEnvironment;
+            RunAtLoad = true;
+            # Starts again after a crash or a kill, and stays down after a
+            # clean stop (exit 0), as a holder that already runs exits.
+            KeepAlive.SuccessfulExit = false;
+            ThrottleInterval = 10;
+            ProcessType = "Background";
+            StandardOutPath = holderLog;
+            StandardErrorPath = holderLog;
+          };
+        };
+      })
+
+      (lib.mkIf (cfg.holder.enable && pkgs.stdenv.hostPlatform.isLinux) {
+        systemd.user.services.tiller-holder = {
+          Unit = {
+            Description = "Tiller holder: the agents' terminals";
+            # A switch never restarts or stops it; the live upgrade replaces
+            # its program (`terminal-holder.md` 6.2). X-SwitchMethod is the
+            # switcher's own spelling of the same.
+            X-RestartIfChanged = false;
+            X-StopIfChanged = false;
+            X-SwitchMethod = "keep-old";
+            StartLimitIntervalSec = 600;
+            StartLimitBurst = 3;
+          };
+          Service = {
+            ExecStart = lib.escapeShellArgs holderCommand;
+            Environment = lib.mapAttrsToList (name: value: "\"${name}=${value}\"") holderEnvironment;
+            Restart = "on-failure";
+            RestartSec = 2;
+            # A stop ends the holder alone: its panes' children are not the
+            # unit's to kill, and a restart after a crash starts an empty
+            # holder (`terminal-holder.md` 6.4).
+            KillMode = "process";
           };
           Install.WantedBy = [ "default.target" ];
         };
