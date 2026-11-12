@@ -648,9 +648,13 @@ impl HolderClient {
             Ok(reply) => reply,
             Err(RecvTimeoutError::Timeout) => {
                 forget();
-                Err(PanesError::Unreachable(format!(
-                    "the holder did not answer {name} in time"
-                )))
+                // The reader may have taken the waiter and sent the reply
+                // just as the wait ran out: a reply that came is used.
+                answer.try_recv().unwrap_or_else(|_| {
+                    Err(PanesError::Unreachable(format!(
+                        "the holder did not answer {name} in time"
+                    )))
+                })
             }
             Err(RecvTimeoutError::Disconnected) => Err(PanesError::Unreachable(format!(
                 "the reply reader stopped during {name}"

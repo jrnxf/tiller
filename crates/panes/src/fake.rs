@@ -412,7 +412,6 @@ impl Panes for FakePanes {
     fn screen(&self, pane: &PaneId, read: Read, format: Format) -> Result<Screen> {
         let world = self.call(format!("screen {pane} {read:?} {format:?}"))?;
         let record = world.pane(pane)?;
-        let mut rows_text = world.screens.get(pane).cloned().unwrap_or_default();
         if !read.in_range() {
             return Err(PanesError::Refused {
                 request: "screen",
@@ -425,8 +424,12 @@ impl Panes for FakePanes {
             Read::Visible => usize::from(record.rows),
             Read::Recent(n) => usize::from(n),
         };
-        let skip = rows_text.len().saturating_sub(lines);
-        rows_text.drain(..skip);
+        let all = world
+            .screens
+            .get(pane)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let rows_text = all[all.len().saturating_sub(lines)..].to_vec();
         Ok(Screen {
             cols: record.cols,
             rows: record.rows,
