@@ -194,8 +194,13 @@ impl Reader {
                     _ => Id { code, last: *last },
                 })
             }
-            [ESC, byte] => Some(Id::char(u32::from(*byte))),
-            _ => None,
+            [ESC, rest @ ..] | rest => {
+                let mut chars = std::str::from_utf8(rest).ok()?.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(c), None) => Some(Id::char(u32::from(c))),
+                    _ => None,
+                }
+            }
         }
     }
 
@@ -203,6 +208,18 @@ impl Reader {
     /// the start of a sequence.
     fn next_key(&mut self, buf: &[u8]) -> Option<(Kind, usize)> {
         let first = buf[0];
+        if first >= 0x80 {
+            let len = char_len(buf)?;
+            let kind = match std::str::from_utf8(&buf[..len]) {
+                Ok(text) if !self.paste => text
+                    .chars()
+                    .next()
+                    .filter(|c| !c.is_control())
+                    .map_or(Kind::Other, Kind::Char),
+                _ => Kind::Other,
+            };
+            return Some((kind, len));
+        }
         if first != ESC {
             let kind = if self.paste {
                 Kind::Other
@@ -235,7 +252,7 @@ impl Reader {
                 Some((self.plain(kind), 3))
             }
             // Alt and a key.
-            Some(_) => Some((Kind::Other, 2)),
+            Some(_) => Some((Kind::Other, 1 + char_len(&buf[1..])?)),
         }
     }
 
@@ -342,6 +359,24 @@ fn modifiers(field: &str) -> (u32, Option<u32>) {
         .map_or(0, |mods| mods.saturating_sub(1) & !(64 | 128));
     let event = parts.next().and_then(|event| event.parse().ok());
     (mods, event)
+}
+
+/// The length of the UTF-8 character at the start of `buf`, 1 for a byte
+/// that starts none, or None when it is cut.
+fn char_len(buf: &[u8]) -> Option<usize> {
+    let len = match buf[0] {
+        0xc2..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf4 => 4,
+        _ => return Some(1),
+    };
+    if buf[1..buf.len().min(len)]
+        .iter()
+        .any(|byte| byte & 0xc0 != 0x80)
+    {
+        return Some(1);
+    }
+    (buf.len() >= len).then_some(len)
 }
 
 /// The length of the CSI sequence at the start of `buf`, or None when it is
@@ -617,6 +652,39 @@ mod tests {
         assert_eq!(acts, [Act::Send(b"\x1b[1;1:3A".to_vec())]);
         // A function key's release is a release too.
         assert_eq!(kinds(&mut reader, b"\x1b[15;1:3~"), [Kind::Release]);
+    }
+
+    #[test]
+    fn a_character_of_many_bytes_is_one_key() {
+        let mut reader = Reader::default();
+        let mut prefixed = Prefixed::default();
+        // A cut character waits for the rest of it.
+        assert!(reader.feed(b"\xc3").is_empty());
+        assert!(reader.waiting());
+        let keys = reader.feed(b"\xa9\x1b\xe2\x82\xac");
+        assert_eq!(keys[0].kind, Kind::Char('\u{e9}'));
+        assert_eq!(keys[0].bytes, "\u{e9}".as_bytes());
+        // Alt and a character of many bytes.
+        assert_eq!(keys[1].bytes, b"\x1b\xe2\x82\xac");
+        // A byte that starts no character is a key of its own.
+        assert_eq!(kinds(&mut reader, b"\xa9x"), [Kind::Other, Kind::Char('x')]);
+        // After the prefix, the whole character is used up, and so is its
+        // release; the next one, and its release, reach the pane.
+        let acts: Vec<_> = reader
+            .feed("\x1c\u{e9}\x1b[233;1:3u\u{e9}\x1b[233;1:3u".as_bytes())
+            .into_iter()
+            .filter_map(|key| prefixed.on_key(key))
+            .collect();
+        assert_eq!(
+            acts,
+            [
+                Act::Send("\u{e9}".as_bytes().to_vec()),
+                Act::Send(b"\x1b[233;1:3u".to_vec())
+            ]
+        );
+        // A cut character that no more bytes follow passes as it is.
+        assert!(reader.feed(b"\xe2\x82").is_empty());
+        assert_eq!(reader.flush()[0].bytes, b"\xe2\x82");
     }
 
     #[test]
