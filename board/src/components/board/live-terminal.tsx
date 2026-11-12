@@ -14,7 +14,7 @@ import {
 import type { MouseEvent as ReactMouseEvent, ReactNode, Ref } from "react";
 
 import { canFullScreen, leavePageFullScreen } from "../../lib/fullscreen";
-import { focusIsFree } from "../../lib/inert";
+import { focusIsFree } from "../../lib/focus";
 import { shortcutsBlocked } from "../../lib/shortcuts";
 import { createStore, useStore } from "../../lib/store";
 import { CloseIcon } from "../shell/icons";
@@ -455,8 +455,9 @@ function switchKey(event: KeyboardEvent): SwitchKey | null {
 // What the Agents view asks of its terminal: start typing to the agent.
 export interface TerminalControl {
   type(): void;
-  // Focus the way out of full screen, unless a carry waits to type here.
-  focusWayOut(): void;
+  // Full screen starts: take focus from `outside`, the page under the card,
+  // or from nowhere.
+  takeFullScreenFocus(outside: HTMLElement | null): void;
 }
 
 // One terminal with its stream and its keys, wired to the host it draws in.
@@ -688,7 +689,8 @@ export function LiveTerminal({
   // The sheet opened to type: the screen takes focus, not the sheet's Back.
   const [sheetTypes, setSheetTypes] = useState(false);
   // Type once the pane is live: asked for before the stream had a screen.
-  const typeWhenLive = useRef(autoType);
+  // A tail never goes live, so it never takes a carry.
+  const typeWhenLive = useRef(autoType && !watch);
   const webglRef = useRef<typeof WebglAddon | null>(null);
   const switchRef = useRef(onSwitch);
   useEffect(() => {
@@ -768,18 +770,30 @@ export function LiveTerminal({
     };
   }, [sessionId, host, closeHistory, tail, peer]);
 
-  // The way out of full screen. A carry that waits to type here keeps focus
-  // free for itself, so a key typed before the pane is live does not press it.
+  // The way out of full screen takes focus from the page under the card, or
+  // from nowhere. A carry that waits to type here keeps focus free for
+  // itself instead, so a key typed before the pane is live does not press it.
   const wayOut = useRef<HTMLButtonElement>(null);
-  const focusWayOut = useCallback(() => {
-    if (!typeWhenLive.current) wayOut.current?.focus();
+  const takeFullScreenFocus = useCallback((outside: HTMLElement | null) => {
+    if (typeWhenLive.current) outside?.blur();
+    else if (outside || focusIsFree()) wayOut.current?.focus();
   }, []);
   // A switch to another agent in full screen mounts this terminal, and focus
-  // on the old one's controls drops to the page: it goes to this way out.
-  const focusWayOutOnMount = useEffectEvent(() => {
-    if (full && focusIsFree()) focusWayOut();
+  // on the old one's controls drops to the page.
+  const takeFocusOnMount = useEffectEvent(() => {
+    if (full) takeFullScreenFocus(null);
   });
-  useEffect(() => focusWayOutOnMount(), []);
+  useEffect(() => takeFocusOnMount(), []);
+  // The carry takes focus once live, unless the owner moved it while it
+  // waited.
+  const takeCarry = useCallback((term: Terminal) => {
+    typeWhenLive.current = false;
+    if (focusIsFree() || term.element?.contains(document.activeElement)) term.focus();
+  }, []);
+  // A pane that ends never goes live.
+  useEffect(() => {
+    if (status.kind === "ended") typeWhenLive.current = false;
+  }, [status.kind]);
 
   const live = status.kind === "live";
   useEffect(() => {
@@ -787,12 +801,8 @@ export function LiveTerminal({
     if (!term) return;
     term.options.disableStdin = !live || peer !== undefined;
     if (!live) term.blur();
-    else if (typeWhenLive.current && term.element) {
-      typeWhenLive.current = false;
-      // Unless the owner moved focus while it waited.
-      if (focusIsFree() || term.element.contains(document.activeElement)) term.focus();
-    }
-  }, [live, peer]);
+    else if (typeWhenLive.current && term.element) takeCarry(term);
+  }, [live, peer, takeCarry]);
 
   useEffect(() => {
     onTyping?.(typing);
@@ -923,11 +933,8 @@ export function LiveTerminal({
     if (focusNext.current) {
       focusNext.current = false;
       term.focus();
-    } else if (typeWhenLive.current && !term.options.disableStdin) {
-      typeWhenLive.current = false;
-      term.focus();
-    }
-  }, [box, ready, host, label, layout, watch]);
+    } else if (typeWhenLive.current && !term.options.disableStdin) takeCarry(term);
+  }, [box, ready, host, label, layout, watch, takeCarry]);
 
   // The pane changes size, or the room for it does: fit it again.
   useEffect(() => {
@@ -1049,9 +1056,9 @@ export function LiveTerminal({
         } else if (term?.element && !term.options.disableStdin) term.focus();
         else typeWhenLive.current = true;
       },
-      focusWayOut,
+      takeFullScreenFocus,
     }),
-    [phone, expand, watch, focusWayOut],
+    [phone, expand, watch, takeFullScreenFocus],
   );
 
   const ended = status.kind === "ended";

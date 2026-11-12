@@ -37,12 +37,6 @@ export function holdInertOutside(element: Element): () => void {
   return holdInert(others);
 }
 
-// No control holds focus, as when the one that did left the page.
-export function focusIsFree(): boolean {
-  const now = document.activeElement;
-  return !now || now === document.body;
-}
-
 function hold(elements: Iterable<Element>, held: Element[]) {
   for (const element of elements) {
     if (element.hasAttribute("data-modal-exempt")) continue;

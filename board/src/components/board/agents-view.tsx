@@ -5,7 +5,7 @@ import type { CSSProperties, KeyboardEvent as KeyEvent, RefObject } from "react"
 
 import type { AgentRow, Machine, PermissionPrompt, Project } from "../../lib/api-types";
 import { leavePageFullScreen, usePageFullScreen } from "../../lib/fullscreen";
-import { focusIsFree, holdInertOutside } from "../../lib/inert";
+import { holdInertOutside } from "../../lib/inert";
 import { focusReason, ownerOf, projectKey, shownId } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import {
@@ -540,8 +540,8 @@ function Stage({
   }, [pageFull, phone]);
   useEffect(() => leavePageFullScreen, []);
   // In full screen the card covers the page, so Tab and assistive tech stay
-  // on it too. Focus left under the card, such as on the rail, moves to the
-  // way out, and goes back when full screen ends.
+  // on it too. The terminal takes focus left under the card, such as on the
+  // rail, and focus goes back there when full screen ends.
   const cardRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const cardBox = cardRef.current;
@@ -552,8 +552,7 @@ function Stage({
         ? before
         : null;
     const release = holdInertOutside(cardBox);
-    // Focus on nothing, as after a click on the button, goes there too.
-    if (outside || focusIsFree()) control.current?.focusWayOut();
+    control.current?.takeFullScreenFocus(outside);
     return () => {
       release();
       // Only from where this effect put it: focus the owner moved, such as

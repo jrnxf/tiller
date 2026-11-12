@@ -429,16 +429,21 @@ test("a switch from typing in full screen leaves focus to the new terminal, not 
   expect(document.fullscreenElement).toBe(document.documentElement);
 });
 
-test("full screen that starts while a carry waits leaves focus to the carry", async () => {
-  stubFullScreen();
-  await renderStage("holder");
-  const streams = await switchFromTyping();
-  fireEvent.click(footer().getByRole("button", { name: "Full screen" }));
-  await footer().findByRole("button", { name: "Full screen", pressed: true });
-  expect(document.activeElement).toBe(document.body);
-  streams.goLive();
-  await waitFor(() => expect(document.activeElement).toBe(typing()));
-});
+test.each([false, true])(
+  "full screen that starts while a carry waits leaves focus to the carry (focus on the rail: %s)",
+  async (onRail) => {
+    stubFullScreen();
+    await renderStage("holder");
+    const streams = await switchFromTyping();
+    // Focus under the card leaves it, as it turns inert.
+    if (onRail) screen.getByRole("listbox").focus();
+    fireEvent.click(footer().getByRole("button", { name: "Full screen" }));
+    await footer().findByRole("button", { name: "Full screen", pressed: true });
+    expect(document.activeElement).toBe(document.body);
+    streams.goLive();
+    await waitFor(() => expect(document.activeElement).toBe(typing()));
+  },
+);
 
 test("a turn to the phone layout, or leaving the Agents view, leaves full screen", async () => {
   const { exit } = stubFullScreen();
