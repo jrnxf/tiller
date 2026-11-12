@@ -443,12 +443,36 @@ pub fn snap(world: &World, name: &str, out: &Out) {
 /// call runs on a slower core, so a test that gates it first calls
 /// [`pin_to_performance_cores`].
 pub fn children_cpu() -> std::time::Duration {
+    children_usage().cpu
+}
+
+/// What every child this process has reaped used, from one `getrusage`.
+#[derive(Clone, Copy)]
+pub struct ChildUsage {
+    /// CPU time, user plus system ([`children_cpu`]).
+    pub cpu: std::time::Duration,
+    /// Involuntary context switches: how often the scheduler took a core
+    /// away. They grow on a busy host while the work stays the same.
+    pub preempted: i64,
+    /// Minor page faults: about the same from run to run (to within 1%
+    /// across sets on one host) unless the binary does more work.
+    pub faults: i64,
+}
+
+/// The usage of every child this process has reaped so far
+/// (`RUSAGE_CHILDREN`): a child counts only once it is reaped, so a
+/// difference across one call covers the children that call reaped.
+pub fn children_usage() -> ChildUsage {
     use nix::sys::resource::{UsageWho, getrusage};
     use std::time::Duration;
     let usage = getrusage(UsageWho::RUSAGE_CHILDREN).unwrap();
     let timeval =
         |t: nix::sys::time::TimeVal| Duration::new(t.tv_sec() as u64, t.tv_usec() as u32 * 1000);
-    timeval(usage.user_time()) + timeval(usage.system_time())
+    ChildUsage {
+        cpu: timeval(usage.user_time()) + timeval(usage.system_time()),
+        preempted: usage.involuntary_context_switches(),
+        faults: usage.minor_page_faults(),
+    }
 }
 
 /// Pins this thread, and so every child it starts from here on, to the
