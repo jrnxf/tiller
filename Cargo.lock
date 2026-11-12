@@ -2051,7 +2051,6 @@ dependencies = [
  "thiserror",
  "tiller-core",
  "tokio",
- "tracing",
  "ulid",
 ]
 

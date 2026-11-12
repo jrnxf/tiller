@@ -387,13 +387,23 @@ fn keeps_connection(err: &PanesError) -> bool {
 }
 
 /// The same error for another caller. Only the kinds a broken connection
-/// has are kept; anything else is `Unreachable` with its text.
+/// has are kept: a holder that broke the protocol broke it for every call
+/// in flight. Anything else is `Unreachable` with its text.
 fn copy(err: &PanesError) -> PanesError {
     match err {
         PanesError::Protocol(why) => PanesError::Protocol(why.clone()),
         PanesError::Unreachable(why) => PanesError::Unreachable(why.clone()),
         err => PanesError::Unreachable(err.to_string()),
     }
+}
+
+/// The instant `wait` from now. A wait too long to add, such as a huge
+/// close grace, waits a year, which no call outlives.
+fn after(wait: Duration) -> Instant {
+    let now = Instant::now();
+    now.checked_add(wait)
+        .or_else(|| now.checked_add(Duration::from_secs(365 * 86_400)))
+        .unwrap_or(now)
 }
 
 /// A caller waiting for its reply.
@@ -623,7 +633,7 @@ impl HolderClient {
             forget();
             return Err(err);
         }
-        let deadline = Instant::now() + wait;
+        let deadline = after(wait);
         let sent = send(&mut writer, wire, deadline);
         drop(writer);
         if let Err(err) = sent {
@@ -949,10 +959,10 @@ impl EventFeed for SocketEvents {
 impl SocketEvents {
     fn read_event(&mut self) -> Result<Event> {
         loop {
-            let message = read_message(&mut self.reader)?;
-            if let Some(event) = message.event() {
-                return Ok(event);
-            }
+            let message = match read_message(&mut self.reader)?.into_event() {
+                Ok(event) => return Ok(event),
+                Err(message) => *message,
+            };
             match message {
                 HolderMessage::Unknown => {}
                 HolderMessage::Error {

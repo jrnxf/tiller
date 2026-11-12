@@ -22,7 +22,6 @@ tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
 tiller-core = { workspace = true, optional = true }
 tokio.workspace = true
-tracing.workspace = true
 ulid.workspace = true
 
 [dev-dependencies]

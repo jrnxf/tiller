@@ -729,7 +729,12 @@ impl HolderMessage {
 
     /// The event this message is, when it is one.
     pub fn event(&self) -> Option<Event> {
-        Some(match self.clone() {
+        self.clone().into_event().ok()
+    }
+
+    /// The event this message is, or the message back when it is none.
+    pub fn into_event(self) -> std::result::Result<Event, Box<Self>> {
+        Ok(match self {
             HolderMessage::Spawned { pane } => Event::Spawned { pane },
             HolderMessage::Exited {
                 id: None,
@@ -745,7 +750,7 @@ impl HolderMessage {
             HolderMessage::ModelReset { pane } => Event::ModelReset { pane },
             HolderMessage::Forgotten { pane, reason } => Event::Forgotten { pane, reason },
             HolderMessage::Upgraded { holder } => Event::Upgraded { holder },
-            _ => return None,
+            message => return Err(Box::new(message)),
         })
     }
 }

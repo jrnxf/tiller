@@ -34,6 +34,9 @@ pub const EXITED_LIMIT: usize = 64;
 /// The first fake pid.
 const FIRST_PID: u32 = 1 << 31;
 
+/// The most lines a `recent` read takes (spec 2.5).
+const MAX_RECENT: u16 = 10_000;
+
 /// The signal number `close` reports, as a child that `hup` ended.
 const SIGHUP: i32 = 1;
 /// The signal number `signal(kill)` reports.
@@ -69,7 +72,7 @@ struct World {
     leases: HashMap<PaneId, Vec<(String, u16, u16)>>,
     attach_clients: usize,
     subscribers: Vec<Subscriber>,
-    watchers: Vec<Sender<Msg<Event>>>,
+    watchers: Vec<(u32, Sender<Msg<Event>>)>,
 }
 
 impl std::fmt::Debug for Subscriber {
@@ -115,7 +118,7 @@ impl World {
     /// Sends `event` to every watch, and drops the ones that are gone.
     fn emit(&mut self, event: &Event) {
         self.watchers
-            .retain(|tx| tx.send(Msg::Item(event.clone())).is_ok());
+            .retain(|(_, tx)| tx.send(Msg::Item(event.clone())).is_ok());
     }
 
     /// Sets `pane` to the top lease's size, and tells everyone when it
@@ -268,7 +271,7 @@ impl FakePanes {
             for slot in world.subscribers.drain(..) {
                 let _ = slot.tx.send(Msg::Fail);
             }
-            for tx in world.watchers.drain(..) {
+            for (_, tx) in world.watchers.drain(..) {
                 let _ = tx.send(Msg::Fail);
             }
             world.leases.clear();
@@ -418,6 +421,13 @@ impl Panes for FakePanes {
         let record = world.pane(pane)?;
         let mut rows_text = world.screens.get(pane).cloned().unwrap_or_default();
         if let Read::Recent(n) = read {
+            if !(1..=MAX_RECENT).contains(&n) {
+                return Err(PanesError::Refused {
+                    request: "screen",
+                    code: ErrorCode::BadRequest,
+                    message: format!("recent takes 1 to {MAX_RECENT} lines, not {n}"),
+                });
+            }
             let skip = rows_text.len().saturating_sub(usize::from(n));
             rows_text.drain(..skip);
         }
@@ -570,9 +580,15 @@ impl Live for FakePanes {
     fn watch(&self) -> Result<Events> {
         let mut world = self.call("watch".into())?;
         let (tx, rx) = mpsc::channel();
-        world.watchers.push(tx.clone());
+        // A watch takes a stream number, so its end can find it.
+        let id = world.next_stream;
+        world.next_stream += 1;
+        world.watchers.push((id, tx.clone()));
+        drop(world);
+        let shared = Arc::clone(&self.world);
         let end = move || {
             let _ = tx.send(Msg::End);
+            lock(&shared).watchers.retain(|(watch, _)| *watch != id);
         };
         Ok(Events::from_parts(
             Box::new(FakeEvents { rx, done: false }),
@@ -636,6 +652,18 @@ impl FakeControl {
         let world = lock(&self.world);
         if world.unreachable {
             return Err(PanesError::Unreachable("the fake holder is down".into()));
+        }
+        // A lag, an exit or a down holder drops the subscriber, as the
+        // holder closes its stream.
+        if !world
+            .subscribers
+            .iter()
+            .any(|slot| slot.stream == self.stream)
+        {
+            return Err(PanesError::Unreachable(format!(
+                "the subscription {} has ended",
+                self.lease
+            )));
         }
         Ok(world)
     }
@@ -986,6 +1014,8 @@ mod tests {
         let ender = events.ender();
         ender.end();
         assert_eq!(events.recv().unwrap(), None);
+        // An ended watch is no longer one the fake sends to.
+        assert!(fake.world().watchers.is_empty());
 
         let mut events = fake.watch().unwrap();
         let other = fake.spawn(&spawn("s2")).unwrap().pane;
@@ -1025,5 +1055,30 @@ mod tests {
         assert_eq!(subscription.recv().unwrap(), Some(Update::Lagged));
         assert_eq!(subscription.recv().unwrap(), None);
         assert!(fake.output(&pane, b"after"));
+        // A cut stream takes no lease, as a closed connection takes none.
+        assert!(matches!(
+            subscription.resize(90, 20),
+            Err(PanesError::Unreachable(_))
+        ));
+        assert!(fake.leases(&pane).is_empty());
+    }
+
+    #[test]
+    fn a_recent_read_outside_its_range_is_refused() {
+        let fake = FakePanes::new();
+        let pane = fake.spawn(&spawn("s1")).unwrap().pane;
+        for lines in [0, MAX_RECENT + 1] {
+            assert!(matches!(
+                fake.screen(&pane, Read::Recent(lines), Format::Text),
+                Err(PanesError::Refused {
+                    code: ErrorCode::BadRequest,
+                    ..
+                })
+            ));
+        }
+        assert!(
+            fake.screen(&pane, Read::Recent(MAX_RECENT), Format::Text)
+                .is_ok()
+        );
     }
 }
