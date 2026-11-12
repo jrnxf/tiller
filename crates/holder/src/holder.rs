@@ -444,6 +444,9 @@ pub struct PaneCell {
     /// True once the pane is forgotten: its PTY read stops.
     forgotten: watch::Sender<bool>,
     watchers: Arc<Watchers>,
+    /// The fixture recorder's files for this pane (`terminal-holder.md` 12).
+    #[cfg(feature = "record")]
+    tap: Option<crate::record::PaneTap>,
 }
 
 impl PaneCell {
@@ -578,6 +581,10 @@ impl PaneCell {
     /// One PTY read: into the model, with the queries in it answered, and
     /// out to every subscriber without them. Gives the pane's next timer.
     fn output(&self, bytes: &[u8]) -> Option<Instant> {
+        #[cfg(feature = "record")]
+        if let Some(tap) = &self.tap {
+            tap.output(bytes);
+        }
         let mut inner = self.inner();
         inner.record.last_output_at = Some(Timestamp::now());
         let filtered = inner.filter.filter(bytes);
@@ -684,6 +691,10 @@ impl PaneCell {
         }
         pty::set_size(self.master.get_ref(), size).map_err(|err| internal(&err))?;
         _ = self.update(inner, |model| model.resize(size));
+        #[cfg(feature = "record")]
+        if let Some(tap) = &self.tap {
+            tap.resize(size);
+        }
         inner.record.cols = size.cols;
         inner.record.rows = size.rows;
         self.emit(&HolderMessage::Resized {
@@ -727,6 +738,9 @@ pub struct Holder {
     screen_reads: Arc<tokio::sync::Semaphore>,
     /// The connections open now.
     connections: Arc<AtomicUsize>,
+    /// Where the fixture recorder writes, when it runs.
+    #[cfg(feature = "record")]
+    recorder: Option<crate::record::Recorder>,
 }
 
 /// A place under a limit, such as [`Limits::connections`] or
@@ -769,7 +783,20 @@ impl Holder {
     }
 
     pub fn with_limits(limits: Limits) -> Arc<Self> {
+        Arc::new(Self::bare(limits))
+    }
+
+    /// A holder that records every pane's raw output into `recorder`.
+    #[cfg(feature = "record")]
+    pub fn recording(recorder: crate::record::Recorder) -> Arc<Self> {
         Arc::new(Self {
+            recorder: Some(recorder),
+            ..Self::bare(Limits::default())
+        })
+    }
+
+    fn bare(limits: Limits) -> Self {
+        Self {
             instance: ulid::Ulid::generate().to_string(),
             boot_id: boot_id(),
             started_at: Timestamp::now(),
@@ -781,7 +808,9 @@ impl Holder {
             watchers: Arc::default(),
             screen_reads: Arc::new(tokio::sync::Semaphore::new(SCREEN_READS)),
             connections: Arc::default(),
-        })
+            #[cfg(feature = "record")]
+            recorder: None,
+        }
     }
 
     pub fn limits(&self) -> Limits {
@@ -932,6 +961,11 @@ impl Holder {
             exit: watch::Sender::new(None),
             forgotten: watch::Sender::new(false),
             watchers: self.watchers.clone(),
+            #[cfg(feature = "record")]
+            tap: self
+                .recorder
+                .as_ref()
+                .and_then(|recorder| recorder.pane(&record.pane, size)),
         });
         {
             // `spawned` goes out under the pane's lock, as its other events
@@ -1795,6 +1829,10 @@ async fn deliver_exit(holder: Arc<Holder>, cell: Arc<PaneCell>, exit: Exit) {
                 .retain(|sub| sub.conn.send_stream(sub.stream, frame.clone()));
         }
         cell.emit(&exited);
+        #[cfg(feature = "record")]
+        if let Some(tap) = &cell.tap {
+            tap.exit();
+        }
         cell.exit.send_replace(Some(exit));
     }
     holder.prune(Timestamp::now());

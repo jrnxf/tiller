@@ -39,6 +39,15 @@ pub enum Cmd {
         #[arg(long, value_hint = ValueHint::FilePath)]
         binary: Option<PathBuf>,
     },
+    /// Run a holder that writes each pane's raw PTY output, with its size
+    /// changes, to a file in a directory (a test build only, for the
+    /// fixtures of `terminal-holder.md` 12)
+    #[cfg(feature = "record")]
+    Record {
+        /// The directory the recordings go in; created when missing
+        #[arg(long, value_hint = ValueHint::DirPath)]
+        out: PathBuf,
+    },
 }
 
 /// `db` is the `--db` or `TILLER_DB` given, if any.
@@ -56,6 +65,13 @@ pub fn run(args: &Args, db: Option<&Path>, json: bool) -> ExitCode {
     if let Some(Cmd::Upgrade { dry_run, binary }) = &args.cmd {
         return upgrade(&home, *dry_run, binary.as_deref(), json);
     }
+    // A recording holder stays in the foreground, under the test that
+    // drives it.
+    #[cfg(feature = "record")]
+    let recording = match &args.cmd {
+        Some(Cmd::Record { out }) => Some(out.as_path()),
+        _ => None,
+    };
     if args.detach {
         // Before any thread or log: the holder forks from here.
         match tiller_holder::detach::detach(&home) {
@@ -86,7 +102,14 @@ pub fn run(args: &Args, db: Option<&Path>, json: bool) -> ExitCode {
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
         .try_init();
-    match tiller_holder::run(&home) {
+    #[cfg(feature = "record")]
+    let outcome = match recording {
+        Some(out) => tiller_holder::run_recording(&home, out),
+        None => tiller_holder::run(&home),
+    };
+    #[cfg(not(feature = "record"))]
+    let outcome = tiller_holder::run(&home);
+    match outcome {
         Ok(Outcome::Stopped) => ExitCode::SUCCESS,
         Ok(Outcome::AlreadyRuns { pid }) => {
             already_runs(pid);

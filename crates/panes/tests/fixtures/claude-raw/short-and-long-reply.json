@@ -1,0 +1,75 @@
+{
+  "cols": 120,
+  "description": "One-word answer turn, then a 120-line reply that scrolls, then /exit.",
+  "marks": [
+    {
+      "composer": "Empty",
+      "note": "idle composer",
+      "offset": 3089,
+      "prompt": null
+    },
+    {
+      "composer": {
+        "Holds": "What is 2+2? Answer with one word."
+      },
+      "note": "typed question",
+      "offset": 3195,
+      "prompt": null
+    },
+    {
+      "composer": "Busy",
+      "note": "busy first turn",
+      "offset": 4500,
+      "prompt": null
+    },
+    {
+      "composer": "Empty",
+      "note": "finished reply",
+      "offset": 6144,
+      "prompt": null
+    },
+    {
+      "composer": {
+        "Holds": "Print the numbers 1 to 120, one per line, in your reply. Write nothing else."
+      },
+      "note": "typed long-reply prompt",
+      "offset": 6391,
+      "prompt": null
+    },
+    {
+      "composer": "Busy",
+      "note": "busy long reply",
+      "offset": 7500,
+      "prompt": null
+    },
+    {
+      "composer": "Busy",
+      "note": "busy long reply later",
+      "offset": 8300,
+      "prompt": null
+    },
+    {
+      "composer": "Empty",
+      "note": "long reply finished",
+      "offset": 10976,
+      "prompt": null
+    },
+    {
+      "composer": {
+        "Holds": "/exit"
+      },
+      "note": "exit typed",
+      "offset": 11546,
+      "prompt": null
+    },
+    {
+      "composer": "Unknown",
+      "note": "exit screen",
+      "offset": 11933,
+      "prompt": null
+    }
+  ],
+  "raw": "short-and-long-reply.raw",
+  "resizes": [],
+  "rows": 40
+}
