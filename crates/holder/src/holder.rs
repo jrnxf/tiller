@@ -369,6 +369,17 @@ impl PaneCell {
         }
     }
 
+    /// Ends the synchronized update the model holds open, if there is one.
+    fn end_open_sync(&self, inner: &mut Inner) {
+        if inner.model.sync_deadline().is_some() {
+            let ended = inner.model.end_sync();
+            self.told(inner);
+            if let Err(panic) = ended {
+                self.model_reset(inner, &panic);
+            }
+        }
+    }
+
     /// No output for [`QUIET_AFTER`] after output.
     fn quiet(&self) {
         let _inner = self.inner();
@@ -378,15 +389,16 @@ impl PaneCell {
         });
     }
 
-    /// Sends `signal` to the child's group while the child runs. Under the
-    /// pane's lock, the reaper cannot free the pid in between.
-    fn signal_running(&self, signal: Signal) -> bool {
-        let inner = self.inner();
+    /// Sends `signal` to the child's group while the child runs, and says
+    /// whether it did. Under the pane's lock, the reaper cannot free the pid
+    /// in between. A forgotten pane is not found.
+    fn signal_running(&self, signal: Signal) -> Result<bool, Failure> {
+        let inner = self.live()?;
         let running = inner.running();
         if running {
             self.signal(signal);
         }
-        running
+        Ok(running)
     }
 
     fn sync_deadline(&self) -> Option<tokio::time::Instant> {
@@ -414,8 +426,10 @@ pub struct Holder {
     table: Mutex<Table>,
     /// Held for a whole `spawn`, so two spawns with one key start one
     /// child, while the table's lock is free for everything else during
-    /// the fork and exec.
-    spawning: Mutex<()>,
+    /// the fork and exec. A spawn waits its turn here before it takes a
+    /// blocking thread, so a burst of spawns holds one thread, not one
+    /// each.
+    spawning: Arc<tokio::sync::Mutex<()>>,
     next_stream: AtomicU32,
     /// Wakes the reaper after a spawn, so an exit that came before the pane
     /// was in the table is not missed.
@@ -430,7 +444,7 @@ impl Holder {
             boot_id: boot_id(),
             started_at: Timestamp::now(),
             table: Mutex::new(Table::default()),
-            spawning: Mutex::new(()),
+            spawning: Arc::default(),
             next_stream: AtomicU32::new(1),
             reap: Notify::new(),
             watchers: Arc::default(),
@@ -474,9 +488,21 @@ impl Holder {
             .cloned()
     }
 
-    /// `spawn`: a new pane, or the running pane that holds the key. It
-    /// forks and waits for the exec, so it runs off the runtime's workers.
-    pub fn spawn(self: &Arc<Self>, req: Spawn) -> Result<(Pane, bool), Failure> {
+    /// `spawn`: a new pane, or the running pane that holds the key. One
+    /// spawn runs at a time, and it forks and waits for the exec on a
+    /// blocking thread, off the runtime's workers.
+    pub async fn spawn(self: &Arc<Self>, req: Spawn) -> Result<(Pane, bool), Failure> {
+        let turn = self.spawning.clone().lock_owned().await;
+        let holder = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _turn = turn;
+            holder.spawn_in_turn(req)
+        })
+        .await
+        .map_err(|err| (ErrorCode::Internal, format!("the spawn failed: {err}")))?
+    }
+
+    fn spawn_in_turn(self: &Arc<Self>, req: Spawn) -> Result<(Pane, bool), Failure> {
         let size = req.size.unwrap_or(tiller_panes::message::DEFAULT_SIZE);
         check_size(size)?;
         if !Path::new(&req.cwd).is_absolute() {
@@ -485,7 +511,6 @@ impl Holder {
                 req.cwd
             )));
         }
-        let _spawning = lock(&self.spawning);
         let running = self.panes().iter().find_map(|cell| {
             let inner = cell.inner();
             (inner.record.key == req.key && inner.running()).then(|| inner.record())
@@ -510,9 +535,11 @@ impl Holder {
                 return Err(internal(&err));
             }
         };
-        let mut table = lock(&self.table);
-        table.next_num += 1;
-        let num = table.next_num;
+        let num = {
+            let mut table = lock(&self.table);
+            table.next_num += 1;
+            table.next_num
+        };
         let record = Pane {
             pane: id.clone(),
             num,
@@ -548,12 +575,16 @@ impl Holder {
             forgotten: watch::Sender::new(false),
             watchers: self.watchers.clone(),
         });
-        table.panes.push(cell.clone());
-        drop(table);
-        tracing::info!(pane = %record.pane, num, pid = record.pid, argv = ?record.argv, "spawned");
-        self.watchers.emit(&HolderMessage::Spawned {
-            pane: record.pane.clone(),
-        });
+        {
+            // `spawned` goes out under the pane's lock, as its other events
+            // do, so none of them comes before it.
+            let _inner = cell.inner();
+            lock(&self.table).panes.push(cell.clone());
+            tracing::info!(pane = %record.pane, num, pid = record.pid, argv = ?record.argv, "spawned");
+            cell.emit(&HolderMessage::Spawned {
+                pane: record.pane.clone(),
+            });
+        }
         tokio::spawn(read_pty(cell.clone()));
         tokio::spawn(write_input(cell));
         self.reap.notify_one();
@@ -634,10 +665,13 @@ impl Holder {
     ) -> Result<(), Failure> {
         let cell = self.cell(pane)?;
         let bytes = {
-            let inner = cell.live()?;
+            let mut inner = cell.live()?;
             if !inner.running() {
                 return Err(exited(pane));
             }
+            // A mode the app set inside an open synchronized update is set
+            // for the keys and the paste it waits for.
+            cell.end_open_sync(&mut inner);
             bytes(inner.model.mode())
         };
         match cell.input.push(&conn.sender, bytes) {
@@ -662,13 +696,7 @@ impl Holder {
         // The model holds an open synchronized update apart from its screen,
         // and the new subscriber never got its start: the update ends here,
         // so the repaint shows it and the bytes after it pass as they are.
-        if inner.model.sync_deadline().is_some() {
-            let ended = inner.model.end_sync();
-            cell.told(&mut inner);
-            if let Err(panic) = ended {
-                cell.model_reset(&mut inner, &panic);
-            }
-        }
+        cell.end_open_sync(&mut inner);
         let repaint = match inner.model.repaint() {
             Ok(repaint) => repaint,
             Err(panic) => {
@@ -810,11 +838,7 @@ impl Holder {
             tiller_panes::Signal::Hup => Signal::HUP,
             tiller_panes::Signal::Kill => Signal::KILL,
         };
-        let cell = self.cell(pane)?;
-        let inner = cell.live()?;
-        // Under the pane's lock, the reaper cannot free the pid in between.
-        if inner.running() {
-            cell.signal(signal);
+        if self.cell(pane)?.signal_running(signal)? {
             Ok(())
         } else {
             Err(exited(pane))
@@ -828,14 +852,14 @@ impl Holder {
     pub async fn close(&self, pane: &PaneId, grace: Duration) -> Result<Exit, Failure> {
         let cell = self.cell(pane)?;
         let mut exit = cell.exit.subscribe();
-        cell.signal_running(Signal::HUP);
+        cell.signal_running(Signal::HUP)?;
         let has_exit = |exit: &Option<Exit>| exit.is_some();
         if let Ok(Ok(exit)) = tokio::time::timeout(grace, exit.wait_for(has_exit)).await
             && let Some(exit) = *exit
         {
             return Ok(exit);
         }
-        if cell.signal_running(Signal::KILL) {
+        if cell.signal_running(Signal::KILL)? {
             tracing::info!(pane = %pane, grace_ms = grace.as_millis(), "the child outlived its close grace and was killed");
         }
         match tokio::time::timeout(KILL_WAIT, exit.wait_for(has_exit)).await {
@@ -1012,7 +1036,8 @@ impl Holder {
     /// Hangs up every running child's group, as the holder stops.
     pub fn hang_up_all(&self) {
         for cell in self.panes() {
-            cell.signal_running(Signal::HUP);
+            // A pane forgotten in between has no child to hang up.
+            _ = cell.signal_running(Signal::HUP);
         }
     }
 }

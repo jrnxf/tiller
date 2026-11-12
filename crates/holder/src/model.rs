@@ -50,6 +50,9 @@ pub enum Told {
 /// The most titles the title stack keeps, as `alacritty_terminal` keeps.
 const TITLE_STACK: usize = 4096;
 
+/// The most notifications told between two takes.
+pub const NOTIFY_MAX: usize = 8;
+
 /// Reads what the app tells its terminal, in the order it tells it, from
 /// the bytes the model parses: titles (OSC 0 and 2, the title stack of
 /// `CSI 22 t` and `CSI 23 t`, and the reset `ESC c`), the bell, and
@@ -57,6 +60,11 @@ const TITLE_STACK: usize = 4096;
 /// OSC cut between reads is read whole, and CAN, SUB or ESC ends an OSC
 /// where they end it for the model. It reads a synchronized update
 /// (mode 2026) as it comes: the model parses that only when it ends.
+///
+/// One PTY read can tell a flood (`yes $'\a'` rings a bell every two
+/// bytes), and each thing told is an event to every watcher. So between
+/// two takes it keeps the latest title only, one bell and the first
+/// [`NOTIFY_MAX`] notifications.
 #[derive(Debug, Default)]
 struct Teller {
     title: String,
@@ -65,16 +73,35 @@ struct Teller {
 }
 
 impl Teller {
+    fn tell(&mut self, told: Told) {
+        match told {
+            Told::Title(_) => self.told.retain(|old| !matches!(old, Told::Title(_))),
+            Told::Bell if self.told.contains(&Told::Bell) => return,
+            Told::Notify { .. }
+                if self
+                    .told
+                    .iter()
+                    .filter(|old| matches!(old, Told::Notify { .. }))
+                    .count()
+                    >= NOTIFY_MAX =>
+            {
+                return;
+            }
+            Told::Bell | Told::Notify { .. } => {}
+        }
+        self.told.push(told);
+    }
+
     fn set_title(&mut self, title: String) {
         self.title.clone_from(&title);
-        self.told.push(Told::Title(title));
+        self.tell(Told::Title(title));
     }
 }
 
 impl Perform for Teller {
     fn execute(&mut self, byte: u8) {
         if byte == 0x07 {
-            self.told.push(Told::Bell);
+            self.tell(Told::Bell);
         }
     }
 
@@ -111,7 +138,7 @@ impl Perform for Teller {
                         && command.parse::<u8>().is_ok_and(|n| (1..=12).contains(&n))
                 });
                 if !conemu {
-                    self.told.push(Told::Notify {
+                    self.tell(Told::Notify {
                         title: String::new(),
                         body: text(rest),
                     });
@@ -119,7 +146,7 @@ impl Perform for Teller {
             }
             b"777" => {
                 if let [b"notify", title, body @ ..] = rest {
-                    self.told.push(Told::Notify {
+                    self.tell(Told::Notify {
                         title: String::from_utf8_lossy(title).into_owned(),
                         body: text(body),
                     });
@@ -260,8 +287,8 @@ impl Model {
     }
 
     /// What the app told the terminal since the last call: titles, bells
-    /// and notifications, in order. A model panic drops what was not
-    /// taken.
+    /// and notifications, in order, with a flood cut down as [`Teller`]
+    /// says. A model panic drops what was not taken.
     pub fn take_told(&mut self) -> Vec<Told> {
         std::mem::take(&mut self.screen.teller.told)
     }
@@ -327,7 +354,14 @@ impl Model {
                     .map(|text| (*text).to_owned())
                     .or_else(|| payload.downcast_ref::<String>().cloned())
                     .unwrap_or_else(|| "a panic with no message".to_owned());
+                // The app's title is still the one it set: only the screen
+                // is lost.
+                let teller = std::mem::take(&mut self.screen.teller);
                 self.screen = Screen::new(self.size);
+                self.screen.teller = Teller {
+                    told: Vec::new(),
+                    ..teller
+                };
                 self.scanner = Scanner::new();
                 Err(ModelPanic {
                     message,
@@ -452,7 +486,6 @@ mod tests {
                 b"\x1b]2;build\x07a\x07\x1b]9;done;now\x1b\\\x1b]777;notify;Claude;needs; you\x07",
             )
             .unwrap();
-        model.feed(b"\x1b]0; spaced \x07\x1b]0;\x07").unwrap();
         assert_eq!(
             model.take_told(),
             [
@@ -460,30 +493,55 @@ mod tests {
                 Told::Bell,
                 notify("", "done;now"),
                 notify("Claude", "needs; you"),
-                Told::Title("spaced".into()),
-                Told::Title(String::new()),
             ]
         );
         assert!(model.take_told().is_empty());
+        model.feed(b"\x1b]0; spaced \x07").unwrap();
+        assert_eq!(model.take_told(), [Told::Title("spaced".into())]);
+        model.feed(b"\x1b]0;\x07").unwrap();
+        assert_eq!(model.take_told(), [Told::Title(String::new())]);
     }
 
     #[test]
     fn the_title_stack_and_a_reset_set_the_title() {
         let mut model = Model::new(size());
-        model
-            .feed(b"\x1b]2;one\x07\x1b[22t\x1b]2;two\x07\x1b[23t\x1b[23t\x1bc")
-            .unwrap();
+        let mut title = |bytes: &[u8]| {
+            model.feed(bytes).unwrap();
+            model.take_told()
+        };
         assert_eq!(
-            model.take_told(),
-            [
-                Told::Title("one".into()),
-                Told::Title("two".into()),
-                // The pushed title comes back, and an empty stack pops
-                // nothing.
-                Told::Title("one".into()),
-                Told::Title(String::new()),
-            ]
+            title(b"\x1b]2;one\x07\x1b[22t"),
+            [Told::Title("one".into())]
         );
+        assert_eq!(title(b"\x1b]2;two\x07"), [Told::Title("two".into())]);
+        // The pushed title comes back, and an empty stack pops nothing.
+        assert_eq!(title(b"\x1b[23t\x1b[23t"), [Told::Title("one".into())]);
+        assert_eq!(title(b"\x1bc"), [Told::Title(String::new())]);
+    }
+
+    #[test]
+    fn a_flood_is_told_as_the_latest_title_one_bell_and_a_few_notifications() {
+        let mut model = Model::new(size());
+        let mut flood = Vec::new();
+        for n in 0..1000 {
+            flood.extend_from_slice(format!("\x07\x1b]2;t{n}\x07\x1b]9;n{n}\x07").as_bytes());
+        }
+        model.feed(&flood).unwrap();
+        let mut want = vec![Told::Bell];
+        want.extend((0..NOTIFY_MAX).map(|n| notify("", &format!("n{n}"))));
+        want.push(Told::Title("t999".into()));
+        assert_eq!(model.take_told(), want);
+    }
+
+    #[test]
+    fn a_model_reset_keeps_the_title_the_app_set() {
+        let mut model = Model::new(size());
+        model.feed(b"\x1b]2;build\x07\x1b[22t").unwrap();
+        model.take_told();
+        model.fail_next();
+        model.feed(b"x").unwrap_err();
+        model.feed(b"\x1b]2;other\x07\x1b[23t").unwrap();
+        assert_eq!(model.take_told(), [Told::Title("build".into())]);
     }
 
     #[test]

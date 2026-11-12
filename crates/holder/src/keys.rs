@@ -149,7 +149,15 @@ fn legacy(out: &mut String, key: Key, modes: Modes) {
 
 /// The character Shift types with `c`, for a letter.
 fn shifted(c: char) -> char {
-    c.to_ascii_uppercase()
+    single(c.to_uppercase()).unwrap_or(c)
+}
+
+/// The one character a case mapping gives, if it gives one.
+fn single(mut mapped: impl Iterator<Item = char>) -> Option<char> {
+    match (mapped.next(), mapped.next()) {
+        (Some(c), None) => Some(c),
+        _ => None,
+    }
 }
 
 /// The control byte Ctrl types with `c`, as xterm sends it.
@@ -209,10 +217,10 @@ fn kitty(out: &mut String, key: Key, modes: Modes) {
         Base::Char(c) => {
             // The code is the key's own, unshifted: a capital is the letter
             // with Shift.
-            let (code, shift) = if c.is_ascii_uppercase() {
-                (c.to_ascii_lowercase(), true)
-            } else {
-                (c, key.shift)
+            let lower = single(c.to_lowercase()).filter(|&lower| lower != c);
+            let (code, shift) = match lower {
+                Some(lower) if c.is_uppercase() => (lower, true),
+                _ => (c, key.shift),
             };
             let key = Key { shift, ..key };
             let typed = if shift { shifted(code) } else { code };
@@ -357,6 +365,9 @@ mod tests {
             ("a", "\x1b[97u"),
             ("shift+a", "\x1b[97;2u"),
             ("ctrl+c", "\x1b[99;5u"),
+            // A capital past ASCII is its small letter with Shift too.
+            ("É", "\x1b[233;2u"),
+            ("shift+é", "\x1b[233;2u"),
         ];
         for (name, want) in cases {
             assert_eq!(bytes(name, all), want, "{name}");

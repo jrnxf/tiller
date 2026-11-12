@@ -355,8 +355,9 @@ async fn frame_in(holder: &Arc<Holder>, conn: &Arc<Conn>, frame: Frame) -> Next 
 }
 
 /// One request, answered on its connection. A request that waits, for a
-/// spawn or a child's exit, is answered from a task of its own, so it holds
-/// up none of the connection's other replies (section 2.4). The rest are
+/// spawn, a long screen read or a child's exit, is answered from a task of
+/// its own, so it holds up none of the connection's other replies (section
+/// 2.4). The rest are
 /// answered before the next frame is read, so text typed with `input`,
 /// `paste` or `keys` keeps its place among the raw input frames.
 fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
@@ -366,13 +367,10 @@ fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
         Request::Spawn { id, spawn } => {
             let (holder, conn) = (holder.clone(), conn.clone());
             tokio::spawn(async move {
-                let spawner = holder.clone();
-                let reply = match tokio::task::spawn_blocking(move || spawner.spawn(spawn)).await {
-                    Ok(spawned) => {
-                        spawned.map(|(pane, existing)| HolderMessage::Pane { id, pane, existing })
-                    }
-                    Err(err) => Err((ErrorCode::Internal, format!("the spawn failed: {err}"))),
-                };
+                let reply = holder
+                    .spawn(spawn)
+                    .await
+                    .map(|(pane, existing)| HolderMessage::Pane { id, pane, existing });
                 send_reply(&conn, Some(id), reply);
             });
             return;
@@ -386,14 +384,28 @@ fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
             pane,
             existing: false,
         }),
+        // A long read formats many rows, so it runs on a blocking thread.
         Request::Screen {
             id,
             pane,
             read,
             format,
-        } => holder
-            .screen(&pane, read, format)
-            .map(|screen| HolderMessage::Screen { id, screen }),
+        } => {
+            let (holder, conn) = (holder.clone(), conn.clone());
+            tokio::spawn(async move {
+                let reply = tokio::task::spawn_blocking(move || holder.screen(&pane, read, format))
+                    .await
+                    .unwrap_or_else(|err| {
+                        Err((
+                            ErrorCode::Internal,
+                            format!("the screen read failed: {err}"),
+                        ))
+                    })
+                    .map(|screen| HolderMessage::Screen { id, screen });
+                send_reply(&conn, Some(id), reply);
+            });
+            return;
+        }
         Request::Input { id, pane, text } => holder.input_text(conn, &pane, text).map(|()| ok(id)),
         Request::Paste { id, pane, text } => holder.paste(conn, &pane, text).map(|()| ok(id)),
         Request::Keys { id, pane, keys } => holder.keys(conn, &pane, &keys).map(|()| ok(id)),

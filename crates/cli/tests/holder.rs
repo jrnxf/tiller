@@ -1012,25 +1012,20 @@ fn a_close_that_waits_holds_up_none_of_the_connections_other_replies() {
         &[
             "/bin/sh",
             "-c",
-            "trap '' HUP; echo trapped; while :; do sleep 1; done",
+            "trap 'echo hung up' HUP; echo trapped; while :; do sleep 1; done",
         ],
     );
     shows(&holder, &stubborn, "trapped");
-    let grace = Duration::from_secs(2);
+    let grace = Duration::from_secs(3);
     std::thread::scope(|scope| {
         let closing = scope.spawn(|| holder.client.close(&stubborn.pane, grace));
-        // The close is in the holder once the hang-up reached the shell.
-        std::thread::sleep(Duration::from_millis(200));
-        let started = Instant::now();
+        // The close is in the holder once the shell says it got the hang-up.
+        shows(&holder, &stubborn, "hung up");
         holder.client.ping().unwrap();
         assert_eq!(holder.client.list().unwrap().panes.len(), 1);
         let other = holder.spawn(&world, &["/bin/cat"]);
         holder.client.get(&other.pane).unwrap().unwrap();
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "{:?}",
-            started.elapsed()
-        );
+        // Each of those came back while the close still waited its grace.
         assert!(!closing.is_finished(), "the close did not wait its grace");
         let exit = closing.join().unwrap().unwrap();
         assert_eq!(exit.signal, Some(9), "{exit:?}");
