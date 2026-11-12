@@ -29,8 +29,83 @@ export function usePageFullScreen(): boolean {
   );
 }
 
+// The Keyboard Lock API, which only Chromium has. With Esc locked a tap of
+// Esc reaches the page, so the pane gets it, and the browser leaves full
+// screen only when Esc is held down.
+type KeyboardLock = { lock(keys?: string[]): Promise<void>; unlock(): void };
+
+function keyboardLock(): KeyboardLock | undefined {
+  try {
+    const keyboard = (navigator as Navigator & { keyboard?: Partial<KeyboardLock> }).keyboard;
+    if (typeof keyboard?.lock !== "function" || typeof keyboard.unlock !== "function") {
+      return undefined;
+    }
+    return keyboard as KeyboardLock;
+  } catch {
+    return undefined;
+  }
+}
+
+let escHeld = false;
+const escListeners = new Set<() => void>();
+
+function setEscHeld(held: boolean) {
+  if (escHeld === held) return;
+  escHeld = held;
+  for (const listener of escListeners) listener();
+}
+
+function releaseEsc() {
+  if (!escHeld) return;
+  setEscHeld(false);
+  keyboardLock()?.unlock();
+}
+
+// Puts the page in full screen, and where the browser can lock Esc, locks it
+// until the page leaves full screen. A lock the browser refuses keeps its own
+// Esc, so the promise fails only when full screen does not open.
+export async function enterPageFullScreen(): Promise<void> {
+  await document.documentElement.requestFullscreen();
+  const keyboard = keyboardLock();
+  if (!keyboard) return;
+  try {
+    await keyboard.lock(["Escape"]);
+  } catch {
+    return;
+  }
+  if (document.fullscreenElement !== document.documentElement) {
+    keyboard.unlock();
+    return;
+  }
+  setEscHeld(true);
+  const left = () => {
+    if (document.fullscreenElement === document.documentElement) return;
+    document.removeEventListener("fullscreenchange", left);
+    releaseEsc();
+  };
+  document.addEventListener("fullscreenchange", left);
+}
+
+function subscribeEscHeld(change: () => void) {
+  escListeners.add(change);
+  return () => {
+    escListeners.delete(change);
+  };
+}
+
+// Whether the page holds Esc in full screen, so a tap goes to the pane and
+// leaving takes a held Esc.
+export function useEscHeld(): boolean {
+  return useSyncExternalStore(
+    subscribeEscHeld,
+    () => escHeld,
+    () => false,
+  );
+}
+
 // Leaves the page's full screen, if it is in it.
 export function leavePageFullScreen() {
+  releaseEsc();
   if (document.fullscreenElement === document.documentElement) {
     void document.exitFullscreen().catch(() => {});
   }

@@ -13,7 +13,12 @@ import {
 } from "react";
 import type { MouseEvent as ReactMouseEvent, ReactNode, Ref } from "react";
 
-import { canFullScreen, leavePageFullScreen } from "../../lib/fullscreen";
+import {
+  canFullScreen,
+  enterPageFullScreen,
+  leavePageFullScreen,
+  useEscHeld,
+} from "../../lib/fullscreen";
 import { focusIsFree } from "../../lib/focus";
 import { shortcutsBlocked } from "../../lib/shortcuts";
 import { createStore, useStore } from "../../lib/store";
@@ -1009,8 +1014,10 @@ export function LiveTerminal({
   // Full screen puts the page in full screen, and the Agents view pins the
   // stage's card over it; the layout fits the pane to the screen as the stage
   // grows. The card outlives a switch to another agent, so full screen stays.
-  // The browser's Esc leaves it.
+  // The browser's Esc leaves it. Where the browser can lock Esc (Chromium),
+  // a tap of Esc goes to the pane and a held Esc leaves.
   const fullScreenAble = stage && !phone && canFullScreen();
+  const escHeld = useEscHeld();
   // A press while the browser has not yet answered the last one waits.
   const entering = useRef(false);
   const toggleFull = useCallback(() => {
@@ -1022,7 +1029,7 @@ export function LiveTerminal({
     const term = termRef.current;
     const wasTyping = term?.textarea !== undefined && document.activeElement === term.textarea;
     entering.current = true;
-    document.documentElement.requestFullscreen().then(
+    enterPageFullScreen().then(
       () => {
         entering.current = false;
         if (wasTyping) termRef.current?.focus();
@@ -1218,7 +1225,13 @@ export function LiveTerminal({
         type="button"
         className="ib sm"
         // One name, pressed or not, as a toggle reads.
-        title={full ? "Leave full screen (Esc)" : "Full screen"}
+        title={
+          full
+            ? escHeld
+              ? "Hold Esc to leave full screen"
+              : "Leave full screen (Esc)"
+            : "Full screen"
+        }
         aria-label="Full screen"
         aria-pressed={full}
         data-full-screen=""

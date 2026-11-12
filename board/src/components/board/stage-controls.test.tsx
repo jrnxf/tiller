@@ -130,7 +130,18 @@ function stubFullScreen() {
   return { request, exit, leave };
 }
 
+// The Keyboard Lock API, which only Chromium has.
+function stubKeyboardLock(refuse = false) {
+  const lock = vi.fn((_keys?: string[]) =>
+    refuse ? Promise.reject(new Error("refused")) : Promise.resolve(),
+  );
+  const unlock = vi.fn();
+  Object.defineProperty(navigator, "keyboard", { configurable: true, value: { lock, unlock } });
+  return { lock, unlock };
+}
+
 function unstubFullScreen() {
+  Reflect.deleteProperty(navigator, "keyboard");
   for (const name of ["fullscreenEnabled", "fullscreenElement", "exitFullscreen"]) {
     Reflect.deleteProperty(document, name);
   }
@@ -260,8 +271,10 @@ test("the stage font clamps to 9 to 24 px in whole pixels", () => {
   expect([STAGE_FONT_MIN, STAGE_FONT_MAX]).toEqual([9, 24]);
 });
 
+// The stage's room, as the layout measures it.
+const room = (shown: number, next = true) => ({ shown, next });
+
 test("the font readout shows the size on screen, and names the choice when they differ", () => {
-  const room = (shown: number, next = true) => ({ shown, next });
   // Before the first measure, the choice.
   expect(fontReadout(16, false, room(0))).toMatchObject({ shown: 16, from: 16, full: false });
   // Without the Fit: the size that shows, and Smaller steps down from it.
@@ -311,6 +324,7 @@ test("full screen pins the agent's card over the page, and a second press or Esc
   expect(request.mock.contexts[0]).toBe(document.documentElement);
   const leaveButton = await bar.findByRole("button", { name: "Full screen", pressed: true });
   expect(leaveButton.getAttribute("aria-pressed")).toBe("true");
+  // With no Keyboard Lock API the browser's own Esc leaves.
   expect(leaveButton.getAttribute("title")).toBe("Leave full screen (Esc)");
   // Focus moves to the way out, off the covered rail.
   expect(document.activeElement).toBe(leaveButton);
@@ -336,6 +350,54 @@ test("full screen pins the agent's card over the page, and a second press or Esc
   leave();
   await bar.findByRole("button", { name: "Full screen", pressed: false });
   expect(bar.getByRole("button", { name: "Expand the terminal" })).toBeTruthy();
+});
+
+test("where the browser locks Esc, a tap goes to the pane and a held Esc leaves", async () => {
+  const { exit, leave } = stubFullScreen();
+  const { lock, unlock } = stubKeyboardLock();
+  const bar = await renderStage("holder");
+  fireEvent.click(bar.getByRole("button", { name: "Full screen" }));
+  const leaveButton = await bar.findByRole("button", { name: "Full screen", pressed: true });
+  expect(lock).toHaveBeenCalledWith(["Escape"]);
+  await waitFor(() =>
+    expect(leaveButton.getAttribute("title")).toBe("Hold Esc to leave full screen"),
+  );
+
+  // A tap of Esc reaches the page, and the board does not leave on it.
+  fireEvent.keyDown(window, { key: "Escape" });
+  fireEvent.keyUp(window, { key: "Escape" });
+  expect(exit).not.toHaveBeenCalled();
+  expect(document.fullscreenElement).toBe(document.documentElement);
+
+  // The browser's held Esc leaves, and the lock goes with full screen.
+  leave();
+  const out = await bar.findByRole("button", { name: "Full screen", pressed: false });
+  expect(unlock).toHaveBeenCalledTimes(1);
+  expect(out.getAttribute("title")).toBe("Full screen");
+
+  // The way out leaves too, and unlocks.
+  fireEvent.click(out);
+  const again = await bar.findByRole("button", { name: "Full screen", pressed: true });
+  await waitFor(() => expect(again.getAttribute("title")).toBe("Hold Esc to leave full screen"));
+  fireEvent.click(again);
+  expect(exit).toHaveBeenCalledTimes(1);
+  expect(unlock).toHaveBeenCalledTimes(2);
+  await bar.findByRole("button", { name: "Full screen", pressed: false });
+});
+
+test("a lock the browser refuses keeps the browser's own Esc", async () => {
+  stubFullScreen();
+  const { lock, unlock } = stubKeyboardLock(true);
+  const bar = await renderStage("holder");
+  fireEvent.click(bar.getByRole("button", { name: "Full screen" }));
+  const leaveButton = await bar.findByRole("button", { name: "Full screen", pressed: true });
+  await waitFor(() => expect(lock).toHaveBeenCalledTimes(1));
+  expect(leaveButton.getAttribute("title")).toBe("Leave full screen (Esc)");
+  // No toast: full screen opened.
+  expect(screen.queryByText("Full screen did not open")).toBeNull();
+  fireEvent.click(leaveButton);
+  await bar.findByRole("button", { name: "Full screen", pressed: false });
+  expect(unlock).not.toHaveBeenCalled();
 });
 
 test("a switch to another agent stays in full screen, and a toast shows in it", async () => {
@@ -369,9 +431,11 @@ test("a switch to another agent stays in full screen, and a toast shows in it", 
 // Terminal streams that go live only when the test says: a carry gives the
 // new terminal focus then. A stream the mirror stops is gone, as a real
 // fetch's is.
+// One NDJSON line of a terminal stream.
+const encode = (line: unknown) => new TextEncoder().encode(`${JSON.stringify(line)}\n`);
+
 function holdStreams() {
   const api = globalThis.fetch;
-  const encode = (line: unknown) => new TextEncoder().encode(`${JSON.stringify(line)}\n`);
   const streams = new Set<ReadableStreamDefaultController<Uint8Array>>();
   vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
     if (!String(input).endsWith("/terminal")) return api(input, init);
