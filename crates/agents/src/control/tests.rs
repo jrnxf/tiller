@@ -1692,7 +1692,7 @@ fn a_relaunch_with_the_terminal_holder_and_its_herdr_pane_gone_opens_no_herdr_pa
     assert!(
         text.contains("A relaunch is not ready yet with the terminal holder")
             && text.contains(&spawned.run.id)
-            && text.contains("nothing was changed"),
+            && text.contains("no agent was stopped and no pane was opened"),
         "{text}"
     );
     assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
@@ -1713,7 +1713,7 @@ fn a_resume_with_the_terminal_holder_and_its_herdr_pane_gone_opens_no_herdr_pane
     assert!(
         text.contains("A resume is not ready yet with the terminal holder")
             && text.contains(&spawned.run.id)
-            && text.contains("nothing was changed"),
+            && text.contains("no agent was stopped and no pane was opened"),
         "{text}"
     );
     assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
@@ -1755,7 +1755,7 @@ fn a_relaunch_with_the_terminal_holder_and_an_untagged_herdr_pane_leaves_the_age
     let text = error.to_string();
     assert!(
         text.contains("A relaunch is not ready yet with the terminal holder")
-            && text.contains("nothing was changed"),
+            && text.contains("no agent was stopped and no pane was opened"),
         "{text}"
     );
     assert!(!typed(&rig, &spawned.pane_id, "/exit"));
@@ -1804,14 +1804,57 @@ fn a_relaunch_with_the_terminal_holder_whose_pane_is_not_reused_names_no_retry()
     let text = error.to_string();
     assert!(
         text.contains(&format!(
-            "the old agent of run {} was stopped and its herdr pane cannot be reused, but no new pane was opened",
+            "no new pane was opened for run {}",
             spawned.run.id
-        )) && text.contains("a relaunch with the terminal holder is not ready yet (H09)")
+        )) && text.contains("the old agent was stopped and the new session has no agent")
             && text.contains("a new start of its card"),
         "{text}"
     );
     assert!(!text.contains("tiller agent relaunch"), "{text}");
-    assert!(!text.contains("resume"), "{text}");
-    assert!(!text.contains("nothing was changed"), "{text}");
+    assert!(!text.contains("tiller agent resume"), "{text}");
+    assert!(!text.contains("no agent was stopped"), "{text}");
+    assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
+}
+
+#[test]
+fn a_relaunch_with_the_terminal_holder_that_fails_in_its_kept_pane_names_no_retry() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.panes = Some(tiller_panes::FakePanes::new());
+    // The stop hands the pane back, then the new session's tokens fail.
+    rig.herdr.refuse("report_tokens");
+    let opened = workspaces_opened(&rig);
+    let ctx = rig.orchestrator();
+
+    let error = relaunch_it(&mut rig, &ctx, &patient(), &spawned.run.id, note("n")).unwrap_err();
+    let text = error.to_string();
+    assert!(
+        text.contains("the relaunch is recorded")
+            && text.contains("with the terminal holder up a relaunch without a pane is refused"),
+        "{text}"
+    );
+    assert!(!text.contains("tiller agent relaunch"), "{text}");
+    assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
+}
+
+#[test]
+fn a_resume_with_the_terminal_holder_refuses_a_herdr_pane_that_is_not_its_own() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.panes = Some(tiller_panes::FakePanes::new());
+    rig.herdr.set_screen(&spawned.pane_id, Screen::Shell);
+    // herdr gave the id to a pane whose tokens name no session of ours.
+    rig.herdr
+        .set_tokens(&spawned.pane_id, std::collections::BTreeMap::new());
+    let opened = workspaces_opened(&rig);
+
+    let error = resume_it(&mut rig, &owner(), &patient(), &spawned.run.id).unwrap_err();
+    let text = error.to_string();
+    assert!(
+        text.contains("A resume is not ready yet with the terminal holder"),
+        "{text}"
+    );
+    let calls = rig.herdr.calls();
+    assert!(!calls.iter().any(|c| c.contains("--resume")), "{calls:?}");
     assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
 }

@@ -166,13 +166,27 @@ impl View {
         let deadline = Instant::now() + WAIT;
         let mut buf = [0_u8; 8192];
         while !done(self) {
+            let left = deadline.saturating_duration_since(Instant::now());
             assert!(
-                Instant::now() < deadline,
+                !left.is_zero(),
                 "no {what} in the view: {:?}\n{}",
                 self.lines,
                 String::from_utf8_lossy(&self.screen)
             );
-            let read = self.stream.read(&mut buf).unwrap();
+            self.stream.set_read_timeout(Some(left)).unwrap();
+            let read = match self.stream.read(&mut buf) {
+                Ok(read) => read,
+                // A quiet stream: the deadline check above says what came.
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => panic!("reading the view: {error}"),
+            };
             assert!(
                 read > 0,
                 "the view ended before {what}: {}",
