@@ -304,7 +304,7 @@ fn hello(holder: &Holder, conn: &Conn, frame: Frame) -> Next {
 async fn frame_in(holder: &Arc<Holder>, conn: &Arc<Conn>, frame: Frame) -> Next {
     match frame {
         Frame::Input { num, bytes } => {
-            holder.input(num, bytes);
+            holder.input(conn, num, bytes);
             Next::Go
         }
         Frame::Output { .. } => {
@@ -318,7 +318,7 @@ async fn frame_in(holder: &Arc<Holder>, conn: &Arc<Conn>, frame: Frame) -> Next 
         }
         Frame::Message(text) => match Request::decode(&text) {
             Ok(request) => {
-                request_in(holder, conn, request);
+                request_in(holder, conn, request).await;
                 Next::Go
             }
             Err(undecodable) => {
@@ -329,14 +329,21 @@ async fn frame_in(holder: &Arc<Holder>, conn: &Arc<Conn>, frame: Frame) -> Next 
     }
 }
 
-/// One request, answered on its connection.
-fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
+/// One request, answered on its connection. The connection's next frame
+/// waits for the answer, so its replies come in order.
+async fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
     let request_id = request.id();
     let reply = match request {
         Request::Hello(_) => Err((ErrorCode::BadRequest, "hello comes once, first".to_owned())),
-        Request::Spawn { id, spawn } => holder
-            .spawn(spawn)
-            .map(|(pane, existing)| HolderMessage::Pane { id, pane, existing }),
+        Request::Spawn { id, spawn } => {
+            let spawner = holder.clone();
+            match tokio::task::spawn_blocking(move || spawner.spawn(spawn)).await {
+                Ok(spawned) => {
+                    spawned.map(|(pane, existing)| HolderMessage::Pane { id, pane, existing })
+                }
+                Err(err) => Err((ErrorCode::Internal, format!("the spawn failed: {err}"))),
+            }
+        }
         Request::List { id } => Ok(HolderMessage::Panes {
             id,
             listing: holder.list(),

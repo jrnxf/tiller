@@ -10,7 +10,7 @@
 use std::io;
 use std::os::fd::OwnedFd;
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -31,8 +31,10 @@ use crate::pty;
 /// sent, when something else still holds the PTY open.
 pub const EXIT_DRAIN: Duration = Duration::from_millis(250);
 
-/// How many raw input chunks may wait for a pane's PTY.
-const INPUT_QUEUE: usize = 256;
+/// The most raw input bytes that may wait for a pane's app to read them.
+/// Input past it cuts the connection that sent it, so a gap in a paste is
+/// never silent.
+pub const INPUT_CAP: usize = 1024 * 1024;
 
 /// The most a PTY read takes at once.
 const READ_CHUNK: usize = 64 * 1024;
@@ -95,6 +97,21 @@ impl Conn {
 
     pub fn send_message(&self, message: &HolderMessage) -> bool {
         message_frame(message).is_some_and(|frame| self.send(frame))
+    }
+
+    /// Queues a subscription's first frames, all or none, apart from the
+    /// cap on live output. False when they were not queued.
+    fn send_repaint(&self, frames: Vec<Vec<u8>>) -> bool {
+        match self.outbox.push_repaint(frames) {
+            Ok(()) => true,
+            Err(Refused::Full) => {
+                if self.cut() {
+                    tracing::warn!("a client let its repaints pile up and was cut");
+                }
+                false
+            }
+            Err(Refused::Gone) => false,
+        }
     }
 
     /// Cuts the connection: its queue is dropped, each of its streams gets
@@ -176,9 +193,12 @@ impl Inner {
 pub struct PaneCell {
     id: PaneId,
     num: u32,
-    pid: u32,
+    /// The child's pid, which is also its process group's id.
+    pid: Pid,
     master: AsyncFd<OwnedFd>,
-    input: mpsc::Sender<Vec<u8>>,
+    input: mpsc::UnboundedSender<Vec<u8>>,
+    /// Raw input bytes queued and not yet written, at most [`INPUT_CAP`].
+    input_queued: AtomicUsize,
     inner: Mutex<Inner>,
     /// True once the PTY read ends: every holder of the slave closed it.
     output_ended: watch::Sender<bool>,
@@ -208,25 +228,20 @@ impl PaneCell {
     /// app that draws the screen: a shell's job runs in a group of its own.
     fn redraw(&self) {
         let group = match rustix::termios::tcgetpgrp(self.master.get_ref()) {
-            Ok(group) => Some(group),
+            Ok(group) => group,
             Err(err) => {
                 tracing::debug!(pane = %self.id, %err, "no foreground group; the child's is used");
-                i32::try_from(self.pid).ok().and_then(Pid::from_raw)
+                self.pid
             }
         };
-        if let Some(group) = group
-            && let Err(err) = rustix::process::kill_process_group(group, Signal::WINCH)
-        {
+        if let Err(err) = rustix::process::kill_process_group(group, Signal::WINCH) {
             tracing::debug!(pane = %self.id, %err, "the redraw signal failed");
         }
     }
 
     /// Sends `signal` to the child's process group.
     fn signal(&self, signal: Signal) {
-        let Some(pid) = i32::try_from(self.pid).ok().and_then(Pid::from_raw) else {
-            return;
-        };
-        if let Err(err) = rustix::process::kill_process_group(pid, signal) {
+        if let Err(err) = rustix::process::kill_process_group(self.pid, signal) {
             tracing::debug!(pane = %self.id, %err, "a signal to the pane's group failed");
         }
     }
@@ -334,7 +349,8 @@ impl Holder {
             .cloned()
     }
 
-    /// `spawn`: a new pane, or the running pane that holds the key.
+    /// `spawn`: a new pane, or the running pane that holds the key. It
+    /// forks and waits for the exec, so it runs off the runtime's workers.
     pub fn spawn(self: &Arc<Self>, req: Spawn) -> Result<(Pane, bool), Failure> {
         let size = req.size.unwrap_or(tiller_panes::message::DEFAULT_SIZE);
         check_size(size)?;
@@ -376,7 +392,7 @@ impl Holder {
             pane: id.clone(),
             num,
             key: req.key,
-            pid: started.pid,
+            pid: started.pid.as_raw_nonzero().get().unsigned_abs(),
             argv: req.argv,
             cwd: req.cwd,
             started_at: Timestamp::now(),
@@ -390,13 +406,14 @@ impl Holder {
             attach_clients: 0,
             subscribers: 0,
         };
-        let (input, input_rx) = mpsc::channel(INPUT_QUEUE);
+        let (input, input_rx) = mpsc::unbounded_channel();
         let cell = Arc::new(PaneCell {
             id,
             num,
             pid: started.pid,
             master,
             input,
+            input_queued: AtomicUsize::new(0),
             inner: Mutex::new(Inner {
                 record: record.clone(),
                 model: Model::new(size),
@@ -482,13 +499,13 @@ impl Holder {
                 exit,
             }));
         }
-        for frame in frames {
-            let Some(frame) = frame else {
-                return Err((ErrorCode::Internal, "a reply would not encode".into()));
-            };
-            if !conn.send(frame) {
-                return Ok(());
-            }
+        // Every frame encodes before the first goes out, so a failure is the
+        // only reply.
+        let Some(frames) = frames.into_iter().collect::<Option<Vec<_>>>() else {
+            return Err((ErrorCode::Internal, "the repaint would not encode".into()));
+        };
+        if !conn.send_repaint(frames) {
+            return Ok(());
         }
         lock(&conn.streams).push((stream, cell.clone()));
         inner.subscribers.push(Subscriber {
@@ -516,11 +533,11 @@ impl Holder {
         Ok(size)
     }
 
-    /// A kind 2 frame: raw bytes for the pane `num`, with no reply. Input
-    /// for a pane that is gone or has exited is dropped. So is input for a
-    /// pane whose app has not read the last [`INPUT_QUEUE`] chunks: waiting
-    /// for it would hold up every other request on the connection.
-    pub fn input(&self, num: u32, bytes: Vec<u8>) {
+    /// A kind 2 frame from `conn`: raw bytes for the pane `num`, with no
+    /// reply. Input for a pane that is gone or has exited is dropped. Input
+    /// is never waited for, as that would hold up every other request on
+    /// the connection: past [`INPUT_CAP`] unread bytes, `conn` is cut.
+    pub fn input(&self, conn: &Conn, num: u32, bytes: Vec<u8>) {
         let Some(cell) = self.by_num(num) else {
             tracing::debug!(num, "raw input for no pane");
             return;
@@ -529,16 +546,24 @@ impl Holder {
             tracing::debug!(pane = %cell.id, "raw input for an exited pane");
             return;
         }
-        match cell.input.try_send(bytes) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(bytes)) => tracing::warn!(
-                pane = %cell.id,
-                len = bytes.len(),
-                "raw input was dropped: the app has not read its input"
-            ),
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                tracing::debug!(pane = %cell.id, "raw input for a pane whose PTY is closed");
+        let len = bytes.len();
+        let taken = cell
+            .input_queued
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+                (queued + len <= INPUT_CAP).then_some(queued + len)
+            });
+        if taken.is_err() {
+            if conn.cut() {
+                tracing::warn!(
+                    pane = %cell.id,
+                    "a client's raw input passed the {INPUT_CAP}-byte queue of an app that does not read it, and the client was cut"
+                );
             }
+            return;
+        }
+        if cell.input.send(bytes).is_err() {
+            cell.input_queued.fetch_sub(len, Ordering::AcqRel);
+            tracing::debug!(pane = %cell.id, "raw input for a pane whose PTY is closed");
         }
     }
 
@@ -557,10 +582,7 @@ impl Holder {
             if cell.inner().reaped {
                 continue;
             }
-            let Some(pid) = i32::try_from(cell.pid).ok().and_then(Pid::from_raw) else {
-                continue;
-            };
-            let exit = match rustix::process::waitpid(Some(pid), WaitOptions::NOHANG) {
+            let exit = match rustix::process::waitpid(Some(cell.pid), WaitOptions::NOHANG) {
                 Ok(None) => continue,
                 Ok(Some((_, status))) => Exit {
                     code: status.exit_status(),
@@ -647,9 +669,11 @@ async fn read_pty(cell: Arc<PaneCell>) {
 /// Writes raw input to a pane's PTY, in order, as fast as it takes it.
 /// It ends once the PTY's output ends: with the slave closed, the master
 /// takes a few KiB and then is never writable again.
-async fn write_input(cell: Arc<PaneCell>, mut input: mpsc::Receiver<Vec<u8>>) {
+async fn write_input(cell: Arc<PaneCell>, mut input: mpsc::UnboundedReceiver<Vec<u8>>) {
     let mut ended = cell.output_ended.subscribe();
     while let Some(bytes) = input.recv().await {
+        // Taken off the queue: the bytes count no more toward its cap.
+        cell.input_queued.fetch_sub(bytes.len(), Ordering::AcqRel);
         let mut rest = bytes.as_slice();
         while !rest.is_empty() {
             let writable = tokio::select! {
@@ -702,10 +726,7 @@ fn register(master: OwnedFd) -> io::Result<AsyncFd<OwnedFd>> {
 
 /// Kills a child the holder cannot keep, and collects it. Killed, it ends
 /// at once, so the wait is short.
-fn kill_and_reap(pid: u32) {
-    let Some(pid) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
-        return;
-    };
+fn kill_and_reap(pid: Pid) {
     let _ = rustix::process::kill_process_group(pid, Signal::KILL);
     let _ = rustix::process::waitpid(Some(pid), WaitOptions::empty());
 }

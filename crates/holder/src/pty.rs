@@ -19,6 +19,7 @@ use std::process::{Command, Stdio};
 
 use rustix::fs::{Mode, OFlags};
 use rustix::io::FdFlags;
+use rustix::process::Pid;
 use rustix::pty::OpenptFlags;
 use rustix::termios::Winsize;
 use tiller_panes::Size;
@@ -41,7 +42,8 @@ pub struct Launch<'a> {
 pub struct Started {
     /// Non-blocking and close-on-exec.
     pub master: OwnedFd,
-    pub pid: u32,
+    /// The child's pid, and its process group's id: it leads a new session.
+    pub pid: Pid,
 }
 
 /// Opens a PTY pair and starts `launch` on it.
@@ -88,7 +90,7 @@ pub fn start(launch: Launch<'_>) -> io::Result<Started> {
     drop(command);
     Ok(Started {
         master,
-        pid: child.id(),
+        pid: Pid::from_child(&child),
     })
 }
 

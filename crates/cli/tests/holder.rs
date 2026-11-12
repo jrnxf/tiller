@@ -349,3 +349,25 @@ fn a_size_out_of_bounds_is_a_bad_request() {
     }
     assert!(holder.client.list().unwrap().panes.is_empty());
 }
+
+#[test]
+fn input_past_the_cap_for_an_app_that_reads_none_cuts_that_client_only() {
+    let world = World::new();
+    let holder = Holder::start(&world);
+    let pane = holder.spawn(&world, &["/bin/sh", "-c", "sleep 30"]);
+    // Whole lines, so the PTY's line buffer fills and then takes no more.
+    let chunk = b"0123456789abcdef\n".repeat(4 * 1024);
+    // About 2 MiB: past the PTY's buffer and the holder's 1 MiB queue.
+    for _ in 0..30 {
+        if holder.client.raw_input(pane.num, &chunk).is_err() {
+            break;
+        }
+    }
+    let err = holder.client.list().unwrap_err();
+    assert!(matches!(err, PanesError::Unreachable(_)), "{err}");
+    assert!(holder.log().contains("was cut"), "{}", holder.log());
+    // Another client is served, and the pane runs on.
+    let other = HolderClient::connect(&holder.socket, "daemon").unwrap();
+    let listing = other.list().unwrap();
+    assert_eq!(listing.panes[0].state, PaneState::Running);
+}

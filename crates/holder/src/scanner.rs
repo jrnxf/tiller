@@ -6,6 +6,11 @@
 //! are held back and fed with the next read, so the model's parser is in its
 //! ground state between reads, and a live upgrade can hand the held tail
 //! over as plain bytes.
+//!
+//! A sequence longer than [`HELD_MAX`] is the one exception: it is fed as it
+//! comes, and the scanner keeps only its introducer (`ESC ]` and so on).
+//! [`Scanner::held`] then gives that introducer, so a new reader of the
+//! stream takes the rest of the sequence as a sequence and not as text.
 
 /// A held tail over this size is fed as it is.
 pub const HELD_MAX: usize = 64 * 1024;
@@ -42,8 +47,18 @@ enum State {
 #[derive(Debug, Default)]
 pub struct Scanner {
     state: State,
+    /// The tail since the last ground point. Once the open sequence passed
+    /// [`HELD_MAX`] and was fed, only its introducer.
     held: Vec<u8>,
+    /// The open sequence's first bytes: `ESC ]`, `ESC [`, `ESC P` and so on.
+    intro: Vec<u8>,
+    /// The open sequence passed [`HELD_MAX`] and was fed. The rest of it is
+    /// fed as it comes, up to its end.
+    overflowed: bool,
 }
+
+/// How many of a sequence's first bytes make its introducer.
+const INTRO_LEN: usize = 2;
 
 impl Scanner {
     pub fn new() -> Self {
@@ -57,33 +72,66 @@ impl Scanner {
     pub fn split(&mut self, input: &[u8]) -> Vec<u8> {
         let mut ground_end = None;
         for (at, &byte) in input.iter().enumerate() {
-            self.state = step(self.state, byte);
+            let was = self.state;
+            self.state = step(was, byte);
+            self.track_intro(was, byte);
             if self.state == State::Ground {
                 ground_end = Some(at + 1);
             }
         }
-        let mut feed = std::mem::take(&mut self.held);
-        match ground_end {
-            Some(end) => {
-                feed.extend_from_slice(&input[..end]);
-                self.held.extend_from_slice(&input[end..]);
-            }
-            None => feed.extend_from_slice(input),
-        }
-        if ground_end.is_none() {
-            if feed.len() > HELD_MAX {
+        // After an overflow, `held` is the introducer the model has had.
+        let mut feed = if self.overflowed {
+            self.held.clear();
+            Vec::new()
+        } else {
+            std::mem::take(&mut self.held)
+        };
+        let Some(end) = ground_end else {
+            feed.extend_from_slice(input);
+            if self.overflowed || feed.len() > HELD_MAX {
+                self.overflow();
                 return feed;
             }
             self.held = feed;
             return Vec::new();
-        }
-        if self.held.len() > HELD_MAX {
-            feed.append(&mut self.held);
+        };
+        self.overflowed = false;
+        feed.extend_from_slice(&input[..end]);
+        if input.len() - end > HELD_MAX {
+            feed.extend_from_slice(&input[end..]);
+            self.overflow();
+        } else {
+            self.held.extend_from_slice(&input[end..]);
         }
         feed
     }
 
-    /// The bytes held back now: a cut sequence the next read ends.
+    /// The open sequence was fed whole: only its introducer is held, for a
+    /// reader that joins now.
+    fn overflow(&mut self) {
+        self.overflowed = true;
+        self.held.clone_from(&self.intro);
+    }
+
+    /// Keeps the open sequence's introducer up to date after `byte`.
+    fn track_intro(&mut self, was: State, byte: u8) {
+        if self.state == State::Ground {
+            self.intro.clear();
+        } else if was == State::Ground || (byte == ESC && self.state == State::Esc) {
+            // A new sequence starts with this byte.
+            self.intro.clear();
+            self.intro.push(byte);
+        } else if was == State::StrEsc && self.state != State::Esc {
+            // A string ended with `ESC`, and that `ESC` started this one.
+            self.intro.clear();
+            self.intro.extend_from_slice(&[ESC, byte]);
+        } else if self.intro.len() < INTRO_LEN && self.intro.first() == Some(&ESC) {
+            self.intro.push(byte);
+        }
+    }
+
+    /// The bytes a new reader of the stream needs before the next read: a
+    /// cut sequence the next read ends, or the introducer of a long one.
     pub fn held(&self) -> &[u8] {
         &self.held
     }
@@ -210,14 +258,45 @@ mod tests {
     }
 
     #[test]
-    fn a_held_tail_over_the_limit_is_fed_as_it_is() {
+    fn a_held_tail_over_the_limit_is_fed_as_it_is_and_keeps_its_introducer() {
         let mut scanner = Scanner::new();
-        assert!(scanner.split(b"\x1b]0;").is_empty());
+        assert_eq!(scanner.split(b"ab\x1b]52;c;"), b"ab");
         let long = vec![b'a'; HELD_MAX];
         let fed = scanner.split(&long);
-        assert_eq!(fed.len(), HELD_MAX + 4);
-        assert!(scanner.held().is_empty());
-        // The string is still open, and its end comes through whole.
+        assert_eq!(fed.len(), HELD_MAX + 7);
+        assert!(fed.starts_with(b"\x1b]52;c;"));
+        // A reader that joins now takes the rest as part of an OSC.
+        assert_eq!(scanner.held(), b"\x1b]");
+        assert_eq!(scanner.split(b"aa"), b"aa");
+        assert_eq!(scanner.held(), b"\x1b]");
+        // The string's end comes through whole, and nothing is held after.
         assert_eq!(scanner.split(b"\x07z"), b"\x07z");
+        assert!(scanner.held().is_empty());
+    }
+
+    #[test]
+    fn a_long_tail_after_a_ground_point_keeps_its_introducer() {
+        let mut scanner = Scanner::new();
+        let mut input = b"x\x1bPq".to_vec();
+        input.extend(vec![b'#'; HELD_MAX + 1]);
+        assert_eq!(scanner.split(&input), input);
+        assert_eq!(scanner.held(), b"\x1bP");
+        assert_eq!(scanner.split(b"##\x1b"), b"##\x1b");
+        assert_eq!(scanner.split(b"\\\x1b[1"), b"\\");
+        assert_eq!(scanner.held(), b"\x1b[1");
+        assert_eq!(scanner.split(b"m"), b"\x1b[1m");
+        assert!(scanner.held().is_empty());
+    }
+
+    #[test]
+    fn an_introducer_names_the_sequence_that_is_open() {
+        let mut scanner = Scanner::new();
+        // A CSI that an OSC's end started: the CSI's introducer is kept.
+        scanner.split(b"\x1b]0;t\x1b[");
+        assert_eq!(scanner.intro, b"\x1b[");
+        scanner.split(b"m\x1b\x1b]");
+        assert_eq!(scanner.intro, b"\x1b]");
+        scanner.split(b"\x07\xe6");
+        assert_eq!(scanner.intro, b"\xe6");
     }
 }

@@ -6,6 +6,10 @@
 //! cut: its queued frames are dropped, each of its subscriptions gets
 //! `lagged`, and the connection ends once those are out or after
 //! [`CUT_GRACE`]. H04 puts per-subscriber back-pressure in place of this.
+//!
+//! A repaint does not count toward the cap: a big screen's repaint alone
+//! can pass it, and the client asked for it. Repaints have a cap of their
+//! own, [`REPAINT_CAP`].
 
 use std::collections::VecDeque;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -16,6 +20,11 @@ use tokio::time::Instant;
 
 /// The most bytes a connection's queue holds.
 pub const OUTBOX_CAP: usize = 4 * 1024 * 1024;
+
+/// The most repaint bytes a connection's queue holds, apart from
+/// [`OUTBOX_CAP`]: one repaint of any size, or several up to the frame
+/// limit together.
+pub const REPAINT_CAP: usize = tiller_panes::frame::MAX_FRAME_LEN as usize;
 
 /// How long a cut connection has to take its last frames.
 pub const CUT_GRACE: Duration = Duration::from_secs(1);
@@ -31,8 +40,12 @@ pub enum Refused {
 
 #[derive(Debug, Default)]
 struct Queue {
-    frames: VecDeque<Vec<u8>>,
+    /// Each frame, and whether it is a repaint's.
+    frames: VecDeque<(Vec<u8>, bool)>,
+    /// Bytes queued apart from repaints.
     bytes: usize,
+    /// Repaint bytes queued.
+    repaint_bytes: usize,
     /// No more frames are taken: the connection ends once these are out.
     closed: bool,
 }
@@ -75,7 +88,28 @@ impl Outbox {
             return Err(Refused::Full);
         }
         queue.bytes += frame.len();
-        queue.frames.push_back(frame);
+        queue.frames.push_back((frame, false));
+        drop(queue);
+        self.wake.notify_one();
+        Ok(())
+    }
+
+    /// Queues the frames of one repaint, all or none, apart from
+    /// [`OUTBOX_CAP`]. They are refused only when other repaints are queued
+    /// and the lot would pass [`REPAINT_CAP`].
+    pub fn push_repaint(&self, frames: Vec<Vec<u8>>) -> Result<(), Refused> {
+        let mut queue = self.queue();
+        if queue.closed {
+            return Err(Refused::Gone);
+        }
+        let len: usize = frames.iter().map(Vec::len).sum();
+        if queue.repaint_bytes > 0 && queue.repaint_bytes + len > REPAINT_CAP {
+            return Err(Refused::Full);
+        }
+        queue.repaint_bytes += len;
+        queue
+            .frames
+            .extend(frames.into_iter().map(|frame| (frame, true)));
         drop(queue);
         self.wake.notify_one();
         Ok(())
@@ -91,7 +125,8 @@ impl Outbox {
         }
         queue.closed = true;
         queue.bytes = last.iter().map(Vec::len).sum();
-        queue.frames = last.into();
+        queue.repaint_bytes = 0;
+        queue.frames = last.into_iter().map(|frame| (frame, false)).collect();
         drop(queue);
         self.cut.send_replace(Some(Instant::now() + CUT_GRACE));
         self.wake.notify_one();
@@ -111,8 +146,12 @@ impl Outbox {
             let wake = self.wake.notified();
             {
                 let mut queue = self.queue();
-                if let Some(frame) = queue.frames.pop_front() {
-                    queue.bytes -= frame.len();
+                if let Some((frame, repaint)) = queue.frames.pop_front() {
+                    if repaint {
+                        queue.repaint_bytes -= frame.len();
+                    } else {
+                        queue.bytes -= frame.len();
+                    }
                     return Some(frame);
                 }
                 if queue.closed {
@@ -139,10 +178,11 @@ impl Outbox {
         *self.cut.borrow()
     }
 
-    /// Bytes queued now.
+    /// Bytes queued now, repaints with the rest.
     #[cfg(test)]
     pub fn queued(&self) -> usize {
-        self.queue().bytes
+        let queue = self.queue();
+        queue.bytes + queue.repaint_bytes
     }
 }
 
@@ -178,6 +218,32 @@ mod tests {
         assert!(!outbox.cut(Vec::new()));
         let deadline = outbox.cut_deadline().await;
         assert!(deadline <= Instant::now() + CUT_GRACE);
+    }
+
+    #[tokio::test]
+    async fn a_repaint_over_the_cap_is_taken_apart_from_it() {
+        let outbox = Outbox::new();
+        outbox.push(vec![1; 10]).unwrap();
+        outbox
+            .push_repaint(vec![vec![2; 5], vec![3; OUTBOX_CAP + 1]])
+            .unwrap();
+        // Live output still has the whole cap but the bytes before it.
+        outbox.push(vec![4; OUTBOX_CAP - 10]).unwrap();
+        assert_eq!(outbox.push(vec![5; 1]), Err(Refused::Full));
+        // A second repaint fits while the lot stays under its cap.
+        assert_eq!(
+            outbox.push_repaint(vec![vec![6; REPAINT_CAP]]),
+            Err(Refused::Full)
+        );
+        outbox.push_repaint(vec![vec![7; 100]]).unwrap();
+        let mut firsts = Vec::new();
+        for _ in 0..5 {
+            firsts.push(outbox.next().await.unwrap()[0]);
+        }
+        assert_eq!(firsts, [1, 2, 3, 4, 7]);
+        assert_eq!(outbox.queued(), 0);
+        // With none queued, one repaint of any size is taken.
+        outbox.push_repaint(vec![vec![8; REPAINT_CAP + 1]]).unwrap();
     }
 
     #[tokio::test]
