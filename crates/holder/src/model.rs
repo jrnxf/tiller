@@ -393,7 +393,10 @@ impl Model {
                 // only the screen is lost. Its parser starts afresh, as the
                 // model's does. The app set its modes once and does not set
                 // them again when it redraws, so the fresh screen keeps them:
-                // keys and pastes still reach the app in its form.
+                // keys and pastes still reach the app in its form. The
+                // modes in force are kept, not the kitty flag stacks, the
+                // scroll region or the saved cursor: the term keeps those
+                // to itself.
                 let mode = *self.screen.term.mode();
                 let style = self.screen.term.cursor_style();
                 let teller = std::mem::take(&mut self.screen.teller);

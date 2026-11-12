@@ -18,8 +18,9 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 
-use crate::holder::{Conn, Holder, ok};
+use crate::holder::{Conn, Holder, message_frame, ok};
 use crate::lock::{Acquired, HolderLock, lock_path};
+use crate::outbox::OUTBOX_CAP;
 use crate::peer::{self, PeerCred};
 
 /// How long a client has to send `hello`.
@@ -245,7 +246,7 @@ async fn read_loop(holder: &Arc<Holder>, conn: &Arc<Conn>, mut input: OwnedReadH
                 }
             };
             let next = if greeted {
-                frame_in(holder, conn, frame).await
+                frame_in(holder, conn, frame)
             } else {
                 greeted = true;
                 hello(holder, conn, frame)
@@ -326,7 +327,7 @@ fn hello(holder: &Holder, conn: &Conn, frame: Frame) -> Next {
 }
 
 /// A frame after the handshake.
-async fn frame_in(holder: &Arc<Holder>, conn: &Arc<Conn>, frame: Frame) -> Next {
+fn frame_in(holder: &Arc<Holder>, conn: &Arc<Conn>, frame: Frame) -> Next {
     match frame {
         Frame::Input { num, bytes } => {
             holder.input(conn, num, bytes);
@@ -487,12 +488,33 @@ fn ok_size(id: u64, size: tiller_panes::Size) -> HolderMessage {
     }
 }
 
+/// Queues a reply. A reply that no connection's queue could hold, such as
+/// a long `ansi` screen read, is refused with `busy`, so the client learns
+/// of it and the connection is not cut.
 fn send_reply(conn: &Conn, id: Option<u64>, reply: Result<HolderMessage, (ErrorCode, String)>) {
-    match reply {
-        Ok(message) => {
-            conn.send_message(&message);
+    let message = match reply {
+        Ok(message) => message,
+        Err((code, message)) => return reply_error(conn, id, code, message),
+    };
+    match message_frame(&message) {
+        Some(frame) if frame.len() <= OUTBOX_CAP => {
+            conn.send(frame);
         }
-        Err((code, message)) => reply_error(conn, id, code, message),
+        Some(frame) => reply_error(
+            conn,
+            id,
+            ErrorCode::Busy,
+            format!(
+                "the reply is {} bytes, more than a connection's {OUTBOX_CAP}-byte queue holds",
+                frame.len()
+            ),
+        ),
+        None => reply_error(
+            conn,
+            id,
+            ErrorCode::Internal,
+            "the reply would not encode".to_owned(),
+        ),
     }
 }
 
@@ -545,6 +567,32 @@ mod tests {
         assert_eq!(body[0], 0, "not a kind 0 frame");
         let reply: serde_json::Value = serde_json::from_slice(&body[1..]).unwrap();
         assert_eq!(reply["type"], "welcome", "{reply}");
+    }
+
+    #[tokio::test]
+    async fn a_reply_no_queue_could_hold_is_refused_and_the_connection_stays() {
+        let conn = Conn::default();
+        let screen = tiller_panes::message::Screen {
+            cols: 80,
+            rows: 24,
+            cursor: tiller_panes::message::Cursor {
+                col: 0,
+                row: 0,
+                visible: true,
+            },
+            modes: Vec::new(),
+            rows_text: vec!["x".repeat(OUTBOX_CAP)],
+        };
+        send_reply(&conn, Some(7), Ok(HolderMessage::Screen { id: 7, screen }));
+        assert!(conn.outbox.cut_at().is_none(), "the connection was cut");
+        let frame = conn.outbox.next().await.unwrap();
+        // The length and the kind come before the message.
+        let reply: serde_json::Value = serde_json::from_slice(&frame[5..]).unwrap();
+        assert_eq!(
+            (&reply["type"], &reply["id"], &reply["code"]),
+            (&"error".into(), &7.into(), &"busy".into()),
+            "{reply}"
+        );
     }
 
     async fn read_message(stream: &mut UnixStream) -> serde_json::Value {

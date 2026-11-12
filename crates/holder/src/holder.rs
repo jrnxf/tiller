@@ -513,6 +513,15 @@ impl Holder {
     }
 
     fn spawn_in_turn(self: &Arc<Self>, req: Spawn) -> Result<(Pane, bool), Failure> {
+        // A spawn for a key that runs gets that pane, as the request that
+        // started it got it, whatever else the request asks for.
+        let running = self.panes().iter().find_map(|cell| {
+            let inner = cell.inner();
+            (inner.record.key == req.key && inner.running()).then(|| inner.record())
+        });
+        if let Some(record) = running {
+            return Ok((record, true));
+        }
         let size = req.size.unwrap_or(tiller_panes::message::DEFAULT_SIZE);
         check_size(size)?;
         if !Path::new(&req.cwd).is_absolute() {
@@ -520,13 +529,6 @@ impl Holder {
                 "cwd {:?} is not an absolute path",
                 req.cwd
             )));
-        }
-        let running = self.panes().iter().find_map(|cell| {
-            let inner = cell.inner();
-            (inner.record.key == req.key && inner.running()).then(|| inner.record())
-        });
-        if let Some(record) = running {
-            return Ok((record, true));
         }
         let id = PaneId::generate();
         let started = pty::start(pty::Launch {
@@ -743,7 +745,9 @@ impl Holder {
         cell.end_open_sync(&mut inner);
         let repaint = match cell.update(&mut inner, Model::repaint) {
             Ok(repaint) => repaint,
-            Err(_) => inner.model.repaint().map_err(|panic| {
+            // The fresh model draws again, and a second panic is reset and
+            // told as the first was.
+            Err(_) => cell.update(&mut inner, Model::repaint).map_err(|panic| {
                 (
                     ErrorCode::Internal,
                     format!("the repaint failed: {}", panic.message),
@@ -824,7 +828,7 @@ impl Holder {
         check_size(size)?;
         let cell = self.cell(pane)?;
         let mut inner = cell.live()?;
-        if inner.record.state == PaneState::Exited {
+        if !inner.running() {
             return Err(exited(pane));
         }
         pty::set_size(cell.master.get_ref(), size).map_err(|err| internal(&err))?;
@@ -855,15 +859,19 @@ impl Holder {
     }
 
     /// `meta`: merges `set` into the pane's metadata, then drops `remove`.
-    /// An exited pane keeps its metadata, so it takes changes too.
+    /// An exited pane keeps its metadata, so it takes changes too. Only a
+    /// change is an event.
     pub fn meta(&self, pane: &PaneId, set: Meta, remove: &[String]) -> Result<Pane, Failure> {
         let cell = self.cell(pane)?;
         let mut inner = cell.live()?;
+        let before = inner.record.meta.clone();
         inner.record.meta.extend(set);
         for key in remove {
             inner.record.meta.remove(key);
         }
-        cell.emit(&HolderMessage::Meta { pane: pane.clone() });
+        if inner.record.meta != before {
+            cell.emit(&HolderMessage::Meta { pane: pane.clone() });
+        }
         Ok(inner.record())
     }
 

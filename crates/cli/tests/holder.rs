@@ -203,6 +203,13 @@ fn a_shell_runs_in_the_holder_and_its_output_shows_in_the_repaint_and_live() {
     // A second spawn with the key of a running pane starts nothing.
     let again = holder.spawn(&world, &["/bin/sh"]);
     assert_eq!(again.pane, pane.pane);
+    // It gets the running pane even when the rest of it would be refused.
+    let refused = Spawn {
+        cwd: "relative".to_owned(),
+        size: Some(Size { cols: 1, rows: 1 }),
+        ..spawn_of(&world, &["/bin/sh"])
+    };
+    assert_eq!(holder.client.spawn(&refused).unwrap().pane, pane.pane);
     let listing = holder.client.list().unwrap();
     assert_eq!(listing.instance, welcome.instance);
     assert_eq!(listing.panes.len(), 1);
@@ -811,6 +818,20 @@ fn meta_merges_set_then_drops_remove_and_tells_watchers() {
             }
     });
     assert_eq!(holder.client.get(&pane.pane).unwrap().unwrap().meta, set);
+
+    // The same set again changes nothing, so it is no event: the next
+    // pane's spawn is the next event.
+    holder.client.set_meta(&pane.pane, &set, &["a"]).unwrap();
+    let next = holder.spawn(&world, &["/bin/cat", "-u"]);
+    let metas = std::cell::Cell::new(0);
+    watch.until(&holder, "spawned", |event| {
+        metas.set(metas.get() + usize::from(matches!(event, Event::Meta { .. })));
+        *event
+            == Event::Spawned {
+                pane: next.pane.clone(),
+            }
+    });
+    assert_eq!(metas.get(), 0, "a set that changed nothing was told");
 }
 
 #[test]
