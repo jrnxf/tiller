@@ -131,10 +131,33 @@ fn end(panes: &dyn Panes, which: impl Fn(&Pane) -> bool) -> std::result::Result<
         nix::unistd::Pid::from_raw(pid),
         nix::sys::signal::Signal::SIGKILL,
     ) {
-        Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
-        Err(e) => Err(format!("killing pane {pane} (pid {pid}): {e}")),
+        Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+        Err(e) => return Err(format!("killing pane {pane} (pid {pid}): {e}")),
+    }
+    // The holder reaps the child a moment later. Until it does, the pane
+    // lists as running, and a cleanup right after would refuse it.
+    let deadline = std::time::Instant::now() + REAPED;
+    loop {
+        let listing = panes.list().map_err(|e| e.to_string())?;
+        if !listing
+            .panes
+            .iter()
+            .any(|p| p.pane == *pane && p.state == PaneState::Running)
+        {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "pane {pane} still runs {} s after its kill",
+                REAPED.as_secs()
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
+
+/// How long a killed pane may take to list as exited.
+const REAPED: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Whether one of `sessions`' panes still runs in the holder: a run's
 /// cleanup never ends a session whose pane lives. A holder that does not

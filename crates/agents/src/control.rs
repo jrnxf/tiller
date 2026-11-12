@@ -559,6 +559,15 @@ pub fn relaunch(
     )?;
 
     let old = live_session(store.conn(), &run.id)?;
+    // With no session to keep the pane, the relaunch would open a new one,
+    // and a new pane belongs in the terminal holder, which takes a relaunch
+    // only once its stop and forget land (H09).
+    if old.is_none() && world.panes.is_some() {
+        return Err(SpawnError::Refused(format!(
+            "A relaunch is not ready yet with the terminal holder (run {}); nothing was changed",
+            run.id
+        )));
+    }
     let (stop_proof, old_pane) = match &old {
         Some(session) => {
             let (proof, pane) = stop(store, world.herdr, waits, session)?;

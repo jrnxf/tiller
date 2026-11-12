@@ -637,6 +637,11 @@ pub fn focus(app: &App, target: &str) -> Done {
     let store = app.read()?;
     let session = resolve_session(&store, target)?;
     let (pane, machine) = tiller_core::state::runs::focus_target(store.conn(), &session)?;
+    if tiller_core::ids::is_holder_pane(&pane) {
+        return Err(failure(SpawnError::Refused(format!(
+            "focus is not ready yet for an agent in the terminal holder (pane {pane}); watch it in the board's live view"
+        ))));
+    }
     let herdr = match &machine {
         Some(machine) => tools.herdr.clone().on_machine(machine),
         None => tools.herdr.clone(),

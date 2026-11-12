@@ -1633,3 +1633,39 @@ fn relaunch_keeps_the_brief_when_the_memory_holds_its_heading() {
     assert_eq!(prompt, first);
     assert_eq!(prompt.matches("A memory paragraph.").count(), 1, "{prompt}");
 }
+
+#[test]
+fn a_relaunch_with_the_terminal_holder_and_no_session_opens_no_herdr_pane() {
+    let mut rig = Rig::new();
+    rig.panes = Some(tiller_panes::FakePanes::new());
+    let card = rig.card(CardKind::Ship, Some(Size::M));
+    let spawned = rig.spawn(&card, RunRole::Builder);
+    rig.fleet
+        .store
+        .session_end(&Ctx::new(Actor::Hook), &spawned.session.id, "logout")
+        .unwrap();
+    let error =
+        relaunch_it(&mut rig, &owner(), &patient(), &spawned.run.id, note("n")).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("A relaunch is not ready yet with the terminal holder"),
+        "{error}"
+    );
+    // Nothing was recorded or opened: no new session, no herdr workspace.
+    let live: Vec<Session> = list(
+        rig.fleet.store.conn(),
+        "run_id = ?1 AND ended_at IS NULL",
+        &[&spawned.run.id],
+    )
+    .unwrap();
+    assert!(live.is_empty(), "{live:?}");
+    assert!(
+        !rig.herdr
+            .calls()
+            .iter()
+            .any(|c| c.starts_with("create_workspace")),
+        "{:?}",
+        rig.herdr.calls()
+    );
+}

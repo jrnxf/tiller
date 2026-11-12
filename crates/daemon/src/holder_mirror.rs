@@ -146,11 +146,33 @@ async fn mirror(
             Ok(view) => view,
             Err(error) => return unavailable(tx, &error),
         };
+        // An update read while gathering a burst, for the next turn.
+        let mut held = None;
         loop {
-            let update = tokio::select! {
-                update = view.updates.recv() => update,
-                () = stopping(&mut stop) => return,
-                () = tx.closed() => return,
+            let update = match held.take() {
+                Some(update) => Some(update),
+                None => tokio::select! {
+                    update = view.updates.recv() => update,
+                    () = stopping(&mut stop) => return,
+                    () = tx.closed() => return,
+                },
+            };
+            // A burst of output already waiting goes as one frame, so a
+            // fast writer does not fill the view's queue line by line.
+            let update = match update {
+                Some(Ok(Some(Update::Output(mut bytes)))) => {
+                    while let Ok(next) = view.updates.try_recv() {
+                        match next {
+                            Ok(Some(Update::Output(more))) => bytes.extend_from_slice(&more),
+                            other => {
+                                held = Some(other);
+                                break;
+                            }
+                        }
+                    }
+                    Some(Ok(Some(Update::Output(bytes))))
+                }
+                other => other,
             };
             let line = match update {
                 Some(Ok(Some(Update::Repaint { cols, rows, bytes }))) => {

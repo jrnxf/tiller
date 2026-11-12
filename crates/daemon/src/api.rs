@@ -4684,7 +4684,7 @@ async fn holder_input(
 
 /// Refuses a pane call that only herdr answers yet, for a pane in the
 /// terminal holder (H11 brings it there).
-fn herdr_only(pane: &str, what: &str) -> Result<(), ApiError> {
+pub(crate) fn herdr_only(pane: &str, what: &str) -> Result<(), ApiError> {
     if !ids::is_holder_pane(pane) {
         return Ok(());
     }
@@ -9906,6 +9906,44 @@ esac"#,
         // The view ends: its subscription ends with it.
         drop(body);
         assert!(eventually(|| holder.subscribers(&pane) == 0).await);
+    }
+
+    #[tokio::test]
+    async fn a_burst_of_output_reaches_the_view_whole_and_keeps_it_open() {
+        use base64::Engine as _;
+        let mut fleet = Fleet::new();
+        let holder = crate::holder::fake::FakeHolder::default();
+        let pane = holder_pane(&holder, "s-1");
+        let session = fleet.worker(pane.as_str());
+        let home = fleet.dir.path();
+        let app = holder_app(home, &holder);
+
+        let response = open_stream(&app, home, &session, json!({})).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        let mut pending = String::new();
+        assert_eq!(next_line(&mut body, &mut pending).await["type"], "size");
+        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
+
+        // Far more writes than the view's queue holds lines, before the
+        // browser reads any of them.
+        let mut written = Vec::new();
+        for n in 0..500 {
+            let chunk = format!("line {n}\r\n");
+            holder.write(&pane, chunk.as_bytes());
+            written.extend_from_slice(chunk.as_bytes());
+        }
+        let mut seen = Vec::new();
+        while seen.len() < written.len() {
+            let line = next_line(&mut body, &mut pending).await;
+            assert_eq!(line["type"], "frame", "{line}");
+            assert_eq!(line["full"], false, "{line}");
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(line["bytes"].as_str().unwrap())
+                .unwrap();
+            seen.extend_from_slice(&bytes);
+        }
+        assert_eq!(seen, written);
     }
 
     #[tokio::test]
