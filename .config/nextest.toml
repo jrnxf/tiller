@@ -25,3 +25,10 @@ threads-required = "num-test-threads"
 filter = 'binary(holder) & test(a_flood_keeps_the_holders_memory_bound_and_every_ping_fast)'
 test-group = "wall-clock"
 threads-required = "num-test-threads"
+
+# The soak (H14a) restarts a daemon and a holder on a timer and reads counters
+# on a schedule, so it runs alone too. Each of its tests checks its group.
+[[profile.default.overrides]]
+filter = 'binary(soak)'
+test-group = "wall-clock"
+threads-required = "num-test-threads"
