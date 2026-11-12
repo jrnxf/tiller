@@ -2793,17 +2793,21 @@ async fn a_read_pairing_cannot_type_into_or_fit_a_peer_pane() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_peer_checks_the_act_scope_again() {
     // The board host still thinks it may act; the peer has cut its key to
-    // `read`, and refuses the keys itself.
+    // `read`, and refuses the keys itself. The cut comes before the link
+    // starts: a cut while it runs ends the link at once (`serve.rs`), and
+    // the board then answers unreachable.
     let scratch = tempfile::tempdir().unwrap();
-    let (pair, session, app, cookie, _dialed, _stop) = watching(scratch.path()).await;
+    let (_pair, session, app, cookie, _dialed, _stop) = watching_on(scratch.path(), None, |pair| {
+        pair.peer
+            .open()
+            .conn()
+            .execute("UPDATE peer_keys SET scope = 'read'", [])
+            .unwrap();
+    })
+    .await;
     let mut body = view_peer(&app, &cookie, &session, json!({"host": "peer"})).await;
     let mut pending = String::new();
     assert_eq!(next_line(&mut body, &mut pending).await["type"], "size");
-    pair.peer
-        .open()
-        .conn()
-        .execute("UPDATE peer_keys SET scope = 'read'", [])
-        .unwrap();
     let answer = act_on_peer(
         &app,
         &cookie,

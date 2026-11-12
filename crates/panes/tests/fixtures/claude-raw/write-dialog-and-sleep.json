@@ -1,0 +1,85 @@
+{
+  "cols": 120,
+  "description": "A Write turn that stops at the permission dialog, then a Bash sleep turn that stays busy for 20 seconds.",
+  "marks": [
+    {
+      "composer": {
+        "Holds": "Create a file named hello.txt in this directory containing the single word hi. Use the Write tool."
+      },
+      "note": "typed write request",
+      "offset": 3271,
+      "prompt": null
+    },
+    {
+      "composer": "Busy",
+      "note": "busy before dialog",
+      "offset": 5000,
+      "prompt": null
+    },
+    {
+      "composer": "Dialog",
+      "note": "write permission dialog",
+      "offset": 8000,
+      "prompt": {
+        "dialog": {
+          "command": null,
+          "folder": null,
+          "layout": "permission",
+          "options": [
+            {
+              "n": 1,
+              "text": "Yes"
+            },
+            {
+              "n": 2,
+              "text": "Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session (shift+tab)"
+            },
+            {
+              "n": 3,
+              "text": "No"
+            }
+          ],
+          "question": "Do you want to create hello.txt?",
+          "title": "Create file",
+          "tool": "Write"
+        },
+        "wait": "Write"
+      }
+    },
+    {
+      "composer": "Empty",
+      "note": "after write done",
+      "offset": 11914,
+      "prompt": null
+    },
+    {
+      "composer": {
+        "Holds": "Run this exact shell command with the Bash tool and then say done: sleep 20"
+      },
+      "note": "typed sleep command",
+      "offset": 13333,
+      "prompt": null
+    },
+    {
+      "composer": "Busy",
+      "note": "busy running sleep",
+      "offset": 20000,
+      "prompt": null
+    },
+    {
+      "composer": "Busy",
+      "note": "busy sleep later",
+      "offset": 30000,
+      "prompt": null
+    },
+    {
+      "composer": "Empty",
+      "note": "sleep finished",
+      "offset": 39064,
+      "prompt": null
+    }
+  ],
+  "raw": "write-dialog-and-sleep.raw",
+  "resizes": [],
+  "rows": 40
+}

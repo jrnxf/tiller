@@ -21,9 +21,16 @@ tokio = { workspace = true, features = ["io-util", "net", "process", "signal", "
 tracing.workspace = true
 ulid.workspace = true
 
+[features]
+# The fixture recorder (terminal-holder.md 12). No release build turns it on:
+# the tests do, through the dev-dependency below, and so does
+# `tiller-cli/record`.
+record = []
+
 [dev-dependencies]
 proptest.workspace = true
 tempfile.workspace = true
+tiller-holder = { path = ".", features = ["record"] }
 
 # The workspace forbids unsafe code. The holder needs it for a few syscalls
 # (the child's setup between fork and exec), so it denies it instead: each

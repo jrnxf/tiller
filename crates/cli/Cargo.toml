@@ -20,6 +20,7 @@ getrandom.workspace = true
 jiff.workspace = true
 qrcode.workspace = true
 rusqlite.workspace = true
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -36,10 +37,20 @@ toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+[features]
+# `tiller holder record`, the fixture recorder (terminal-holder.md 12). A test
+# build only: no release build turns it on.
+record = ["tiller-holder/record"]
+
+[[test]]
+name = "holder_record"
+required-features = ["record"]
+
 [dev-dependencies]
 insta.workspace = true
 nix.workspace = true
 rsa.workspace = true
+rustix = { workspace = true, features = ["pty"] }
 tempfile.workspace = true
 tiller-core = { workspace = true, features = ["test-owner"] }
 tiller-herdr = { workspace = true, features = ["testing"] }

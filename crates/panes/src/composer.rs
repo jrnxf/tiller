@@ -14,7 +14,9 @@
 pub enum Composer {
     /// A Claude composer holding nothing, with the agent not mid-turn.
     Empty,
-    /// A Claude composer, empty, while the footer says a turn is running.
+    /// A Claude composer, empty, while a turn is running: the footer says
+    /// "esc to interrupt" (older Claude Code), or the spinner row is drawn
+    /// above the composer (current Claude Code).
     Busy,
     /// A Claude composer holding text: the owner's draft, or an earlier
     /// wake-up line that was typed but not submitted.
@@ -62,18 +64,67 @@ pub fn classify(ansi: &str) -> Composer {
         if footer
             .iter()
             .any(|row| row.to_lowercase().contains("esc to interrupt"))
+            || spinner_above(&rows[..*top])
         {
             return Composer::Busy;
         }
         return Composer::Empty;
     }
 
-    let bottom = &rows[rows.len().saturating_sub(16)..];
+    // Claude draws a short dialog under the last reply, not at the screen's
+    // bottom, so count the 16 rows from the last row that holds anything.
+    let end = rows
+        .iter()
+        .rposition(|row| !row.trim().is_empty())
+        .map_or(0, |i| i + 1);
+    let bottom = &rows[end.saturating_sub(16)..end];
     if bottom.iter().any(|row| is_dialog_row(row)) {
         Composer::Dialog
     } else {
         Composer::Unknown
     }
+}
+
+/// Glyphs Claude cycles through at the start of its spinner row.
+const SPINNER_GLYPHS: [char; 7] = ['*', '·', '✢', '✳', '✶', '✻', '✽'];
+/// Most rows above the composer's top rule that the spinner scan walks. A
+/// task list adds up to six rows (five items and a `+N` row), a queued
+/// message two, and a blank row and a tip row sit there too.
+const SPINNER_REACH: usize = 12;
+
+/// Whether the turn is running: the nearest flush-left row above the
+/// composer's top rule is the spinner row. Blank rows and indented rows (a
+/// task list, a tool-progress row, a tip) are walked over. Any other row, such
+/// as `● reply text` or a finished turn's `✻ Cooked for 2s · done` row, ends the
+/// turn above it, so a spinner further up is scrollback.
+fn spinner_above(rows: &[String]) -> bool {
+    rows.iter()
+        .rev()
+        .take(SPINNER_REACH)
+        .find(|row| !row.trim().is_empty() && !row.starts_with(char::is_whitespace))
+        .is_some_and(|row| is_spinner(row))
+}
+
+/// `<glyph> <Word>…`, optionally followed by ` (<n>s · ...)`, flush left. A
+/// finished turn's `✻ Cooked for 2s · done 6:01 PM` has no `…`, and reply text
+/// is indented, so neither matches.
+fn is_spinner(row: &str) -> bool {
+    let mut chars = row.chars();
+    let (Some(glyph), Some(' ')) = (chars.next(), chars.next()) else {
+        return false;
+    };
+    if !SPINNER_GLYPHS.contains(&glyph) {
+        return false;
+    }
+    let rest = chars.as_str();
+    let Some((word, tail)) = rest.split_once('…') else {
+        return false;
+    };
+    word.starts_with(|c: char| c.is_ascii_uppercase())
+        && word
+            .chars()
+            .all(|c| c.is_alphabetic() || c == '-' || c == '\'')
+        && (tail.is_empty() || tail.starts_with(" ("))
 }
 
 fn is_rule(row: &str) -> bool {
@@ -292,5 +343,114 @@ mod tests {
             classify(&screen),
             Composer::Holds("first part of a\nlong draft".into())
         );
+    }
+
+    #[test]
+    fn spinner_row_above_an_empty_composer_is_busy() {
+        let rule = "─".repeat(40);
+        for spinner in [
+            "✻ Examining…",
+            "· Examining… (3s · ↓ 120 tokens)",
+            "* Fiddle-faddling… (running Stop hooks… 1/2 · 2s)",
+            "✽ Examining… (4s · ↓ 9 tokens · thinking)",
+            // Verbs with an accent or an apostrophe.
+            "✶ Sautéing… (2s)",
+            "✻ Jiggin'…",
+        ] {
+            let screen = format!("{spinner}\n\n{rule}\n❯\u{a0}\n{rule}\n  ? for shortcuts\n");
+            assert_eq!(classify(&screen), Composer::Busy, "{spinner}");
+        }
+        // A tool-progress row or a tip may sit between spinner and composer.
+        let screen =
+            format!("✢ Examining… (2s)\n  ⎿  Tip: invented tip\n\n{rule}\n❯\u{a0}\n{rule}\n");
+        assert_eq!(classify(&screen), Composer::Busy);
+    }
+
+    #[test]
+    fn typed_text_beats_the_spinner() {
+        let rule = "─".repeat(40);
+        let screen = format!("✻ Examining… (2s)\n\n{rule}\n❯\u{a0}next idea\n{rule}\n");
+        assert_eq!(classify(&screen), Composer::Holds("next idea".into()));
+    }
+
+    #[test]
+    fn finished_reply_that_looks_like_a_spinner_stays_empty() {
+        let rule = "─".repeat(40);
+        for last in [
+            // The finished-turn row.
+            "✻ Cooked for 2s · done 6:01 PM",
+            // Reply text is indented, whatever it says.
+            "  * Waiting… (3s later it returned)",
+            "● Waiting… (3s later it returned)",
+            "  ✻ Examining… (2s)",
+            // No glyph, or an ordinary sentence.
+            "Examining… (2s)",
+            "✻ the file ends with a dot… (3s)",
+            "✻ Examining… and then more text",
+        ] {
+            let screen =
+                format!("● It works.\n{last}\n\n{rule}\n❯\u{a0}\n{rule}\n  ? for shortcuts\n");
+            assert_eq!(classify(&screen), Composer::Empty, "{last}");
+        }
+    }
+
+    #[test]
+    fn spinner_far_above_the_composer_is_scrollback() {
+        let rule = "─".repeat(40);
+        let screen = format!("✻ Examining… (2s)\n● a\n● b\n● c\n● d\n\n{rule}\n❯\u{a0}\n{rule}\n");
+        assert_eq!(classify(&screen), Composer::Empty);
+    }
+
+    #[test]
+    fn spinner_over_a_task_list_is_busy() {
+        let rule = "─".repeat(40);
+        let screen = format!(
+            "✶ Planning… (6s · ↓ 210 tokens)\n  ⎿  ◻ step one\n     ◻ step two\n     ◻ step three\n     ◻ step four\n     ◻ step five\n      … +1 pending\n\n{rule}\n❯\u{a0}\n{rule}\n  ? for shortcuts\n"
+        );
+        assert_eq!(classify(&screen), Composer::Busy);
+    }
+
+    #[test]
+    fn spinner_under_a_queued_message_is_busy() {
+        let rule = "─".repeat(40);
+        let screen = format!(
+            "❯ After that, say the word queued.\n  ctrl+enter to send now\n\n✻ Waiting… (9s)\n\n{rule}\n❯\u{a0}\n{rule}\n"
+        );
+        assert_eq!(classify(&screen), Composer::Busy);
+    }
+
+    #[test]
+    fn finished_turn_with_a_task_summary_stays_empty() {
+        let rule = "─".repeat(40);
+        let screen = format!(
+            "● All done.\n\n✻ Cooked for 9s · done 6:01 PM\n  6 tasks (6 done, 0 open)\n  ✔ step one\n  ✔ step two\n\n{rule}\n❯\u{a0}\n{rule}\n  ? for shortcuts\n"
+        );
+        assert_eq!(classify(&screen), Composer::Empty);
+    }
+
+    #[test]
+    fn spinner_beyond_the_reach_is_scrollback() {
+        let rule = "─".repeat(40);
+        let tail = "  ⎿  ◻ invented item\n".repeat(SPINNER_REACH);
+        let screen = format!("✻ Examining… (2s)\n{tail}{rule}\n❯\u{a0}\n{rule}\n");
+        assert_eq!(classify(&screen), Composer::Empty);
+    }
+
+    #[test]
+    fn a_dialog_above_blank_rows_is_a_dialog() {
+        let rule = "─".repeat(40);
+        let blank = "\n".repeat(30);
+        let screen = format!(
+            "❯ Create a file.\n● Write(notes.txt)\n{rule}\n Create file\n notes.txt\n Do you want to create notes.txt?\n ❯ 1. Yes\n   2. No\n Esc to cancel{blank}"
+        );
+        assert_eq!(classify(&screen), Composer::Dialog);
+    }
+
+    #[test]
+    fn a_dialog_row_in_scrollback_far_above_blank_rows_is_unknown() {
+        let blank = "\n".repeat(30);
+        let filler = "● invented reply line\n".repeat(16);
+        let screen = format!(" Esc to cancel\n{filler}{blank}");
+        assert_eq!(classify(&screen), Composer::Unknown);
     }
 }

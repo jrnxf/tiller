@@ -1,0 +1,133 @@
+{
+  "cols": 120,
+  "description": "An Edit turn stopped at its permission dialog, then a Bash turn stopped at its dialog and declined, then /exit.",
+  "marks": [
+    {
+      "composer": "Empty",
+      "note": "idle composer",
+      "offset": 1496,
+      "prompt": null
+    },
+    {
+      "composer": {
+        "Holds": "Use the Edit tool to add a function farewell(name) to src/greet.py that returns a goodbye string."
+      },
+      "note": "typed edit request",
+      "offset": 3526,
+      "prompt": null
+    },
+    {
+      "composer": "Busy",
+      "note": "busy before edit dialog",
+      "offset": 8000,
+      "prompt": null
+    },
+    {
+      "composer": "Dialog",
+      "note": "edit permission dialog",
+      "offset": 13000,
+      "prompt": {
+        "dialog": {
+          "command": null,
+          "folder": null,
+          "layout": "permission",
+          "options": [
+            {
+              "n": 1,
+              "text": "Yes"
+            },
+            {
+              "n": 2,
+              "text": "Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session (shift+tab)"
+            },
+            {
+              "n": 3,
+              "text": "No"
+            }
+          ],
+          "question": "Do you want to make this edit to greet.py?",
+          "title": "Edit file",
+          "tool": "Edit"
+        },
+        "wait": "Edit"
+      }
+    },
+    {
+      "composer": "Busy",
+      "note": "busy after edit approved",
+      "offset": 18000,
+      "prompt": null
+    },
+    {
+      "composer": "Empty",
+      "note": "edit turn finished",
+      "offset": 20761,
+      "prompt": null
+    },
+    {
+      "composer": {
+        "Holds": "Use the Bash tool to run exactly: touch scratch.tmp"
+      },
+      "note": "typed bash request",
+      "offset": 21019,
+      "prompt": null
+    },
+    {
+      "composer": "Busy",
+      "note": "busy before bash dialog",
+      "offset": 24000,
+      "prompt": null
+    },
+    {
+      "composer": "Dialog",
+      "note": "bash permission dialog",
+      "offset": 29000,
+      "prompt": {
+        "dialog": {
+          "command": "touch scratch.tmp",
+          "folder": null,
+          "layout": "permission",
+          "options": [
+            {
+              "n": 1,
+              "text": "Yes"
+            },
+            {
+              "n": 2,
+              "text": "Yes, and always allow access to /home/user/src/code/work/src/code/work/src/code/work/src/code/work/src/code/work/src/code/work/src/c/inkwell from this project"
+            },
+            {
+              "n": 3,
+              "text": "Yes, and switch to auto mode \u00b7 auto mode handles these prompts for you"
+            },
+            {
+              "n": 4,
+              "text": "No"
+            }
+          ],
+          "question": "Do you want to proceed?",
+          "title": "Bash command",
+          "tool": "Bash"
+        },
+        "wait": "Bash"
+      }
+    },
+    {
+      "composer": "Empty",
+      "note": "bash turn finished",
+      "offset": 34399,
+      "prompt": null
+    },
+    {
+      "composer": {
+        "Holds": "/exit"
+      },
+      "note": "exit typed",
+      "offset": 35014,
+      "prompt": null
+    }
+  ],
+  "raw": "edit-and-bash-dialogs.raw",
+  "resizes": [],
+  "rows": 40
+}

@@ -13,6 +13,8 @@ pub mod outbox;
 pub mod peer;
 pub mod pty;
 pub mod query;
+#[cfg(feature = "record")]
+pub mod record;
 pub mod repaint;
 pub mod scanner;
 pub mod screen;
@@ -21,4 +23,6 @@ pub mod snapshot;
 pub mod sync;
 pub mod upgrade;
 
+#[cfg(feature = "record")]
+pub use server::run_recording;
 pub use server::{HolderError, Outcome, resume, run};

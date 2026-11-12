@@ -10,9 +10,9 @@
 //! text, is formatted from a copy away from it.
 //!
 //! Locks are taken in one order: a pane's, then its input queue's write
-//! turn, then the queue itself, then the table's, then the watchers', then a connection's list of streams. A
-//! pane's events go out under its lock, so they reach every watcher in the
-//! order they happened.
+//! turn, then the queue itself, then the table's, then the watchers', then
+//! a connection's list of streams. A pane's events go out under its lock,
+//! so they reach every watcher in the order they happened.
 //!
 //! The live upgrade (section 6.2) holds every pane still: it pauses the
 //! readers and writers, then takes each pane's lock and input queue in the
@@ -25,7 +25,7 @@ use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
@@ -173,6 +173,9 @@ pub struct Conn {
     /// Held by the writer for each frame: the live upgrade takes it, so no
     /// frame is half written when the new image answers on the socket.
     write_turn: Arc<tokio::sync::Mutex<()>>,
+    /// Its hello named the client `attach`: it counts in `attach_clients`,
+    /// and its watch gets `show` events.
+    attach: AtomicBool,
 }
 
 impl Default for Conn {
@@ -185,6 +188,7 @@ impl Default for Conn {
             leased: Mutex::default(),
             in_flight: Arc::default(),
             write_turn: Arc::default(),
+            attach: AtomicBool::new(false),
         }
     }
 }
@@ -211,6 +215,15 @@ impl Conn {
             }
             Err(Refused::Gone) => false,
         }
+    }
+
+    /// Marks this connection as a `tiller attach` client, from its hello.
+    pub fn mark_attach(&self) {
+        self.attach.store(true, Ordering::Relaxed);
+    }
+
+    fn is_attach(&self) -> bool {
+        self.attach.load(Ordering::Relaxed)
     }
 
     pub fn send_message(&self, message: &HolderMessage) -> bool {
@@ -373,8 +386,10 @@ struct Inner {
 impl Inner {
     /// The pane's record as `list` shows it.
     fn record(&self) -> Pane {
+        let attach = self.subscribers.iter().filter(|sub| sub.conn.is_attach());
         Pane {
             subscribers: u32::try_from(self.subscribers.len()).unwrap_or(u32::MAX),
+            attach_clients: u32::try_from(attach.count()).unwrap_or(u32::MAX),
             ..self.record.clone()
         }
     }
@@ -468,6 +483,9 @@ pub struct PaneCell {
     /// neither read nor written.
     paused: watch::Receiver<bool>,
     watchers: Arc<Watchers>,
+    /// The fixture recorder's files for this pane (`terminal-holder.md` 12).
+    #[cfg(feature = "record")]
+    tap: Option<crate::record::PaneTap>,
 }
 
 impl PaneCell {
@@ -602,6 +620,12 @@ impl PaneCell {
     /// One PTY read: into the model, with the queries in it answered, and
     /// out to every subscriber without them. Gives the pane's next timer.
     fn output(&self, inner: &mut Inner, bytes: &[u8]) -> Option<Instant> {
+        // Under the lock, so a read and a resize are logged in the order
+        // the model took them.
+        #[cfg(feature = "record")]
+        if let Some(tap) = &self.tap {
+            tap.output(bytes);
+        }
         inner.record.last_output_at = Some(Timestamp::now());
         let filtered = inner.filter.filter(bytes);
         // The model answers each query as it reads it, and the holder
@@ -707,6 +731,10 @@ impl PaneCell {
         }
         pty::set_size(self.master.get_ref(), size).map_err(|err| internal(&err))?;
         _ = self.update(inner, |model| model.resize(size));
+        #[cfg(feature = "record")]
+        if let Some(tap) = &self.tap {
+            tap.resize(size);
+        }
         inner.record.cols = size.cols;
         inner.record.rows = size.rows;
         self.emit(&HolderMessage::Resized {
@@ -756,6 +784,9 @@ pub struct Holder {
     upgrades: Arc<AtomicUsize>,
     /// The listener and the lock, as the handover gives them on.
     handover: OnceLock<HandoverFds>,
+    /// Where the fixture recorder writes, when it runs.
+    #[cfg(feature = "record")]
+    recorder: Option<crate::record::Recorder>,
 }
 
 /// Copies of the listening socket's fd and the `holder.lock` fd, which the
@@ -838,7 +869,20 @@ impl Holder {
     }
 
     pub fn with_limits(limits: Limits) -> Arc<Self> {
+        Arc::new(Self::bare(limits))
+    }
+
+    /// A holder that records every pane's raw output into `recorder`.
+    #[cfg(feature = "record")]
+    pub fn recording(recorder: crate::record::Recorder) -> Arc<Self> {
         Arc::new(Self {
+            recorder: Some(recorder),
+            ..Self::bare(Limits::default())
+        })
+    }
+
+    fn bare(limits: Limits) -> Self {
+        Self {
             instance: ulid::Ulid::generate().to_string(),
             boot_id: boot_id(),
             started_at: Timestamp::now(),
@@ -853,7 +897,9 @@ impl Holder {
             paused: watch::Sender::new(false),
             upgrades: Arc::default(),
             handover: OnceLock::new(),
-        })
+            #[cfg(feature = "record")]
+            recorder: None,
+        }
     }
 
     /// The holder the new program image makes from a handover record
@@ -867,8 +913,7 @@ impl Holder {
             instance: record.instance,
             boot_id: record.boot_id,
             started_at: record.started_at,
-            ..Arc::into_inner(Self::new())
-                .ok_or_else(|| io::Error::other("a new holder is shared"))?
+            ..Self::bare(Limits::default())
         });
         lock(&holder.table).next_num = record.next_num;
         let now = Instant::now();
@@ -929,6 +974,8 @@ impl Holder {
             forgotten: watch::Sender::new(false),
             paused: self.paused.subscribe(),
             watchers: self.watchers.clone(),
+            #[cfg(feature = "record")]
+            tap: None,
         });
         lock(&self.table).panes.push(cell.clone());
         tracing::info!(pane = %record.pane, num = record.num, pid = record.pid, "resumed");
@@ -1210,6 +1257,11 @@ impl Holder {
             forgotten: watch::Sender::new(false),
             paused: self.paused.subscribe(),
             watchers: self.watchers.clone(),
+            #[cfg(feature = "record")]
+            tap: self
+                .recorder
+                .as_ref()
+                .and_then(|recorder| recorder.pane(&record.pane, size)),
         });
         {
             // `spawned` goes out under the pane's lock, as its other events
@@ -1748,15 +1800,19 @@ impl Holder {
         }
     }
 
-    /// `switch`: tells every attach client to show a running pane, and
-    /// answers with how many were told. No attach client exists before
-    /// `tiller attach` (H07), so none is.
+    /// `switch`: tells every attach client to show a running pane, with a
+    /// `show` event on its watch, and answers with how many were told.
     pub fn switch(&self, pane: &PaneId) -> Result<usize, Failure> {
-        if self.cell(pane)?.live()?.running() {
-            Ok(0)
-        } else {
-            Err(exited(pane))
+        if !self.cell(pane)?.live()?.running() {
+            return Err(exited(pane));
         }
+        let show = HolderMessage::Show { pane: pane.clone() };
+        let watchers = lock(&self.watchers.0);
+        Ok(watchers
+            .iter()
+            .filter(|conn| conn.is_attach())
+            .filter(|conn| conn.send_message(&show))
+            .count())
     }
 
     /// A kind 2 frame from `conn`: raw bytes for the pane `num`, with no
@@ -2167,6 +2223,10 @@ async fn deliver_exit(holder: Arc<Holder>, cell: Arc<PaneCell>) {
                 .retain(|sub| sub.conn.send_stream(sub.stream, frame.clone()));
         }
         cell.emit(&exited);
+        #[cfg(feature = "record")]
+        if let Some(tap) = &cell.tap {
+            tap.exit();
+        }
         cell.exit.send_replace(Some(exit));
     }
     holder.prune(Timestamp::now());

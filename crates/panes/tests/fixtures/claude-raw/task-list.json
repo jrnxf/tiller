@@ -1,0 +1,61 @@
+{
+  "cols": 120,
+  "description": "A TaskCreate turn: six tasks listed under the spinner while a 20 second Bash sleep runs, then the finished summary.",
+  "marks": [
+    {
+      "composer": "Empty",
+      "note": "idle composer",
+      "offset": 1489,
+      "prompt": null
+    },
+    {
+      "composer": {
+        "Holds": "Use your task tools (TaskCreate) to create exactly 6 tasks named step one to step six. Then run this exact shell\ncommand with the Bash tool: sleep 20. Then mark each task completed with TaskUpdate, and say finished."
+      },
+      "note": "typed task-list prompt",
+      "offset": 3902,
+      "prompt": null
+    },
+    {
+      "composer": "Busy",
+      "note": "busy early",
+      "offset": 8000,
+      "prompt": null
+    },
+    {
+      "composer": "Busy",
+      "note": "busy with task list",
+      "offset": 15000,
+      "prompt": null
+    },
+    {
+      "composer": "Busy",
+      "note": "busy task list later",
+      "offset": 25000,
+      "prompt": null
+    },
+    {
+      "composer": "Busy",
+      "note": "busy task list late",
+      "offset": 35000,
+      "prompt": null
+    },
+    {
+      "composer": "Empty",
+      "note": "task turn finished",
+      "offset": 42255,
+      "prompt": null
+    },
+    {
+      "composer": {
+        "Holds": "/exit"
+      },
+      "note": "exit typed",
+      "offset": 43000,
+      "prompt": null
+    }
+  ],
+  "raw": "task-list.raw",
+  "resizes": [],
+  "rows": 40
+}
