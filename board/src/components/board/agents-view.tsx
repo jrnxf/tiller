@@ -562,6 +562,15 @@ function Stage({
       if (outside?.isConnected && lost) outside.focus();
     };
   }, [full]);
+  // A switch to another agent mounts its own terminal, so focus on the old
+  // one's controls drops to the page: it goes to the way out again.
+  useEffect(() => {
+    const cardBox = cardRef.current;
+    if (!full || !cardBox) return;
+    const now = document.activeElement;
+    if (now && now !== document.body) return;
+    cardBox.querySelector<HTMLElement>("[data-full-screen]")?.focus();
+  }, [full, agent.session_id]);
   // The details drawer opens under the header, which wraps on a narrow stage.
   const headRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {

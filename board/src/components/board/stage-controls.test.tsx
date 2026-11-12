@@ -302,7 +302,7 @@ test("a switch to another agent stays in full screen, and a toast shows in it", 
   const { request } = stubFullScreen();
   await renderStage("holder");
   fireEvent.click(footer().getByRole("button", { name: "Full screen" }));
-  await footer().findByRole("button", { name: "Full screen", pressed: true });
+  (await footer().findByRole("button", { name: "Full screen", pressed: true })).focus();
   const first = screen
     .getByRole("group", { name: /^Live terminal for / })
     .getAttribute("aria-label");
@@ -314,7 +314,9 @@ test("a switch to another agent stays in full screen, and a toast shows in it", 
       screen.getByRole("group", { name: /^Live terminal for / }).getAttribute("aria-label"),
     ).not.toBe(first),
   );
-  expect(await footer().findByRole("button", { name: "Full screen", pressed: true })).toBeTruthy();
+  // The old terminal's way out is gone, so focus goes to the new one's.
+  const leaveButton = await footer().findByRole("button", { name: "Full screen", pressed: true });
+  await waitFor(() => expect(document.activeElement).toBe(leaveButton));
   expect(request).toHaveBeenCalledTimes(1);
   expect(document.fullscreenElement).toBe(document.documentElement);
   expect(document.querySelector(".av-card")?.classList.contains("full")).toBe(true);
