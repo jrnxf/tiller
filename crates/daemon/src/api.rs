@@ -4643,7 +4643,8 @@ async fn holder_terminal(
         Ok(_) => crate::holder_mirror::stream(
             holder,
             id,
-            fit.is_some(),
+            fit,
+            state.0.mirrors.fits(),
             stop_or_signed_out(state, headers),
             viewer,
         ),
@@ -9875,8 +9876,29 @@ esac"#,
         );
     }
 
+    /// Sends the board's new size to the Fit on the session's pane.
+    async fn holder_refit(
+        app: &Router,
+        home: &std::path::Path,
+        session: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Answer {
+        let cookie = owner_cookie(home);
+        send(
+            app,
+            mutation(
+                "POST",
+                &format!("/api/v1/agents/{session}/terminal/fit"),
+                json!({"cols": cols, "rows": rows}),
+                &[("cookie", cookie.as_str())],
+            ),
+        )
+        .await
+    }
+
     #[tokio::test]
-    async fn a_fit_on_a_holder_pane_is_unfit_and_a_new_size_repaints_the_view() {
+    async fn a_fit_sizes_a_holder_pane_to_the_board_and_gives_it_back_when_the_view_ends() {
         let mut fleet = Fleet::new();
         let holder = crate::holder::fake::FakeHolder::default();
         let pane = holder_pane(&holder, "s-1");
@@ -9885,7 +9907,7 @@ esac"#,
         let home = fleet.dir.path();
         let app = holder_app(home, &holder);
 
-        // Fit waits for H11: the view says so and shows the pane's own size.
+        // The Fit sets the pane to the board's size, and the view opens at it.
         let response = open_stream(
             &app,
             home,
@@ -9896,28 +9918,136 @@ esac"#,
         assert_eq!(response.status(), StatusCode::OK);
         let mut body = response.into_body().into_data_stream();
         let mut pending = String::new();
+        assert_eq!(
+            next_line(&mut body, &mut pending).await,
+            json!({"type": "size", "cols": 100, "rows": 30})
+        );
+        assert_eq!(
+            next_line(&mut body, &mut pending).await,
+            json!({"type": "frame", "seq": 1, "full": true, "bytes": b64(b"hi")})
+        );
+        assert_eq!(holder.size(&pane), Some((100, 30)));
+
+        // The board changes size: the Fit follows it in place.
+        let refit = holder_refit(&app, home, &session, 110, 35).await;
+        assert_eq!(refit.status, StatusCode::OK, "{}", refit.body);
+        assert_eq!(
+            next_line(&mut body, &mut pending).await,
+            json!({"type": "size", "cols": 110, "rows": 35})
+        );
+        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
+
+        // Another client resizes the PTY: the view shows that size, and the
+        // Fit does not fight it.
+        holder.resize(&pane, 90, 25);
+        assert_eq!(
+            next_line(&mut body, &mut pending).await,
+            json!({"type": "size", "cols": 90, "rows": 25})
+        );
+        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
+
+        // The viewer leaves: the pane gets back the size it had before the Fit.
+        drop(body);
+        assert!(eventually(|| holder.size(&pane) == Some((120, 40))).await);
+        assert!(eventually(|| holder.subscribers(&pane) == 0).await);
+        assert_eq!(
+            holder
+                .sizes_set()
+                .into_iter()
+                .map(|(_, size)| size)
+                .collect::<Vec<_>>(),
+            [(100, 30), (110, 35), (120, 40)]
+        );
+        // With no Fit streaming, a refit is refused.
+        let late = holder_refit(&app, home, &session, 100, 30).await;
+        assert_eq!(
+            late.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            late.body
+        );
+    }
+
+    #[tokio::test]
+    async fn a_view_without_a_fit_follows_the_size_a_fit_sets_and_gives_back() {
+        let mut fleet = Fleet::new();
+        let holder = crate::holder::fake::FakeHolder::default();
+        let pane = holder_pane(&holder, "s-1");
+        let session = fleet.worker(pane.as_str());
+        let home = fleet.dir.path();
+        let app = holder_app(home, &holder);
+
+        let plain = open_stream(&app, home, &session, json!({})).await;
+        let mut plain = plain.into_body().into_data_stream();
+        let mut plain_pending = String::new();
+        assert_eq!(
+            next_line(&mut plain, &mut plain_pending).await,
+            json!({"type": "size", "cols": 120, "rows": 40})
+        );
+        next_line(&mut plain, &mut plain_pending).await;
+
+        // A Fit from another view: the plain view opens again at its size.
+        let fitted = open_stream(
+            &app,
+            home,
+            &session,
+            json!({"fit": {"cols": 100, "rows": 30}}),
+        )
+        .await;
+        let mut fitted = fitted.into_body().into_data_stream();
+        let mut fitted_pending = String::new();
+        assert_eq!(
+            next_line(&mut fitted, &mut fitted_pending).await,
+            json!({"type": "size", "cols": 100, "rows": 30})
+        );
+        assert_eq!(
+            next_line(&mut plain, &mut plain_pending).await,
+            json!({"type": "size", "cols": 100, "rows": 30})
+        );
+        assert_eq!(
+            next_line(&mut plain, &mut plain_pending).await["full"],
+            true
+        );
+
+        // The Fit ends (the board turned it off): the plain view follows the
+        // size given back.
+        drop(fitted);
+        assert_eq!(
+            next_line(&mut plain, &mut plain_pending).await,
+            json!({"type": "size", "cols": 120, "rows": 40})
+        );
+        assert_eq!(
+            next_line(&mut plain, &mut plain_pending).await["full"],
+            true
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fit_the_holder_refuses_is_unfit_and_the_view_goes_on() {
+        let mut fleet = Fleet::new();
+        let holder = crate::holder::fake::FakeHolder::default();
+        let pane = holder_pane(&holder, "s-1");
+        let session = fleet.worker(pane.as_str());
+        let home = fleet.dir.path();
+        let app = holder_app(home, &holder);
+        holder.refuse_sizes(true);
+
+        let response = open_stream(
+            &app,
+            home,
+            &session,
+            json!({"fit": {"cols": 100, "rows": 30}}),
+        )
+        .await;
+        let mut body = response.into_body().into_data_stream();
+        let mut pending = String::new();
         assert_eq!(next_line(&mut body, &mut pending).await["type"], "unfit");
         assert_eq!(
             next_line(&mut body, &mut pending).await,
             json!({"type": "size", "cols": 120, "rows": 40})
         );
         assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
-
-        // Another client resizes the PTY: the view sends the new size and a
-        // fresh full screen.
-        holder.resize(&pane, 90, 25);
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "size", "cols": 90, "rows": 25})
-        );
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "frame", "seq": 2, "full": true, "bytes": b64(b"hi")})
-        );
-
-        // The view ends: its subscription ends with it.
-        drop(body);
-        assert!(eventually(|| holder.subscribers(&pane) == 0).await);
+        assert!(holder.sizes_set().is_empty());
     }
 
     #[tokio::test]

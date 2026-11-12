@@ -145,11 +145,16 @@ struct View {
 
 impl View {
     fn open(port: u16, cookie: &str, session: &str) -> Self {
+        Self::open_with(port, cookie, session, "{}")
+    }
+
+    /// Opens the view with `body`, such as a Fit.
+    fn open_with(port: u16, cookie: &str, session: &str, body: &str) -> Self {
         let stream = post(
             port,
             cookie,
             &format!("/api/v1/agents/{session}/terminal"),
-            "{}",
+            body,
         );
         Self {
             stream,
@@ -307,4 +312,55 @@ fn a_daemon_restart_serves_the_same_holder_pane_with_its_history_and_input() {
     assert_eq!(ours.len(), 1, "{:?}", listing.panes);
     assert_eq!(ours[0].pane.to_string(), pane);
     assert_eq!(ours[0].state, PaneState::Running);
+}
+
+/// The size of the session's pane in the holder now.
+fn pane_size(client: &HolderClient, session: &str) -> (u16, u16) {
+    let listing = client.list().unwrap();
+    let pane = listing.panes.iter().find(|p| p.key == session).unwrap();
+    (pane.cols, pane.rows)
+}
+
+/// The board's Fit on a holder pane: the PTY takes the board's size while
+/// the view is open, and gets its own size back when the view ends.
+#[test]
+fn a_fit_sizes_the_holder_pane_and_the_view_gives_it_back_when_it_ends() {
+    let world = World::initialized();
+    launchable(&world);
+    let (_holder, client) = start_holder(&world);
+    let started = world.must(&["orchestrator", "start", "alpha"]);
+    let session = started.data()["session"]["id"].as_str().unwrap().to_owned();
+    let own = pane_size(&client, &session);
+    assert_ne!(own, (100, 30));
+
+    let cookie = cookie(&world);
+    let (_daemon, port) = git_only_daemon(&world);
+    let mut view = View::open_with(
+        port,
+        &cookie,
+        &session,
+        r#"{"fit": {"cols": 100, "rows": 30}}"#,
+    );
+    view.until("the Fit's size", |view| {
+        view.lines
+            .iter()
+            .any(|l| l["type"] == "size" && l["cols"] == 100 && l["rows"] == 30)
+    });
+    assert!(
+        !view.lines.iter().any(|l| l["type"] == "unfit"),
+        "{:?}",
+        view.lines
+    );
+    assert_eq!(pane_size(&client, &session), (100, 30));
+
+    drop(view);
+    let deadline = Instant::now() + WAIT;
+    while pane_size(&client, &session) != own {
+        assert!(
+            Instant::now() < deadline,
+            "the pane kept the Fit's size: {:?}",
+            pane_size(&client, &session)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
