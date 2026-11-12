@@ -528,6 +528,7 @@ function Stage({
   onSwitch: (key: SwitchKey) => void;
 }) {
   const { agent, card } = line;
+  const [fullRoot, setFullRoot] = useState<HTMLDivElement | null>(null);
   const standing = useStanding(agent);
   const ambiguous = useAmbiguousIds();
   const off = focusReason(ownerOf(agent));
@@ -603,6 +604,7 @@ function Stage({
       machine={remote && !peerHost ? host.label : undefined}
       peer={peerHost}
       holder={!remote && !peerHost && isHolderPane(agent.pane_id)}
+      fullScreenRoot={fullRoot}
       strip={
         remote || peerHost ? null : (
           <AnswerStrip
@@ -756,7 +758,11 @@ function Stage({
         />
       ) : null}
       <div className="av-card-b" ref={bodyRef}>
-        {body}
+        {/* What goes full screen: it outlives the terminal, so a switch to
+            another agent stays in full screen. */}
+        <div className="av-full" ref={setFullRoot}>
+          {body}
+        </div>
         {
           // Steer and interrupt reach a pane on this machine only: a peer's
           // pane is watch only, and a saved machine's pane is read as a tail.

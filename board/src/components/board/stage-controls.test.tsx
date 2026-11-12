@@ -21,6 +21,7 @@ import {
   isHolderPane,
   reloadTerminalPrefs,
 } from "./live-terminal";
+import { showToast } from "./toast";
 
 await loadRouteChunks();
 
@@ -216,6 +217,13 @@ test("the font size steps by one pixel, clamps, persists, and goes back to the d
   expect(size().textContent).toBe(String(STAGE_FONT_MIN));
 });
 
+test("an empty stored font size reads as the default", async () => {
+  localStorage.setItem(FONT_KEY, " ");
+  reloadTerminalPrefs();
+  const bar = await renderStage("holder");
+  expect(bar.getByRole("button", { name: /^Font size / }).textContent).toBe(String(STAGE_FONT));
+});
+
 test("the stage font clamps to 9 to 24 px in whole pixels", () => {
   expect(clampStageFont(14)).toBe(14);
   expect(clampStageFont(8)).toBe(STAGE_FONT_MIN);
@@ -233,7 +241,9 @@ test("full screen holds the stage, and a second press or Esc leaves it", async (
 
   fireEvent.click(bar.getByRole("button", { name: "Full screen" }));
   expect(request).toHaveBeenCalledTimes(1);
-  expect(request.mock.contexts[0]).toBe(stage);
+  // The stage's wrapper, which outlives a switch to another agent.
+  expect(request.mock.contexts[0]).toBe(document.querySelector(".av-full"));
+  expect(stage?.parentElement).toBe(request.mock.contexts[0]);
   const leaveButton = await bar.findByRole("button", { name: "Leave full screen" });
   expect(leaveButton.getAttribute("aria-pressed")).toBe("true");
   expect(leaveButton.getAttribute("title")).toBe("Leave full screen (Esc)");
@@ -251,6 +261,32 @@ test("full screen holds the stage, and a second press or Esc leaves it", async (
   leave();
   await bar.findByRole("button", { name: "Full screen" });
   expect(bar.getByRole("button", { name: "Expand the terminal" })).toBeTruthy();
+});
+
+test("a switch to another agent stays in full screen, and a toast shows in it", async () => {
+  const { request } = stubFullScreen();
+  await renderStage("holder");
+  fireEvent.click(footer().getByRole("button", { name: "Full screen" }));
+  await footer().findByRole("button", { name: "Leave full screen" });
+  const first = screen
+    .getByRole("group", { name: /^Live terminal for / })
+    .getAttribute("aria-label");
+
+  const rows = screen.getAllByRole("option");
+  fireEvent.click(rows[1] as HTMLElement);
+  await waitFor(() =>
+    expect(
+      screen.getByRole("group", { name: /^Live terminal for / }).getAttribute("aria-label"),
+    ).not.toBe(first),
+  );
+  expect(await footer().findByRole("button", { name: "Leave full screen" })).toBeTruthy();
+  expect(request).toHaveBeenCalledTimes(1);
+  expect(document.fullscreenElement).toBe(document.querySelector(".av-full"));
+
+  // Only the element in full screen shows: a toast goes in it.
+  act(() => showToast("bad", "The pane kept its own size"));
+  const toast = screen.getByTestId("toast");
+  expect(document.querySelector(".av-full")?.contains(toast)).toBe(true);
 });
 
 test("with no Fullscreen API the button is not there, and Expand still is", async () => {

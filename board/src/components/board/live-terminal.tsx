@@ -12,6 +12,7 @@ import {
 } from "react";
 import type { MouseEvent as ReactMouseEvent, ReactNode, Ref } from "react";
 
+import { canFullScreen, useFullScreenElement } from "../../lib/fullscreen";
 import { shortcutsBlocked } from "../../lib/shortcuts";
 import { createStore, useStore } from "../../lib/store";
 import { CloseIcon } from "../shell/icons";
@@ -126,7 +127,8 @@ export function clampStageFont(size: number): number {
 function loadStageFont(): number {
   try {
     const stored = localStorage.getItem(FONT_KEY);
-    return stored === null ? STAGE_FONT : clampStageFont(Number(stored));
+    // Nothing stored, or nothing that reads as a number, is the default.
+    return stored === null || stored.trim() === "" ? STAGE_FONT : clampStageFont(Number(stored));
   } catch {
     return STAGE_FONT;
   }
@@ -154,33 +156,6 @@ function setStageFont(size: number) {
 
 // A press on a view control leaves focus where it was, so typing goes on.
 const keepFocus = (event: ReactMouseEvent) => event.preventDefault();
-
-// Whether this browser can put an element in full screen. iPhone Safari
-// cannot (only a video), and there the phone's sheet is the full view.
-function canFullScreen(): boolean {
-  try {
-    return (
-      document.fullscreenEnabled === true &&
-      typeof Element.prototype.requestFullscreen === "function"
-    );
-  } catch {
-    return false;
-  }
-}
-
-function subscribeFullScreen(change: () => void) {
-  document.addEventListener("fullscreenchange", change);
-  return () => document.removeEventListener("fullscreenchange", change);
-}
-
-// The element in full screen, or null.
-function useFullScreenElement(): Element | null {
-  return useSyncExternalStore(
-    subscribeFullScreen,
-    () => document.fullscreenElement ?? null,
-    () => null,
-  );
-}
 
 function subscribeVisible(change: () => void) {
   document.addEventListener("visibilitychange", change);
@@ -594,6 +569,7 @@ export function LiveTerminal({
   machine,
   peer,
   holder = false,
+  fullScreenRoot = null,
   strip,
   onClose,
 }: {
@@ -623,6 +599,8 @@ export function LiveTerminal({
   // The pane is in the terminal holder, not herdr: the stage fits it by
   // default, since no other window shows it.
   holder?: boolean;
+  // The stage's full screen element, when the caller keeps one across agents.
+  fullScreenRoot?: HTMLElement | null;
   // What the stage shows between the screen and its footer: the answer buttons.
   strip?: ReactNode;
   onClose?: () => void;
@@ -660,8 +638,11 @@ export function LiveTerminal({
   // The stage in full screen: its own element, so a dialog or another
   // agent's stage never reads as it.
   const [root, setRoot] = useState<HTMLDivElement | null>(null);
+  // What goes full screen: the caller's wrapper, which outlives a switch to
+  // another agent, or else this stage itself.
+  const fullTarget = fullScreenRoot ?? root;
   const fullElement = useFullScreenElement();
-  const full = stage && root !== null && fullElement === root;
+  const full = stage && fullTarget !== null && fullElement === fullTarget;
   const visible = useVisible();
   const [unfit, setUnfit] = useState(false);
   const fitting = stage && !phone && fitWanted && !unfit && visible && view === "inline";
@@ -971,16 +952,16 @@ export function LiveTerminal({
 
   // Full screen holds the stage, its strip and its footer; the layout fits
   // the pane to the screen as the stage grows. The browser's Esc leaves it.
-  const fullScreenAble = stage && canFullScreen();
+  const fullScreenAble = stage && !phone && canFullScreen();
   const toggleFull = useCallback(() => {
     if (full) {
       void document.exitFullscreen().catch(() => {});
       return;
     }
-    if (!root) return;
+    if (!fullTarget) return;
     const term = termRef.current;
     const wasTyping = term?.textarea !== undefined && document.activeElement === term.textarea;
-    root.requestFullscreen().then(
+    fullTarget.requestFullscreen().then(
       () => {
         if (wasTyping) termRef.current?.focus();
       },
@@ -991,7 +972,7 @@ export function LiveTerminal({
           "The browser refused it. Expand shows the terminal larger.",
         ),
     );
-  }, [full, root]);
+  }, [full, fullTarget]);
 
   const collapse = useCallback(() => {
     termRef.current?.blur();
@@ -1123,8 +1104,8 @@ export function LiveTerminal({
         Fit pane
       </button>
     ) : null;
-  // The stage's own view controls, on a computer: the font size and full
-  // screen. A press keeps focus where it was, so typing goes on.
+  // The stage's font size, on a computer. A press keeps focus where it was,
+  // so typing goes on.
   const stageControls =
     stage && !phone && screenShown && view === "inline" ? (
       <>
@@ -1170,20 +1151,22 @@ export function LiveTerminal({
             <FontLargerIcon />
           </button>
         </span>
-        {fullScreenAble && !ended ? (
-          <button
-            type="button"
-            className="ib sm"
-            title={full ? "Leave full screen (Esc)" : "Full screen"}
-            aria-label={full ? "Leave full screen" : "Full screen"}
-            aria-pressed={full}
-            onMouseDown={keepFocus}
-            onClick={toggleFull}
-          >
-            {full ? <LeaveFullScreenIcon /> : <FullScreenIcon />}
-          </button>
-        ) : null}
       </>
+    ) : null;
+  // In full screen the way out stays, whatever the stream does.
+  const fullButton =
+    full || (fullScreenAble && !ended && screenShown && view === "inline") ? (
+      <button
+        type="button"
+        className="ib sm"
+        title={full ? "Leave full screen (Esc)" : "Full screen"}
+        aria-label={full ? "Leave full screen" : "Full screen"}
+        aria-pressed={full}
+        onMouseDown={keepFocus}
+        onClick={toggleFull}
+      >
+        {full ? <LeaveFullScreenIcon /> : <FullScreenIcon />}
+      </button>
     ) : null;
   // The scrollback is the stage's, while the screen shows inline.
   const canHistory = stage && !tail && screenShown && !ended && view === "inline";
@@ -1292,6 +1275,7 @@ export function LiveTerminal({
           </span>
         ) : null}
         {stageControls}
+        {fullButton}
         <button type="button" className="btn sm" onClick={done}>
           Done
         </button>
@@ -1307,6 +1291,7 @@ export function LiveTerminal({
       </span>
       <span className="mir-fr">
         {stageControls}
+        {fullButton}
         <button type="button" className="btn sm primary" onClick={closeHistory}>
           Back to live
         </button>
@@ -1319,6 +1304,7 @@ export function LiveTerminal({
         {sizeText ? <span className="mir-sz">{sizeText}</span> : null}
         {historyButton}
         {stageControls}
+        {fullButton}
         {fitButton}
         {expandButton}
       </span>
@@ -1350,7 +1336,7 @@ export function LiveTerminal({
           {strip}
         </div>
       ) : null}
-      {screenShown && !popup ? (
+      {(screenShown || full) && !popup ? (
         <div className="mir-f">{stage ? stageFooter : footer("inline")}</div>
       ) : null}
       {view === "dialog" ? (

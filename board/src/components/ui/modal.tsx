@@ -2,6 +2,7 @@ import { useEffect, useEffectEvent, useLayoutEffect, useRef } from "react";
 import type { KeyboardEvent, ReactNode, RefObject } from "react";
 import { createPortal } from "react-dom";
 
+import { useLayerRoot } from "../../lib/fullscreen";
 import { holdInert } from "../../lib/inert";
 
 // Every modal on the board is this one dialog. It owns what each used to
@@ -155,6 +156,7 @@ export function Modal({
 }) {
   const outer = useRef<HTMLDivElement>(null);
   const dialog = useRef<HTMLDivElement>(null);
+  const layer = useLayerRoot();
 
   const escape = () => {
     if (dismissable) (onEscape ?? onClose)();
@@ -257,6 +259,7 @@ export function Modal({
         {panel}
       </div>
     ),
-    document.body,
+    // In full screen only that element shows, so the dialog opens in it.
+    layer,
   );
 }

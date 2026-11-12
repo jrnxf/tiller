@@ -465,6 +465,17 @@
   min-height: 0;
 }
 
+.av-full {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.av-full:fullscreen {
+  background: var(--bg-panel);
+}
+
 .av-body-note {
   padding: 0 10px;
 }
