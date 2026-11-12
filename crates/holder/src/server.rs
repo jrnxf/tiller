@@ -308,6 +308,9 @@ async fn write_loop(conn: Arc<Conn>, mut out: OwnedWriteHalf) {
             }
         };
         if !written {
+            // Closed under the turn, so a turn taken after this one sees
+            // that a frame may be half written.
+            conn.outbox.close();
             return;
         }
     }

@@ -306,8 +306,9 @@ fn an_upgrade_keeps_the_pids_the_instance_and_every_pane_field_by_field() {
     for chunk in sent.chunks(16 * 1024) {
         client.raw_input(input.num, chunk).unwrap();
     }
-    // The frames reach the queue, and every model settles.
-    std::thread::sleep(Duration::from_millis(500));
+    // The holder reads a connection's frames in order, so once the ping
+    // is answered every frame is in the queue.
+    client.ping().unwrap();
     let before = client.list().unwrap();
 
     let out = upgrade(&world, &wrapper, false);
@@ -590,6 +591,71 @@ fn a_counter_runs_through_the_upgrade_and_a_child_that_exits_in_it_keeps_its_cod
 }
 
 #[test]
+fn a_close_under_way_at_the_upgrade_still_kills_a_child_that_outlives_its_grace() {
+    let world = World::new();
+    let holder = Holder::start(&world);
+    let client = holder.client(&world);
+    let wrapper = wrapper(&world);
+
+    // A child that lets go of its terminal, so the pane's output ends, and
+    // outlives the close's `SIGHUP`.
+    let lingers = spawn(
+        &client,
+        &world,
+        "lingers",
+        r"trap 'touch hupped' HUP; echo lingers-ready; exec </dev/null >/dev/null 2>&1; while :; do sleep 0.05; done",
+    );
+    shows(&holder, &client, &lingers, Read::Visible, "lingers-ready");
+    let closer = {
+        let client = holder.client(&world);
+        let pane = lingers.pane.clone();
+        std::thread::spawn(move || {
+            // The upgrade ends the connection before the reply.
+            let _ = client.close(&pane, Duration::from_secs(2));
+        })
+    };
+    let deadline = Instant::now() + WAIT;
+    while !world.dir.path().join("hupped").exists() {
+        assert!(Instant::now() < deadline, "{}", holder.log());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Dry runs until the record has the close under way and the output
+    // ended.
+    for n in 1.. {
+        let out = upgrade(&world, &wrapper, true);
+        assert_eq!(out.data()["upgrade"], "ready", "{}", out.json);
+        let record = record(&world, &n.to_string());
+        let pane = pane_of(&record, &lingers);
+        if pane.output_ended && pane.close_in.is_some() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{pane:?}\n{}", holder.log());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let out = upgrade(&world, &wrapper, false);
+    assert_eq!(
+        out.data()["upgrade"],
+        "started",
+        "{}\n{}",
+        out.json,
+        holder.log()
+    );
+    closer.join().unwrap();
+    let client = holder.client(&world);
+    let deadline = Instant::now() + WAIT;
+    let exit = loop {
+        let record = client.get(&lingers.pane).unwrap().unwrap();
+        if let Some(exit) = record.exit {
+            break exit;
+        }
+        assert!(Instant::now() < deadline, "{}", holder.log());
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(exit.signal, Some(9), "{}", holder.log());
+}
+
+#[test]
 fn a_dry_run_changes_nothing() {
     let world = World::new();
     let holder = Holder::start(&world);
@@ -740,7 +806,19 @@ exec '{TILLER}' "$@"
         r"printf 'osc-ready\033]0;'; head -c 70000 /dev/zero | tr '\000' a; sleep 3600",
     );
     shows(&holder, &client, &open_osc, Read::Visible, "osc-ready");
-    std::thread::sleep(Duration::from_millis(300));
+    // The model has the whole OSC once a dry run cannot record it.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let out = upgrade(&world, Path::new(TILLER), true);
+        if out.json["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("keeps running as it is: record: "))
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{}", out.json);
+        std::thread::sleep(Duration::from_millis(20));
+    }
     let out = upgrade(&world, Path::new(TILLER), false);
     assert_eq!(out.error_code(), "upgrade_refused", "{}", out.json);
     let message = out.json["error"]["message"].as_str().unwrap();

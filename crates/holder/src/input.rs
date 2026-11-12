@@ -79,6 +79,9 @@ pub enum Refused {
 #[derive(Debug, Default)]
 pub struct InputQueue {
     state: Mutex<State>,
+    /// The writer's turn: held from the frame it takes to the part it puts
+    /// back, so the handover never finds a frame in the writer's hands.
+    writing: Mutex<()>,
     wake: Notify,
 }
 
@@ -186,14 +189,17 @@ impl Drop for InFlight<'_> {
 
 /// A queue held still: nothing is pushed or taken while it lives.
 #[derive(Debug)]
-pub struct Held<'a>(MutexGuard<'a, State>);
+pub struct Held<'a> {
+    state: MutexGuard<'a, State>,
+    _writing: MutexGuard<'a, ()>,
+}
 
 impl Held<'_> {
     /// What waits, for the handover, in the order it is written. A cut
     /// client's input is left out: it would be dropped, not written. A
     /// frame written in part is kept, as it is written to its end.
     pub fn queued(&self) -> Queued {
-        let state = &self.0;
+        let state = &self.state;
         Queued {
             chunks: state
                 .partial
@@ -226,6 +232,12 @@ pub struct Queued {
 impl InputQueue {
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The writer's turn, held from [`InputQueue::try_next`] to
+    /// [`InFlight::put_back`]. A push does not wait for it.
+    pub fn write_turn(&self) -> MutexGuard<'_, ()> {
+        self.writing.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Queues `bytes` from `sender`. A frame is taken whole while the
@@ -323,10 +335,15 @@ impl InputQueue {
         }
     }
 
-    /// Holds the queue still, for the handover: a push waits until it is
-    /// let go. Taken under the pane's lock, as a push under it is.
+    /// Holds the queue still, for the handover: it waits for the writer's
+    /// turn, so no frame is in the writer's hands, and a push waits until
+    /// it is let go.
     pub fn hold(&self) -> Held<'_> {
-        Held(self.state())
+        let writing = self.write_turn();
+        Held {
+            state: self.state(),
+            _writing: writing,
+        }
     }
 
     /// What waits, for the handover.
@@ -349,6 +366,7 @@ impl InputQueue {
         }
         Self {
             state: Mutex::new(state),
+            writing: Mutex::new(()),
             wake: Notify::new(),
         }
     }

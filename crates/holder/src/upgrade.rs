@@ -148,22 +148,17 @@ pub async fn upgrade(
     .await
     .map_err(|err| format!("record: {err}"))?
     .map_err(|err| format!("record: {err}"))?;
-    let out = run_child(
-        binary,
-        "--dry-run-handover",
-        Some(bytes.clone()),
-        DRY_RUN_TIMEOUT,
-    )
-    .await
-    .map_err(|err| format!("dry_run: {err}"))?;
+    let wrote = checksum(&bytes);
+    let out = run_child(binary, "--dry-run-handover", Some(bytes), DRY_RUN_TIMEOUT)
+        .await
+        .map_err(|err| format!("dry_run: {err}"))?;
     let read: DryRun = serde_json::from_slice(&out).map_err(|err| {
         format!("dry_run: the binary's answer is not one this holder reads: {err}")
     })?;
-    if read.checksum != checksum(&bytes) {
+    if read.checksum != wrote {
         return Err(format!(
-            "dry_run: the binary read the record back as {}, and this holder wrote {}",
-            read.checksum,
-            checksum(&bytes)
+            "dry_run: the binary read the record back as {}, and this holder wrote {wrote}",
+            read.checksum
         ));
     }
     if dry_run {
@@ -180,6 +175,9 @@ pub async fn upgrade(
     let write_turn = tokio::time::timeout(WRITE_TURN_WAIT, conn.write_turn())
         .await
         .map_err(|_| "busy: the connection did not finish its write".to_owned())?;
+    if conn.outbox.is_closed() || conn.outbox.cut_at().is_some() {
+        return Err("requester: the connection is closed or cut".to_owned());
+    }
     let turn = holder.spawn_turn().await;
     let held = holder.clone();
     let binary = binary.to_owned();

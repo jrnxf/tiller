@@ -9,16 +9,17 @@
 //! a client under it, and the long work, a repaint or a `screen` read's
 //! text, is formatted from a copy away from it.
 //!
-//! Locks are taken in one order: a pane's, then its input queue's, then
-//! the table's, then the watchers', then a connection's list of streams. A
+//! Locks are taken in one order: a pane's, then its input queue's write
+//! turn, then the queue itself, then the table's, then the watchers', then a connection's list of streams. A
 //! pane's events go out under its lock, so they reach every watcher in the
 //! order they happened.
 //!
 //! The live upgrade (section 6.2) holds every pane still: it pauses the
 //! readers and writers, then takes each pane's lock and input queue in the
-//! table's order. A PTY is read and written only under its pane's lock,
-//! after a check of the pause, so the handover record has every byte read
-//! in the model and every byte written gone from the queue.
+//! table's order. A PTY is read only under its pane's lock and written
+//! only under its queue's write turn, each after a check of the pause, so
+//! the handover record has every byte read in the model and every byte
+//! written gone from the queue.
 
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
@@ -938,10 +939,8 @@ impl Holder {
             tokio::spawn(read_pty(cell.clone()));
         }
         tokio::spawn(write_input(cell.clone()));
-        if let Some(deadline) = cell.inner().closing
-            && !output_ended
-        {
-            tokio::spawn(kill_at(cell.clone(), deadline));
+        if let Some(deadline) = cell.inner().closing {
+            tokio::spawn(close_resumed(cell.clone(), deadline));
         }
         if cell.inner().pending_exit.is_some() {
             tokio::spawn(deliver_exit(self.clone(), cell));
@@ -2034,6 +2033,26 @@ async fn kill_at(cell: Arc<PaneCell>, deadline: Instant) {
     }
 }
 
+/// A close the old image began goes on in the new one, as
+/// [`Holder::close`] runs it: a child that has not exited by the deadline
+/// is killed, and so is what it left of its group.
+async fn close_resumed(cell: Arc<PaneCell>, deadline: Instant) {
+    let mut exit = cell.exit.subscribe();
+    let exited = matches!(
+        tokio::time::timeout_at(deadline, exit.wait_for(Option::is_some)).await,
+        Ok(Ok(_))
+    );
+    if exited {
+        if !*cell.output_ended.borrow() {
+            kill_at(cell, deadline).await;
+        }
+        return;
+    }
+    if let Ok(true) = cell.kill_what_is_left() {
+        tracing::info!(pane = %cell.id, "the child outlived the close grace it had before the upgrade and was killed");
+    }
+}
+
 /// Pasted text with each line ended by a carriage return, as a terminal
 /// pastes it without bracketed paste.
 fn paste_lines(text: &str) -> String {
@@ -2050,8 +2069,9 @@ async fn write_input(cell: Arc<PaneCell>) {
 }
 
 /// The writer holds no frame while it waits: each write takes the next
-/// frame under the pane's lock, and puts back what the PTY did not take, so
-/// the handover finds every unwritten byte in the queue.
+/// frame under the queue's write turn, and puts back what the PTY did not
+/// take, so the handover finds every unwritten byte in the queue. It takes
+/// no pane lock, so input does not wait behind the output feed.
 async fn write_all_input(cell: &PaneCell) {
     let mut ended = cell.output_ended.subscribe();
     let mut paused = cell.paused.clone();
@@ -2074,7 +2094,7 @@ async fn write_all_input(cell: &PaneCell) {
             if *cell.paused.borrow() {
                 return Ok(Write::Paused);
             }
-            let _inner = cell.inner();
+            let _turn = cell.input.write_turn();
             if *cell.paused.borrow() {
                 return Ok(Write::Paused);
             }
