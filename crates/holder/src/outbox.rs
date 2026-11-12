@@ -173,6 +173,12 @@ impl Outbox {
         }
     }
 
+    /// Whether the outbox takes no more frames: the connection was cut or
+    /// is closing.
+    pub fn is_closed(&self) -> bool {
+        self.queue().closed
+    }
+
     /// The cut's deadline, if the connection was cut.
     pub fn cut_at(&self) -> Option<Instant> {
         *self.cut.borrow()

@@ -326,6 +326,14 @@ fn main() -> ExitCode {
         };
     }
     if let Command::Holder = &cli.command {
+        // The holder keeps no database: a `--db` other than the home's own
+        // would suggest a home it does not serve.
+        if daemon::refuse_db(cli.db.as_deref()).is_some() {
+            eprintln!(
+                "tiller holder: --db and TILLER_DB do not apply to the holder: it serves the home TILLER_HOME names, with its socket and lock in its run directory. Set TILLER_HOME to choose the home."
+            );
+            return ExitCode::from(2);
+        }
         return holder::run();
     }
     if let Command::Daemon(args) = &cli.command {

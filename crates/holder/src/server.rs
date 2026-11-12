@@ -234,7 +234,8 @@ async fn read_loop(holder: &Arc<Holder>, conn: &Arc<Conn>, mut input: OwnedReadH
                 greeted = true;
                 hello(holder, conn, frame)
             };
-            if let Next::End = next {
+            // A cut connection takes nothing more: no input after a gap.
+            if matches!(next, Next::End) || conn.outbox.is_closed() {
                 return;
             }
         }

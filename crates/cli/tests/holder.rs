@@ -371,3 +371,18 @@ fn input_past_the_cap_for_an_app_that_reads_none_cuts_that_client_only() {
     let listing = other.list().unwrap();
     assert_eq!(listing.panes[0].state, PaneState::Running);
 }
+
+#[test]
+fn a_db_other_than_the_homes_is_refused() {
+    let world = World::new();
+    let output = world
+        .bare_command()
+        .args(["--db", "/home/user/elsewhere.db", "holder"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("do not apply to the holder"), "{stderr}");
+    assert!(!socket_path(&world.home()).exists());
+}
