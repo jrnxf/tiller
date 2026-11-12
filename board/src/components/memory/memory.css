@@ -690,20 +690,20 @@
 .docs .sug-f {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
   gap: 6px;
   margin-top: 12px;
 }
 
 .docs .sug-f .note {
-  margin-right: auto;
   font-size: 12px;
   color: var(--fg-4);
 }
 
-/* With no note, the space before Discard still pushes the decision right. */
-.docs .sug-f .sp {
-  flex: 1;
+/* Discard and Keep stay together, on the right, whatever comes before. */
+.docs .sug-d {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
 }
 
 /* The holdout passed, or the text moved under the suggestion. */
@@ -1184,8 +1184,16 @@
     height: 32px;
   }
 
+  /* No room beside the buttons: the note takes its own line above them, and
+     Discard and Keep drop under a step that leaves them no room. */
+  .docs .sug-f {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+
   .docs .sug-f .note {
-    display: none;
+    flex: 1 1 100%;
+    order: -1;
   }
 }
 

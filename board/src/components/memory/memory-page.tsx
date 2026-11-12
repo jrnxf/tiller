@@ -688,25 +688,27 @@ function SuggestionCard({
       {refusal ? <Inline error={refusal} about={`proposal ${suggestion.proposal_id}`} /> : null}
       <div className="sug-f">
         {lead}
-        {note ? <span className="note">{note}</span> : <span className="sp" />}
-        <button
-          type="button"
-          className="btn"
-          disabled={locked}
-          onClick={() => ctl.decide(suggestion, "discard")}
-        >
-          Discard
-        </button>
-        <button
-          type="button"
-          className="btn primary"
-          disabled={locked || !gate.ok || evaluating}
-          aria-describedby={gate.ok || evaluating ? undefined : gateId}
-          onClick={() => ctl.decide(suggestion, "keep")}
-        >
-          <CheckIcon />
-          Keep
-        </button>
+        {note ? <span className="note">{note}</span> : null}
+        <span className="sug-d">
+          <button
+            type="button"
+            className="btn"
+            disabled={locked}
+            onClick={() => ctl.decide(suggestion, "discard")}
+          >
+            Discard
+          </button>
+          <button
+            type="button"
+            className="btn primary"
+            disabled={locked || !gate.ok || evaluating}
+            aria-describedby={gate.ok || evaluating ? undefined : gateId}
+            onClick={() => ctl.decide(suggestion, "keep")}
+          >
+            <CheckIcon />
+            Keep
+          </button>
+        </span>
       </div>
     </div>
   );

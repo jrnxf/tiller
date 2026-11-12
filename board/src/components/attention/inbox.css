@@ -994,7 +994,7 @@ a.irow:hover {
   font-weight: var(--w-normal);
 }
 
-div.stale {
+div.not-current {
   display: flex;
   align-items: flex-start;
   gap: 12px;
@@ -1005,25 +1005,25 @@ div.stale {
   background: color-mix(in srgb, var(--yellow-text) 8%, transparent);
 }
 
-.stale > .icon {
+.not-current > .icon {
   flex: none;
   margin-top: 2px;
   color: var(--yellow-text);
 }
 
-.stale .txt {
+.not-current .txt {
   flex: 1;
   min-width: 0;
   color: var(--fg-2);
   font-size: var(--fs-small);
 }
 
-.stale .txt b {
+.not-current .txt b {
   color: var(--fg-1);
   font-weight: var(--w-semibold);
 }
 
-.stale .txt .sub {
+.not-current .txt .sub {
   color: var(--fg-3);
   margin-top: 2px;
 }
@@ -1479,7 +1479,7 @@ button.chip:active {
     display: none;
   }
 
-  .stale {
+  .not-current {
     flex-wrap: wrap;
   }
 }

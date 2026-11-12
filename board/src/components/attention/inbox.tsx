@@ -303,7 +303,7 @@ function Status({
   if (!item.still_current) {
     const text = staleText(item.stale);
     return (
-      <div className="stale" data-testid="not-current">
+      <div className="not-current" data-testid="not-current">
         <InfoIcon />
         <div className="txt">
           <div>
