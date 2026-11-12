@@ -135,9 +135,12 @@ export interface RoomFont {
 export function fontReadout(stageFont: number, fitted: boolean, room: RoomFont) {
   const shown = room.shown > 0 ? room.shown : stageFont;
   const fontText = `Font size ${shown} px`;
+  const chosen = stageFont === STAGE_FONT ? "the default" : "the chosen";
+  // With the Fit, the room can be short only for a while: until the pane
+  // takes its new size, or while a prompt's strip borrows rows.
   const base =
     shown < stageFont
-      ? `${fontText} of the chosen ${stageFont}${fitted ? "" : ", as large as the stage holds the pane"}`
+      ? `${fontText} of ${chosen} ${stageFont}, as large as the stage holds the pane${fitted ? " for now" : ""}`
       : stageFont === STAGE_FONT
         ? `${fontText}, the default`
         : fontText;
@@ -769,7 +772,9 @@ export function LiveTerminal({
     if (!live) term.blur();
     else if (typeWhenLive.current && term.element) {
       typeWhenLive.current = false;
-      term.focus();
+      // Unless the owner moved focus while it waited.
+      const now = document.activeElement;
+      if (!now || now === document.body || term.element.contains(now)) term.focus();
     }
   }, [live, peer]);
 

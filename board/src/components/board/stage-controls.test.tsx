@@ -272,7 +272,7 @@ test("the font readout shows the size on screen, and names the choice when they 
     hint: "Font size 13 px of the chosen 20, as large as the stage holds the pane. Click for the default, 14 px",
   });
   expect(fontReadout(STAGE_FONT, false, room(12, false)).hint).toBe(
-    "Font size 12 px of the chosen 14, as large as the stage holds the pane",
+    "Font size 12 px of the default 14, as large as the stage holds the pane",
   );
   expect(fontReadout(STAGE_FONT, false, room(STAGE_FONT)).hint).toBe(
     "Font size 14 px, the default",
@@ -285,7 +285,13 @@ test("the font readout shows the size on screen, and names the choice when they 
     shown: 14,
     from: 17,
     full: false,
-    hint: "Font size 14 px of the chosen 17. Click for the default, 14 px",
+    hint: "Font size 14 px of the chosen 17, as large as the stage holds the pane for now. Click for the default, 14 px",
+  });
+  // A Fit at its smallest pane that still cannot hold the font.
+  expect(fontReadout(24, true, room(19, false))).toMatchObject({
+    shown: 19,
+    from: 24,
+    full: false,
   });
 });
 
@@ -368,24 +374,27 @@ test("a switch from typing in full screen leaves focus to the new terminal, not 
   // carry gives it focus.
   const api = globalThis.fetch;
   const encode = (line: unknown) => new TextEncoder().encode(`${JSON.stringify(line)}\n`);
-  let goLive = () => {};
+  const streams: ReadableStreamDefaultController<Uint8Array>[] = [];
+  const goLive = () => {
+    for (const controller of streams) {
+      controller.enqueue(encode({ type: "size", cols: 80, rows: 24 }));
+      controller.enqueue(encode({ type: "frame", seq: 0, full: true, bytes: btoa("$ ") }));
+    }
+  };
   vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
     if (!String(input).endsWith("/terminal")) return api(input, init);
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
-        goLive = () => {
-          controller.enqueue(encode({ type: "size", cols: 80, rows: 24 }));
-          controller.enqueue(encode({ type: "frame", seq: 0, full: true, bytes: btoa("$ ") }));
-        };
+        streams.push(controller);
       },
     });
     return Promise.resolve(new Response(body, { status: 200 }));
   });
   fireEvent.keyDown(first, { key: "∆", code: "KeyJ", altKey: true });
   await waitFor(() => expect(typing()).not.toBe(first));
-  // Before it is live, a key typed on does not press the way out.
-  const wayOut = footer().getByRole("button", { name: "Full screen", pressed: true });
-  expect(document.activeElement).not.toBe(wayOut);
+  // Before it is live, focus waits on the page, so a key typed on does not
+  // press the way out.
+  expect(document.activeElement).toBe(document.body);
   act(() => goLive());
   await waitFor(() => expect(document.activeElement).toBe(typing()));
   expect(document.fullscreenElement).toBe(document.documentElement);

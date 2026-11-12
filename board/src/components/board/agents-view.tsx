@@ -571,9 +571,12 @@ function Stage({
   // one's controls drops to the page: it goes to the way out again. A switch
   // from typing carries focus to the new terminal once it is live, so a key
   // typed before then does not press the way out.
+  const stagedId = useRef(agent.session_id);
   useEffect(() => {
     const cardBox = cardRef.current;
-    if (!full || !cardBox || carry) return;
+    const switched = stagedId.current !== agent.session_id;
+    stagedId.current = agent.session_id;
+    if (!switched || !full || !cardBox || carry) return;
     const now = document.activeElement;
     if (now && now !== document.body) return;
     focusWayOut(cardBox);
