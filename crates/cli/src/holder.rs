@@ -44,9 +44,6 @@ pub enum Cmd {
 /// `db` is the `--db` or `TILLER_DB` given, if any.
 pub fn run(args: &Args, db: Option<&Path>, json: bool) -> ExitCode {
     let home = crate::app::App::from_env(None).home;
-    if let Some(Cmd::Upgrade { dry_run, binary }) = &args.cmd {
-        return upgrade(&home, *dry_run, binary.as_deref(), json);
-    }
     // The holder keeps no database: a `--db` other than the home's own
     // would suggest a home it does not serve.
     if db.is_some_and(|db| !crate::daemon::is_home_db(db, &home)) {
@@ -55,6 +52,9 @@ pub fn run(args: &Args, db: Option<&Path>, json: bool) -> ExitCode {
             home.display()
         );
         return ExitCode::from(2);
+    }
+    if let Some(Cmd::Upgrade { dry_run, binary }) = &args.cmd {
+        return upgrade(&home, *dry_run, binary.as_deref(), json);
     }
     if args.detach {
         // Before any thread or log: the holder forks from here.
