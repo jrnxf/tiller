@@ -101,7 +101,7 @@ impl HolderLink {
 
     /// Stops using `used` after it failed, unless another call has
     /// replaced it already.
-    fn forget(&self, used: &Arc<HolderClient>) {
+    fn drop_client(&self, used: &Arc<HolderClient>) {
         let mut slot = self.client.lock().unwrap_or_else(PoisonError::into_inner);
         if slot
             .as_ref()
@@ -116,17 +116,8 @@ impl HolderLink {
     /// connection broke, fails every call from then on. Only for calls the
     /// holder may take twice.
     fn twice<T>(&self, call: impl Fn(&HolderClient) -> Result<T>) -> Result<T> {
-        let client = self.client()?;
-        match call(&client) {
-            Err(PanesError::Unreachable(_)) => {
-                self.forget(&client);
-                let client = self.client()?;
-                let result = call(&client);
-                if matches!(result, Err(PanesError::Unreachable(_))) {
-                    self.forget(&client);
-                }
-                result
-            }
+        match self.once(&call) {
+            Err(PanesError::Unreachable(_)) => self.once(call),
             result => result,
         }
     }
@@ -137,7 +128,7 @@ impl HolderLink {
         let client = self.client()?;
         let result = call(&client);
         if matches!(result, Err(PanesError::Unreachable(_))) {
-            self.forget(&client);
+            self.drop_client(&client);
         }
         result
     }
@@ -210,7 +201,7 @@ impl Holder for HolderLink {
         let client = self.client()?;
         let (client, listing) = match client.list() {
             Err(PanesError::Unreachable(_)) => {
-                self.forget(&client);
+                self.drop_client(&client);
                 let client = self.client()?;
                 let listing = client.list();
                 (client, listing)
@@ -222,7 +213,7 @@ impl Holder for HolderLink {
             client.raw_input(num, bytes)
         });
         if matches!(result, Err(PanesError::Unreachable(_))) {
-            self.forget(&client);
+            self.drop_client(&client);
         }
         result
     }
@@ -479,8 +470,10 @@ pub(crate) mod fake {
             Ok(listing)
         }
 
+        /// With the PTY's size, as [`FakeHolder::list`] gives it.
         fn get(&self, pane: &PaneId) -> Result<Option<Pane>> {
-            self.panes.get(pane)
+            let listing = self.list()?;
+            Ok(listing.panes.into_iter().find(|p| &p.pane == pane))
         }
 
         fn screen(&self, pane: &PaneId, read: Read, format: Format) -> Result<Screen> {
