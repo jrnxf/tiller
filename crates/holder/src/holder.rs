@@ -157,8 +157,10 @@ pub struct Conn {
     sender: Arc<input::Sender>,
     /// This connection's subscriptions: each stream and its pane.
     streams: Mutex<Vec<(u32, Arc<PaneCell>)>>,
+    /// The panes this connection took a lease on, which its end visits.
+    leased: Mutex<Vec<Arc<PaneCell>>>,
     /// Its requests answered from a task of their own, not answered yet.
-    pub(crate) in_flight: AtomicUsize,
+    pub(crate) in_flight: Arc<AtomicUsize>,
 }
 
 impl Default for Conn {
@@ -168,7 +170,8 @@ impl Default for Conn {
             outbox: Outbox::default(),
             sender: Arc::default(),
             streams: Mutex::default(),
-            in_flight: AtomicUsize::new(0),
+            leased: Mutex::default(),
+            in_flight: Arc::default(),
         }
     }
 }
@@ -240,7 +243,10 @@ impl Conn {
     pub fn cut(&self) -> bool {
         let last = lock(&self.streams)
             .iter()
-            .filter_map(|(stream, _)| message_frame(&HolderMessage::Lagged { stream: *stream }))
+            .filter_map(|(stream, _)| {
+                message_frame(&HolderMessage::Lagged { stream: *stream })
+                    .map(|frame| (*stream, frame))
+            })
             .collect();
         let cut = self.outbox.cut(last);
         if cut {
@@ -715,17 +721,29 @@ pub struct Holder {
     /// on a blocking thread.
     screen_reads: Arc<tokio::sync::Semaphore>,
     /// The connections open now.
-    connections: AtomicUsize,
+    connections: Arc<AtomicUsize>,
 }
 
-/// A connection's place under [`Limits::connections`], given back when it
-/// drops.
+/// A place under a limit, such as [`Limits::connections`] or
+/// [`Limits::in_flight`], given back when it drops.
 #[derive(Debug)]
-pub struct ConnSlot(Arc<Holder>);
+pub struct Slot(Arc<AtomicUsize>);
 
-impl Drop for ConnSlot {
+impl Slot {
+    /// One more of `count`, or `None` when `limit` are taken.
+    pub fn take(count: &Arc<AtomicUsize>, limit: usize) -> Option<Self> {
+        count
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |open| {
+                (open < limit).then_some(open + 1)
+            })
+            .ok()
+            .map(|_| Self(count.clone()))
+    }
+}
+
+impl Drop for Slot {
     fn drop(&mut self) {
-        self.0.connections.fetch_sub(1, Ordering::SeqCst);
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -757,7 +775,7 @@ impl Holder {
             reap: Notify::new(),
             watchers: Arc::default(),
             screen_reads: Arc::new(tokio::sync::Semaphore::new(SCREEN_READS)),
-            connections: AtomicUsize::new(0),
+            connections: Arc::default(),
         })
     }
 
@@ -779,13 +797,8 @@ impl Holder {
 
     /// A place for one more connection, or `None` past
     /// [`Limits::connections`].
-    pub fn take_conn_slot(self: &Arc<Self>) -> Option<ConnSlot> {
-        self.connections
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |open| {
-                (open < self.limits.connections).then_some(open + 1)
-            })
-            .ok()
-            .map(|_| ConnSlot(self.clone()))
+    pub fn take_conn_slot(&self) -> Option<Slot> {
+        Slot::take(&self.connections, self.limits.connections)
     }
 
     fn panes(&self) -> Vec<Arc<PaneCell>> {
@@ -1253,6 +1266,7 @@ impl Holder {
         if !inner.running() {
             return Err(exited(pane));
         }
+        let before = inner.leases.clone();
         inner
             .leases
             .take(conn.id, lease, size)
@@ -1262,8 +1276,19 @@ impl Holder {
                     format!("pane {pane} holds {LEASES_PER_PANE} leases, its limit"),
                 )
             })?;
-        cell.apply_top(&mut inner)?;
-        Ok(inner.size())
+        // A size that could not be set leaves no lease the client thinks
+        // it lacks.
+        if let Err(err) = cell.apply_top(&mut inner) {
+            inner.leases = before;
+            return Err(err);
+        }
+        let size = inner.size();
+        drop(inner);
+        let mut leased = lock(&conn.leased);
+        if !leased.iter().any(|held| Arc::ptr_eq(held, &cell)) {
+            leased.push(cell);
+        }
+        Ok(size)
     }
 
     /// `release`: drops `conn`'s lease `lease`, and the next lease sets the
@@ -1489,7 +1514,7 @@ impl Holder {
             let mut inner = cell.inner();
             inner.subscribers.retain(|sub| sub.stream != stream);
         }
-        for cell in self.panes() {
+        for cell in std::mem::take(&mut *lock(&conn.leased)) {
             let mut inner = cell.inner();
             if inner.leases.drop_conn(conn.id)
                 && let Err((_, err)) = cell.apply_top(&mut inner)

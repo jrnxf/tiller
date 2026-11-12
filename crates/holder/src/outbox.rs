@@ -31,7 +31,7 @@ use tokio::time::Instant;
 /// The most reply and event bytes a connection's queue holds.
 pub const OUTBOX_CAP: usize = 4 * 1024 * 1024;
 
-/// The room past [`OUTBOX_CAP`] for a `busy` reply and a stream's `lagged`.
+/// The room past [`OUTBOX_CAP`] for a `busy` reply.
 pub const BUSY_ROOM: usize = 64 * 1024;
 
 /// The most live output bytes one subscription's queue holds.
@@ -67,15 +67,19 @@ enum Entry {
         bytes: Vec<u8>,
         part: Part,
     },
-    /// A new subscription's first frames go here.
-    Slot(u32),
+    /// A new subscription's first frames go here, and its `lagged` after
+    /// them when it fell behind before they came.
+    Slot {
+        stream: u32,
+        lagged: Option<Vec<u8>>,
+    },
 }
 
 impl Entry {
     fn of_stream(&self, stream: u32) -> bool {
         match self {
             Entry::Frame { part, .. } => *part == Part::Stream(stream),
-            Entry::Slot(own) => *own == stream,
+            Entry::Slot { stream: own, .. } => *own == stream,
         }
     }
 }
@@ -124,8 +128,19 @@ impl Queue {
     fn drop_output(&mut self, stream: u32, slot: bool) {
         self.entries.retain(|entry| match entry {
             Entry::Frame { .. } => !entry.of_stream(stream),
-            Entry::Slot(_) => !slot || !entry.of_stream(stream),
+            Entry::Slot { .. } => !slot || !entry.of_stream(stream),
         });
+    }
+
+    /// The `lagged` of `stream`'s place not filled yet, if it has one.
+    fn slot(&mut self, stream: u32) -> Option<&mut Option<Vec<u8>>> {
+        self.entries.iter_mut().find_map(|entry| match entry {
+            Entry::Slot {
+                stream: own,
+                lagged,
+            } if *own == stream => Some(lagged),
+            _ => None,
+        })
     }
 }
 
@@ -210,7 +225,10 @@ impl Outbox {
             return Err(Refused::Gone);
         }
         queue.streams.insert(stream, 0);
-        queue.entries.push_back(Entry::Slot(stream));
+        queue.entries.push_back(Entry::Slot {
+            stream,
+            lagged: None,
+        });
         Ok(())
     }
 
@@ -223,7 +241,7 @@ impl Outbox {
         let Some(at) = queue
             .entries
             .iter()
-            .position(|entry| matches!(entry, Entry::Slot(own) if *own == stream))
+            .position(|entry| matches!(entry, Entry::Slot { stream: own, .. } if *own == stream))
         else {
             return Err(Refused::Gone);
         };
@@ -232,7 +250,11 @@ impl Outbox {
             return Err(Refused::Full);
         }
         queue.repaint += len;
-        queue.entries.remove(at);
+        let lagged = match queue.entries.remove(at) {
+            Some(Entry::Slot { lagged, .. }) => lagged,
+            _ => None,
+        };
+        let count = frames.len();
         for (offset, bytes) in frames.into_iter().enumerate() {
             queue.entries.insert(
                 at + offset,
@@ -242,23 +264,36 @@ impl Outbox {
                 },
             );
         }
+        if let Some(bytes) = lagged {
+            queue.control += bytes.len();
+            queue.entries.insert(
+                at + count,
+                Entry::Frame {
+                    bytes,
+                    part: Part::Control,
+                },
+            );
+        }
         drop(queue);
         self.wake.notify_one();
         Ok(())
     }
 
     /// Ends `stream` because it fell behind: its queued live output is
-    /// dropped, `last` (its `lagged`) is queued with [`BUSY_ROOM`] past the
-    /// cap, and it takes no more. A place not filled yet is kept, so its
-    /// reply still comes first. False when the stream had ended already.
+    /// dropped, `last` (its `lagged`) is queued past every cap, as a stream
+    /// has one, and it takes no more. A place not filled yet is kept, and
+    /// `last` waits on it, so the reply still comes first and a failed
+    /// subscription sends no `lagged`. False when the stream had ended
+    /// already.
     pub fn lag(&self, stream: u32, last: Vec<u8>) -> bool {
         let mut queue = self.queue();
         if queue.closed || queue.streams.remove(&stream).is_none() {
             return false;
         }
         queue.drop_output(stream, false);
-        if queue.control + last.len() <= OUTBOX_CAP + BUSY_ROOM {
-            queue.push(last, Part::Control);
+        match queue.slot(stream) {
+            Some(lagged) => *lagged = Some(last),
+            None => queue.push(last, Part::Control),
         }
         drop(queue);
         self.wake.notify_one();
@@ -280,19 +315,28 @@ impl Outbox {
         self.wake.notify_one();
     }
 
-    /// Drops every queued frame, queues `last` instead, and takes no more.
-    /// The writer sends `last` within [`CUT_GRACE`] and ends. False when the
-    /// outbox was closed already.
-    pub fn cut(&self, last: Vec<Vec<u8>>) -> bool {
+    /// Drops every queued frame, queues the `lagged` of each stream in
+    /// `last` instead, and takes no more. A stream whose place is not
+    /// filled yet, or that has ended, gets none: the client does not know
+    /// it. The writer sends the rest within [`CUT_GRACE`] and ends. False
+    /// when the outbox was closed already.
+    pub fn cut(&self, last: Vec<(u32, Vec<u8>)>) -> bool {
         let mut queue = self.queue();
         if queue.closed {
             return false;
         }
+        let known: Vec<Vec<u8>> = last
+            .into_iter()
+            .filter(|(stream, _)| {
+                queue.streams.contains_key(stream) && queue.slot(*stream).is_none()
+            })
+            .map(|(_, frame)| frame)
+            .collect();
         *queue = Queue {
             closed: true,
             ..Queue::default()
         };
-        for frame in last {
+        for frame in known {
             queue.push(frame, Part::Control);
         }
         drop(queue);
@@ -323,7 +367,7 @@ impl Outbox {
                         }
                     }
                     // Its frames are on their way.
-                    Some(Entry::Slot(_)) => {}
+                    Some(Entry::Slot { .. }) => {}
                     None if queue.closed => return None,
                     None => {}
                 }
@@ -389,7 +433,11 @@ mod tests {
         assert_eq!(outbox.push_over(vec![0; BUSY_ROOM]), Err(Refused::Full));
         assert_eq!(outbox.queued(), OUTBOX_CAP + 100);
         assert!(outbox.cut_at().is_none());
-        assert!(outbox.cut(vec![b"lagged".to_vec()]));
+        outbox.reserve(1).unwrap();
+        outbox.fill(1, Vec::new()).unwrap();
+        // A stream whose reply has not gone out gets no `lagged`.
+        outbox.reserve(2).unwrap();
+        assert!(outbox.cut(vec![(1, b"lagged".to_vec()), (2, b"unknown".to_vec())]));
         assert!(outbox.cut_at().is_some());
         assert_eq!(outbox.push(b"x".to_vec()), Err(Refused::Gone));
         assert_eq!(outbox.next().await.unwrap(), b"lagged");
@@ -471,10 +519,32 @@ mod tests {
         outbox.reserve(3).unwrap();
         outbox.push_stream(3, vec![3; 10]).unwrap();
         assert!(outbox.lag(3, b"lagged".to_vec()));
+        outbox.push(b"after".to_vec()).unwrap();
         outbox.fill(3, vec![b"subscribed".to_vec()]).unwrap();
         assert_eq!(outbox.next().await.unwrap(), b"subscribed");
         assert_eq!(outbox.next().await.unwrap(), b"lagged");
+        assert_eq!(outbox.next().await.unwrap(), b"after");
         assert_eq!(outbox.queued(), 0);
+        // A subscription that fails drops its `lagged` with its place.
+        outbox.reserve(4).unwrap();
+        assert!(outbox.lag(4, b"lost".to_vec()));
+        outbox.drop_stream(4);
+        outbox.push(b"busy".to_vec()).unwrap();
+        assert_eq!(outbox.next().await.unwrap(), b"busy");
+        assert_eq!(outbox.queued(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_lagged_is_queued_past_every_cap() {
+        let outbox = Outbox::new();
+        outbox.reserve(5).unwrap();
+        outbox.fill(5, Vec::new()).unwrap();
+        outbox.push(vec![0; OUTBOX_CAP]).unwrap();
+        outbox.push_over(vec![0; BUSY_ROOM]).unwrap();
+        assert!(outbox.lag(5, b"lagged".to_vec()));
+        assert_eq!(outbox.next().await.unwrap().len(), OUTBOX_CAP);
+        assert_eq!(outbox.next().await.unwrap().len(), BUSY_ROOM);
+        assert_eq!(outbox.next().await.unwrap(), b"lagged");
     }
 
     #[tokio::test]

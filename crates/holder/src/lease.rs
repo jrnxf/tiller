@@ -20,7 +20,7 @@ pub struct Lease {
 }
 
 /// A pane's leases, the top one last.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Leases(Vec<Lease>);
 
 /// The pane holds [`LEASES_PER_PANE`] leases already.

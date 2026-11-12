@@ -6,7 +6,6 @@ use std::io;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use tiller_panes::frame::{Decoder, Frame, FrameError};
@@ -19,7 +18,7 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 
-use crate::holder::{Conn, ConnSlot, Holder, message_frame, ok};
+use crate::holder::{Conn, Holder, Slot, message_frame, ok};
 use crate::lock::{Acquired, HolderLock, lock_path};
 use crate::outbox::{self, OUTBOX_CAP};
 use crate::peer::{self, PeerCred};
@@ -180,7 +179,7 @@ fn admit(holder: &Arc<Holder>, stream: UnixStream, own: u32) {
 }
 
 /// One connection, from `hello` to its end.
-async fn connection(holder: Arc<Holder>, stream: UnixStream, _slot: ConnSlot) {
+async fn connection(holder: Arc<Holder>, stream: UnixStream, _slot: Slot) {
     let (read, write) = stream.into_split();
     let conn = Arc::new(Conn::default());
     let writer = write_loop(conn.clone(), write);
@@ -490,7 +489,7 @@ fn answer_later(
     id: u64,
     reply: impl Future<Output = Result<HolderMessage, (ErrorCode, String)>> + Send + 'static,
 ) {
-    let Some(turn) = InFlight::take(conn, limit) else {
+    let Some(turn) = Slot::take(&conn.in_flight, limit) else {
         return reply_error(
             conn,
             Some(id),
@@ -498,30 +497,13 @@ fn answer_later(
             format!("{limit} requests of this connection are in flight, its limit"),
         );
     };
+    let conn = conn.clone();
     tokio::spawn(async move {
         let reply = reply.await;
-        send_reply(&turn.0, Some(id), reply);
+        send_reply(&conn, Some(id), reply);
+        // The request counts until its answer is queued.
+        drop(turn);
     });
-}
-
-/// A request in flight on its connection, counted until it is answered.
-struct InFlight(Arc<Conn>);
-
-impl InFlight {
-    fn take(conn: &Arc<Conn>, limit: usize) -> Option<Self> {
-        conn.in_flight
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |open| {
-                (open < limit).then_some(open + 1)
-            })
-            .ok()
-            .map(|_| Self(conn.clone()))
-    }
-}
-
-impl Drop for InFlight {
-    fn drop(&mut self) {
-        self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
-    }
 }
 
 /// The bare `ok` with the pane's size after the request.
