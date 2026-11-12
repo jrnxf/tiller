@@ -587,7 +587,7 @@ the orchestrator - 30 min - after S1b and S1c
 ### H09 to H14 The port (`holder-port`, in series)
 6 h, 6 h, 5 h, 4 h, 3 h and 6 h - H09 after S1c, H05 and H06; each next one after the one before (H11 also after H07, H13 also after H08)
 
-- [ ] H09 Agents and delivery on `Panes`, from S1c's wiring; the restart tests of 9.2
+- [x] H09 Agents and delivery on `Panes`, from S1c's wiring; the restart tests of 9.2
 - [ ] H10 Reconcile, observe and state: R18, R21, R22, the 11.1 migration
 - [ ] H11 Daemon API and peers: live view, Fit as a lease, Open in terminal, the peer pane link
 - [ ] H12 Board copy and `terminal-open.ts`, screenshots in both themes at 1440 px and 390 px
