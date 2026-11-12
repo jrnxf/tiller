@@ -100,7 +100,10 @@ export type Scenario =
   | "dialog"
   // A memory document a launch goes on without, and a Keep over the startup
   // budget (memory.md sections 6 and 9).
-  | "memory-limits";
+  | "memory-limits"
+  // The default board with every local agent in the terminal holder: their
+  // pane ids are the holder's (terminal-holder.md 2.4).
+  | "holder";
 
 // The scenarios with paired peers. `stale-sessions` has them so a peer's older
 // sessions show on this host's board.
@@ -136,6 +139,7 @@ export const SCENARIOS: readonly Scenario[] = [
   "merge-exposed",
   "dialog",
   "memory-limits",
+  "holder",
 ];
 
 const WEEKLY_FLOOR_PERCENT = 3;
@@ -1197,10 +1201,25 @@ function agentsFor(
     });
   return {
     orchestrators: [
-      ...localOrchestrators,
+      ...(scenario === "holder" ? localOrchestrators.map(inHolder) : localOrchestrators),
       ...peerAgents(now, board.rows, peerProjectRows, staleTiller ? staleOf : undefined),
     ],
     tiller_version: FIXTURE_TILLER_VERSION,
+  };
+}
+
+// A holder pane id for a session: `p` and a ULID, made from the session id.
+function holderPaneOf(session: string): string {
+  const crockford = session.toUpperCase().replace(/[^0-9A-HJKMNP-TV-Z]/g, "");
+  return `p01JPANE${crockford.slice(-19).padStart(19, "0")}`;
+}
+
+// An agent and its workers with their panes in the terminal holder.
+function inHolder(agent: AgentRow): AgentRow {
+  return {
+    ...agent,
+    pane_id: holderPaneOf(agent.session_id),
+    workers: agent.workers.map(inHolder),
   };
 }
 

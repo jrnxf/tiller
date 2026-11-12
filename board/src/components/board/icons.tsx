@@ -88,6 +88,34 @@ export const FitIcon = () => (
   </Glyph>
 );
 
+// Full screen: a screen with its corners pushed out, and in again to leave.
+export const FullScreenIcon = () => (
+  <Glyph>
+    <rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1.5" {...stroke} />
+    <path d="M4.6 7.4V5.6h1.8M11.4 8.6v1.8H9.6" {...stroke} {...round} />
+  </Glyph>
+);
+
+export const LeaveFullScreenIcon = () => (
+  <Glyph>
+    <rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1.5" {...stroke} />
+    <path d="M6.4 5.6v1.8H4.6M9.6 10.4V8.6h1.8" {...stroke} {...round} />
+  </Glyph>
+);
+
+// The terminal's font size, a step down or up: a letter A with a minus or a plus.
+export const FontSmallerIcon = () => (
+  <Glyph>
+    <path d="M1.8 12.5 5.2 4l3.4 8.5M3 9.6h4.4M10.6 8.2h3.8" {...stroke} {...round} />
+  </Glyph>
+);
+
+export const FontLargerIcon = () => (
+  <Glyph>
+    <path d="M1.8 12.5 5.2 4l3.4 8.5M3 9.6h4.4M10.6 8.2h3.8M12.5 6.3v3.8" {...stroke} {...round} />
+  </Glyph>
+);
+
 // The scrollback: a clock turned back.
 export const HistoryIcon = () => (
   <Glyph>

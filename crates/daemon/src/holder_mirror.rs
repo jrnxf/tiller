@@ -10,21 +10,28 @@
 //! exit is `closed`, with how it ended, and a holder that stops answering
 //! is `unavailable`, after which the board opens the view again.
 //!
-//! Fit waits for its own slice (H11, a Fit as a lease): a view asked for
-//! one says `unfit` and goes on at the pane's own size, as it does when
-//! herdr refuses a Fit.
+//! A view asked for a Fit sets the pane to the board's size, follows the
+//! board's refits, and gives the pane back the size it had before the Fit
+//! when the view ends. It is single-viewer: one Fit holds a pane at a
+//! time, and a second view that asks for one says `unfit` and goes on at
+//! the pane's size. Each daemon resize reopens every view on the pane, as
+//! the holder tells no other subscription. H11 makes the Fit a size lease
+//! on the view's own subscription (`terminal-holder.md` 2.6), shared by
+//! many viewers and dropped by the holder when the daemon dies; until
+//! then, a daemon that dies mid-Fit leaves the pane at the board's size.
 
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::{Body, Bytes};
 use base64::Engine as _;
 use tiller_panes::{PaneId, PanesError, Update};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{OwnedMutexGuard, mpsc, watch};
 
 use crate::dto::TerminalLine;
 use crate::holder::{Holder, Live, LiveControl, exit_reason};
-use crate::mirror::{Viewer, queue, stopping, unavailable};
+use crate::mirror::{Fits, Viewer, queue, stopping, unavailable};
 
 /// Updates a subscription's thread can hand on before it waits for the
 /// view to take them.
@@ -33,6 +40,9 @@ const UPDATES: usize = 64;
 /// The most output bytes one frame gathers from a burst, so a fast writer
 /// cannot make one frame without end or keep the view from its stop.
 const BURST: usize = 64 * 1024;
+
+/// How long the daemon waits for the holder to take a Fit's size.
+const RESIZE_WAIT: Duration = Duration::from_secs(5);
 
 /// A subscription read on a thread of its own, since its `recv` blocks.
 struct Pumped {
@@ -78,19 +88,20 @@ async fn open(holder: &Arc<dyn Holder>, pane: &PaneId) -> Result<Pumped, String>
     .map_err(|error| error.to_string())?
 }
 
-/// The NDJSON body that streams the holder's `pane` to one viewer. A view
-/// the board `fitted` says `unfit` first.
+/// The NDJSON body that streams the holder's `pane` to one viewer, with
+/// the pane at the board's size `fit` while the view is open.
 pub fn stream(
     holder: Arc<dyn Holder>,
     pane: PaneId,
-    fitted: bool,
+    fit: Option<(u16, u16)>,
+    fits: Arc<Fits>,
     stop: watch::Receiver<bool>,
     viewer: Viewer,
 ) -> Body {
     let (tx, mut rx) = mpsc::channel::<Bytes>(crate::mirror::QUEUE);
     tokio::spawn(async move {
         let _viewer = viewer;
-        mirror(&holder, &pane, fitted, stop, &tx).await;
+        mirror(&holder, &pane, fit, &fits, stop, &tx).await;
     });
     let lines = futures_util::stream::poll_fn(move |cx| {
         rx.poll_recv(cx).map(|line| line.map(Ok::<_, Infallible>))
@@ -124,43 +135,235 @@ fn frame(seq: &mut u64, full: bool, bytes: &[u8]) -> TerminalLine {
     }
 }
 
-/// What a Fit on a holder pane gets until H11.
-const UNFIT: &str = "Fit is not ready yet for an agent in the terminal holder; the view shows the pane at its own size";
+/// What a second view that asks for a Fit on the same pane gets.
+const BUSY: &str = "another view holds a Fit on this pane, or is still giving it back";
 
-/// Streams `pane` to `tx` until the browser leaves, the child exits, the
-/// holder stops answering or the daemon stops.
+/// A Fit's hold on the pane, one at a time per pane until H11.
+struct Fit {
+    _turn: OwnedMutexGuard<()>,
+    /// The board's size, as it refits.
+    board: watch::Receiver<(u16, u16)>,
+    /// The size to give the pane back: its size before the Fit, from the
+    /// first repaint, or the size another client set since.
+    back: Option<(u16, u16)>,
+    /// The size this Fit last set.
+    set: Option<(u16, u16)>,
+}
+
+/// The pane's size in the holder now, read off the async threads, since
+/// the holder tells the view of no other client's resize. None when the
+/// holder does not answer in time or no longer lists the pane.
+async fn size_now(holder: &Arc<dyn Holder>, pane: &PaneId) -> Option<(u16, u16)> {
+    let (lister, asked) = (Arc::clone(holder), pane.clone());
+    let task = tokio::task::spawn_blocking(move || {
+        let listing = lister.list().ok()?;
+        let found = listing.panes.into_iter().find(|p| p.pane == asked)?;
+        Some((found.cols, found.rows))
+    });
+    tokio::time::timeout(RESIZE_WAIT, task).await.ok()?.ok()?
+}
+
+/// Sets the pane to `size` off the async threads, and tells every view on
+/// the pane to open again.
+async fn set_size(
+    holder: &Arc<dyn Holder>,
+    fits: &Fits,
+    pane: &PaneId,
+    size: (u16, u16),
+) -> Result<(), String> {
+    let (sizer, asked) = (Arc::clone(holder), pane.clone());
+    let task = tokio::task::spawn_blocking(move || {
+        sizer
+            .set_size(&asked, size.0, size.1)
+            .map_err(|error| error.to_string())
+    });
+    let result = match tokio::time::timeout(RESIZE_WAIT, task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err("the terminal holder did not take the Fit's size in time".to_owned()),
+    };
+    if result.is_ok() {
+        fits.resized(pane.as_str());
+    }
+    result
+}
+
+/// Gives the pane back the size it had before the Fit, or the size another
+/// client set since, if the pane is still at the size this Fit last set. A
+/// pane another client sized since keeps that size. A Fit that never set a
+/// size, a pane that has exited, or a holder that is gone, has nothing to
+/// give back.
+async fn give_back(holder: &Arc<dyn Holder>, fits: &Fits, pane: &PaneId, fit: Fit) {
+    let (Some(back), Some(set)) = (fit.back, fit.set) else {
+        return;
+    };
+    if back == set || size_now(holder, pane).await != Some(set) {
+        return;
+    }
+    match set_size(holder, fits, pane, back).await {
+        Ok(()) => {
+            tracing::info!(pane = %pane, cols = back.0, rows = back.1, "gave a holder pane back its size after a Fit")
+        }
+        Err(error) => {
+            tracing::info!(pane = %pane, %error, "could not give a holder pane back its size after a Fit")
+        }
+    }
+}
+
+/// The board's next size for the Fit; never for a view without one.
+async fn refitted(fit: &mut Option<Fit>) -> (u16, u16) {
+    if let Some(fit) = fit
+        && fit.board.changed().await.is_ok()
+    {
+        return *fit.board.borrow_and_update();
+    }
+    std::future::pending().await
+}
+
+/// The next count of the daemon's resizes of the pane; never once nothing
+/// can resize it.
+async fn resized(sized: &mut watch::Receiver<u64>) {
+    if sized.changed().await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Streams `pane` to `tx` with the board's Fit, if it asked for one, and
+/// gives the pane back its size when the view ends.
 async fn mirror(
     holder: &Arc<dyn Holder>,
     pane: &PaneId,
-    fitted: bool,
+    fit: Option<(u16, u16)>,
+    fits: &Arc<Fits>,
+    stop: watch::Receiver<bool>,
+    tx: &mpsc::Sender<Bytes>,
+) {
+    let mut held = None;
+    if let Some(size) = fit {
+        match fits.turn(pane.as_str()).await {
+            Some(turn) => {
+                held = Some(Fit {
+                    _turn: turn,
+                    board: fits.board(pane.as_str(), size),
+                    back: None,
+                    set: None,
+                });
+            }
+            None => {
+                if !queue(
+                    tx,
+                    &TerminalLine::Unfit {
+                        message: BUSY.to_owned(),
+                    },
+                ) {
+                    return;
+                }
+            }
+        }
+    }
+    view(holder, pane, &mut held, fits, stop, tx).await;
+    if let Some(fit) = held {
+        give_back(holder, fits, pane, fit).await;
+    }
+}
+
+/// What woke a view.
+enum Woke {
+    Update(Option<std::result::Result<Option<Update>, PanesError>>),
+    /// The board asked the Fit for a new size.
+    Refit((u16, u16)),
+    /// The daemon resized the pane: the view opens again at its new size.
+    Resized,
+}
+
+/// Sets the Fit's size, or ends the Fit with an `unfit` line when the
+/// holder would not take it. A size another client set since the Fit last
+/// set one is the size to give back. False when the browser left.
+async fn fit_to(
+    holder: &Arc<dyn Holder>,
+    fits: &Fits,
+    pane: &PaneId,
+    held: &mut Option<Fit>,
+    size: (u16, u16),
+    tx: &mpsc::Sender<Bytes>,
+) -> bool {
+    if let Some(fit) = held.as_mut()
+        && let Some(set) = fit.set
+        && let Some(now) = size_now(holder, pane).await
+        && now != set
+    {
+        fit.back = Some(now);
+    }
+    match set_size(holder, fits, pane, size).await {
+        Ok(()) => {
+            if let Some(fit) = held.as_mut() {
+                fit.set = Some(size);
+            }
+            true
+        }
+        Err(error) => {
+            if let Some(fit) = held.take() {
+                give_back(holder, fits, pane, fit).await;
+            }
+            queue(
+                tx,
+                &TerminalLine::Unfit {
+                    message: format!(
+                        "the terminal holder would not fit the pane ({error}); the view shows the pane at its own size"
+                    ),
+                },
+            )
+        }
+    }
+}
+
+/// Streams `pane` to `tx` until the browser leaves, the child exits, the
+/// holder stops answering or the daemon stops.
+async fn view(
+    holder: &Arc<dyn Holder>,
+    pane: &PaneId,
+    held: &mut Option<Fit>,
+    fits: &Fits,
     mut stop: watch::Receiver<bool>,
     tx: &mpsc::Sender<Bytes>,
 ) {
-    if fitted
-        && !queue(
-            tx,
-            &TerminalLine::Unfit {
-                message: UNFIT.to_owned(),
-            },
-        )
-    {
-        return;
-    }
+    let mut sized = fits.sized(pane.as_str());
     let mut seq = 0;
     'views: loop {
+        sized.borrow_and_update();
         let mut view = match open(holder, pane).await {
             Ok(view) => view,
             Err(error) => return unavailable(tx, &error),
         };
         // An update read while gathering a burst, for the next turn.
-        let mut held = None;
+        let mut later = None;
         loop {
-            let update = match held.take() {
+            let update = match later.take() {
                 Some(update) => Some(update),
-                None => tokio::select! {
-                    update = view.updates.recv() => update,
+                None => match tokio::select! {
+                    update = view.updates.recv() => Woke::Update(update),
+                    size = refitted(held) => Woke::Refit(size),
+                    () = resized(&mut sized) => Woke::Resized,
                     () = stopping(&mut stop) => return,
                     () = tx.closed() => return,
+                } {
+                    Woke::Update(update) => update,
+                    Woke::Refit(size) => {
+                        // Before the first repaint the size to give back is
+                        // not known yet: the repaint fits to the board's
+                        // newest size.
+                        if held
+                            .as_ref()
+                            .is_none_or(|fit| fit.back.is_none() || fit.set == Some(size))
+                        {
+                            continue;
+                        }
+                        if !fit_to(holder, fits, pane, held, size, tx).await {
+                            return;
+                        }
+                        continue 'views;
+                    }
+                    Woke::Resized => continue 'views,
                 },
             };
             // A burst of output already waiting goes as one frame, so a
@@ -173,7 +376,7 @@ async fn mirror(
                         match next {
                             Ok(Some(Update::Output(more))) => bytes.extend_from_slice(&more),
                             other => {
-                                held = Some(other);
+                                later = Some(other);
                                 break;
                             }
                         }
@@ -182,6 +385,27 @@ async fn mirror(
                 }
                 other => other,
             };
+            // The first repaint of a Fit is the size to give back. A Fit
+            // sets its size once: a pane another client sized since shows
+            // at that size, and that size is the one to give back.
+            if let Some(Ok(Some(Update::Repaint { cols, rows, .. }))) = &update
+                && let Some(fit) = held.as_mut()
+            {
+                let own = (*cols, *rows);
+                match fit.set {
+                    Some(set) if set != own => fit.back = Some(own),
+                    _ => {
+                        fit.back.get_or_insert(own);
+                    }
+                }
+                let board = *fit.board.borrow_and_update();
+                if own != board && fit.set != Some(board) {
+                    if !fit_to(holder, fits, pane, held, board, tx).await {
+                        return;
+                    }
+                    continue 'views;
+                }
+            }
             let line = match update {
                 Some(Ok(Some(Update::Repaint { cols, rows, bytes }))) => {
                     if !deliver(tx, &mut stop, &TerminalLine::Size { cols, rows }).await {

@@ -10,6 +10,9 @@
 // Herdr can refuse, and then the stream says so and goes on unfitted. A new
 // size for an open Fit goes in place, so the pane never drops back between
 // two sizes; the stream answers it with a `size` line and a full screen.
+// On a holder pane the daemon resizes the pane for the Fit, one view at a
+// time, and gives it back its size when the stream ends; a second Fit on the
+// pane, or a resize the holder refuses, is `unfit` the same way.
 
 export const terminalPath = (sessionId: string) => `/api/v1/agents/${sessionId}/terminal`;
 const terminalInputPath = (sessionId: string) => `${terminalPath(sessionId)}/input`;

@@ -26,6 +26,11 @@ pub trait Holder: Panes {
     fn subscribe(&self, pane: &PaneId) -> Result<Box<dyn Live>>;
     /// Writes `bytes` to the pane as they are.
     fn input(&self, pane: &PaneId, bytes: &[u8]) -> Result<()>;
+    /// Sets the pane's PTY to `cols` by `rows`, and returns once the holder
+    /// took it. Only the board's Fit resizes a pane (`holder_mirror`). The
+    /// holder reports a resize only to the subscription that asked for it,
+    /// so the views open on the pane learn of it from the daemon.
+    fn set_size(&self, pane: &PaneId, cols: u16, rows: u16) -> Result<()>;
 }
 
 /// One subscription to a pane's output. [`Live::recv`] blocks.
@@ -36,8 +41,7 @@ pub trait Live: Send {
     fn control(&self) -> Arc<dyn LiveControl>;
 }
 
-/// Ends a [`Live`] while another thread waits in its `recv`. The view never
-/// resizes the pane until Fit has its own slice (H11).
+/// Ends a [`Live`] while another thread waits in its `recv`.
 pub trait LiveControl: Send + Sync {
     /// Ends the subscription: a `recv` waiting now returns `None`.
     fn end(&self);
@@ -168,6 +172,28 @@ impl Holder for HolderLink {
         }
         result
     }
+
+    /// Through a subscription of its own, which ends once the holder took
+    /// the size: the slice's holder keeps no leases, so the size stays
+    /// when it ends (H11 makes the Fit a lease on the view's own
+    /// subscription). Only the subscribe is tried twice; a resize the
+    /// holder does not answer fails the Fit.
+    fn set_size(&self, pane: &PaneId, cols: u16, rows: u16) -> Result<()> {
+        let mut sizer = self.twice(|client| client.subscribe(pane, Subscribe::default()))?;
+        sizer.resize(cols, rows)?;
+        loop {
+            match sizer.recv()? {
+                Some(Update::Resized { .. }) => return Ok(()),
+                Some(Update::Exited(_)) => return Err(PanesError::Exited(pane.to_string())),
+                Some(Update::Lagged) | None => {
+                    return Err(PanesError::Unreachable(format!(
+                        "the terminal holder ended the subscription before it resized pane {pane}"
+                    )));
+                }
+                Some(Update::Repaint { .. } | Update::Output(_)) => {}
+            }
+        }
+    }
 }
 
 /// After a start: reads which live sessions `state.db` puts in the
@@ -288,6 +314,10 @@ pub(crate) mod fake {
         inputs: Vec<(PaneId, Vec<u8>)>,
         /// The size each resized pane has now.
         sizes: HashMap<PaneId, (u16, u16)>,
+        /// Each size the daemon set, with its pane, in order.
+        set: Vec<(PaneId, (u16, u16))>,
+        /// Whether a size the daemon sets is refused.
+        refuse_sizes: bool,
     }
 
     #[derive(Clone, Default)]
@@ -336,13 +366,37 @@ pub(crate) mod fake {
             self.screens().inputs.clone()
         }
 
-        /// Another client resizes the pane's PTY; each subscription sees it.
+        /// Another client resizes the pane's PTY; each subscription sees it,
+        /// as it will once `watch` events land.
         pub(crate) fn resize(&self, pane: &PaneId, cols: u16, rows: u16) {
             let mut screens = self.screens();
             screens.sizes.insert(pane.clone(), (cols, rows));
             if let Some(live) = screens.live.get_mut(pane) {
                 live.retain(|(_, tx)| tx.send(Update::Resized { cols, rows }).is_ok());
             }
+        }
+
+        /// Another client resizes the pane's PTY, and no subscription hears
+        /// of it, as with the slice's holder.
+        pub(crate) fn resize_unseen(&self, pane: &PaneId, cols: u16, rows: u16) {
+            self.screens().sizes.insert(pane.clone(), (cols, rows));
+        }
+
+        /// Each size the daemon set, with its pane, in order.
+        pub(crate) fn sizes_set(&self) -> Vec<(PaneId, (u16, u16))> {
+            self.screens().set.clone()
+        }
+
+        /// Refuses each size the daemon sets from now on, or stops refusing.
+        pub(crate) fn refuse_sizes(&self, refuse: bool) {
+            self.screens().refuse_sizes = refuse;
+        }
+
+        /// The pane's PTY size now.
+        pub(crate) fn size(&self, pane: &PaneId) -> Option<(u16, u16)> {
+            let listing = self.list().ok()?;
+            let found = listing.panes.into_iter().find(|p| &p.pane == pane)?;
+            Some((found.cols, found.rows))
         }
 
         /// How many subscriptions to the pane are open.
@@ -356,23 +410,27 @@ pub(crate) mod fake {
             self.panes.spawn(req)
         }
 
+        /// As the holder's listing does, each pane has its PTY's size.
         fn list(&self) -> Result<Listing> {
-            self.panes.list()
+            let mut listing = self.panes.list()?;
+            let screens = self.screens();
+            for pane in &mut listing.panes {
+                if let Some((cols, rows)) = screens.sizes.get(&pane.pane) {
+                    (pane.cols, pane.rows) = (*cols, *rows);
+                }
+            }
+            Ok(listing)
         }
     }
 
     impl Holder for FakeHolder {
         fn subscribe(&self, pane: &PaneId) -> Result<Box<dyn Live>> {
-            let listing = self.panes.list()?;
+            let listing = self.list()?;
             let found = running(&listing, pane)?;
+            let (cols, rows) = (found.cols, found.rows);
             let (tx, rx) = channel();
             let mut screens = self.screens();
             let bytes = screens.written.get(pane).cloned().unwrap_or_default();
-            let (cols, rows) = screens
-                .sizes
-                .get(pane)
-                .copied()
-                .unwrap_or((found.cols, found.rows));
             let _ = tx.send(Update::Repaint { cols, rows, bytes });
             let id = screens.next;
             screens.next += 1;
@@ -391,6 +449,22 @@ pub(crate) mod fake {
             let listing = self.panes.list()?;
             running(&listing, pane)?;
             self.screens().inputs.push((pane.clone(), bytes.to_vec()));
+            Ok(())
+        }
+
+        /// As the slice's holder does, the size reaches no other
+        /// subscription.
+        fn set_size(&self, pane: &PaneId, cols: u16, rows: u16) -> Result<()> {
+            let listing = self.panes.list()?;
+            running(&listing, pane)?;
+            let mut screens = self.screens();
+            if screens.refuse_sizes {
+                return Err(tiller_panes::PanesError::Unreachable(
+                    "the holder refused the size".to_owned(),
+                ));
+            }
+            screens.sizes.insert(pane.clone(), (cols, rows));
+            screens.set.push((pane.clone(), (cols, rows)));
             Ok(())
         }
     }

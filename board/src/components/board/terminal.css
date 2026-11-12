@@ -307,12 +307,28 @@
   min-height: 44px;
   margin: 0;
   padding: 8px 10px 8px 14px;
+  container-type: inline-size;
 }
 
+/* A block, not a flex row, so a long line ends in an ellipsis. */
 .mir.stage .mir-f .tx {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.mir.stage .mir-f .tx > svg {
+  display: inline-block;
+  margin-right: 7px;
+  vertical-align: -3px;
+}
+
+/* A narrow stage keeps its hint and controls, and drops the pane's size. */
+@container (max-width: 640px) {
+  .mir.stage .mir-sz {
+    display: none;
+  }
 }
 
 .mir-fr {
@@ -325,6 +341,41 @@
 
 .mir-f .mir-fr .btn {
   margin-left: 0;
+}
+
+/* The stage's font size: smaller, the size (back to the default), larger. */
+.mir-font {
+  display: inline-flex;
+  align-items: center;
+}
+
+.mir-font .ib[disabled] {
+  opacity: 0.4;
+  cursor: default;
+  background: transparent;
+  color: var(--fg-3);
+}
+
+.mir-fsz {
+  min-width: 26px;
+  height: 28px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: var(--r6);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: var(--fs-mini);
+  font-weight: var(--w-medium);
+  font-variant-numeric: tabular-nums;
+}
+
+.mir-fsz:hover {
+  background: var(--bg-hover);
+  color: var(--fg-1);
+}
+
+.mir-f .ib[aria-pressed="true"] {
+  color: var(--accent);
 }
 
 .mir-sw {
