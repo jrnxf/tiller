@@ -10,23 +10,24 @@ publish = false
 
 [features]
 # The fake herdr server and the test fleet, for other crates' tests.
-testing = ["dep:tempfile", "rustix/pty"]
+testing = ["dep:tempfile", "tiller-panes/testing"]
 
 [dependencies]
 rusqlite.workspace = true
-rustix = { workspace = true, features = ["process"] }
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-signal-hook.workspace = true
 tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
 tiller-core.workspace = true
+tiller-panes.workspace = true
+tiller-poll.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
-rustix = { workspace = true, features = ["pty"] }
+tiller-panes = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true

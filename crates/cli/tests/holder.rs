@@ -17,7 +17,7 @@ use common::{Running, World};
 use tiller_panes::frame::{Frame, read_frame, write_frame};
 use tiller_panes::message::ErrorCode;
 use tiller_panes::{
-    Exit, HolderClient, Meta, Pane, PaneState, Panes, PanesError, Size, Spawn, StreamHandle,
+    Exit, HolderClient, Live, Meta, Pane, PaneState, Panes, PanesError, Size, Spawn, StreamHandle,
     Subscribe, Update, socket_path,
 };
 

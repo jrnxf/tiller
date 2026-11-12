@@ -9,19 +9,27 @@ repository.workspace = true
 publish = false
 
 [features]
-# The in-memory `FakePanes`, for other crates' tests.
-testing = []
+# The in-memory `FakePanes` and the test fleet, for other crates' tests.
+testing = ["dep:tempfile", "dep:tiller-core", "rustix/pty"]
 
 [dependencies]
 jiff.workspace = true
+rustix = { workspace = true, features = ["event", "net", "process"] }
 serde.workspace = true
 serde_json.workspace = true
+signal-hook.workspace = true
+tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
+tiller-core = { workspace = true, optional = true }
+tokio.workspace = true
+tracing.workspace = true
 ulid.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+rustix = { workspace = true, features = ["pty"] }
 tempfile.workspace = true
+tiller-core.workspace = true
 
 [lints]
 workspace = true

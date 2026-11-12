@@ -496,6 +496,7 @@ impl Holder {
         }
         if let Some(exit) = inner.record.exit {
             frames.push(message_frame(&HolderMessage::Exited {
+                id: None,
                 pane: cell.id.clone(),
                 exit,
             }));
@@ -743,6 +744,7 @@ async fn deliver_exit(cell: Arc<PaneCell>, exit: Exit) {
     let id = cell.id.clone();
     inner.fan_out(|_| {
         message_frame(&HolderMessage::Exited {
+            id: None,
             pane: id.clone(),
             exit,
         })

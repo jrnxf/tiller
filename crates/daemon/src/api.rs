@@ -10264,7 +10264,7 @@ esac"#,
             std::time::Duration::from_secs(60)
         }
         fn poll(&mut self, _now: Timestamp) -> Result<(), tiller_herdr::poller::PollError> {
-            Err(tiller_herdr::poller::PollError::Herdr(
+            Err(tiller_herdr::poller::PollError::from(
                 HerdrError::Unreachable("checks are not read".into()),
             ))
         }

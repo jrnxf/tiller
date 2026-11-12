@@ -11,7 +11,7 @@ use tiller_panes::frame::{Frame, FrameError, MAX_FRAME_LEN, read_frame, write_fr
 use tiller_panes::handshake::{ProtoRange, Refused, SUPPORTED, Welcome, negotiate};
 use tiller_panes::message::{ErrorCode, HolderMessage, Request, SyncMode};
 use tiller_panes::{
-    Exit, HolderClient, Listing, Meta, Pane, PaneId, PaneState, Panes, PanesError, Spawn,
+    Exit, HolderClient, Listing, Live, Meta, Pane, PaneId, PaneState, Panes, PanesError, Spawn,
     Subscribe, Update, socket_path,
 };
 
@@ -228,7 +228,7 @@ fn spawn_and_list_round_trip_and_an_error_reply_keeps_the_connection() {
         };
         assert_eq!(spawn, spawn_request());
         // A message type from a newer holder comes first, and is skipped.
-        peer.send_frame(&Frame::Message(r#"{"type":"quiet","pane":"p1"}"#.into()));
+        peer.send_frame(&Frame::Message(r#"{"type":"sparkle","pane":"p1"}"#.into()));
         peer.send(&HolderMessage::Pane {
             id,
             pane: pane(1),
@@ -370,8 +370,10 @@ fn a_subscription_yields_the_repaint_then_output_and_raw_input_reaches_the_pane(
                 id,
                 cols: Some(100),
                 rows: Some(30),
+                clients: None,
             });
             peer.send(&HolderMessage::Exited {
+                id: None,
                 pane: script_pane,
                 exit: Exit {
                     code: Some(0),
@@ -670,6 +672,7 @@ fn a_resize_that_fails_on_a_closed_stream_keeps_the_exit_it_had_buffered() {
     let (closed, connection_closed) = std::sync::mpsc::channel();
     let holder = subscription_holder(move |peer, _| {
         peer.send(&HolderMessage::Exited {
+            id: None,
             pane: "p1".into(),
             exit: Exit {
                 code: Some(0),
@@ -764,6 +767,7 @@ fn a_resize_refused_keeps_the_stream_and_an_ok_for_no_resize_breaks_it() {
             id: 99,
             cols: Some(80),
             rows: Some(24),
+            clients: None,
         });
         assert_eq!(peer.frame(), None);
     });
@@ -948,5 +952,290 @@ fn a_retired_client_subscribes_to_nothing() {
         .subscribe(&"p1".into(), Subscribe::default())
         .unwrap_err();
     assert!(err.to_string().contains("connect again"), "{err}");
+    holder.join();
+}
+
+#[test]
+fn overlapping_calls_each_get_their_own_reply_in_any_order() {
+    let holder = Holder::serve(vec![Box::new(|mut peer: Peer| {
+        peer.handshake(SUPPORTED);
+        // Both requests are in before either is answered.
+        let mut requests = [peer.request(), peer.request()];
+        requests.sort_by_key(|request| matches!(request, Request::List { .. }));
+        let [Request::Get { id: get, .. }, Request::List { id: list }] = requests else {
+            panic!("expected a get and a list, got {requests:?}");
+        };
+        // The later request is answered first.
+        peer.send(&HolderMessage::Panes {
+            id: list,
+            listing: Listing {
+                instance: INSTANCE.into(),
+                panes: vec![pane(1), pane(2)],
+            },
+        });
+        peer.send(&HolderMessage::Pane {
+            id: get,
+            pane: pane(1),
+            existing: false,
+        });
+        assert_eq!(peer.frame(), None);
+    })]);
+    let client = std::sync::Arc::new(HolderClient::connect(&holder.path, "daemon").unwrap());
+    let get = {
+        let client = client.clone();
+        thread::spawn(move || client.get(&pane(1).pane))
+    };
+    let list = {
+        let client = client.clone();
+        thread::spawn(move || client.list())
+    };
+    assert_eq!(get.join().unwrap().unwrap(), Some(pane(1)));
+    assert_eq!(list.join().unwrap().unwrap().panes.len(), 2);
+    drop(client);
+    holder.join();
+}
+
+#[test]
+fn every_later_request_reaches_the_holder_and_its_reply_maps() {
+    let ours = pane(1);
+    let script_pane = ours.pane.clone();
+    let holder = Holder::serve(vec![Box::new(move |mut peer: Peer| {
+        peer.handshake(SUPPORTED);
+        let exit = Exit {
+            code: None,
+            signal: Some(1),
+            at: "2026-11-11T12:01:00Z".parse().unwrap(),
+        };
+        let mut seen = Vec::new();
+        while let Some(Frame::Message(text)) = peer.frame() {
+            let request = Request::decode(&text).unwrap();
+            let id = request.id().unwrap();
+            let wire: serde_json::Value = serde_json::from_str(&text).unwrap();
+            seen.push(wire["type"].as_str().unwrap().to_owned());
+            let reply = match request {
+                Request::Get { pane, .. } if pane != script_pane => HolderMessage::Error {
+                    id: Some(id),
+                    code: ErrorCode::NotFound,
+                    message: format!("no pane {pane}"),
+                },
+                Request::Get { .. } | Request::Meta { .. } => HolderMessage::Pane {
+                    id,
+                    pane: pane(1),
+                    existing: false,
+                },
+                Request::Screen { read, format, .. } => {
+                    assert_eq!(
+                        (read, format),
+                        (tiller_panes::Read::Recent(2), tiller_panes::Format::Ansi)
+                    );
+                    HolderMessage::Screen {
+                        id,
+                        screen: tiller_panes::Screen {
+                            cols: 120,
+                            rows: 40,
+                            cursor: tiller_panes::Cursor {
+                                col: 0,
+                                row: 1,
+                                visible: true,
+                            },
+                            modes: Vec::new(),
+                            rows_text: vec!["a".into(), "b".into()],
+                        },
+                    }
+                }
+                Request::Keys { keys, .. } => {
+                    assert_eq!(keys, [tiller_panes::Key::ENTER]);
+                    HolderMessage::Ok {
+                        id,
+                        cols: None,
+                        rows: None,
+                        clients: None,
+                    }
+                }
+                Request::Close { grace_ms, .. } => {
+                    assert_eq!(grace_ms, 250);
+                    HolderMessage::Exited {
+                        id: Some(id),
+                        pane: script_pane.clone(),
+                        exit,
+                    }
+                }
+                Request::Switch { .. } => HolderMessage::Ok {
+                    id,
+                    cols: None,
+                    rows: None,
+                    clients: Some(3),
+                },
+                Request::Ping { .. } => HolderMessage::Pong { id },
+                Request::Upgrade { dry_run, .. } => {
+                    assert!(dry_run);
+                    HolderMessage::UpgradeRefused {
+                        id,
+                        reason: "a dry run".into(),
+                    }
+                }
+                _ => HolderMessage::Ok {
+                    id,
+                    cols: None,
+                    rows: None,
+                    clients: None,
+                },
+            };
+            peer.send(&reply);
+        }
+        assert_eq!(
+            seen,
+            [
+                "get", "get", "screen", "input", "paste", "keys", "meta", "signal", "close",
+                "forget", "switch", "ping", "upgrade"
+            ]
+        );
+    })]);
+    let client = HolderClient::connect(&holder.path, "daemon").unwrap();
+    let pane_id = &ours.pane;
+    assert_eq!(client.get(&"p404".into()).unwrap(), None);
+    assert_eq!(client.get(pane_id).unwrap(), Some(ours.clone()));
+    let screen = client
+        .screen(
+            pane_id,
+            tiller_panes::Read::Recent(2),
+            tiller_panes::Format::Ansi,
+        )
+        .unwrap();
+    assert_eq!(screen.text(), "a\nb");
+    client.input(pane_id, "ls").unwrap();
+    client.paste(pane_id, "a\nb").unwrap();
+    client.keys(pane_id, &[tiller_panes::Key::ENTER]).unwrap();
+    assert_eq!(
+        client.set_meta(pane_id, &Meta::new(), &["role"]).unwrap(),
+        ours
+    );
+    client.signal(pane_id, tiller_panes::Signal::Int).unwrap();
+    let exit = client
+        .close(pane_id, std::time::Duration::from_millis(250))
+        .unwrap();
+    assert_eq!(exit.signal, Some(1));
+    client.forget(pane_id).unwrap();
+    assert_eq!(client.switch(pane_id).unwrap(), 3);
+    client.ping().unwrap();
+    assert_eq!(
+        client.upgrade("/home/user/bin/tiller", true).unwrap(),
+        tiller_panes::Upgrade::Refused("a dry run".into())
+    );
+    drop(client);
+    holder.join();
+}
+
+#[test]
+fn a_watch_yields_events_skips_unknown_ones_and_ends_from_another_thread() {
+    let (sent, events_sent) = std::sync::mpsc::channel();
+    let holder = Holder::serve(vec![
+        Box::new(|mut peer: Peer| {
+            peer.handshake(SUPPORTED);
+            assert_eq!(peer.frame(), None);
+        }),
+        Box::new(move |mut peer: Peer| {
+            peer.handshake(SUPPORTED);
+            let Request::Watch { id } = peer.request() else {
+                panic!("expected watch");
+            };
+            peer.send(&HolderMessage::Watching { id });
+            peer.send(&HolderMessage::Spawned { pane: "p1".into() });
+            peer.send_frame(&Frame::Message(r#"{"type":"sparkle","pane":"p1"}"#.into()));
+            peer.send(&HolderMessage::Resized {
+                pane: "p1".into(),
+                cols: 80,
+                rows: 24,
+            });
+            sent.send(()).unwrap();
+            // The watch stays open until the client ends it.
+            assert_eq!(peer.frame(), None);
+        }),
+    ]);
+    let client = HolderClient::connect(&holder.path, "daemon").unwrap();
+    let mut events = client.watch().unwrap();
+    events_sent.recv().unwrap();
+    assert_eq!(
+        events.recv().unwrap(),
+        Some(tiller_panes::Event::Spawned { pane: "p1".into() })
+    );
+    assert_eq!(
+        events.recv().unwrap(),
+        Some(tiller_panes::Event::Resized {
+            pane: "p1".into(),
+            cols: 80,
+            rows: 24,
+        })
+    );
+    let ender = events.ender();
+    let waiting = thread::spawn(move || events.recv());
+    ender.end();
+    assert_eq!(waiting.join().unwrap().unwrap(), None);
+    drop(client);
+    holder.join();
+}
+
+#[test]
+fn a_watch_the_holder_closes_is_unreachable() {
+    let holder = Holder::serve(vec![
+        Box::new(|mut peer: Peer| {
+            peer.handshake(SUPPORTED);
+            assert_eq!(peer.frame(), None);
+        }),
+        Box::new(|mut peer: Peer| {
+            peer.handshake(SUPPORTED);
+            let id = peer.request().id().unwrap();
+            peer.send(&HolderMessage::Watching { id });
+        }),
+    ]);
+    let client = HolderClient::connect(&holder.path, "daemon").unwrap();
+    let mut events = client.watch().unwrap();
+    assert!(
+        matches!(events.recv(), Err(PanesError::Unreachable(_))),
+        "a closed watch is not a quiet end"
+    );
+    assert_eq!(events.recv().unwrap(), None);
+    drop(client);
+    holder.join();
+}
+
+#[test]
+fn a_resized_event_from_another_lease_reaches_the_subscription() {
+    let holder = subscription_holder(|peer, _| {
+        // Another subscription's lease set the size: no `ok` answers it.
+        peer.send(&HolderMessage::Resized {
+            pane: "p1".into(),
+            cols: 100,
+            rows: 30,
+        });
+        peer.send(&HolderMessage::Exited {
+            id: None,
+            pane: "p1".into(),
+            exit: Exit {
+                code: Some(0),
+                signal: None,
+                at: "2026-11-11T12:01:00Z".parse().unwrap(),
+            },
+        });
+    });
+    let client = HolderClient::connect(&holder.path, "daemon").unwrap();
+    let mut subscription = client
+        .subscribe(&"p1".into(), Subscribe::default())
+        .unwrap();
+    assert!(matches!(
+        subscription.recv(),
+        Ok(Some(Update::Repaint { .. }))
+    ));
+    assert_eq!(
+        subscription.recv().unwrap(),
+        Some(Update::Resized {
+            cols: 100,
+            rows: 30
+        })
+    );
+    assert!(matches!(subscription.recv(), Ok(Some(Update::Exited(_)))));
+    assert_eq!(subscription.recv().unwrap(), None);
+    drop(subscription);
+    drop(client);
     holder.join();
 }

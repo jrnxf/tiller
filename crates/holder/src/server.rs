@@ -391,7 +391,14 @@ async fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
                 id,
                 cols: Some(size.cols),
                 rows: Some(size.rows),
+                clients: None,
             }),
+        // The rest of the protocol comes with the holder's later tasks
+        // (H04 and on).
+        request => Err((
+            ErrorCode::Unsupported,
+            format!("this holder does not serve {} yet", request_type(&request)),
+        )),
     };
     match reply {
         Ok(message) => {
@@ -399,6 +406,14 @@ async fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
         }
         Err((code, message)) => reply_error(conn, request_id, code, message),
     }
+}
+
+/// A request's `type` on the wire.
+fn request_type(request: &Request) -> String {
+    serde_json::to_value(request)
+        .ok()
+        .and_then(|wire| wire["type"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| "that request".to_owned())
 }
 
 fn reply_error(conn: &Conn, id: Option<u64>, code: ErrorCode, message: String) {
@@ -449,5 +464,39 @@ mod tests {
         assert_eq!(body[0], 0, "not a kind 0 frame");
         let reply: serde_json::Value = serde_json::from_slice(&body[1..]).unwrap();
         assert_eq!(reply["type"], "welcome", "{reply}");
+    }
+
+    async fn read_message(stream: &mut UnixStream) -> serde_json::Value {
+        let mut len = [0; 4];
+        stream.read_exact(&mut len).await.unwrap();
+        let mut body = vec![0; u32::from_be_bytes(len) as usize];
+        stream.read_exact(&mut body).await.unwrap();
+        assert_eq!(body[0], 0, "not a kind 0 frame");
+        serde_json::from_slice(&body[1..]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_request_this_holder_does_not_serve_yet_is_unsupported_and_keeps_the_connection() {
+        let holder = Holder::new();
+        let (theirs, mut ours) = UnixStream::pair().unwrap();
+        admit(&holder, theirs, peer::own_uid());
+        for request in [
+            Request::Hello(Hello::new("daemon")),
+            Request::Ping { id: 7 },
+            Request::List { id: 8 },
+        ] {
+            let text = serde_json::to_string(&request).unwrap();
+            ours.write_all(&Frame::Message(text).to_bytes().unwrap())
+                .await
+                .unwrap();
+        }
+        assert_eq!(read_message(&mut ours).await["type"], "welcome");
+        let unsupported = read_message(&mut ours).await;
+        assert_eq!(
+            unsupported,
+            serde_json::json!({"type":"error","id":7,"code":"unsupported",
+                "message":"this holder does not serve ping yet"})
+        );
+        assert_eq!(read_message(&mut ours).await["type"], "panes");
     }
 }

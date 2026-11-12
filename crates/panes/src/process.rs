@@ -261,39 +261,12 @@ impl Drop for Interrupt {
     }
 }
 
-/// Test helpers shared with the CLI adapter's tests.
-#[cfg(test)]
-pub(crate) mod tests_support {
-    use std::path::Path;
-    use std::process::Command;
-
-    pub(crate) use crate::testing::{eventually, gone};
-
-    /// The pid a stand-in wrote to `file`, once it is there.
-    pub(crate) fn pid_in(file: &Path) -> String {
-        assert!(
-            eventually(|| std::fs::read_to_string(file).is_ok_and(|s| s.ends_with('\n'))),
-            "{} was never written",
-            file.display()
-        );
-        std::fs::read_to_string(file)
-            .expect("pid file")
-            .trim()
-            .to_owned()
-    }
-
-    /// Kills `pid` if it still runs, so a failed test leaves nothing behind.
-    pub(crate) fn reap(pid: &str) {
-        let _ = Command::new("kill").args(["-KILL", pid]).status();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::process::Stdio;
 
-    use super::tests_support::{eventually, gone, pid_in, reap};
     use super::*;
+    use crate::testing::{eventually, gone, pid_in, reap};
 
     /// A shell, in its own group, that starts a `sleep` and writes the
     /// sleep's pid to `file` before running `then`.

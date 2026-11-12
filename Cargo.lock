@@ -1997,10 +1997,11 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
- "signal-hook",
  "tempfile",
  "thiserror",
  "tiller-core",
+ "tiller-panes",
+ "tiller-poll",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -2042,11 +2043,27 @@ version = "0.1.0"
 dependencies = [
  "jiff",
  "proptest",
+ "rustix",
  "serde",
  "serde_json",
+ "signal-hook",
  "tempfile",
  "thiserror",
+ "tiller-core",
+ "tokio",
+ "tracing",
  "ulid",
+]
+
+[[package]]
+name = "tiller-poll"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror",
+ "tiller-core",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
