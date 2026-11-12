@@ -293,7 +293,7 @@ The board and the CLI send key names. Today they are "named as `herdr pane send-
 - Modifier prefixes `ctrl+`, `alt+` and `shift+`, as in `ctrl+c` and `shift+tab`. A name prints them in that order, but parses them in any order, each at most once, because the board sends `alt+ctrl+x`.
 - A single printable character.
 
-The holder encodes each name for the app's current mode: legacy, application cursor keys, or the kitty keyboard flags that the app pushed. The list lives in `tiller-panes::keys`. H02 builds it from those two files, not from this summary, and a test checks that every name they can emit parses.
+The holder encodes each name for the app's current mode: legacy, application cursor keys, or the kitty keyboard flags that the app pushed. The list lives in `tiller-panes::keys`. H02 builds it from those two files, not from this summary, and tests check that every name they can emit parses. No test reads their source as text: `terminal-keys.ts` exports `keyNames()`, a board test keeps it equal to what `typedKeys` sends and to the committed `crates/panes/tests/fixtures/board-key-names.json`, and `tiller-panes` parses each name in that fixture. The daemon's prompt test parses each name `Dialog::keys` sends.
 
 ### 4.4 Every herdr call path, mapped
 
