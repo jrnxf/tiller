@@ -547,13 +547,18 @@ function Stage({
     const cardBox = cardRef.current;
     if (!full || !cardBox) return;
     const before = document.activeElement;
-    const outside = before instanceof HTMLElement && !cardBox.contains(before) ? before : null;
+    const outside =
+      before instanceof HTMLElement && before !== document.body && !cardBox.contains(before)
+        ? before
+        : null;
     const release = holdInertOutside(cardBox);
     if (outside) cardBox.querySelector<HTMLElement>("[data-full-screen]")?.focus();
     return () => {
       release();
+      // Only from where this effect put it: focus the owner moved, such as
+      // into the terminal to type, stays.
       const now = document.activeElement;
-      const lost = !now || now === document.body || cardBox.contains(now);
+      const lost = !now || now === document.body || now.hasAttribute("data-full-screen");
       if (outside?.isConnected && lost) outside.focus();
     };
   }, [full]);

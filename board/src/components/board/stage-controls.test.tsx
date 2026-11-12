@@ -41,15 +41,32 @@ function stubApi(scenario: Scenario) {
   );
 }
 
+// The window's width: a phone's or a computer's. `turn` changes it, as a
+// tablet turned on its side does.
 function stubMedia(phone = false) {
+  let narrow = phone;
+  const changes = new Map<(event: { matches: boolean }) => void, string>();
+  const matches = (query: string) => narrow && query.includes("max-width");
   vi.stubGlobal("matchMedia", (query: string) => ({
-    matches: phone && query.includes("max-width"),
+    get matches() {
+      return matches(query);
+    },
     media: query,
-    addEventListener: () => {},
-    removeEventListener: () => {},
+    addEventListener: (_: string, change: (event: { matches: boolean }) => void) =>
+      changes.set(change, query),
+    removeEventListener: (_: string, change: (event: { matches: boolean }) => void) =>
+      changes.delete(change),
     addListener: () => {},
     removeListener: () => {},
   }));
+  return {
+    turn(toPhone: boolean) {
+      narrow = toPhone;
+      act(() => {
+        for (const [change, query] of changes) change({ matches: matches(query) });
+      });
+    },
+  };
 }
 
 // The Agents view with its first agent on the stage, once the stage shows.
@@ -305,6 +322,27 @@ test("a switch to another agent stays in full screen, and a toast shows in it", 
   // The page is in full screen, so a toast shows over the card.
   act(() => showToast("bad", "The pane kept its own size"));
   expect(screen.getByTestId("toast").textContent).toContain("The pane kept its own size");
+});
+
+test("a turn to the phone layout, or leaving the Agents view, leaves full screen", async () => {
+  const { exit } = stubFullScreen();
+  const media = stubMedia();
+  await renderStage("holder");
+  fireEvent.click(footer().getByRole("button", { name: "Full screen" }));
+  await footer().findByRole("button", { name: "Full screen", pressed: true });
+
+  media.turn(true);
+  await waitFor(() => expect(exit).toHaveBeenCalledTimes(1));
+  expect(document.fullscreenElement).toBeNull();
+  expect(document.querySelector(".av-card.full")).toBeNull();
+  expect(document.querySelector("[inert]:not(.av-det)")).toBeNull();
+
+  media.turn(false);
+  fireEvent.click(await footer().findByRole("button", { name: "Full screen" }));
+  await footer().findByRole("button", { name: "Full screen", pressed: true });
+  cleanup();
+  expect(exit).toHaveBeenCalledTimes(2);
+  expect(document.fullscreenElement).toBeNull();
 });
 
 test("with no Fullscreen API the button is not there, and Expand still is", async () => {

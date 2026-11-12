@@ -48,35 +48,8 @@ import "./terminal.css";
 // look: it is a way of looking, and closed until the owner opens one.
 const OPEN_KEY = "tiller-terminal-open";
 
-function loadOpen(): boolean {
-  try {
-    return localStorage.getItem(OPEN_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
-const terminalOpenStore = createStore<boolean>(loadOpen());
-
-function toggleTerminal() {
-  terminalOpenStore.update((open) => {
-    try {
-      localStorage.setItem(OPEN_KEY, open ? "0" : "1");
-    } catch {
-      // Blocked storage: the choice lasts for this tab.
-    }
-    return !open;
-  });
-}
-
-// Whether the Agents view's stage fits the pane to itself, one choice per
-// kind of pane. A herdr pane is off until the owner turns it on, since the Fit
-// changes the pane for herdr's own window too. A pane in the terminal holder
-// has no other window, so it fits until the owner turns it off.
-export const FIT_KEY = "tiller-terminal-fit";
-export const HOLDER_FIT_KEY = "tiller-terminal-fit-holder";
-
-function fitChoice(key: string, unset: boolean) {
+// A yes or no the owner chose, per browser: `unset` until they choose.
+function storedChoice(key: string, unset: boolean) {
   const load = () => {
     try {
       const stored = localStorage.getItem(key);
@@ -87,19 +60,28 @@ function fitChoice(key: string, unset: boolean) {
   };
   const store = createStore<boolean>(load());
   const toggle = () =>
-    store.update((fit) => {
+    store.update((on) => {
       try {
-        localStorage.setItem(key, fit ? "0" : "1");
+        localStorage.setItem(key, on ? "0" : "1");
       } catch {
         // Blocked storage: the choice lasts for this tab.
       }
-      return !fit;
+      return !on;
     });
   return { store, toggle, load };
 }
 
-const herdrFit = fitChoice(FIT_KEY, false);
-const holderFit = fitChoice(HOLDER_FIT_KEY, true);
+const terminalOpen = storedChoice(OPEN_KEY, false);
+
+// Whether the Agents view's stage fits the pane to itself, one choice per
+// kind of pane. A herdr pane is off until the owner turns it on, since the Fit
+// changes the pane for herdr's own window too. A pane in the terminal holder
+// has no other window, so it fits until the owner turns it off.
+export const FIT_KEY = "tiller-terminal-fit";
+export const HOLDER_FIT_KEY = "tiller-terminal-fit-holder";
+
+const herdrFit = storedChoice(FIT_KEY, false);
+const holderFit = storedChoice(HOLDER_FIT_KEY, true);
 
 // A pane id the terminal holder gave: `p` and a ULID (terminal-holder.md 2.4).
 // Any other pane id is herdr's (`w2:p1`). The session's pane id alone says
@@ -173,7 +155,7 @@ function useVisible(): boolean {
 }
 
 export function useTerminalOpen(): boolean {
-  return useStore(terminalOpenStore);
+  return useStore(terminalOpen.store);
 }
 
 export function TerminalToggle({ size }: { size?: "sm" }) {
@@ -184,7 +166,7 @@ export function TerminalToggle({ size }: { size?: "sm" }) {
       className={`btn mir-tog${size ? ` ${size}` : ""}`}
       aria-pressed={open}
       title={open ? "Hide the terminal" : "Show the live terminal"}
-      onClick={toggleTerminal}
+      onClick={terminalOpen.toggle}
     >
       <TerminalIcon />
       Terminal
@@ -570,7 +552,7 @@ export function LiveTerminal({
   machine,
   peer,
   holder = false,
-  full: pinned = false,
+  full = false,
   strip,
   onClose,
 }: {
@@ -637,10 +619,9 @@ export function LiveTerminal({
   const fitChoiceFor = holder ? holderFit : herdrFit;
   const fitWanted = useStore(fitChoiceFor.store);
   const stageFont = useStore(stageFontStore);
-  const full = pinned && stage;
-  // Whether the stage font sets the text's size now. Without the Fit, the
-  // stage's room can set a smaller one, and a larger font changes nothing.
-  const [capped, setCapped] = useState(true);
+  // Without the Fit, the stage's room can hold the text smaller than the
+  // stage font: the size it shows, and whether one size larger still fits.
+  const [roomFont, setRoomFont] = useState({ shown: 0, next: true });
   const visible = useVisible();
   const [unfit, setUnfit] = useState(false);
   // A tail or a peer's pane is never fitted: its stream has no Fit.
@@ -852,7 +833,16 @@ export function LiveTerminal({
       }
     }
     setFont(term.options.fontSize ?? BASE_FONT);
-    if (stage && view === "inline") setCapped(cell >= Math.floor(most * ratio));
+    if (stage && view === "inline") {
+      // The largest cell the room holds this pane at, before any rounding
+      // step above, so a pixel off never reads as a full room.
+      let roomCell = Math.floor((width * dpr) / term.cols);
+      while (roomCell > least && rowsHigh(roomCell) > room) roomCell -= 1;
+      const fits = (px: number) => Math.floor(px * ratio) <= roomCell;
+      const shown = fits(stageFont) ? stageFont : Math.floor(sized(roomCell));
+      const next = fits(stageFont + 1);
+      setRoomFont((was) => (was.shown === shown && was.next === next ? was : { shown, next }));
+    }
   }, [host, box, view, scale, stage, stageFont]);
 
   // Put the one xterm in the view that shows it, opening it there the first
@@ -1115,46 +1105,42 @@ export function LiveTerminal({
   // so any size shows. Without it, the readout is the size that shows, and
   // Smaller steps down from it. A press keeps focus where it was, so typing
   // goes on.
-  const larger = (fitting && !ended) || capped;
-  const shownFont = larger ? stageFont : Math.min(stageFont, Math.floor(font));
-  // Without the Fit, the room sets a pane this wide: smaller text only
-  // leaves the stage empty around it, and larger text does not fit.
+  // The Fit sizes the pane to the font, so any size shows. Without it, the
+  // readout is the size that shows, Smaller steps down from it, and Larger
+  // waits until one size larger fits.
+  const fitted = fitting && !ended;
+  const shownFont = fitted || roomFont.shown === 0 ? stageFont : roomFont.shown;
+  const canLarger = fitted || roomFont.next;
   const roomHint = watch
     ? "The pane fills the stage at this size"
     : "The pane fills the stage at this size. Fit pane sizes it to the text";
-  // The readout's title and name: a click goes back to the default.
+  // The readout's name: a click goes back to the default.
   const fontText = `Font size ${shownFont} px`;
   const sizeHint =
-    stageFont !== STAGE_FONT
-      ? {
-          title: `${fontText}. Click for the default, ${STAGE_FONT} px`,
-          label: `${fontText}, back to ${STAGE_FONT} px`,
-        }
-      : shownFont === STAGE_FONT
-        ? { title: `${fontText}, the default`, label: `${fontText}, the default` }
-        : {
-            title: `${fontText}, as large as the stage holds the pane`,
-            label: `${fontText}, as large as the stage holds the pane`,
-          };
+    shownFont === STAGE_FONT
+      ? `${fontText}, the default`
+      : stageFont === STAGE_FONT
+        ? `${fontText}, as large as the stage holds the pane`
+        : `${fontText}. Click for the default, ${STAGE_FONT} px`;
   const fontControls =
     stage && !phone && screenShown && view === "inline" ? (
       <span className="mir-font" role="group" aria-label="Font size">
         <button
           type="button"
           className="ib sm"
-          title={larger ? "Smaller text" : roomHint}
+          title="Smaller text"
           aria-label="Smaller text"
-          disabled={stageFont <= STAGE_FONT_MIN || !larger}
+          disabled={shownFont <= STAGE_FONT_MIN}
           onMouseDown={keepFocus}
-          onClick={() => setStageFont(stageFont - 1)}
+          onClick={() => setStageFont(shownFont - 1)}
         >
           <FontSmallerIcon />
         </button>
         <button
           type="button"
           className="mir-fsz"
-          title={sizeHint.title}
-          aria-label={sizeHint.label}
+          title={sizeHint}
+          aria-label={sizeHint}
           onMouseDown={keepFocus}
           onClick={() => setStageFont(STAGE_FONT)}
         >
@@ -1163,9 +1149,9 @@ export function LiveTerminal({
         <button
           type="button"
           className="ib sm"
-          title={larger ? "Larger text" : roomHint}
+          title={canLarger ? "Larger text" : roomHint}
           aria-label="Larger text"
-          disabled={stageFont >= STAGE_FONT_MAX || !larger}
+          disabled={stageFont >= STAGE_FONT_MAX || !canLarger}
           onMouseDown={keepFocus}
           onClick={() => setStageFont(stageFont + 1)}
         >
