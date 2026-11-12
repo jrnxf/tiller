@@ -1350,6 +1350,10 @@ async fn run(
 /// A pane's tail read through herdr, or nothing when herdr cannot read it.
 /// It blocks.
 pub(crate) fn pane_tail_of(herdr: Cli, target: PaneTarget) -> Vec<String> {
+    // herdr has no holder pane to read; the live view shows it.
+    if ids::is_holder_pane(&target.pane) {
+        return Vec::new();
+    }
     let herdr = match target.machine {
         Some(machine) => herdr.on_machine(machine),
         None => herdr,
@@ -4604,6 +4608,14 @@ pub(crate) fn holder_error(pane: &str, error: &tiller_panes::PanesError) -> ApiE
             StatusCode::UNPROCESSABLE_ENTITY,
             "refused",
             format!("the agent in pane {pane} has exited; nothing reads its input"),
+        ),
+        // A broken frame is a bug, not a holder that comes back: the board
+        // stops and shows it. A version mismatch stays `unavailable` with
+        // its text, since a restarted holder answers the next try.
+        PanesError::Protocol(_) => ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            error.to_string(),
         ),
         error => ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,

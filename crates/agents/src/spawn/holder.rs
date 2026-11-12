@@ -18,28 +18,29 @@ use super::Result;
 /// the holder does no `PATH` search.
 const SHELL: &str = "/bin/sh";
 
-/// The names a pane never gets from the process that launches it: the
-/// launching session's own markers, the terminal the holder sets itself,
-/// and the shell's bookkeeping. The holder passes on nothing of its own
-/// (spec 2.4), so the pane gets the rest of the launcher's environment, as
-/// a herdr pane got its shell's (proxies, agents and auth included), and
-/// the launch script sets the session's own variables on top.
-const DROPPED: &[&str] = &[
-    "CLAUDECODE",
-    "CLAUDE_CODE_ENTRYPOINT",
-    "CLAUDE_CODE_SSE_PORT",
-    "CLAUDE_PROJECT_DIR",
-    "CLAUDE_ENV_FILE",
-    "TILLER_SESSION_ID",
-    "TILLER_RUN_ID",
-    "TILLER_ROLE",
-    "TILLER_PANE",
-    "TERM",
-    "COLORTERM",
-    "PWD",
-    "OLDPWD",
-    "SHLVL",
-    "_",
+/// The environment names a pane gets from the process that launches it.
+/// The holder passes on nothing of its own (spec 2.4), and the launch script
+/// adds the session's own variables. The list is short on purpose: a spawn
+/// can run inside an orchestrator's sandbox, whose proxy, temp directory and
+/// session markers must not outlive it in the worker.
+const PASSED: &[&str] = &[
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "PATH",
+    "LANG",
+    "LANGUAGE",
+    "TZ",
+    "SSH_AUTH_SOCK",
+    "XDG_RUNTIME_DIR",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+    "XDG_CACHE_HOME",
+    "NIX_PROFILES",
+    "NIX_SSL_CERT_FILE",
+    "SSL_CERT_FILE",
 ];
 
 /// Whose a pane is, for its `meta`.
@@ -51,7 +52,7 @@ pub(crate) struct Owner<'a> {
     pub label: &'a str,
 }
 
-/// The pane's environment: this process's, less [`DROPPED`].
+/// The pane's environment: [`PASSED`] and every `LC_*` this process has.
 fn env() -> BTreeMap<String, String> {
     passed(std::env::vars_os())
 }
@@ -60,7 +61,7 @@ fn passed(
     vars: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
 ) -> BTreeMap<String, String> {
     vars.filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
-        .filter(|(name, _)| !DROPPED.contains(&name.as_str()))
+        .filter(|(name, _)| PASSED.contains(&name.as_str()) || name.starts_with("LC_"))
         .collect()
 }
 
@@ -159,15 +160,13 @@ fn end(panes: &dyn Panes, which: impl Fn(&Pane) -> bool) -> std::result::Result<
 /// How long a killed pane may take to list as exited.
 const REAPED: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Whether one of `sessions`' panes still runs in the holder: a run's
-/// cleanup never ends a session whose pane lives. A holder that does not
-/// answer cannot prove the pane gone, so it refuses too, as does a command
-/// with no holder to ask.
+/// Whether the holder's `pane` still runs: a run's cleanup never ends a
+/// session whose pane lives. A holder that does not answer cannot prove
+/// the pane gone, so it refuses. With no holder socket at all, no holder
+/// runs, and a pane dies with its holder's PTY, so none of its panes does.
 pub(crate) fn running(panes: Option<&dyn Panes>, pane: &str) -> Result<bool> {
     let Some(panes) = panes else {
-        return Err(super::SpawnError::Refused(format!(
-            "pane {pane} is in the terminal holder, which this command cannot reach; start the holder, then retry"
-        )));
+        return Ok(false);
     };
     let id = PaneId::from(pane);
     Ok(panes
@@ -261,14 +260,20 @@ mod tests {
         assert_eq!(req.meta["session"], "S1");
         assert_eq!(req.meta["run"], "R1");
         assert_eq!(req.meta["label"], "alpha-1 build");
-        assert!(req.env.keys().all(|name| !DROPPED.contains(&name.as_str())));
+        assert!(
+            req.env
+                .keys()
+                .all(|name| PASSED.contains(&name.as_str()) || name.starts_with("LC_"))
+        );
     }
 
     #[test]
-    fn a_pane_gets_the_launchers_environment_but_not_its_session() {
+    fn a_pane_gets_the_users_basics_but_not_the_launchers_sandbox_or_session() {
         let vars = [
             ("PATH", "/usr/bin"),
+            ("LC_ALL", "C.UTF-8"),
             ("HTTPS_PROXY", "http://192.0.2.1:3128"),
+            ("TMPDIR", "/home/user/sandbox/tmp"),
             ("TILLER_SESSION_ID", "S0"),
             ("CLAUDECODE", "1"),
             ("TERM", "dumb"),
@@ -277,7 +282,7 @@ mod tests {
         let env = passed(vars.into_iter());
         assert_eq!(
             env.keys().map(String::as_str).collect::<Vec<_>>(),
-            ["HTTPS_PROXY", "PATH"]
+            ["LC_ALL", "PATH"]
         );
     }
 }

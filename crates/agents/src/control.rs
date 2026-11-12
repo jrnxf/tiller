@@ -559,10 +559,11 @@ pub fn relaunch(
     )?;
 
     let old = live_session(store.conn(), &run.id)?;
-    // With no session to keep the pane, the relaunch would open a new one,
-    // and a new pane belongs in the terminal holder, which takes a relaunch
-    // only once its stop and forget land (H09).
-    if old.is_none() && world.panes.is_some() {
+    // With no herdr pane to go on in, the relaunch would open a new one, and
+    // a new pane belongs in the terminal holder, which takes a relaunch only
+    // once its stop and forget land (H09). An agent in herdr goes on there.
+    let in_herdr = old.as_ref().and_then(|s| s.pane_id.as_deref()).is_some();
+    if !in_herdr && world.panes.is_some() {
         return Err(SpawnError::Refused(format!(
             "A relaunch is not ready yet with the terminal holder (run {}); nothing was changed",
             run.id

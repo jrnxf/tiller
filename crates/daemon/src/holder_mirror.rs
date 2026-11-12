@@ -3,8 +3,10 @@
 //!
 //! The view subscribes to the pane: a `size` line and a full frame with the
 //! holder's repaint, then each of the PTY's writes as a frame of its own.
-//! When the PTY's size changes, the view subscribes again, so its new
-//! repaint is the board's next `size` line and full screen. The child's
+//! When the subscription reports a new size, the view subscribes again, so
+//! its new repaint is the board's next `size` line and full screen. The
+//! slice's client reports only its own resizes, which the view never makes:
+//! a resize by another client reaches the view once `watch` events land. The child's
 //! exit is `closed`, with how it ended, and a holder that stops answering
 //! is `unavailable`, after which the board opens the view again.
 //!
@@ -27,6 +29,10 @@ use crate::mirror::{Viewer, queue, stopping, unavailable};
 /// Updates a subscription's thread can hand on before it waits for the
 /// view to take them.
 const UPDATES: usize = 64;
+
+/// The most output bytes one frame gathers from a burst, so a fast writer
+/// cannot make one frame without end or keep the view from its stop.
+const BURST: usize = 64 * 1024;
 
 /// A subscription read on a thread of its own, since its `recv` blocks.
 struct Pumped {
@@ -161,7 +167,9 @@ async fn mirror(
             // fast writer does not fill the view's queue line by line.
             let update = match update {
                 Some(Ok(Some(Update::Output(mut bytes)))) => {
-                    while let Ok(next) = view.updates.try_recv() {
+                    while bytes.len() < BURST
+                        && let Ok(next) = view.updates.try_recv()
+                    {
                         match next {
                             Ok(Some(Update::Output(more))) => bytes.extend_from_slice(&more),
                             other => {
