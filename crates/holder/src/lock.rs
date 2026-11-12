@@ -9,6 +9,13 @@
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// How often, and how far apart, a second holder reads the first one's pid.
+/// The first one writes it just after it takes the lock, so a read in
+/// between finds an old pid or none.
+const PID_READS: u32 = 20;
+const PID_READ_GAP: Duration = Duration::from_millis(25);
 
 /// The lock file in a run directory.
 pub fn lock_path(run_dir: &Path) -> PathBuf {
@@ -43,20 +50,53 @@ impl HolderLock {
         match file.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => {
-                let mut text = String::new();
-                file.read_to_string(&mut text)?;
                 return Ok(Acquired::Taken {
-                    pid: text.trim().parse().ok(),
+                    pid: holder_pid(&mut file)?,
                 });
             }
             Err(TryLockError::Error(err)) => return Err(err),
         }
-        file.set_len(0)?;
+        // Written over the old pid and then cut to length, so the file is
+        // never empty on the way.
+        let pid = format!("{}\n", std::process::id());
         file.seek(SeekFrom::Start(0))?;
-        writeln!(file, "{}", std::process::id())?;
+        file.write_all(pid.as_bytes())?;
+        file.set_len(pid.len() as u64)?;
         file.flush()?;
         Ok(Acquired::Held(HolderLock { _file: file }))
     }
+}
+
+/// The pid in a taken lock's file, once it names a live process.
+fn holder_pid(file: &mut File) -> std::io::Result<Option<u32>> {
+    for read in 0..PID_READS {
+        if read > 0 {
+            std::thread::sleep(PID_READ_GAP);
+        }
+        let mut text = String::new();
+        file.seek(SeekFrom::Start(0))?;
+        file.read_to_string(&mut text)?;
+        let Ok(pid) = text.trim().parse::<u32>() else {
+            continue;
+        };
+        if is_alive(pid) {
+            return Ok(Some(pid));
+        }
+    }
+    Ok(None)
+}
+
+/// Whether `pid` is a process. One of another user's counts.
+fn is_alive(pid: u32) -> bool {
+    i32::try_from(pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .is_some_and(|pid| {
+            matches!(
+                rustix::process::test_kill_process(pid),
+                Ok(()) | Err(rustix::io::Errno::PERM)
+            )
+        })
 }
 
 #[cfg(test)]

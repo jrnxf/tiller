@@ -304,7 +304,7 @@ fn hello(holder: &Holder, conn: &Conn, frame: Frame) -> Next {
 async fn frame_in(holder: &Arc<Holder>, conn: &Arc<Conn>, frame: Frame) -> Next {
     match frame {
         Frame::Input { num, bytes } => {
-            holder.input(num, bytes).await;
+            holder.input(num, bytes);
             Next::Go
         }
         Frame::Output { .. } => {

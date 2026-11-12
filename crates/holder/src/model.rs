@@ -26,6 +26,12 @@ pub const RECENT_INPUT: usize = 4 * 1024;
 pub const MIN_COLS: u16 = 2;
 /// The fewest rows the model takes.
 pub const MIN_ROWS: u16 = 1;
+/// The most columns the model takes. The grid is allocated whole, so a
+/// size near `u16::MAX` would abort the holder on allocation, which no
+/// `catch_unwind` stops. This is wider than any real screen.
+pub const MAX_COLS: u16 = 1024;
+/// The most rows the model takes.
+pub const MAX_ROWS: u16 = 512;
 
 /// The model's event listener. The slice drops every event: query answers
 /// (`PtyWrite`), titles and bells come with H03 and H04.
@@ -98,8 +104,8 @@ impl std::fmt::Debug for Model {
 }
 
 impl Model {
-    /// A blank screen of `size`, which must be at least
-    /// [`MIN_COLS`] by [`MIN_ROWS`].
+    /// A blank screen of `size`, which must be between [`MIN_COLS`] by
+    /// [`MIN_ROWS`] and [`MAX_COLS`] by [`MAX_ROWS`].
     pub fn new(size: Size) -> Self {
         Self {
             screen: Screen::new(size),

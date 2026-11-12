@@ -23,7 +23,7 @@ use tiller_panes::{Exit, Listing, Pane, PaneId, PaneState, Size, Spawn};
 use tokio::io::unix::AsyncFd;
 use tokio::sync::{Notify, mpsc, watch};
 
-use crate::model::{MIN_COLS, MIN_ROWS, Model, ModelPanic};
+use crate::model::{MAX_COLS, MAX_ROWS, MIN_COLS, MIN_ROWS, Model, ModelPanic};
 use crate::outbox::{Outbox, Refused};
 use crate::pty;
 
@@ -108,6 +108,11 @@ impl Conn {
         self.outbox.cut(last)
     }
 
+    /// Drops one subscription from this connection's list.
+    fn forget(&self, stream: u32) {
+        lock(&self.streams).retain(|(own, _)| *own != stream);
+    }
+
     /// Takes this connection's subscriptions, at its end.
     fn take_streams(&self) -> Vec<(u32, Arc<PaneCell>)> {
         std::mem::take(&mut *lock(&self.streams))
@@ -133,21 +138,36 @@ struct Inner {
 }
 
 impl Inner {
+    /// The pane's record as `list` shows it.
+    fn record(&self) -> Pane {
+        Pane {
+            subscribers: u32::try_from(self.subscribers.len()).unwrap_or(u32::MAX),
+            ..self.record.clone()
+        }
+    }
+
+    /// Whether the child still runs: not yet reaped. A reaped child's exit
+    /// goes into the record a little later, once its last output is in.
+    fn running(&self) -> bool {
+        self.record.state == PaneState::Running && !self.reaped
+    }
+
     /// Sends `frame_for(stream)` to each subscriber, and drops each one
     /// whose connection is cut or gone.
     fn fan_out(&mut self, frame_for: impl Fn(u32) -> Option<Vec<u8>>) {
         self.subscribers
             .retain(|sub| frame_for(sub.stream).is_some_and(|frame| sub.conn.send(frame)));
-        self.record.subscribers = self.subscribers.len() as u32;
     }
 
-    /// Cuts every subscriber: the model was reset, so what they drew from
-    /// it is stale. Each may subscribe again for a repaint.
-    fn cut_all(&mut self) {
+    /// Ends every subscription of this pane with `lagged`: the model was
+    /// reset, so what they drew from it is stale. Each may subscribe again
+    /// for a repaint. The connections stay, with any other pane's streams.
+    fn lag_all(&mut self) {
         for sub in self.subscribers.drain(..) {
-            sub.conn.cut();
+            sub.conn.forget(sub.stream);
+            sub.conn
+                .send_message(&HolderMessage::Lagged { stream: sub.stream });
         }
-        self.record.subscribers = 0;
     }
 }
 
@@ -169,8 +189,8 @@ impl PaneCell {
         lock(&self.inner)
     }
 
-    /// A model panic: the model is fresh already. The child redraws on
-    /// `SIGWINCH`, and every subscriber is cut (section 3.5).
+    /// A model panic: the model is fresh already. The app in front redraws
+    /// on `SIGWINCH`, and every subscriber of the pane is cut (section 3.5).
     fn model_reset(&self, inner: &mut Inner, panic: &ModelPanic) {
         tracing::error!(
             pane = %self.id,
@@ -178,8 +198,27 @@ impl PaneCell {
             recent = %String::from_utf8_lossy(&panic.recent).escape_debug(),
             "the pane's screen model panicked and was reset"
         );
-        self.signal(Signal::WINCH);
-        inner.cut_all();
+        if inner.running() {
+            self.redraw();
+        }
+        inner.lag_all();
+    }
+
+    /// Asks the terminal's foreground process group to redraw. That is the
+    /// app that draws the screen: a shell's job runs in a group of its own.
+    fn redraw(&self) {
+        let group = match rustix::termios::tcgetpgrp(self.master.get_ref()) {
+            Ok(group) => Some(group),
+            Err(err) => {
+                tracing::debug!(pane = %self.id, %err, "no foreground group; the child's is used");
+                i32::try_from(self.pid).ok().and_then(Pid::from_raw)
+            }
+        };
+        if let Some(group) = group
+            && let Err(err) = rustix::process::kill_process_group(group, Signal::WINCH)
+        {
+            tracing::debug!(pane = %self.id, %err, "the redraw signal failed");
+        }
     }
 
     /// Sends `signal` to the child's process group.
@@ -239,6 +278,10 @@ pub struct Holder {
     boot_id: String,
     started_at: Timestamp,
     table: Mutex<Table>,
+    /// Held for a whole `spawn`, so two spawns with one key start one
+    /// child, while the table's lock is free for everything else during
+    /// the fork and exec.
+    spawning: Mutex<()>,
     next_stream: AtomicU32,
     /// Wakes the reaper after a spawn, so an exit that came before the pane
     /// was in the table is not missed.
@@ -252,6 +295,7 @@ impl Holder {
             boot_id: boot_id(),
             started_at: Timestamp::now(),
             table: Mutex::new(Table::default()),
+            spawning: Mutex::new(()),
             next_stream: AtomicU32::new(1),
             reap: Notify::new(),
         })
@@ -300,14 +344,10 @@ impl Holder {
                 req.cwd
             )));
         }
-        let mut table = lock(&self.table);
-        let running = table.panes.iter().find_map(|cell| {
+        let _spawning = lock(&self.spawning);
+        let running = self.panes().iter().find_map(|cell| {
             let inner = cell.inner();
-            // A reaped child whose exit is not in yet is not running.
-            (inner.record.key == req.key
-                && inner.record.state == PaneState::Running
-                && !inner.reaped)
-                .then(|| inner.record.clone())
+            (inner.record.key == req.key && inner.running()).then(|| inner.record())
         });
         if let Some(record) = running {
             return Ok((record, true));
@@ -321,7 +361,15 @@ impl Holder {
             pane: id.as_str(),
         })
         .map_err(|err| spawn_failure(&req, &err))?;
-        let master = register(started.master).map_err(|err| internal(&err))?;
+        let master = match register(started.master) {
+            Ok(master) => master,
+            Err(err) => {
+                // Not in the table, so the reaper would never collect it.
+                kill_and_reap(started.pid);
+                return Err(internal(&err));
+            }
+        };
+        let mut table = lock(&self.table);
         table.next_num += 1;
         let num = table.next_num;
         let record = Pane {
@@ -373,7 +421,7 @@ impl Holder {
             panes: self
                 .panes()
                 .iter()
-                .map(|cell| cell.inner().record.clone())
+                .map(|cell| cell.inner().record())
                 .collect(),
         }
     }
@@ -447,7 +495,6 @@ impl Holder {
             stream,
             conn: conn.clone(),
         });
-        inner.record.subscribers = inner.subscribers.len() as u32;
         Ok(())
     }
 
@@ -470,14 +517,28 @@ impl Holder {
     }
 
     /// A kind 2 frame: raw bytes for the pane `num`, with no reply. Input
-    /// for a pane that is gone or has exited is dropped.
-    pub async fn input(&self, num: u32, bytes: Vec<u8>) {
+    /// for a pane that is gone or has exited is dropped. So is input for a
+    /// pane whose app has not read the last [`INPUT_QUEUE`] chunks: waiting
+    /// for it would hold up every other request on the connection.
+    pub fn input(&self, num: u32, bytes: Vec<u8>) {
         let Some(cell) = self.by_num(num) else {
             tracing::debug!(num, "raw input for no pane");
             return;
         };
-        if cell.input.send(bytes).await.is_err() {
-            tracing::debug!(num, "raw input for a pane whose PTY is closed");
+        if !cell.inner().running() {
+            tracing::debug!(pane = %cell.id, "raw input for an exited pane");
+            return;
+        }
+        match cell.input.try_send(bytes) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(bytes)) => tracing::warn!(
+                pane = %cell.id,
+                len = bytes.len(),
+                "raw input was dropped: the app has not read its input"
+            ),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                tracing::debug!(pane = %cell.id, "raw input for a pane whose PTY is closed");
+            }
         }
     }
 
@@ -486,7 +547,6 @@ impl Holder {
         for (stream, cell) in conn.take_streams() {
             let mut inner = cell.inner();
             inner.subscribers.retain(|sub| sub.stream != stream);
-            inner.record.subscribers = inner.subscribers.len() as u32;
         }
     }
 
@@ -585,11 +645,18 @@ async fn read_pty(cell: Arc<PaneCell>) {
 }
 
 /// Writes raw input to a pane's PTY, in order, as fast as it takes it.
+/// It ends once the PTY's output ends: with the slave closed, the master
+/// takes a few KiB and then is never writable again.
 async fn write_input(cell: Arc<PaneCell>, mut input: mpsc::Receiver<Vec<u8>>) {
+    let mut ended = cell.output_ended.subscribe();
     while let Some(bytes) = input.recv().await {
         let mut rest = bytes.as_slice();
         while !rest.is_empty() {
-            let Ok(mut guard) = cell.master.writable().await else {
+            let writable = tokio::select! {
+                writable = cell.master.writable() => writable,
+                _ = ended.wait_for(|ended| *ended) => return,
+            };
+            let Ok(mut guard) = writable else {
                 return;
             };
             match guard.try_io(|fd| rustix::io::write(fd.get_ref(), rest).map_err(io::Error::from))
@@ -633,10 +700,26 @@ fn register(master: OwnedFd) -> io::Result<AsyncFd<OwnedFd>> {
     unsafe { AsyncFd::register(master) }.map_err(io::Error::from)
 }
 
+/// Kills a child the holder cannot keep, and collects it. Killed, it ends
+/// at once, so the wait is short.
+fn kill_and_reap(pid: u32) {
+    let Some(pid) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
+        return;
+    };
+    let _ = rustix::process::kill_process_group(pid, Signal::KILL);
+    let _ = rustix::process::waitpid(Some(pid), WaitOptions::empty());
+}
+
 fn check_size(size: Size) -> Result<(), Failure> {
     if size.cols < MIN_COLS || size.rows < MIN_ROWS {
         return Err(bad_request(format!(
             "a size of {} by {} is under the {MIN_COLS} by {MIN_ROWS} minimum",
+            size.cols, size.rows
+        )));
+    }
+    if size.cols > MAX_COLS || size.rows > MAX_ROWS {
+        return Err(bad_request(format!(
+            "a size of {} by {} is over the {MAX_COLS} by {MAX_ROWS} maximum",
             size.cols, size.rows
         )));
     }

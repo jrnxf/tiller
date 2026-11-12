@@ -15,12 +15,27 @@ use std::time::{Duration, Instant};
 
 use common::{Running, World};
 use tiller_panes::frame::{Frame, read_frame, write_frame};
+use tiller_panes::message::ErrorCode;
 use tiller_panes::{
-    Exit, HolderClient, Meta, Pane, PaneState, Panes, Spawn, Subscribe, Update, socket_path,
+    Exit, HolderClient, Meta, Pane, PaneState, Panes, PanesError, Size, Spawn, StreamHandle,
+    Subscribe, Update, socket_path,
 };
 
 /// How long a test waits for anything the holder does.
 const WAIT: Duration = Duration::from_secs(10);
+
+/// A subscription's updates, read on a thread so a wait can give up. The
+/// subscription ends when this drops.
+struct Updates {
+    rx: mpsc::Receiver<Update>,
+    handle: StreamHandle,
+}
+
+impl Drop for Updates {
+    fn drop(&mut self) {
+        self.handle.end();
+    }
+}
 
 /// A running holder on `world`'s home, and a client of it.
 struct Holder {
@@ -68,25 +83,16 @@ impl Holder {
     }
 
     fn spawn(&self, world: &World, argv: &[&str]) -> Pane {
-        let env = BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]);
-        self.client
-            .spawn(&Spawn {
-                key: format!("key-{}", argv.join(" ")),
-                argv: argv.iter().map(|arg| (*arg).to_owned()).collect(),
-                cwd: world.dir.path().display().to_string(),
-                env,
-                size: None,
-                meta: Meta::default(),
-            })
-            .unwrap()
+        self.client.spawn(&spawn_of(world, argv)).unwrap()
     }
 
-    /// The pane's updates, read on a thread so a wait can give up.
-    fn updates(&self, pane: &Pane) -> mpsc::Receiver<Update> {
+    /// The pane's updates on a new subscription.
+    fn updates(&self, pane: &Pane) -> Updates {
         let mut subscription = self
             .client
             .subscribe(&pane.pane, Subscribe::default())
             .unwrap();
+        let handle = subscription.handle();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             while let Ok(Some(update)) = subscription.recv() {
@@ -95,7 +101,7 @@ impl Holder {
                 }
             }
         });
-        rx
+        Updates { rx, handle }
     }
 
     fn log(&self) -> String {
@@ -103,9 +109,21 @@ impl Holder {
     }
 }
 
+fn spawn_of(world: &World, argv: &[&str]) -> Spawn {
+    Spawn {
+        key: format!("key-{}", argv.join(" ")),
+        argv: argv.iter().map(|arg| (*arg).to_owned()).collect(),
+        cwd: world.dir.path().display().to_string(),
+        env: BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]),
+        size: None,
+        meta: Meta::default(),
+    }
+}
+
 /// The next update, or a panic naming `what` when none comes in time.
-fn next(updates: &mpsc::Receiver<Update>, holder: &Holder, what: &str) -> Update {
+fn next(updates: &Updates, holder: &Holder, what: &str) -> Update {
     updates
+        .rx
         .recv_timeout(WAIT)
         .unwrap_or_else(|err| panic!("no {what} ({err})\n{}", holder.log()))
 }
@@ -186,7 +204,23 @@ fn a_shell_runs_in_the_holder_and_its_output_shows_in_the_repaint_and_live() {
     let listing = holder.client.list().unwrap();
     assert_eq!(listing.instance, welcome.instance);
     assert_eq!(listing.panes.len(), 1);
-    assert_eq!(listing.panes[0].subscribers, 1);
+
+    // Only the live subscription counts: the ended ones drop out once the
+    // holder reads their close.
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let subscribers = holder.client.list().unwrap().panes[0].subscribers;
+        if subscribers == 1 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{subscribers} subscribers, not 1\n{}",
+            holder.log()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    drop(updates);
 }
 
 #[test]
@@ -272,4 +306,46 @@ fn a_client_with_no_shared_version_is_refused() {
     assert_eq!(reply["proto"], serde_json::json!([1, 1]), "{reply}");
     // And the holder closes the connection.
     assert!(read_frame(&mut socket).unwrap().is_none());
+}
+
+#[test]
+fn input_for_an_exited_pane_is_dropped_and_holds_up_nothing() {
+    let world = World::new();
+    let holder = Holder::start(&world);
+    let pane = holder.spawn(&world, &["/bin/sh", "-c", "exit 0"]);
+    exit_of(&holder, &pane);
+    // Far more than the PTY and the input queue take: were any of it
+    // waiting for the gone app, the list below would wait too.
+    let chunk = vec![b'x'; 64 * 1024];
+    for _ in 0..512 {
+        holder.client.raw_input(pane.num, &chunk).unwrap();
+    }
+    let started = Instant::now();
+    let listing = holder.client.list().unwrap();
+    assert!(started.elapsed() < WAIT, "{:?}", started.elapsed());
+    assert_eq!(listing.panes[0].state, PaneState::Exited);
+}
+
+#[test]
+fn a_size_out_of_bounds_is_a_bad_request() {
+    let world = World::new();
+    let holder = Holder::start(&world);
+    for (cols, rows) in [(1, 40), (120, 0), (5000, 40), (120, 5000)] {
+        let spawn = Spawn {
+            size: Some(Size { cols, rows }),
+            ..spawn_of(&world, &["/bin/sh"])
+        };
+        let err = holder.client.spawn(&spawn).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PanesError::Refused {
+                    code: ErrorCode::BadRequest,
+                    ..
+                }
+            ),
+            "{cols} by {rows}: {err}"
+        );
+    }
+    assert!(holder.client.list().unwrap().panes.is_empty());
 }
