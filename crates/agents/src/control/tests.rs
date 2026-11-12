@@ -1858,3 +1858,41 @@ fn a_resume_with_the_terminal_holder_refuses_a_herdr_pane_that_is_not_its_own() 
     assert!(!calls.iter().any(|c| c.contains("--resume")), "{calls:?}");
     assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
 }
+
+#[test]
+fn a_relaunch_with_the_terminal_holder_refuses_a_herdr_pane_another_session_is_bound_to() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.panes = Some(tiller_panes::FakePanes::new());
+    // A second live session took the same pane; the tokens still name ours.
+    rig.fleet.worker(&spawned.pane_id);
+    let ctx = rig.orchestrator();
+
+    let error = relaunch_it(&mut rig, &ctx, &patient(), &spawned.run.id, note("n")).unwrap_err();
+    let text = error.to_string();
+    assert!(
+        text.contains("A relaunch is not ready yet with the terminal holder"),
+        "{text}"
+    );
+    assert!(!typed(&rig, &spawned.pane_id, "/exit"));
+    assert!(session(&rig, &spawned.session.id).ended_at.is_none());
+}
+
+#[test]
+fn a_resume_with_the_terminal_holder_and_no_live_session_names_no_relaunch() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.panes = Some(tiller_panes::FakePanes::new());
+    rig.fleet
+        .store
+        .session_end(&Ctx::new(Actor::Hook), &spawned.session.id, "logout")
+        .unwrap();
+
+    let error = resume_it(&mut rig, &owner(), &patient(), &spawned.run.id).unwrap_err();
+    let text = error.to_string();
+    assert!(
+        text.contains("no live session to resume") && text.contains("terminal holder"),
+        "{text}"
+    );
+    assert!(!text.contains("tiller agent relaunch"), "{text}");
+}

@@ -326,17 +326,32 @@ pub fn resume(
     require_local(store, run)?;
     require_active(run)?;
     let worktree = worktree_of(run)?;
+    // A relaunch with no pane to go on in is refused with the terminal
+    // holder up, so the advice names it only without the holder.
+    let held = "a new session needs a new pane, which the terminal holder takes only from H09";
     let session = live_session(store.conn(), &run.id)?.ok_or_else(|| {
-        SpawnError::Refused(format!(
-            "run {} has no live session to resume: the last one ended, so start a new one with tiller agent relaunch {} --note <progress>",
-            run.id, run.id
-        ))
+        SpawnError::Refused(match world.panes {
+            Some(_) => format!(
+                "run {} has no live session to resume: the last one ended, and {held}",
+                run.id
+            ),
+            None => format!(
+                "run {} has no live session to resume: the last one ended, so start a new one with tiller agent relaunch {} --note <progress>",
+                run.id, run.id
+            ),
+        })
     })?;
     let claude_id = session.claude_session_id.clone().ok_or_else(|| {
-        SpawnError::Refused(format!(
-            "session {} never bound a Claude session, so there is nothing to resume; tiller agent relaunch {} --note <progress> starts one",
-            session.id, run.id
-        ))
+        SpawnError::Refused(match world.panes {
+            Some(_) => format!(
+                "session {} never bound a Claude session, so there is nothing to resume, and {held}",
+                session.id
+            ),
+            None => format!(
+                "session {} never bound a Claude session, so there is nothing to resume; tiller agent relaunch {} --note <progress> starts one",
+                session.id, run.id
+            ),
+        })
     })?;
     // With the terminal holder up, the resume goes on only in a herdr pane
     // that is still the session's own: a new pane belongs in the holder,
@@ -611,11 +626,23 @@ pub fn relaunch(
         },
         &mut events,
     )
-    .map_err(|error| SpawnError::Undone {
+    .map_err(|error| {
+        // With the holder up, a retry goes on only in a herdr pane the new
+        // session already owns; without one it is refused like any relaunch
+        // with no pane.
+        let retry_refused = world.panes.is_some()
+            && live_session(store.conn(), &relaunched.run.id)
+                .ok()
+                .flatten()
+                .and_then(|now| {
+                    own_herdr_pane(store, world.herdr, Some(&now), "A relaunch")
+                        .ok()
+                        .flatten()
+                })
+                .is_none();
+        SpawnError::Undone {
         error: Box::new(error),
-        // A retry needs the new session's pane, which it never got, so with
-        // the holder up a retry is refused like any relaunch with no pane.
-        notes: if world.panes.is_some() {
+        notes: if retry_refused {
             format!(
                 "the relaunch is recorded (run {}, session {}) and nothing was deleted; the old agent was stopped and the new session has no agent, and with the terminal holder up a relaunch without a pane is refused until H09, so the run waits for that or for a new start of its card",
                 relaunched.run.id, relaunched.session.id
@@ -626,6 +653,7 @@ pub fn relaunch(
                 relaunched.run.id, relaunched.session.id, relaunched.run.id
             )
         },
+        }
     })?;
     let (since, pane_id, warning) = launched;
     let (started, evidence) = wait_started(
@@ -812,13 +840,12 @@ fn own_herdr_pane(
     let Some(pane) = herdr.pane(pane_id)? else {
         return Ok(None);
     };
-    // The tokens name the session, so only a bound row can hold it.
-    let bound: Vec<Session> = list(
-        store.conn(),
-        "ended_at IS NULL AND pane_id = ?1 AND id <> ?2",
-        &[&pane.pane_id, &session.id],
-    )?;
-    Ok((tagged(&pane, &session.id) && bound.is_empty()).then_some(pane))
+    if !tagged(&pane, &session.id) {
+        return Ok(None);
+    }
+    Ok(pane_holder(store, &pane, &session.id)?
+        .is_none()
+        .then_some(pane))
 }
 
 /// Another session that holds `pane`: a live row bound to it, or the

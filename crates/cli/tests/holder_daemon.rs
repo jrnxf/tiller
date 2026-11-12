@@ -176,11 +176,14 @@ impl View {
             self.stream.set_read_timeout(Some(left)).unwrap();
             let read = match self.stream.read(&mut buf) {
                 Ok(read) => read,
-                // A quiet stream: the deadline check above says what came.
+                // A quiet stream or a signal: the deadline check above says what
+                // came.
                 Err(error)
                     if matches!(
                         error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::Interrupted
                     ) =>
                 {
                     continue;
