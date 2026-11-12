@@ -335,6 +335,9 @@ struct Inner {
     /// The reaper has collected the child. Its exit goes into the record
     /// once its last output is in.
     reaped: bool,
+    /// A close hung up the child's group: what is left of it when the
+    /// pane is forgotten is killed.
+    closing: bool,
     /// Takes the queries the model answers out of the subscribers' bytes.
     filter: QueryFilter,
     /// The synchronized frames' markers in those bytes, while a subscriber
@@ -916,6 +919,7 @@ impl Holder {
                 model: Model::new(size),
                 subscribers: Vec::new(),
                 reaped: false,
+                closing: false,
                 filter: QueryFilter::new(),
                 marks: Marks::default(),
                 leases: Leases::default(),
@@ -1350,8 +1354,14 @@ impl Holder {
         let known = |failure: Failure, exit: &watch::Receiver<Option<Exit>>| {
             (*exit.borrow()).ok_or(failure)
         };
-        if let Err(failure) = cell.signal_running(Signal::HUP) {
-            return known(failure, &exit);
+        match cell.live() {
+            Ok(mut inner) => {
+                if inner.running() {
+                    inner.closing = true;
+                    cell.signal(Signal::HUP);
+                }
+            }
+            Err(failure) => return known(failure, &exit),
         }
         let deadline = Instant::now() + grace;
         let has_exit = |exit: &Option<Exit>| exit.is_some();
@@ -1407,9 +1417,9 @@ impl Holder {
         for sub in inner.subscribers.drain(..) {
             sub.conn.end_stream(sub.stream);
         }
-        // What is left of the group still holds the PTY: with the pane gone,
-        // nothing else would kill it.
-        if inner.reaped && !*cell.output_ended.borrow() {
+        // A close kills what is left of the group at the end of its grace:
+        // with the pane gone, nothing else would.
+        if inner.closing && inner.reaped && !*cell.output_ended.borrow() {
             cell.signal(Signal::KILL);
         }
         cell.forgotten.send_replace(true);

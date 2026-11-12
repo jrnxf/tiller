@@ -1064,6 +1064,45 @@ fn a_forget_after_a_close_kills_what_is_left_of_the_group() {
     }
 }
 
+// Section 2: only a close signals the group, so a forget after the child
+// exits by itself leaves what the child started alone.
+#[test]
+fn a_forget_after_a_natural_exit_leaves_the_rest_of_the_group_alone() {
+    let world = World::new();
+    let holder = Holder::start(&world);
+    let ticks = world.dir.path().join("ticks");
+    let job = world.dir.path().join("job");
+    // The leader exits once its background job, which ignores the hang-up
+    // and holds the PTY, has written its pid to `job`.
+    let pane = holder.spawn(
+        &world,
+        &[
+            "/bin/sh",
+            "-c",
+            "sh -c 'trap \"\" HUP; echo $$ > job; while :; do echo x >> ticks; sleep 0.1; done' & \
+             while [ ! -s job ]; do sleep 0.05; done; exit 0",
+        ],
+    );
+    let exit = exit_of(&holder, &pane);
+    assert_eq!(exit.code, Some(0), "{exit:?}");
+    holder.client.forget(&pane.pane).unwrap();
+    let pid: i32 = std::fs::read_to_string(&job)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let len = || std::fs::metadata(&ticks).map_or(0, |meta| meta.len());
+    let before = len();
+    std::thread::sleep(Duration::from_secs(1));
+    let after = len();
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .unwrap();
+    assert!(after > before, "the forget killed the rest of the group");
+}
+
 // Section 2.4: requests on one connection may overlap, so a close that
 // waits out its grace holds up nothing else the client asks.
 #[test]
