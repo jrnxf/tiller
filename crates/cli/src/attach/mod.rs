@@ -13,7 +13,7 @@ use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use jiff::Timestamp;
 use tiller_core::authority::principal;
@@ -44,8 +44,9 @@ const ESC_WAIT: Duration = Duration::from_millis(25);
 /// How often the window's size is read. Polling needs no signal handler.
 const SIZE_POLL: Duration = Duration::from_millis(100);
 
-pub fn run(args: &Args, json: bool) -> ExitCode {
-    match attach(args) {
+/// `db` is the `--db` or `TILLER_DB` given, if any.
+pub fn run(args: &Args, db: Option<&Path>, json: bool) -> ExitCode {
+    match attach(args, db) {
         Ok(()) => ExitCode::SUCCESS,
         Err(failure) => {
             let exit = failure.exit;
@@ -66,13 +67,22 @@ fn refusal(why: String) -> Failure {
     .hint("an agent never attaches; the owner's own shell or a notification click may")
 }
 
-fn attach(args: &Args) -> Result<(), Failure> {
+fn attach(args: &Args, db: Option<&Path>) -> Result<(), Failure> {
     principal::owner_at_terminal().map_err(refusal)?;
     // The owner check stands in for stdin in tests, so both ends are checked.
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return Err(refusal("stdin and stdout must be a terminal".into()));
     }
     let home = crate::app::App::from_env(None).home;
+    // Attach reads the home's holder and its daemon's state: a `--db`
+    // other than the home's own would suggest another.
+    if db.is_some_and(|db| !crate::daemon::is_home_db(db, &home)) {
+        return Err(Failure::usage(format!(
+            "--db and TILLER_DB do not apply to attach: it shows the agents of the home {}",
+            home.display()
+        ))
+        .hint("set TILLER_HOME to choose another"));
+    }
     let prefix = prefix(&home)?;
     let client = connect(&home)?;
     let window = term::window_size().unwrap_or((80, 24));
@@ -307,11 +317,17 @@ impl Session<'_> {
     }
 
     fn run(&mut self, rx: Receiver<Ev>, mut reader: Reader) -> Result<(), Failure> {
+        // When the cut sequence waiting began: pane output must not hold
+        // back a lone Escape.
+        let mut since: Option<Instant> = None;
         loop {
             let ev = if reader.waiting() {
-                match rx.recv_timeout(ESC_WAIT) {
+                let began = *since.get_or_insert_with(Instant::now);
+                let left = (began + ESC_WAIT).saturating_duration_since(Instant::now());
+                match rx.recv_timeout(left) {
                     Ok(ev) => ev,
                     Err(RecvTimeoutError::Timeout) => {
+                        since = None;
                         let keys = reader.flush();
                         if self.keys(keys)? == Flow::Detach {
                             return Ok(());
@@ -328,6 +344,7 @@ impl Session<'_> {
             };
             let flow = match ev {
                 Ev::Keys(bytes) => {
+                    since = None;
                     let keys = reader.feed(&bytes);
                     self.keys(keys)?
                 }
@@ -373,8 +390,10 @@ impl Session<'_> {
         for key in keys {
             match &mut self.view {
                 // A kitty key's release is no key press: the release of the
-                // `?` that opened the help must not close it.
-                View::Help | View::Switcher(_) if key.kind == Kind::Release => {}
+                // `?` that opened the help must not close it. A modifier
+                // pressed alone is none either.
+                View::Help | View::Switcher(_)
+                    if matches!(key.kind, Kind::Release | Kind::Modifier) => {}
                 // Any key closes the help, and is swallowed.
                 View::Help => self.repaint()?,
                 View::Switcher(switcher) => match key.kind {
@@ -518,9 +537,16 @@ impl Session<'_> {
     }
 
     /// Shows `pane`: a new stream, which starts with a repaint, and this
-    /// client's lease at the window's size.
+    /// client's lease at the window's size. The old stream ends after the
+    /// new lease is on top, so a repaint of the same pane never lets
+    /// another lease resize it in between.
     fn show(&mut self, pane: Pane) -> Result<(), Failure> {
-        self.end_stream();
+        let old = self.stream.take();
+        let end_old = || {
+            if let Some(old) = old {
+                old.handle.end();
+            }
+        };
         self.generation += 1;
         self.view = View::Pane;
         self.prefixed = Prefixed::default();
@@ -534,10 +560,14 @@ impl Session<'_> {
         let mut subscription = match subscribed {
             Ok(subscription) => subscription,
             Err(PanesError::NotFound(_)) => {
+                end_old();
                 let note = format!("  {} is gone", agents::label(&pane));
                 return self.open_switcher(Some(note));
             }
-            Err(error) => return Err(holder_down(&error)),
+            Err(error) => {
+                end_old();
+                return Err(holder_down(&error));
+            }
         };
         let handle = subscription.handle();
         let (tx, generation) = (self.tx.clone(), self.generation);
@@ -564,6 +594,7 @@ impl Session<'_> {
         if !self.read_only {
             take_lease(&mut stream, self.window);
         }
+        end_old();
         self.stream = Some(stream);
         Ok(())
     }
@@ -646,7 +677,9 @@ impl Session<'_> {
         let View::Switcher(switcher) = &self.view else {
             return Ok(());
         };
-        let lines = switcher.lines(Timestamp::now());
+        // The box's borders take two rows.
+        let room = usize::from(self.window.1).saturating_sub(2);
+        let lines = switcher.lines(Timestamp::now(), room);
         term::write(&term::draw_box("agents", &lines, self.window)).map_err(gone)
     }
 

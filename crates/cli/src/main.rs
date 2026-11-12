@@ -334,7 +334,7 @@ fn main() -> ExitCode {
         return holder::run(args, cli.db.as_deref(), cli.json);
     }
     if let Command::Attach(args) = &cli.command {
-        return attach::run(args, cli.json);
+        return attach::run(args, cli.db.as_deref(), cli.json);
     }
     if let Command::Daemon(args) = &cli.command {
         if let Some(message) = daemon::refuse_db(cli.db.as_deref()) {

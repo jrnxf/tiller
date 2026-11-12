@@ -19,11 +19,13 @@ impl Default for Prefix {
 
 impl Prefix {
     /// Reads `ctrl-<key>` (or `C-<key>`), where the key is a letter or one
-    /// of `\ ] ^ _`, as `[attach] prefix` gives it.
+    /// of `\ ]`, as `[attach] prefix` gives it. Ctrl-i, Ctrl-j and Ctrl-m
+    /// send the bytes of Tab and Enter, and Ctrl-^ and Ctrl-_ need Shift in
+    /// the kitty encoding, so none of them can be the prefix.
     pub fn parse(text: &str) -> Result<Self, String> {
         let refuse = || {
             format!(
-                "[attach] prefix is ctrl- and a letter or one of \\ ] ^ _, such as ctrl-\\ or ctrl-a; not {text:?}"
+                "[attach] prefix is ctrl- and a letter but i, j or m, or one of \\ ], such as ctrl-\\ or ctrl-a; not {text:?}"
             )
         };
         let lower = text.trim().to_ascii_lowercase();
@@ -33,7 +35,10 @@ impl Prefix {
             .ok_or_else(refuse)?;
         let mut chars = key.chars();
         match (chars.next(), chars.next()) {
-            (Some(chord), None) if chord.is_ascii_lowercase() || "\\]^_".contains(chord) => {
+            (Some(chord), None)
+                if (chord.is_ascii_lowercase() && !"ijm".contains(chord))
+                    || "\\]".contains(chord) =>
+            {
                 Ok(Self { chord })
             }
             _ => Err(refuse()),
@@ -68,6 +73,8 @@ pub enum Kind {
     Escape,
     /// A kitty key release event, which only follows a press.
     Release,
+    /// A kitty press of a modifier key alone, as Shift before `?`.
+    Modifier,
     /// Anything else, a paste's bytes among them.
     Other,
 }
@@ -225,14 +232,19 @@ impl Reader {
         let shifted = codes.next().and_then(|code| code.parse::<u32>().ok());
         const SHIFT: u32 = 1;
         const CTRL: u32 = 4;
+        // Shift, Ctrl, Alt, Super, Hyper, Meta and the ISO level shifts.
+        if (57441..=57454).contains(&code) {
+            return Kind::Modifier;
+        }
         match mods {
             CTRL if code == self.prefix.code() => Kind::Prefix,
             0 if code == 13 => Kind::Enter,
             0 if code == 27 => Kind::Escape,
             0 => printable(code),
+            // With no shifted key reported, the US layout's is the guess.
             SHIFT => match shifted {
                 Some(shifted) => printable(shifted),
-                None => printable(code).upper(),
+                None => printable(code).shifted(),
             },
             _ => Kind::Other,
         }
@@ -240,9 +252,17 @@ impl Reader {
 }
 
 impl Kind {
-    fn upper(self) -> Self {
+    /// The key Shift gives on a US layout.
+    fn shifted(self) -> Self {
+        const PLAIN: &str = "`1234567890-=[]\\;',./";
+        const SHIFTED: &str = "~!@#$%^&*()_+{}|:\"<>?";
         match self {
-            Kind::Char(c) => Kind::Char(c.to_ascii_uppercase()),
+            Kind::Char(c) => Kind::Char(
+                PLAIN
+                    .find(c)
+                    .and_then(|at| SHIFTED.chars().nth(at))
+                    .unwrap_or(c.to_ascii_uppercase()),
+            ),
             other => other,
         }
     }
@@ -304,8 +324,9 @@ impl Prefixed {
             }
             return Some(Act::Send(key.bytes));
         }
-        // The prefix's own release comes before the next key.
-        if key.kind == Kind::Release {
+        // The prefix's own release, and a Shift held for `?`, come before
+        // the next key.
+        if matches!(key.kind, Kind::Release | Kind::Modifier) {
             return None;
         }
         self.armed = false;
@@ -366,6 +387,9 @@ mod tests {
         let mut reader = Reader::default();
         assert_eq!(kinds(&mut reader, b"\x1b[100u"), [Kind::Char('d')]);
         assert_eq!(kinds(&mut reader, b"\x1b[47:63;2u"), [Kind::Char('?')]);
+        assert_eq!(kinds(&mut reader, b"\x1b[47;2u"), [Kind::Char('?')]);
+        assert_eq!(kinds(&mut reader, b"\x1b[97;2u"), [Kind::Char('A')]);
+        assert_eq!(kinds(&mut reader, b"\x1b[57441;2u"), [Kind::Modifier]);
         assert_eq!(kinds(&mut reader, b"\x1b[13u"), [Kind::Enter]);
         assert_eq!(kinds(&mut reader, b"\x1b[27u"), [Kind::Escape]);
         assert_eq!(kinds(&mut reader, b"\x1b[1;1:3A"), [Kind::Release]);
@@ -431,11 +455,26 @@ mod tests {
     }
 
     #[test]
+    fn a_modifier_pressed_after_the_prefix_keeps_it_armed() {
+        let mut reader = Reader::default();
+        let mut prefixed = Prefixed::default();
+        let acts: Vec<_> = reader
+            .feed(b"\x1b[92;5u\x1b[92;5:3u\x1b[57441;2u\x1b[47;2u")
+            .into_iter()
+            .filter_map(|key| prefixed.on_key(key))
+            .collect();
+        assert_eq!(acts, [Act::Help]);
+    }
+
+    #[test]
     fn a_prefix_setting_reads_ctrl_and_one_key() {
         assert_eq!(Prefix::parse("ctrl-\\").unwrap(), Prefix::default());
         let a = Prefix::parse("C-a").unwrap();
         assert_eq!((a.byte(), a.code(), a.label()), (1, 97, "Ctrl-a".into()));
-        assert!(Prefix::parse("ctrl-[").is_err());
+        assert!(Prefix::parse("ctrl-]").is_ok());
+        for refused in ["ctrl-[", "ctrl-i", "ctrl-j", "ctrl-m", "ctrl-^", "ctrl-_"] {
+            assert!(Prefix::parse(refused).is_err(), "{refused}");
+        }
         assert!(Prefix::parse("alt-a").is_err());
         assert!(Prefix::parse("ctrl-ab").is_err());
     }

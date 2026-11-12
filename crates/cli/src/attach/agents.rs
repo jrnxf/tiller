@@ -105,8 +105,9 @@ impl Switcher {
         self.panes.get(self.selected)
     }
 
-    /// The box's rows at `now`.
-    pub fn lines(&self, now: Timestamp) -> Vec<Line> {
+    /// The box's rows at `now`, at most `room` of them: when the panes do
+    /// not fit, the rows shown scroll to keep the selected one.
+    pub fn lines(&self, now: Timestamp, room: usize) -> Vec<Line> {
         let mut lines = Vec::new();
         if let Some(note) = &self.note {
             lines.push(Line::plain(note.clone()));
@@ -121,13 +122,14 @@ impl Switcher {
             .max()
             .unwrap_or(0);
         let mut block = None;
+        let mut body = Vec::new();
         for (n, pane) in self.panes.iter().enumerate() {
             if block != Some(project(pane)) {
                 block = Some(project(pane));
-                lines.push(Line::plain(format!("  {}", project(pane))));
+                body.push(Line::plain(format!("  {}", project(pane))));
             }
             let (glyph, state) = self.status(pane);
-            lines.push(Line {
+            body.push(Line {
                 text: format!(
                     "   {glyph}  {:width$}  {state:10} {}",
                     label(pane),
@@ -136,6 +138,15 @@ impl Switcher {
                 selected: n == self.selected,
             });
         }
+        // The note and the hint stay, and the panes get what is left.
+        let fits = room.saturating_sub(lines.len() + 1).max(1);
+        if body.len() > fits {
+            let at = body.iter().position(|line| line.selected).unwrap_or(0);
+            let start = (at + 1).saturating_sub(fits);
+            body.truncate(start + fits);
+            body.drain(..start);
+        }
+        lines.extend(body);
         lines.push(Line::plain("  ↑↓ move  enter attach  esc close"));
         lines
     }
@@ -236,7 +247,7 @@ mod tests {
         let switcher = Switcher::new(panes, Some(&PaneId::from("p2")), activity);
         let now = Timestamp::from_second(220).unwrap();
         let text: Vec<_> = switcher
-            .lines(now)
+            .lines(now, 24)
             .into_iter()
             .map(|line| (line.text, line.selected))
             .collect();
@@ -253,5 +264,32 @@ mod tests {
                 ("  ↑↓ move  enter attach  esc close".to_owned(), false),
             ]
         );
+    }
+
+    #[test]
+    fn a_long_list_scrolls_to_keep_the_selected_pane() {
+        let panes: Vec<_> = (0..10)
+            .map(|n| pane(&format!("p{n}"), "alpha", &format!("agent-{n}"), n))
+            .collect();
+        let mut switcher = Switcher::new(panes, None, HashMap::new());
+        switcher.note = Some("  a note".into());
+        let shown = |switcher: &Switcher| -> Vec<String> {
+            let now = Timestamp::from_second(60).unwrap();
+            let lines = switcher.lines(now, 6);
+            assert_eq!(lines.len(), 6);
+            assert_eq!(lines[0].text, "  a note");
+            assert_eq!(lines[5].text, "  ↑↓ move  enter attach  esc close");
+            lines
+                .into_iter()
+                .filter(|line| line.selected)
+                .map(|line| line.text)
+                .collect()
+        };
+        assert_eq!(shown(&switcher).len(), 1);
+        for _ in 0..9 {
+            switcher.down();
+        }
+        let selected = shown(&switcher);
+        assert!(selected[0].contains("agent-9"), "{selected:?}");
     }
 }

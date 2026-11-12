@@ -392,7 +392,8 @@ With no target, it shows the switcher first.
   - `Ctrl-\` sends one `Ctrl-\` to the agent.
   - `?` shows a help screen over the pane that lists every prefix key. It sends nothing to the pane. Any key closes it and asks for a repaint. That key is swallowed and never reaches the pane.
   - Any other key closes the prefix and does nothing.
-  - `[attach] prefix` in `config.toml` can change the prefix key.
+  - `[attach] prefix` in `config.toml` can change the prefix key to another Ctrl chord: a letter, or `\` or `]`. Ctrl-i, Ctrl-j and Ctrl-m are refused, because they send the bytes of Tab and Enter.
+  - A kitty press of a modifier key alone, such as the Shift before `?`, leaves the prefix waiting.
 - **The kitty keyboard.** When the agent pushed kitty keyboard flags, the owner's terminal sends `Ctrl-\` as `CSI 92;5u`, not as byte `0x1c`. `tiller attach` knows the pane's mode from the holder and reads both forms.
 - **Detach.** It drops the lease, then restores the terminal: it pops the kitty flags, turns off bracketed paste, mouse and focus modes, leaves the alternate screen, shows the cursor and resets SGR. Then it leaves raw mode. The pane runs on.
 - **Many clients.** Any number of attach clients and board views can watch one pane. All of them see the same output. Input from all of them goes to the pane in the order it arrives, with no lock. The size follows the client that typed last.

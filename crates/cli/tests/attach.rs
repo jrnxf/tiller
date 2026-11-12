@@ -620,6 +620,20 @@ fn attach_refuses_a_fleet_caller() {
     );
 }
 
+// Attach shows the home's agents: a `--db` of another home is refused, and
+// the terminal is never taken.
+#[test]
+fn attach_refuses_a_db_of_another_home() {
+    let world = World::new();
+    let _holder = Holder::start(&world);
+    let mut outer = Outer::new(80, 24);
+    outer.attach(&world, &[], &[("TILLER_DB", "/home/user/other/state.db")]);
+    assert_eq!(outer.exit(), 2, "{}", outer.written());
+    let written = outer.written();
+    assert!(written.contains("do not apply to attach"), "{written}");
+    assert!(!outer.raw());
+}
+
 // D12: a notification click runs attach for the owner with the session's
 // `TILLER_SESSION_ID` set: it passes, and shows that pane.
 #[test]
