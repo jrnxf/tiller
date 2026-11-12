@@ -137,9 +137,9 @@ impl Subscription {
     }
 
     /// The next update. `None` once the stream has ended: after
-    /// [`Update::Lagged`], after a close that follows [`Update::Exited`],
-    /// after [`StreamHandle::end`], or after an earlier error ended it. A
-    /// close at any other time is `Unreachable`: the holder may have died,
+    /// [`Update::Lagged`] or [`Update::Exited`], after
+    /// [`StreamHandle::end`], or after an earlier error ended it. A close
+    /// before either is `Unreachable`: the holder may have died,
     /// so the pane's state is unknown, not gone. An `error` reply to a
     /// resize or a release is an error that leaves the stream open; any
     /// other error ends it.

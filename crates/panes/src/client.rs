@@ -40,7 +40,7 @@ use rustix::net::{AddressFamily, SocketAddrUnix, SocketType, connect, sockopt};
 use rustix::net::{SocketFlags, socket_with};
 
 use crate::error::{PanesError, Result};
-use crate::frame::{Frame, FrameError, encode_input, read_frame};
+use crate::frame::{Frame, encode_input, read_frame};
 use crate::handshake::{Hello, ProtoRange, SUPPORTED, Welcome};
 use crate::keys::Key;
 use crate::live::{Control, EventFeed, Events, Feed, Subscribe, Subscription, Update};
@@ -936,7 +936,6 @@ impl Live for HolderClient {
             reader,
             side: Arc::clone(&side),
             state: StreamState::AwaitingRepaint,
-            exited: false,
         };
         Ok(Subscription::from_parts(
             pane.clone(),
@@ -1200,8 +1199,6 @@ struct SocketFeed {
     reader: BufReader<Timed>,
     side: Arc<StreamSide>,
     state: StreamState,
-    /// Whether the pane's `exited` came, after which a close is the end.
-    exited: bool,
 }
 
 impl Feed for SocketFeed {
@@ -1225,7 +1222,7 @@ impl Feed for SocketFeed {
             (result, _) => result,
         };
         let ends = match &result {
-            Ok(None | Some(Update::Lagged)) => true,
+            Ok(None | Some(Update::Lagged | Update::Exited(_))) => true,
             Ok(Some(_)) => false,
             Err(err) => !keeps_connection(err),
         };
@@ -1247,21 +1244,7 @@ impl SocketFeed {
 
     fn read_update(&mut self) -> Result<Option<Update>> {
         loop {
-            // After the exit, a holder that closes with a resize it never
-            // read resets the connection: that is the end too. A frame cut
-            // short is still an error.
-            let read = match read_frame(&mut self.reader) {
-                Err(FrameError::Io(err))
-                    if self.exited && err.kind() == io::ErrorKind::ConnectionReset =>
-                {
-                    Ok(None)
-                }
-                read => read.map_err(PanesError::from_frame),
-            };
-            let Some(frame) = read? else {
-                if self.exited {
-                    return Ok(None);
-                }
+            let Some(frame) = read_frame(&mut self.reader).map_err(PanesError::from_frame)? else {
                 return Err(PanesError::Unreachable(format!(
                     "the holder closed stream {} before the pane exited",
                     self.stream
@@ -1324,7 +1307,6 @@ impl SocketFeed {
                         pane,
                         exit,
                     } if pane == self.side.pane => {
-                        self.exited = true;
                         return Ok(Some(Update::Exited(exit)));
                     }
                     HolderMessage::Lagged { stream } if stream == self.stream => {
@@ -1375,11 +1357,6 @@ mod tests {
 
     /// A live subscription to stream 1 on `ours`, and its write side.
     fn live(ours: UnixStream) -> (Subscription, Arc<StreamSide>) {
-        live_after(ours, false)
-    }
-
-    /// As [`live`], after the pane's `exited` came when `exited`.
-    fn live_after(ours: UnixStream, exited: bool) -> (Subscription, Arc<StreamSide>) {
         let side = Arc::new(StreamSide {
             pane: "p1".into(),
             lease: "stream-1".into(),
@@ -1394,7 +1371,6 @@ mod tests {
             reader: BufReader::new(Timed::new(ours)),
             side: Arc::clone(&side),
             state: StreamState::Live,
-            exited,
         };
         let subscription = Subscription::from_parts(
             "p1".into(),
@@ -1421,23 +1397,6 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(20));
             }
         })
-    }
-
-    #[test]
-    fn a_frame_cut_short_after_the_exit_is_still_an_error() {
-        let (ours, mut theirs) = UnixStream::pair().unwrap();
-        let (mut subscription, _side) = live_after(ours, true);
-        let mut wire = Vec::new();
-        Frame::Output {
-            stream: 1,
-            bytes: b"the last bytes".to_vec(),
-        }
-        .encode(&mut wire)
-        .unwrap();
-        theirs.write_all(&wire[..wire.len() - 3]).unwrap();
-        drop(theirs);
-        let got = subscription.recv();
-        assert!(matches!(got, Err(PanesError::Unreachable(_))), "{got:?}");
     }
 
     #[test]

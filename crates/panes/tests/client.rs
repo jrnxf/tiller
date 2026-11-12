@@ -582,6 +582,53 @@ fn a_lagged_subscriber_is_told_and_its_stream_ends() {
 }
 
 #[test]
+fn an_exit_ends_the_stream_while_the_holder_keeps_the_connection_open() {
+    let (closed, connection_closed) = std::sync::mpsc::channel();
+    let holder = subscription_holder(move |peer, _| {
+        peer.send(&HolderMessage::Exited {
+            id: None,
+            pane: "p1".into(),
+            exit: Exit {
+                code: Some(4),
+                signal: None,
+                at: "2026-11-11T12:01:00Z".parse().unwrap(),
+            },
+        });
+        // The holder keeps the connection open after the exit, as the real
+        // holder does; the client ends it.
+        assert_eq!(peer.frame(), None);
+        closed.send(()).unwrap();
+    });
+    let client = HolderClient::connect(&holder.path, "daemon").unwrap();
+    let mut subscription = client
+        .subscribe(&"p1".into(), Subscribe::default())
+        .unwrap();
+    assert!(matches!(
+        subscription.recv(),
+        Ok(Some(Update::Repaint { .. }))
+    ));
+    let (done, finished) = std::sync::mpsc::channel();
+    let reader = thread::spawn(move || {
+        let first = subscription.recv();
+        let second = subscription.recv();
+        let _ = done.send((first, second));
+        subscription
+    });
+    let (first, second) = finished
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the stream never ended after the exit");
+    assert!(matches!(first, Ok(Some(Update::Exited(_)))), "{first:?}");
+    assert_eq!(second.unwrap(), None);
+    // The connection ends with the stream, while the subscription lives.
+    connection_closed
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    drop(reader.join().unwrap());
+    drop(client);
+    holder.join();
+}
+
+#[test]
 fn a_close_before_the_pane_exits_is_unreachable_not_the_end() {
     // The holder closes the stream with no exit and no lagged: it may have
     // died, so the pane's state is unknown.

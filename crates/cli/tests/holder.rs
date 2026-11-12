@@ -252,6 +252,12 @@ fn an_exit_code_and_a_killing_signal_are_reported() {
     };
     assert!(String::from_utf8_lossy(&bytes).contains("bye"));
     assert!(matches!(next(&updates, &holder, "exit"), Update::Exited(_)));
+    // Then the end: the reader's recv gives None, so its sender drops.
+    assert_eq!(
+        updates.rx.recv_timeout(WAIT).unwrap_err(),
+        mpsc::RecvTimeoutError::Disconnected,
+        "the stream did not end after the exit"
+    );
 }
 
 #[test]
