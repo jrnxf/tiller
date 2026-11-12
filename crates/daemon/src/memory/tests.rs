@@ -940,6 +940,33 @@ async fn a_clean_filter_does_not_make_tillers_own_write_an_edit() {
     );
 }
 
+/// An end-of-line rule gives the owner's checkout bytes that are not
+/// `HEAD`'s. The file is clean when the rule stages `HEAD`'s blob from it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_end_of_line_rule_checkout_is_not_an_edit() {
+    let home = home();
+    home.add("k-1", "alpha", NOTE_SECTION, "First note").await;
+    let root = home.repo().root().to_path_buf();
+    std::fs::write(root.join(".gitattributes"), "*.md text eol=crlf\n").unwrap();
+    owner_commit(&root, ".gitattributes", "line endings");
+
+    // The owner's checkout writes the document with CRLF line endings.
+    let crlf = text(&home, ALPHA).replace('\n', "\r\n");
+    std::fs::write(root.join(ALPHA), &crlf).unwrap();
+    assert_eq!(home.view("alpha").await["doc"]["dirty"], false);
+    home.add("k-2", "alpha", NOTE_SECTION, "Second note").await;
+    assert!(text(&home, ALPHA).contains("Second note"));
+    assert_eq!(home.view("alpha").await["doc"]["dirty"], false);
+
+    // A CRLF hand edit nobody committed still blocks changes.
+    let edited = format!(
+        "{}- hand edit\r\n",
+        text(&home, ALPHA).replace('\n', "\r\n")
+    );
+    std::fs::write(root.join(ALPHA), edited).unwrap();
+    assert_eq!(home.view("alpha").await["doc"]["dirty"], true);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn flagged_commit_is_undone() {
     let home = home();
