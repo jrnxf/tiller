@@ -1562,6 +1562,14 @@ fn rss_kib(pid: u32) -> u64 {
 // 50 ms.
 #[test]
 fn a_flood_keeps_the_holders_memory_bound_and_every_ping_fast() {
+    // It times the wall clock, so `.config/nextest.toml` runs it alone.
+    if std::env::var_os("NEXTEST_RUN_ID").is_some() {
+        assert_eq!(
+            std::env::var("NEXTEST_TEST_GROUP").as_deref(),
+            Ok("wall-clock"),
+            "the nextest override that runs this test alone no longer matches it"
+        );
+    }
     let world = World::new();
     let holder = Holder::start(&world);
     let script = concat!(
