@@ -370,8 +370,10 @@
   border-radius: var(--r8);
 }
 
+/* With no room for both, the actions drop below the agent's name. */
 .av-card-h {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   flex: none;
@@ -379,8 +381,10 @@
   padding: 8px 10px 8px 14px;
 }
 
+/* Room for the name and its chips before the actions wrap below. */
 .av-who {
   display: flex;
+  flex: 1 1 240px;
   flex-direction: column;
   gap: 3px;
   min-width: 0;
@@ -435,11 +439,15 @@
   color: var(--green-text);
 }
 
+/* On a line of their own, too wide a set of actions wraps from the right. */
 .av-acts {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   align-items: center;
   gap: 6px;
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
   margin-left: auto;
 }
 
@@ -461,6 +469,22 @@
   flex-direction: column;
   flex: 1;
   min-height: 0;
+}
+
+/* Full screen: the page is, and the agent's card covers it, under the
+   toasts (50), the dialogs (70) and the menus (90) that open over it. */
+.av-card.full {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  border: 0;
+  border-radius: 0;
+}
+
+/* No sidebar shows in full screen, so the toast centers on the screen. */
+:root:fullscreen .toast {
+  left: 50%;
+  max-width: min(520px, calc(100% - 32px));
 }
 
 .av-body-note {
@@ -494,7 +518,7 @@
 /* The details drawer slides over the terminal from the right. */
 .av-det {
   position: absolute;
-  top: 56px;
+  top: var(--av-head, 56px);
   right: 16px;
   bottom: 50px;
   z-index: 2;

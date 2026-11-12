@@ -21,6 +21,9 @@
 //! 5. the row tokens are reported, the layout pass runs and the launch line
 //!    is typed into the pane.
 //!
+//! With the terminal holder in the world, steps 3 and 5 are one `spawn` in
+//! the checkout that runs the launch script (`terminal-holder.md` 4.4).
+//!
 //! The orchestrator runs in the project checkout (`recovery.md`, Resuming a
 //! session: an orchestrator resumes in "the project's checkout path from the
 //! config file"), with no run, so `TILLER_RUN_ID` is empty. Its home, the
@@ -36,13 +39,12 @@ use tiller_core::state::get;
 use tiller_core::state::outbox::live_orchestrator;
 use tiller_core::state::runs::{NewOrchestrator, OrchestratorStarted};
 use tiller_core::{Actor, Applied, Ctx, Store, ids};
-use tiller_herdr::client::Herdr;
 use tiller_herdr::layout;
 
 use super::launch::{self, LaunchSpec, Roots};
 use super::memory;
 use super::settings;
-use super::{Result, SpawnError, World, local_host, relayout};
+use super::{Result, SpawnError, World, close_pane, holder, local_host, relayout};
 use crate::control::{self, Waits};
 use crate::roles::Role;
 
@@ -93,7 +95,7 @@ struct Places {
 /// What a failed start undoes: the pane it opened, its scratch directory and
 /// the home when this start made it.
 struct Opened<'a> {
-    herdr: &'a dyn Herdr,
+    world: &'a World<'a>,
     scratch: &'a Path,
     home: Option<&'a Path>,
 }
@@ -143,7 +145,7 @@ pub fn start(
         // The stored response holds the session as it started: read it now.
         let now: Session = get(store.conn(), "session", &session.id)?;
         if now.ended_at.is_none() {
-            return Ok(replayed(world.herdr, replay, label));
+            return Ok(replayed(world, replay, label));
         }
         ctx.clone()
     } else {
@@ -152,7 +154,7 @@ pub fn start(
     let mut events = Vec::new();
     let mut leftover = None;
     let restarting = match (live_orchestrator(store.conn(), &project.id)?, restart) {
-        (Some(live), None) => return Ok(existing(world.herdr, live, label)),
+        (Some(live), None) => return Ok(existing(world, live, label)),
         (Some(live), Some(waits)) => {
             // The board is the owner signed in on this host, so its Restart
             // and its stale restart record the board all the way through
@@ -197,7 +199,7 @@ pub fn start(
     let session_id = ids::new_ulid();
     let scratch = world.scratch_root.join(&session_id);
     let opened = Opened {
-        herdr: world.herdr,
+        world,
         scratch: &scratch,
         home: fresh_home.then_some(places.home.as_path()),
     };
@@ -241,16 +243,41 @@ pub fn start(
         };
     events.extend(recorded.events);
 
-    let pane = match world.herdr.create_workspace(&label, Some(&places.checkout)) {
-        Ok(pane) => pane,
-        Err(e) => return Err(unwind(None, e.into())),
+    // The pane id, and herdr's workspace when herdr holds it. The holder
+    // runs the launch as it spawns, so the session row below is written
+    // while `claude` starts; its `SessionStart` hook finds the row by
+    // `TILLER_SESSION_ID` only once that write is in. There is no write
+    // that puts a pane on an orchestrator's session after its start, so
+    // the order stays until one is added.
+    let opened_pane = match world.panes {
+        Some(panes) => {
+            let owner = holder::Owner {
+                session: &session_id,
+                run: None,
+                project: &project.id,
+                role: "orchestrator",
+                label: &label,
+            };
+            holder::open(panes, &owner, &launched.script, &places.checkout)
+                .map(|pane| (pane.pane.to_string(), None))
+        }
+        None => world
+            .herdr
+            .create_workspace(&label, Some(&places.checkout))
+            .map(|pane| (pane.pane_id, Some(pane.workspace_id)))
+            .map_err(SpawnError::from),
     };
+    let (pane_id, workspace_id) = match opened_pane {
+        Ok(opened) => opened,
+        Err(e) => return Err(unwind(None, e)),
+    };
+    let in_holder = workspace_id.is_none();
     let started = store.session_start(
         &keyed,
         NewOrchestrator {
             id: Some(session_id.clone()),
             project_id: project.id.clone(),
-            pane_id: Some(pane.pane_id.clone()),
+            pane_id: Some(pane_id.clone()),
             config_hash: Some(launched.config_hash.clone()),
             ..NewOrchestrator::default()
         },
@@ -258,8 +285,8 @@ pub fn start(
     let started = match started {
         // The key started one already, in a request that won the race.
         Ok(started) if started.replayed => {
-            let notes = opened.clean(Some(&pane.pane_id));
-            let mut found = replayed(world.herdr, started, label);
+            let notes = opened.clean(Some(&pane_id));
+            let mut found = replayed(world, started, label);
             found.events.splice(0..0, events);
             found.value.warning = [found.value.warning.take(), leftover]
                 .into_iter()
@@ -272,11 +299,11 @@ pub fn start(
         Err(e) => {
             // Another start won the race: return its orchestrator.
             let live = live_orchestrator(store.conn(), &project.id);
-            let error = unwind(Some(&pane.pane_id), e.into());
+            let error = unwind(Some(&pane_id), e.into());
             return match live {
                 Ok(Some(live)) => {
                     // The manifest this start recorded is still written.
-                    let mut found = existing(world.herdr, live, label);
+                    let mut found = existing(world, live, label);
                     found.events = events;
                     Ok(found)
                 }
@@ -296,16 +323,19 @@ pub fn start(
         )),
     };
     let launch = || -> Result<Option<String>> {
+        // The holder runs the launch script itself: nothing to type or lay
+        // out.
+        if in_holder {
+            return Ok(None);
+        }
         let bindings = layout::bindings(store.conn(), &host)?;
         // The tokens name the session before anything else reads the pane.
         if let Some(binding) = bindings.iter().find(|b| b.session_id == session_id) {
-            world
-                .herdr
-                .report_tokens(&pane.pane_id, &binding.tokens())?;
+            world.herdr.report_tokens(&pane_id, &binding.tokens())?;
         }
         let warning = relayout(world.herdr, &bindings).err();
-        world.herdr.send_text(&pane.pane_id, &launched.line)?;
-        world.herdr.send_enter(&pane.pane_id)?;
+        world.herdr.send_text(&pane_id, &launched.line)?;
+        world.herdr.send_enter(&pane_id)?;
         Ok(warning)
     };
     let warning = match launch() {
@@ -315,7 +345,7 @@ pub fn start(
             if let Err(e) = store.session_end(ctx, &session_id, LAUNCH_FAILED) {
                 notes.push(format!("ending session {session_id} failed: {e}"));
             }
-            let error = unwind(Some(&pane.pane_id), error);
+            let error = unwind(Some(&pane_id), error);
             return Err(match (error, notes.is_empty()) {
                 (error, true) => error,
                 (SpawnError::Undone { error, notes: more }, false) => SpawnError::Undone {
@@ -340,8 +370,8 @@ pub fn start(
     Ok(Applied {
         value: Orchestrator {
             session,
-            pane_id: Some(pane.pane_id),
-            workspace_id: Some(pane.workspace_id),
+            pane_id: Some(pane_id),
+            workspace_id,
             label,
             home: Some(places.home.to_string_lossy().into_owned()),
             notes: started.value.notes,
@@ -363,11 +393,11 @@ fn new_orchestrator(project_id: &str) -> NewOrchestrator {
 /// A keyed start's stored result: its session as recorded, where herdr
 /// shows it now, and its notes.
 fn replayed(
-    herdr: &dyn Herdr,
+    world: &World<'_>,
     replay: Applied<OrchestratorStarted>,
     label: String,
 ) -> Applied<Orchestrator> {
-    let mut found = existing(herdr, replay.value.session, label);
+    let mut found = existing(world, replay.value.session, label);
     found.value.notes = replay.value.notes;
     found.events = replay.events;
     found
@@ -376,11 +406,25 @@ fn replayed(
 /// The live orchestrator, returned as a replay. A pane herdr no longer
 /// shows is only a warning: the liveness ladder decides whether the session
 /// ended (`recovery.md`, section 2), not a start.
-fn existing(herdr: &dyn Herdr, live: Session, label: String) -> Applied<Orchestrator> {
+fn existing(world: &World<'_>, live: Session, label: String) -> Applied<Orchestrator> {
+    let herdr = world.herdr;
     let (workspace_id, warning) = match &live.pane_id {
         None => (
             None,
             Some(format!("orchestrator session {} has no pane", live.id)),
+        ),
+        // The holder has no workspaces. A pane it no longer runs is only a
+        // warning too.
+        Some(pane) if ids::is_holder_pane(pane) => (
+            None,
+            match holder::running(world.panes, pane) {
+                Ok(true) => None,
+                Ok(false) => Some(format!(
+                    "the terminal holder no longer runs pane {pane} of orchestrator session {}",
+                    live.id
+                )),
+                Err(e) => Some(e.to_string()),
+            },
         ),
         Some(pane) => match herdr.pane(pane) {
             Ok(Some(info)) => (Some(info.workspace_id), None),
@@ -458,7 +502,7 @@ impl Opened<'_> {
     fn clean(&self, pane: Option<&str>) -> Vec<String> {
         let mut notes = Vec::new();
         if let Some(pane) = pane
-            && let Err(e) = self.herdr.close_pane(pane)
+            && let Err(e) = close_pane(self.world, pane)
         {
             notes.push(format!("closing pane {pane} failed: {e}"));
         }

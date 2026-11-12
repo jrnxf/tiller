@@ -179,6 +179,35 @@ test("herdr out of reach is shown and tried again", async () => {
   stream.stop();
 });
 
+test("a terminal holder out of reach is named, not taken for herdr, and tried again", async () => {
+  const { request } = opens(
+    refusal(503, "unavailable", "the terminal holder is unreachable: no socket"),
+    ndjson([{ type: "size", cols: 80, rows: 24 }, frame(1, true, "back")]),
+  );
+  const seen: MirrorStatus[] = [];
+  const { screen } = recorder();
+  const stream = new TerminalStream(
+    "s1",
+    screen,
+    (status) => seen.push(status),
+    () => {},
+  );
+  stream.start();
+  await settle();
+  expect(seen.at(-1)).toEqual({
+    kind: "unreachable",
+    title: "Can't reach the terminal holder on this machine",
+    detail:
+      "The agent may still be running. Run tiller holder to start the holder. Tiller tries again on its own, or now.",
+    mark: "holder unreachable",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  await settle();
+  expect(request).toHaveBeenCalledTimes(2);
+  expect(seen.at(-1)?.kind).toBe("live");
+  stream.stop();
+});
+
 test("leaving the mirror drops the request, which ends the observe process", async () => {
   const { signals } = opens(ndjson([{ type: "size", cols: 80, rows: 24 }]));
   const { screen, onStatus } = recorder();
@@ -258,6 +287,47 @@ test("a live Fit takes a new size in place, and opens again when it cannot", asy
   expect(signals[1]?.aborted).toBe(true);
   expect(opened.at(-1)).toBe("{}");
   expect(events).toEqual(["reset 100x30", "fitted", "reset 130x44", "again", "reset 80x24", "own"]);
+  stream.stop();
+});
+
+test("a peer pane's keys and Fit name the peer, so the board host signs them to it", async () => {
+  const sent: { path: string; body: string }[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (path: string, init: RequestInit) => {
+      sent.push({ path, body: String(init.body) });
+      if (path.endsWith("/terminal")) {
+        return ndjson([{ type: "size", cols: 100, rows: 30 }, frame(1, true, "fitted")]);
+      }
+      return new Response("{}", { status: 200 });
+    }),
+  );
+  const { screen, onStatus } = recorder();
+  let fit = { cols: 100, rows: 30 };
+  const stream = new TerminalStream(
+    "s1",
+    screen,
+    onStatus,
+    () => {},
+    { size: () => fit, onUnfit: () => {} },
+    "host-d",
+  );
+  stream.start();
+  await settle();
+  fit = { cols: 120, rows: 40 };
+  stream.refit();
+  await settle();
+  const input = new TerminalInput("s1", () => {}, "host-d");
+  input.keys(["l", "s", "enter"]);
+  await settle();
+  expect(sent).toEqual([
+    { path: "/api/v1/agents/s1/terminal", body: '{"fit":{"cols":100,"rows":30},"host":"host-d"}' },
+    { path: "/api/v1/agents/s1/terminal/fit", body: '{"cols":120,"rows":40,"host":"host-d"}' },
+    {
+      path: "/api/v1/agents/s1/terminal/input",
+      body: '{"keys":["l","s","enter"],"host":"host-d"}',
+    },
+  ]);
   stream.stop();
 });
 

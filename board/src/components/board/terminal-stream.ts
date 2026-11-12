@@ -10,6 +10,11 @@
 // Herdr can refuse, and then the stream says so and goes on unfitted. A new
 // size for an open Fit goes in place, so the pane never drops back between
 // two sizes; the stream answers it with a `size` line and a full screen.
+// On a holder pane the daemon resizes the pane for the Fit, one view at a
+// time, and gives it back its size when the stream ends; a second Fit on the
+// pane, or a resize the holder refuses, is `unfit` the same way. A paired
+// peer's pane works the same way through the board host (protocol.md 10.7):
+// every request names the peer as its `host`.
 
 export const terminalPath = (sessionId: string) => `/api/v1/agents/${sessionId}/terminal`;
 const terminalInputPath = (sessionId: string) => `${terminalPath(sessionId)}/input`;
@@ -29,7 +34,8 @@ export type MirrorStatus =
   | { kind: "connecting" }
   | { kind: "live" }
   | { kind: "reconnecting"; attempt: number }
-  | { kind: "unreachable"; title: string; detail: string }
+  // `mark` names what is away, for the status mark: herdr when unset.
+  | { kind: "unreachable"; title: string; detail: string; mark?: string }
   // The pane closed; the screen keeps its last frame.
   | { kind: "ended"; at: Date }
   | { kind: "forbidden" }
@@ -62,6 +68,10 @@ type Line =
 
 const UNREACHABLE_TITLE = "Can't reach herdr on this machine";
 const UNREACHABLE_DETAIL = "The agent may still be running. Tiller tries again on its own, or now.";
+// An agent in the terminal holder: the daemon could not reach the holder.
+const HOLDER_TITLE = "Can't reach the terminal holder on this machine";
+const HOLDER_DETAIL =
+  "The agent may still be running. Run tiller holder to start the holder. Tiller tries again on its own, or now.";
 // Tries in a row with no live screen before the mirror says herdr is gone
 // rather than that the stream dropped.
 const QUIET_TRIES = 4;
@@ -143,7 +153,7 @@ export interface Mirror {
 
 // Why a stream ended, and what the mirror does next.
 type Outcome =
-  | { next: "retry"; title?: string; detail?: string }
+  | { next: "retry"; title?: string; detail?: string; mark?: string }
   | { next: "stop"; status: MirrorStatus };
 
 export class TerminalStream implements Mirror {
@@ -232,7 +242,7 @@ export class TerminalStream implements Mirror {
       const response = await fetch(this.fitPath, {
         method: "POST",
         headers: { "content-type": "application/json", accept: "application/json" },
-        body: JSON.stringify(size),
+        body: JSON.stringify({ ...size, ...(this.peer ? { host: this.peer } : {}) }),
       });
       sent = response.ok;
     } catch {
@@ -269,6 +279,7 @@ export class TerminalStream implements Mirror {
         kind: "unreachable",
         title: outcome.title ?? UNREACHABLE_TITLE,
         detail: outcome.detail ?? UNREACHABLE_DETAIL,
+        ...(outcome.mark ? { mark: outcome.mark } : {}),
       });
     } else {
       this.set({ kind: "reconnecting", attempt: this.failures });
@@ -353,6 +364,14 @@ export class TerminalStream implements Mirror {
         next: "retry",
         title: `Can't reach ${this.peer ?? "the peer host"}`,
         detail: "The agent may still be running. Tiller tries again on its own, or now.",
+      };
+    }
+    if (response.status === 503 && error.message.startsWith("the terminal holder is unreachable")) {
+      return {
+        next: "retry",
+        title: HOLDER_TITLE,
+        detail: HOLDER_DETAIL,
+        mark: "holder unreachable",
       };
     }
     if (response.status === 503) {
@@ -523,13 +542,20 @@ export function pasteChunks(text: string): string[] {
 export class TerminalInput {
   private readonly path: string;
   private readonly onRefused: (title: string, detail: string) => void;
+  // The paired peer the pane runs on: the board host signs the keys to it.
+  private readonly peer: string | undefined;
   private readonly queue: Input[] = [];
   private busy = false;
   private closed = false;
 
-  constructor(sessionId: string, onRefused: (title: string, detail: string) => void) {
+  constructor(
+    sessionId: string,
+    onRefused: (title: string, detail: string) => void,
+    peer?: string,
+  ) {
     this.path = terminalInputPath(sessionId);
     this.onRefused = onRefused;
+    this.peer = peer;
   }
 
   keys(keys: string[]) {
@@ -580,7 +606,7 @@ export class TerminalInput {
         response = await fetch(this.path, {
           method: "POST",
           headers: { "content-type": "application/json", accept: "application/json" },
-          body: JSON.stringify(input),
+          body: JSON.stringify({ ...input, ...(this.peer ? { host: this.peer } : {}) }),
         });
       } catch {
         this.onRefused("Keys not sent", "The daemon did not answer.");

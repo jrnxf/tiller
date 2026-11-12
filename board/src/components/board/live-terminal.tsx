@@ -4,6 +4,7 @@ import "@xterm/xterm/css/xterm.css";
 import {
   useCallback,
   useEffect,
+  useEffectEvent,
   useImperativeHandle,
   useLayoutEffect,
   useRef,
@@ -12,9 +13,16 @@ import {
 } from "react";
 import type { MouseEvent as ReactMouseEvent, ReactNode, Ref } from "react";
 
+import {
+  canFullScreen,
+  enterPageFullScreen,
+  leavePageFullScreen,
+  useEscHeld,
+} from "../../lib/fullscreen";
+import { focusIsFree } from "../../lib/focus";
 import { shortcutsBlocked } from "../../lib/shortcuts";
 import { createStore, useStore } from "../../lib/store";
-import { CloseIcon } from "../shell/icons";
+import { CloseIcon, ServerIcon } from "../shell/icons";
 import { Modal } from "../ui/modal";
 import { Ago, useTick } from "./ago";
 import { formatLisbonMoment, secondsSince } from "./format";
@@ -24,9 +32,13 @@ import {
   EnterIcon,
   ExpandIcon,
   FitIcon,
+  FontLargerIcon,
+  FontSmallerIcon,
+  FullScreenIcon,
   GlobeIcon,
   HistoryIcon,
   KeyboardIcon,
+  LeaveFullScreenIcon,
   LockIcon,
   PointerIcon,
   RetryIcon,
@@ -43,51 +55,129 @@ import "./terminal.css";
 // look: it is a way of looking, and closed until the owner opens one.
 const OPEN_KEY = "tiller-terminal-open";
 
-function loadOpen(): boolean {
+// A yes or no the owner chose, per browser: `unset` until they choose.
+function storedChoice(key: string, unset: boolean) {
+  const load = () => {
+    try {
+      const stored = localStorage.getItem(key);
+      return stored === null ? unset : stored === "1";
+    } catch {
+      return unset;
+    }
+  };
+  const store = createStore<boolean>(load());
+  const toggle = () =>
+    store.update((on) => {
+      try {
+        localStorage.setItem(key, on ? "0" : "1");
+      } catch {
+        // Blocked storage: the choice lasts for this tab.
+      }
+      return !on;
+    });
+  return { store, toggle, load };
+}
+
+const terminalOpen = storedChoice(OPEN_KEY, false);
+
+// Whether the Agents view's stage fits a herdr pane to itself. It is off
+// until the owner turns it on, since the Fit changes the pane for herdr's own
+// window too. A pane in the terminal holder always fits, with no choice: H11
+// decides how several viewers share its size.
+export const FIT_KEY = "tiller-terminal-fit";
+
+const herdrFit = storedChoice(FIT_KEY, false);
+
+// A pane id the terminal holder gave: `p` and a ULID (terminal-holder.md 2.4).
+// Any other pane id is herdr's (`w2:p1`). The session's pane id alone says
+// which of the two runs its pane, as `tiller_core::ids::is_holder_pane` does.
+// The ULID reads in either case, as Rust's does; the `p` is lower case only.
+const HOLDER_PANE = /^p[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$/;
+
+export function isHolderPane(pane: string | null | undefined): boolean {
+  return typeof pane === "string" && HOLDER_PANE.test(pane);
+}
+
+// The stage's font size, per browser: the size the Fit sizes the pane at, and
+// the largest the stage scales a pane it does not fit to.
+export const FONT_KEY = "tiller-terminal-font";
+export const STAGE_FONT_MIN = 9;
+export const STAGE_FONT_MAX = 24;
+// The stage grows a small pane into its room, but not past a size that reads
+// as a terminal rather than a poster.
+export const STAGE_FONT = 14;
+
+export function clampStageFont(size: number): number {
+  if (!Number.isFinite(size)) return STAGE_FONT;
+  return Math.min(STAGE_FONT_MAX, Math.max(STAGE_FONT_MIN, Math.round(size)));
+}
+
+function loadStageFont(): number {
   try {
-    return localStorage.getItem(OPEN_KEY) === "1";
+    const stored = localStorage.getItem(FONT_KEY);
+    // Nothing stored, or nothing that reads as a number, is the default.
+    return stored === null || stored.trim() === "" ? STAGE_FONT : clampStageFont(Number(stored));
   } catch {
-    return false;
+    return STAGE_FONT;
   }
 }
 
-const terminalOpenStore = createStore<boolean>(loadOpen());
+const stageFontStore = createStore<number>(loadStageFont());
 
-function toggleTerminal() {
-  terminalOpenStore.update((open) => {
-    try {
-      localStorage.setItem(OPEN_KEY, open ? "0" : "1");
-    } catch {
-      // Blocked storage: the choice lasts for this tab.
-    }
-    return !open;
-  });
+// What the stage's room makes of the font: the size that shows, and whether
+// one size larger fits.
+export interface RoomFont {
+  shown: number;
+  next: boolean;
 }
 
-// Whether the Agents view's stage fits the pane to itself in herdr. Off until
-// the owner turns it on, since it changes the pane for herdr's own window too.
-const FIT_KEY = "tiller-terminal-fit";
-
-const fitStore = createStore<boolean>(
-  (() => {
-    try {
-      return localStorage.getItem(FIT_KEY) === "1";
-    } catch {
-      return false;
-    }
-  })(),
-);
-
-function toggleFit() {
-  fitStore.update((fit) => {
-    try {
-      localStorage.setItem(FIT_KEY, fit ? "0" : "1");
-    } catch {
-      // Blocked storage: the choice lasts for this tab.
-    }
-    return !fit;
-  });
+// The font controls' reading of the stage. The readout is the size that
+// shows, and its name says the stored size, chosen or the default, when the
+// two differ. The Fit sizes the pane to the chosen size, so with it the steps
+// go from that choice, and the text follows once the pane takes its new size.
+// Without it, Smaller steps down from the size that shows, and Larger waits
+// until one size larger fits.
+export function fontReadout(stageFont: number, fitted: boolean, room: RoomFont) {
+  const shown = room.shown > 0 ? room.shown : stageFont;
+  const fontText = `Font size ${shown} px`;
+  const chosen = stageFont === STAGE_FONT ? "the default" : "the chosen";
+  // With the Fit the room is short until the pane takes its new size, while
+  // a prompt's strip borrows rows, or where the smallest pane is too large.
+  const base =
+    shown < stageFont
+      ? `${fontText} of ${chosen} ${stageFont}, as large as the stage holds the pane`
+      : stageFont === STAGE_FONT
+        ? `${fontText}, the default`
+        : fontText;
+  return {
+    shown,
+    // The size Smaller steps down from.
+    from: fitted ? stageFont : shown,
+    // The room holds no size larger, which a Fit would change.
+    full: !fitted && !room.next,
+    hint: stageFont === STAGE_FONT ? base : `${base}. Click for the default, ${STAGE_FONT} px`,
+  };
 }
+
+// Reads the stage's choices from storage again, as a new tab would: for tests.
+export function reloadTerminalPrefs() {
+  herdrFit.store.set(herdrFit.load());
+  stageFontStore.set(loadStageFont());
+}
+
+function setStageFont(size: number) {
+  const next = clampStageFont(size);
+  stageFontStore.set(next);
+  try {
+    if (next === STAGE_FONT) localStorage.removeItem(FONT_KEY);
+    else localStorage.setItem(FONT_KEY, String(next));
+  } catch {
+    // Blocked storage: the size lasts for this tab.
+  }
+}
+
+// A press on a view control leaves focus where it was, so typing goes on.
+const keepFocus = (event: ReactMouseEvent) => event.preventDefault();
 
 function subscribeVisible(change: () => void) {
   document.addEventListener("visibilitychange", change);
@@ -104,7 +194,7 @@ function useVisible(): boolean {
 }
 
 export function useTerminalOpen(): boolean {
-  return useStore(terminalOpenStore);
+  return useStore(terminalOpen.store);
 }
 
 export function TerminalToggle({ size }: { size?: "sm" }) {
@@ -115,7 +205,7 @@ export function TerminalToggle({ size }: { size?: "sm" }) {
       className={`btn mir-tog${size ? ` ${size}` : ""}`}
       aria-pressed={open}
       title={open ? "Hide the terminal" : "Show the live terminal"}
-      onClick={toggleTerminal}
+      onClick={terminalOpen.toggle}
     >
       <TerminalIcon />
       Terminal
@@ -186,9 +276,6 @@ const TAIL_OLD = 15;
 const HISTORY_ROWS = 1000;
 const MIN_FONT = 4;
 const MAX_FONT = 20;
-// The stage grows a small pane into its room, but not past a size that reads
-// as a terminal rather than a poster.
-const STAGE_FONT = 14;
 // The screen's inner padding on each side, in CSS pixels.
 const PAD = 8;
 
@@ -217,6 +304,47 @@ function advance(): number {
 // line height floored. Null where the canvas cannot say.
 type Cell = { width: number; height: number };
 const measured = new Map<string, Cell>();
+// The cell, in device pixels, that shows the pane's grid in the room: from
+// `cell` down, no wider than the room's width over the grid's columns (when
+// the view fits), and with the grid's rows inside `room` (in CSS pixels, as
+// `rowsHigh` gives them). Under the stage's Fit the cell is `pinned`: the
+// grid on screen is the old one while the pane's new size is on its way, so
+// the stage clips it until the repaint lands, and the text never scales down
+// to it.
+export function gridCell(view: {
+  cell: number;
+  least: number;
+  width: number;
+  cols: number;
+  room: number;
+  rowsHigh: (cell: number) => number;
+  fit: boolean;
+  pinned: boolean;
+}): number {
+  let cell = view.cell;
+  if (view.fit && !view.pinned) cell = Math.min(cell, Math.floor(view.width / view.cols));
+  cell = Math.max(view.least, cell);
+  while (!view.pinned && cell > view.least && view.rowsHigh(cell) > view.room) cell -= 1;
+  return cell;
+}
+
+// Whether the stage keeps the chosen font over the grid it has. Under the
+// Fit, while the pane's new size is on its way, the old grid shows at the
+// chosen font, clipped by the stage, and never scaled down to it. Once the
+// size lands, or the wait runs out, the grid is the pane's own and scales
+// as without the Fit. The answer strip's loan shrinks the text too, so the
+// dialog under the strip stays in view.
+export function holdsFont(stage: {
+  held: boolean;
+  sizing: boolean;
+  lent: number;
+  grid: TerminalSize;
+  target: TerminalSize;
+}): boolean {
+  if (!stage.held || !stage.sizing || stage.lent !== 0) return false;
+  return stage.grid.cols !== stage.target.cols || stage.grid.rows !== stage.target.rows;
+}
+
 function cellAt(fontSize: number, dpr: number): Cell | null {
   const key = `${fontSize}@${dpr}`;
   const known = measured.get(key);
@@ -251,6 +379,9 @@ const clampFit = (cols: number, rows: number): TerminalSize => ({
 
 // How long the stage's size has to hold before the pane follows it.
 const REFIT_DELAY = 300;
+// How long the stage keeps the chosen font over the old grid while a new
+// size is on its way: the refit's delay and the daemon's 5 s resize wait.
+const SIZE_WAIT = REFIT_DELAY + 5000;
 
 function fontReady(): Promise<unknown> {
   try {
@@ -294,7 +425,7 @@ function StatusMark({ status }: { status: MirrorStatus }) {
             : status.kind === "ended"
               ? ["idle", "Ended"]
               : status.kind === "unreachable"
-                ? ["off", "herdr unreachable"]
+                ? ["off", status.mark ?? "herdr unreachable"]
                 : ["off", "No terminal"];
   return (
     <span className="mir-st">
@@ -383,6 +514,9 @@ function switchKey(event: KeyboardEvent): SwitchKey | null {
 // What the Agents view asks of its terminal: start typing to the agent.
 export interface TerminalControl {
   type(): void;
+  // Full screen starts: take focus from `outside`, the page under the card,
+  // or from nowhere.
+  takeFullScreenFocus(outside: HTMLElement | null): void;
 }
 
 // One terminal with its stream and its keys, wired to the host it draws in.
@@ -440,23 +574,14 @@ function mountTerminal(
       },
     };
   }
-  // A peer's pane is read only too: the board host relays its stream, and
-  // there is no path back into the pane (protocol.md 10.7).
-  if (peer !== undefined) {
-    const stream = new TerminalStream(sessionId, screen, report.status, report.size, null, peer);
-    host.addEventListener("focusin", refuseFocus);
-    return {
-      input: null,
-      stream,
-      dispose() {
-        stream.stop();
-        host.removeEventListener("focusin", refuseFocus);
-        term.dispose();
-      },
-    };
-  }
-  const input = new TerminalInput(sessionId, (title, detail) => showToast("bad", title, detail));
-  const stream = new TerminalStream(sessionId, screen, report.status, report.size, fitting);
+  // A peer's pane takes keys and the Fit as a local one does: the board host
+  // relays its stream and signs each key to the peer (protocol.md 10.7).
+  const input = new TerminalInput(
+    sessionId,
+    (title, detail) => showToast("bad", title, detail),
+    peer,
+  );
+  const stream = new TerminalStream(sessionId, screen, report.status, report.size, fitting, peer);
   const data = term.onData((typed) => {
     const { keys, unsent } = typedKeys(typed);
     input.keys(keys);
@@ -516,6 +641,8 @@ export function LiveTerminal({
   onSwitch,
   machine,
   peer,
+  holder = false,
+  full = false,
   strip,
   onClose,
 }: {
@@ -539,17 +666,20 @@ export function LiveTerminal({
   // The saved machine the agent runs on. herdr streams only its own panes,
   // so this one is read as a tail every few seconds, read only.
   machine?: string;
-  // The paired peer host the agent runs on. Its board host relays the
-  // stream, read only: no keys, no Fit.
+  // The paired peer host the agent runs on. This board host relays its
+  // stream, its keys and its Fit.
   peer?: string;
+  // The pane is in the terminal holder, not herdr: the stage always fits it.
+  holder?: boolean;
+  // The page is in full screen, and the Agents view pins the stage's card
+  // over it. The view decides, so the card and its stage always agree.
+  full?: boolean;
   // What the stage shows between the screen and its footer: the answer buttons.
   strip?: ReactNode;
   onClose?: () => void;
 }) {
   const phone = usePhone();
   const tail = machine !== undefined;
-  // A tail or a peer's pane: nothing here types into it.
-  const watch = tail || peer !== undefined;
   const stage = variant === "stage";
   const popup = variant === "popup";
   const [host] = useState(() => {
@@ -571,17 +701,42 @@ export function LiveTerminal({
   const [view, setView] = useState<View>(popup ? (phone ? "sheet" : "dialog") : "inline");
   const [scale, setScale] = useState<Scale>(popup && phone ? "one" : "fit");
   const [font, setFont] = useState(BASE_FONT);
-  // The Fit is the stage's on a computer, while the board is on screen, the
-  // stage is not expanded, and herdr has not refused it for this agent.
-  const fitWanted = useStore(fitStore);
+  // The Fit is the stage's while the board is on screen, the stage is not
+  // expanded, and the pane has not refused it. A holder pane always fits,
+  // on a phone too, where the sheet keeps the stage's size so the pane does
+  // not resize each time the owner types. A herdr pane fits on the owner's
+  // switch, on a computer only.
+  const herdrFitWanted = useStore(herdrFit.store);
+  const fitWanted = holder || herdrFitWanted;
+  const stageFont = useStore(stageFontStore);
+  // Without the Fit, the stage's room can hold the text smaller than the
+  // stage font: the size it shows, and whether one size larger still fits.
+  const [roomFont, setRoomFont] = useState<RoomFont>({ shown: 0, next: true });
   const visible = useVisible();
   const [unfit, setUnfit] = useState(false);
-  const fitting = stage && !phone && fitWanted && !unfit && visible && view === "inline";
+  // A tail is never fitted: it has no stream to hold a Fit.
+  const fitting =
+    stage &&
+    (holder || !phone) &&
+    !tail &&
+    fitWanted &&
+    !unfit &&
+    visible &&
+    (view === "inline" || (holder && view === "sheet"));
   const fittingRef = useRef(fitting);
   // The stage's room in cells at the stage's font, kept up by the layout.
   const fitTarget = useRef<TerminalSize | null>(null);
   const stripBox = useRef<HTMLDivElement>(null);
   const refitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // A Fit that holds a live pane: the layout reads it, so a change of
+  // visibility does not rebuild the layout.
+  const fitHeld = useRef(false);
+  // The stage changed size under the Fit, and the pane's size for it has
+  // not landed yet. The wait runs out after SIZE_WAIT, so a pane that keeps
+  // another size (a client that resized it, or a refused resize) scales.
+  const sizing = useRef(false);
+  const sizingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const layoutRef = useRef<() => void>(() => {});
   // The web font is in, so xterm measures its cells right when it opens.
   const [ready, setReady] = useState(false);
   // The pane's scrollback, read on the owner's ask and shown over the live
@@ -631,7 +786,13 @@ export function LiveTerminal({
               // A closed pane has no scrollback left to read.
               if (next.kind === "ended") closeHistory();
             },
-            size: setSize,
+            size: (next) => {
+              const target = fitTarget.current;
+              if (target && target.cols === next.cols && target.rows === next.rows) {
+                sizing.current = false;
+              }
+              setSize(next);
+            },
             typing: (on) => {
               setTyping(on);
               // Typing goes to the live screen, so the scrollback gives way.
@@ -642,7 +803,7 @@ export function LiveTerminal({
             size: () => (fittingRef.current ? fitTarget.current : null),
             onUnfit: (detail) => {
               setUnfit(true);
-              showToast("bad", "herdr kept the pane's size", detail);
+              showToast("bad", "The pane kept its own size", detail);
             },
           },
           tail,
@@ -678,17 +839,37 @@ export function LiveTerminal({
     };
   }, [sessionId, host, closeHistory, tail, peer]);
 
+  // The way out of full screen takes focus from the page under the card, or
+  // from nowhere. A carry that waits to type here, on a pane that can still go
+  // live, leaves focus free instead: it takes it once live, and a key typed
+  // before then does not press the way out.
+  const wayOut = useRef<HTMLButtonElement>(null);
+  const carryWaits = !tail && status.kind !== "ended";
+  const takeFullScreenFocus = useCallback(
+    (outside: HTMLElement | null) => {
+      if (typeWhenLive.current && carryWaits) outside?.blur();
+      else if (outside || focusIsFree()) wayOut.current?.focus();
+    },
+    [carryWaits],
+  );
+  // A switch to another agent in full screen mounts this terminal, and focus
+  // on the old one's controls drops to the page.
+  const takeFocusOnMount = useEffectEvent(() => {
+    if (full) takeFullScreenFocus(null);
+  });
+  useEffect(() => takeFocusOnMount(), []);
+
   const live = status.kind === "live";
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
-    term.options.disableStdin = !live || peer !== undefined;
+    term.options.disableStdin = !live;
     if (!live) term.blur();
     else if (typeWhenLive.current && term.element) {
       typeWhenLive.current = false;
       term.focus();
     }
-  }, [live, peer]);
+  }, [live]);
 
   useEffect(() => {
     onTyping?.(typing);
@@ -701,9 +882,13 @@ export function LiveTerminal({
     fittingRef.current = fitting;
     streamRef.current?.refit();
   }, [fitting]);
+  useEffect(() => {
+    fitHeld.current = fitting && status.kind !== "ended";
+  }, [fitting, status.kind]);
   useEffect(
     () => () => {
       if (refitTimer.current !== null) clearTimeout(refitTimer.current);
+      if (sizingTimer.current !== null) clearTimeout(sizingTimer.current);
     },
     [],
   );
@@ -732,20 +917,26 @@ export function LiveTerminal({
         ? box.clientHeight - PAD * 2
         : Number.POSITIVE_INFINITY;
     const least = Math.ceil(MIN_FONT * ratio);
-    const most = grow ? MAX_FONT : stage && view === "inline" ? STAGE_FONT : BASE_FONT;
+    // The large view grows the text at least to the stage's size.
+    const most = grow ? Math.max(MAX_FONT, stage ? stageFont : 0) : BASE_FONT;
     // A hair over the cell, so xterm's own rounding lands on it.
     const sized = (cells: number) => (cells + 0.05) / ratio;
+    const inStage = stage && view === "inline";
+    // The answer strip borrows its height from the stage: the pane keeps
+    // its size under it, since a resize redraws the dialog it answers.
+    const lent = inStage ? (stripBox.current?.offsetHeight ?? 0) : 0;
+    let pinned = false;
     // What the stage holds at its own font, for the Fit. A new size waits
     // for the stage to settle, so a drag of the window opens the stream once.
-    if (stage && view === "inline") {
-      const stageCell = Math.floor(STAGE_FONT * ratio);
+    if (inStage) {
+      const stageCell = Math.floor(stageFont * ratio);
       const metrics = cellAt(sized(stageCell), dpr);
       const high = metrics?.height ?? (screen.offsetHeight / term.rows) * dpr;
-      // The answer strip borrows its height from the stage: the pane keeps
-      // its size under it, since a resize redraws the dialog it answers.
-      const lent = stripBox.current?.offsetHeight ?? 0;
+      // A column is drawn a hair over the cell (`sized`), so the grid is
+      // counted at that width: else a wide grid comes out a few pixels over
+      // the stage, and the text steps down a size to fit.
       const target = clampFit(
-        Math.floor((width * dpr) / stageCell),
+        Math.floor((width * dpr) / (stageCell + 0.05)),
         Math.floor(((box.clientHeight + lent - PAD * 2) * dpr) / high),
       );
       const before = fitTarget.current;
@@ -756,11 +947,24 @@ export function LiveTerminal({
           refitTimer.current = null;
           streamRef.current?.refit();
         }, REFIT_DELAY);
+        if (fitHeld.current) {
+          sizing.current = true;
+          if (sizingTimer.current !== null) clearTimeout(sizingTimer.current);
+          sizingTimer.current = setTimeout(() => {
+            sizingTimer.current = null;
+            sizing.current = false;
+            layoutRef.current();
+          }, SIZE_WAIT);
+        }
       }
+      pinned = holdsFont({
+        held: fitHeld.current,
+        sizing: sizing.current,
+        lent,
+        grid: { cols: term.cols, rows: term.rows },
+        target,
+      });
     }
-    let cell = Math.floor(most * ratio);
-    if (fit) cell = Math.min(cell, Math.floor((width * dpr) / term.cols));
-    cell = Math.max(least, cell);
     // Rows are whole pixels, so their height does not grow evenly with the
     // font: a guess from the height now can flip between two sizes on every
     // pass. Step down to the largest cell whose own rows fit the room.
@@ -769,11 +973,26 @@ export function LiveTerminal({
       if (its) return (its.height * term.rows) / dpr;
       return (screen.offsetHeight / current) * sized(cells);
     };
-    while (cell > least && rowsHigh(cell) > room) cell -= 1;
+    // On the stage, one size over the font, so the readout knows whether
+    // Larger shows.
+    // The largest cell the room holds this pane at, before any rounding
+    // step below, so a pixel off never reads as a full room.
+    const roomCell = gridCell({
+      cell: Math.floor((inStage ? stageFont + 1 : most) * ratio),
+      least,
+      width: width * dpr,
+      cols: term.cols,
+      room,
+      rowsHigh,
+      fit,
+      pinned,
+    });
+    let cell = roomCell;
+    if (inStage) cell = Math.max(least, Math.min(cell, Math.floor(stageFont * ratio)));
     if (sized(cell) !== current) term.options.fontSize = sized(cell);
     // A measure off by a pixel can still come out wide: step down until it
     // is inside.
-    if (fit) {
+    if (fit && !pinned) {
       for (
         let tries = 0;
         tries < 4 && screen.offsetWidth > width + 0.5 && cell > least;
@@ -784,7 +1003,16 @@ export function LiveTerminal({
       }
     }
     setFont(term.options.fontSize ?? BASE_FONT);
-  }, [host, box, view, scale, stage]);
+    if (inStage) {
+      const fits = (px: number) => Math.floor(px * ratio) <= roomCell;
+      const shown = pinned || fits(stageFont) ? stageFont : Math.floor(sized(roomCell));
+      const next = fits(stageFont + 1);
+      setRoomFont((was) => (was.shown === shown && was.next === next ? was : { shown, next }));
+    }
+  }, [host, box, view, scale, stage, stageFont]);
+  useEffect(() => {
+    layoutRef.current = layout;
+  }, [layout]);
 
   // Put the one xterm in the view that shows it, opening it there the first
   // time (xterm measures its cells on open, so the host must be on the page),
@@ -796,7 +1024,7 @@ export function LiveTerminal({
     if (!term.element) {
       term.open(host);
       openRenderer(term, webglRef.current);
-      term.textarea?.setAttribute("aria-label", watch ? `Tail of ${label}` : `Type to ${label}`);
+      term.textarea?.setAttribute("aria-label", tail ? `Tail of ${label}` : `Type to ${label}`);
       // Sized first, so a Fit's first open already knows the stage's room.
       layout();
       streamRef.current?.start();
@@ -809,7 +1037,7 @@ export function LiveTerminal({
       typeWhenLive.current = false;
       term.focus();
     }
-  }, [box, ready, host, label, layout, watch]);
+  }, [box, ready, host, label, layout, tail]);
 
   // The pane changes size, or the room for it does: fit it again.
   useEffect(() => {
@@ -881,6 +1109,40 @@ export function LiveTerminal({
     setView("dialog");
   }, [phone, closeHistory]);
 
+  // Full screen puts the page in full screen, and the Agents view pins the
+  // stage's card over it; the layout fits the pane to the screen as the stage
+  // grows. The card outlives a switch to another agent, so full screen stays.
+  // The browser's Esc leaves it. Where the browser can lock Esc (Chromium),
+  // a tap of Esc goes to the pane and a held Esc leaves.
+  const fullScreenAble = stage && !phone && canFullScreen();
+  const escHeld = useEscHeld();
+  // A press while the browser has not yet answered the last one waits.
+  const entering = useRef(false);
+  const toggleFull = useCallback(() => {
+    if (entering.current) return;
+    if (full) {
+      leavePageFullScreen();
+      return;
+    }
+    const term = termRef.current;
+    const wasTyping = term?.textarea !== undefined && document.activeElement === term.textarea;
+    entering.current = true;
+    enterPageFullScreen().then(
+      () => {
+        entering.current = false;
+        if (wasTyping) termRef.current?.focus();
+      },
+      () => {
+        entering.current = false;
+        showToast(
+          "bad",
+          "Full screen did not open",
+          "The browser refused it. Expand shows the terminal larger.",
+        );
+      },
+    );
+  }, [full]);
+
   const collapse = useCallback(() => {
     termRef.current?.blur();
     if (popup) onClose?.();
@@ -892,15 +1154,16 @@ export function LiveTerminal({
     () => ({
       type() {
         const term = termRef.current;
-        if (watch) return;
+        if (tail) return;
         if (phone) {
           focusNext.current = true;
           expand();
         } else if (term?.element && !term.options.disableStdin) term.focus();
         else typeWhenLive.current = true;
       },
+      takeFullScreenFocus,
     }),
-    [phone, expand, watch],
+    [phone, expand, tail, takeFullScreenFocus],
   );
 
   const ended = status.kind === "ended";
@@ -912,7 +1175,7 @@ export function LiveTerminal({
     (ended && size !== null);
   const message = screenShown ? null : ended ? (
     <Message icon={<TerminalIcon />} title="The agent's pane is closed">
-      herdr no longer has a pane for this agent.
+      The agent's terminal is gone.
     </Message>
   ) : (
     <NoScreen status={status} onRetry={retry} />
@@ -946,16 +1209,11 @@ export function LiveTerminal({
         The stream dropped. Opening it again for a fresh full screen (try {status.attempt}).
       </span>
     ) : status.kind === "connecting" ? (
-      <span className="tx">Waiting for the first screen from herdr.</span>
+      <span className="tx">Waiting for the agent's first screen.</span>
     ) : ended ? (
       <span className="tx">The pane closed {endedAt}. This is its last screen.</span>
     ) : where === "inline" && view !== "inline" ? (
       <span className="tx">The terminal is open in the expanded view.</span>
-    ) : peer !== undefined ? (
-      <span className="tx">
-        <GlobeIcon />
-        <span>{phone ? `Read only, on ${peer}` : `Read only: the agent runs on ${peer}`}</span>
-      </span>
     ) : status.kind === "tail" ? (
       <span className="tx">
         <GlobeIcon />
@@ -969,11 +1227,18 @@ export function LiveTerminal({
       <span className="tx">
         <PointerIcon />
         {phone ? "Tap" : "Click"} the screen to type to the agent
+        {peer !== undefined ? (
+          <span className="hchip" title={`The agent runs on ${peer}`} data-testid="peer-chip">
+            <ServerIcon />
+            {peer}
+          </span>
+        ) : null}
       </span>
     );
 
+  // Full screen is already the larger view, so Expand waits for it to end.
   const expandButton =
-    screenShown && !ended && view === "inline" ? (
+    screenShown && !ended && view === "inline" && !full ? (
       <button
         type="button"
         className="ib sm"
@@ -984,8 +1249,9 @@ export function LiveTerminal({
         <ExpandIcon />
       </button>
     ) : null;
+  // A holder pane always fits, so only a herdr pane has the switch.
   const fitButton =
-    stage && !phone && !watch && screenShown && !ended && view === "inline" ? (
+    stage && !holder && !phone && !tail && screenShown && !ended && view === "inline" ? (
       <button
         type="button"
         className="btn sm mir-tog"
@@ -996,15 +1262,89 @@ export function LiveTerminal({
             : "Size the pane in herdr to fill the stage, until you leave it"
         }
         onClick={() => {
-          // After herdr kept the pane's size, a press asks again.
+          // After the pane kept its size, a press asks again.
           setUnfit(false);
-          if (!unfit || !fitWanted) toggleFit();
+          if (!unfit || !fitWanted) herdrFit.toggle();
         }}
       >
         <FitIcon />
         Fit pane
       </button>
     ) : null;
+  // The stage's font size. A press keeps focus where it was,
+  // so typing goes on.
+  const readout = fontReadout(stageFont, fitting && !ended, roomFont);
+  const roomHint =
+    tail || holder
+      ? "The pane fills the stage at this size"
+      : "The pane fills the stage at this size. Fit pane sizes it to the text";
+  const fontControls =
+    stage && screenShown && view === "inline" ? (
+      <span className="mir-font" role="group" aria-label="Font size">
+        <button
+          type="button"
+          className="ib sm"
+          title="Smaller text"
+          aria-label="Smaller text"
+          disabled={readout.from <= STAGE_FONT_MIN}
+          onMouseDown={keepFocus}
+          onClick={() => setStageFont(readout.from - 1)}
+        >
+          <FontSmallerIcon />
+        </button>
+        <button
+          type="button"
+          className="mir-fsz"
+          title={readout.hint}
+          aria-label={readout.hint}
+          onMouseDown={keepFocus}
+          onClick={() => setStageFont(STAGE_FONT)}
+        >
+          {readout.shown}
+        </button>
+        <button
+          type="button"
+          className="ib sm"
+          title={readout.full ? roomHint : "Larger text"}
+          aria-label="Larger text"
+          disabled={stageFont >= STAGE_FONT_MAX || readout.full}
+          onMouseDown={keepFocus}
+          onClick={() => setStageFont(stageFont + 1)}
+        >
+          <FontLargerIcon />
+        </button>
+      </span>
+    ) : null;
+  // In full screen the way out stays, whatever the stream does.
+  const fullButton =
+    full || (fullScreenAble && !ended && screenShown && view === "inline") ? (
+      <button
+        type="button"
+        className="ib sm"
+        // One name, pressed or not, as a toggle reads.
+        title={
+          full
+            ? escHeld
+              ? "Hold Esc to leave full screen"
+              : "Leave full screen (Esc)"
+            : "Full screen"
+        }
+        aria-label="Full screen"
+        aria-pressed={full}
+        data-full-screen=""
+        ref={wayOut}
+        onMouseDown={keepFocus}
+        onClick={toggleFull}
+      >
+        {full ? <LeaveFullScreenIcon /> : <FullScreenIcon />}
+      </button>
+    ) : null;
+  const viewControls = (
+    <>
+      {fontControls}
+      {fullButton}
+    </>
+  );
   // The scrollback is the stage's, while the screen shows inline.
   const canHistory = stage && !tail && screenShown && !ended && view === "inline";
   const historyButton =
@@ -1025,7 +1365,7 @@ export function LiveTerminal({
   // the stage is often wider and taller than the pane it shows.
   const typeFromScreen = (event: ReactMouseEvent<HTMLDivElement>) => {
     const term = termRef.current;
-    if (watch || phone || typing || historyOpen) return;
+    if (tail || phone || typing || historyOpen) return;
     if (!term?.element || term.options.disableStdin || !pressTypes(event, term.element)) return;
     // Else the press moves focus to the body right after the screen takes it.
     event.preventDefault();
@@ -1049,7 +1389,7 @@ export function LiveTerminal({
     <div
       className="mir-s"
       role="group"
-      aria-label={`${watch ? "Tail" : "Live terminal"} for ${label}`}
+      aria-label={`${tail ? "Tail" : "Live terminal"} for ${label}`}
       onMouseDown={typeFromScreen}
       // Scrolling up on the stage reads back, as it would in the terminal.
       onWheel={(event) => {
@@ -1111,6 +1451,7 @@ export function LiveTerminal({
             switch agents
           </span>
         ) : null}
+        {viewControls}
         <button type="button" className="btn sm" onClick={done}>
           Done
         </button>
@@ -1120,22 +1461,27 @@ export function LiveTerminal({
     <>
       <span className="tx">
         <HistoryIcon />
-        {phone
+        {phone || full
           ? "Scrollback, read-only"
           : "Scrollback, read-only. Esc goes back to the live screen."}
       </span>
       <span className="mir-fr">
+        {viewControls}
         <button type="button" className="btn sm primary" onClick={closeHistory}>
           Back to live
         </button>
       </span>
     </>
+  ) : !screenShown ? (
+    // In full screen with no screen: only the way out.
+    <span className="mir-fr">{viewControls}</span>
   ) : (
     <>
       {footer("inline")}
       <span className="mir-fr">
         {sizeText ? <span className="mir-sz">{sizeText}</span> : null}
         {historyButton}
+        {viewControls}
         {fitButton}
         {expandButton}
       </span>
@@ -1164,7 +1510,7 @@ export function LiveTerminal({
           {strip}
         </div>
       ) : null}
-      {screenShown && !popup ? (
+      {(screenShown || full) && !popup ? (
         <div className="mir-f">{stage ? stageFooter : footer("inline")}</div>
       ) : null}
       {view === "dialog" ? (
@@ -1186,7 +1532,7 @@ export function LiveTerminal({
             <div
               className={`mir-s ${scale}`}
               role="group"
-              aria-label={`${watch ? "Tail" : "Live terminal"} for ${label}`}
+              aria-label={`${tail ? "Tail" : "Live terminal"} for ${label}`}
               hidden={!screenShown}
               onMouseDown={typeFromScreen}
             >
@@ -1221,7 +1567,7 @@ export function LiveTerminal({
             className={`mir-sheet-b ${scale}`}
             ref={setBigBox}
             role="group"
-            aria-label={`${watch ? "Tail" : "Live terminal"} for ${label}`}
+            aria-label={`${tail ? "Tail" : "Live terminal"} for ${label}`}
             hidden={!screenShown}
             data-trap-skip=""
           />
@@ -1238,7 +1584,7 @@ export function LiveTerminal({
               footer("big")
             )}
           </div>
-          {watch ? null : (
+          {tail ? null : (
             <div className="mir-keys" role="group" aria-label="Keys a phone lacks">
               {SOFT_KEYS.map((key) => {
                 const [face, name, wide] = SOFT_FACES[key];

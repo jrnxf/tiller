@@ -14,6 +14,7 @@ use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use axum::body::{Body, Bytes};
 use serde_json::Value;
@@ -28,8 +29,9 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 
 use super::forward::{Mutate, Order};
-use super::pane::{PaneKind, PaneOpen};
+use super::pane::{PaneFit, PaneInput, PaneKind, PaneOpen, PaneSigner};
 use super::{Federation, Frame, Hello, HelloKey, PeerView, Timing, peer_alias, stale_reason};
+use crate::dto::TerminalFit;
 use crate::dto::{LinkEvent, LinkHealth, LinkState, PeerEvent, PeerResetEvent};
 use crate::readonly::Damage;
 use crate::views;
@@ -95,66 +97,238 @@ pub enum Paned {
 pub struct PaneStream {
     first: String,
     lines: tokio::io::Lines<Box<dyn AsyncBufRead + Send + Unpin>>,
-    _writer: Box<dyn AsyncWrite + Send + Unpin>,
-    _child: Option<Child>,
+    writer: Box<dyn AsyncWrite + Send + Unpin>,
+    child: Option<Child>,
+    /// The open's `id`, which every input on the link names.
+    open_id: String,
+    signer: PaneSigner,
+    /// The session as the open named it.
+    session: String,
+    /// Where the board's inputs for this stream are found.
+    desk: (Arc<PaneDesks>, String),
 }
 
 /// Lines waiting for a browser before its stream is dropped, as the local
 /// mirror holds them.
 const PANE_QUEUE: usize = 64;
 
+/// Inputs waiting for an open stream's link to take them.
+const PANE_ASKS: usize = 16;
+
+/// How long a stream the browser left has to end on the peer, so a Fit
+/// gives the pane back before the next Fit takes its turn.
+const PANE_DRAIN: Duration = Duration::from_secs(12);
+
+/// What the board asks of an open peer pane stream.
+pub enum PaneAct {
+    /// Keys (`Ok`) or a paste (`Err`).
+    Input(Result<Vec<String>, String>),
+    /// The board's new size for the stream's Fit.
+    Fit((u16, u16)),
+}
+
+/// How an input on a peer's pane went (`protocol.md` 10.7).
+pub enum Typed {
+    /// No stream of this board host shows the pane: nothing was sent.
+    NoStream,
+    /// The link did not take the frame: nothing was sent.
+    Unreachable,
+    /// Sent, with no answer in time or before the link ended.
+    Uncertain,
+    /// The peer's answer, with the status and body its own board API gives.
+    Answered(u16, Value),
+}
+
+struct PaneAsk {
+    act: PaneAct,
+    reply: oneshot::Sender<Option<(u16, Value)>>,
+}
+
+/// One open stream's input queue, and whether its open holds the Fit.
+struct Desk {
+    asks: mpsc::Sender<PaneAsk>,
+    fitted: bool,
+}
+
+/// The open streams' input queues, by the peer's `hosts` row id and the
+/// session they show, oldest first. The newest open stream on a pane takes
+/// its keys, and the one that holds the Fit takes its sizes.
+#[derive(Default)]
+pub struct PaneDesks {
+    open: Mutex<HashMap<String, Vec<Desk>>>,
+}
+
+impl PaneDesks {
+    fn key(host_id: &str, session: &str) -> String {
+        format!("{host_id}/{session}")
+    }
+
+    fn take(&self, key: &str, asks: mpsc::Sender<PaneAsk>, fitted: bool) {
+        let mut open = self.open.lock().unwrap_or_else(PoisonError::into_inner);
+        open.retain(|_, desks| {
+            desks.retain(|desk| !desk.asks.is_closed());
+            !desks.is_empty()
+        });
+        open.entry(key.to_owned())
+            .or_default()
+            .push(Desk { asks, fitted });
+    }
+
+    fn leave(&self, key: &str, asks: &mpsc::Sender<PaneAsk>) {
+        let mut open = self.open.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(desks) = open.get_mut(key) {
+            desks.retain(|desk| !desk.asks.same_channel(asks));
+            if desks.is_empty() {
+                open.remove(key);
+            }
+        }
+    }
+
+    /// The queue an act goes to: a size to the stream that holds the Fit,
+    /// anything else to the newest stream.
+    fn get(&self, key: &str, act: &PaneAct) -> Option<mpsc::Sender<PaneAsk>> {
+        let open = self.open.lock().unwrap_or_else(PoisonError::into_inner);
+        open.get(key)?
+            .iter()
+            .rev()
+            .filter(|desk| !desk.asks.is_closed())
+            .find(|desk| desk.fitted || !matches!(act, PaneAct::Fit(_)))
+            .map(|desk| desk.asks.clone())
+    }
+}
+
+/// The `result` the peer sent for one of this link's inputs, or None for
+/// any other line. Only a line that starts as a `result` frame does is
+/// parsed: the mirror's lines are not.
+fn answer_of(line: &str) -> Option<(String, u16, Value)> {
+    if !line.starts_with(r#"{"type":"result""#) {
+        return None;
+    }
+    match serde_json::from_str::<Frame>(line) {
+        Ok(Frame::Result {
+            id,
+            http_status,
+            body,
+        }) => Some((id, http_status, body)),
+        _ => None,
+    }
+}
+
 impl PaneStream {
     /// The stream as the browser's NDJSON body, line for line as the peer
-    /// sent them. It ends when the browser leaves, the peer closes, `stop`
-    /// turns true or the browser falls a whole queue behind; a link that
-    /// ends is followed by an `unavailable` line, so the browser
-    /// opens again and learns whether the peer is still there.
+    /// sent them, less the `result`s of the board's inputs, which go back
+    /// to the input that asked. It ends when the browser leaves, the peer
+    /// closes, `stop` turns true or the browser falls a whole queue
+    /// behind; a link that ends is followed by an `unavailable` line, so
+    /// the browser opens again and learns whether the peer is still there.
+    /// `fit` is the turn this host's Fit on the pane holds, kept until the
+    /// peer has given the pane back.
     pub fn relay(
         self,
         label: String,
         stop: watch::Receiver<bool>,
         viewer: crate::mirror::Viewer,
+        fit: Option<tokio::sync::OwnedMutexGuard<()>>,
+        unfit: Option<String>,
     ) -> Body {
         let (tx, mut rx) = mpsc::channel::<Bytes>(PANE_QUEUE);
+        let (desk, mut asks) = mpsc::channel::<PaneAsk>(PANE_ASKS);
+        let fitted = fit.is_some() && unfit.is_none();
         tokio::spawn(async move {
             let _viewer = viewer;
+            let _fit = fit;
             let PaneStream {
                 first,
                 mut lines,
-                _writer,
-                _child,
+                mut writer,
+                child,
+                open_id,
+                signer,
+                session,
+                desk: (desks, key),
             } = self;
+            desks.take(&key, desk.clone(), fitted);
             let mut stop = stop;
             let queue = |line: String| {
                 let mut bytes = line.into_bytes();
                 bytes.push(b'\n');
                 tx.try_send(Bytes::from(bytes)).is_ok()
             };
-            if !queue(first) {
-                return;
-            }
-            loop {
+            let mut seq = 0;
+            let mut waiting: HashMap<String, oneshot::Sender<Option<(u16, Value)>>> =
+                HashMap::new();
+            let mut ended = unfit.is_some_and(|message| {
+                let unfit = crate::dto::TerminalLine::Unfit { message };
+                !serde_json::to_string(&unfit).is_ok_and(queue)
+            }) || !queue(first);
+            while !ended {
                 tokio::select! {
                     line = lines.next_line() => match line {
                         Ok(Some(line)) => {
-                            if !queue(line) {
-                                return;
+                            if let Some((id, status, body)) = answer_of(&line) {
+                                if let Some(reply) = waiting.remove(&id) {
+                                    let _ = reply.send(Some((status, body)));
+                                }
+                            } else if !queue(line) {
+                                ended = true;
                             }
                         }
                         Ok(None) | Err(_) => {
-                            let ended = crate::dto::TerminalLine::Unavailable {
+                            let gone = crate::dto::TerminalLine::Unavailable {
                                 message: format!("the link to {label} ended"),
                             };
-                            if let Ok(line) = serde_json::to_string(&ended) {
+                            if let Ok(line) = serde_json::to_string(&gone) {
                                 queue(line);
                             }
-                            return;
+                            ended = true;
                         }
                     },
-                    _ = stop.wait_for(|stop| *stop) => return,
-                    () = tx.closed() => return,
+                    Some(ask) = asks.recv() => {
+                        seq += 1;
+                        let now = Timestamp::now();
+                        let frame = match ask.act {
+                            PaneAct::Input(input) => Frame::PaneInput(Box::new(PaneInput::signed(
+                                &signer, &open_id, seq, &session, input, now,
+                            ))),
+                            PaneAct::Fit(size) => Frame::PaneFit(Box::new(PaneFit::signed(
+                                &signer, &open_id, seq, &session, size, now,
+                            ))),
+                        };
+                        let id = match &frame {
+                            Frame::PaneInput(frame) => frame.id.clone(),
+                            Frame::PaneFit(frame) => frame.id.clone(),
+                            _ => String::new(),
+                        };
+                        if write_frame(&mut writer, &frame).await.is_ok() {
+                            // An input whose caller gave up waits no more.
+                            waiting.retain(|_, reply| !reply.is_closed());
+                            waiting.insert(id, ask.reply);
+                        } else {
+                            // Nothing reached the peer: the input says so.
+                            let _ = ask.reply.send(None);
+                        }
+                    }
+                    () = async {
+                        let _ = stop.wait_for(|stop| *stop).await;
+                    } => ended = true,
+                    () = tx.closed() => ended = true,
                 }
             }
+            desks.leave(&key, &desk);
+            // Inputs still queued were never sent: they say so.
+            asks.close();
+            while let Ok(ask) = asks.try_recv() {
+                let _ = ask.reply.send(None);
+            }
+            drop(waiting);
+            // Closing the peer's stdin ends its stream; reading on to its
+            // end lets a Fit give the pane back before the turn is free.
+            drop(writer);
+            let _ = timeout(PANE_DRAIN, async {
+                while let Ok(Some(_)) = lines.next_line().await {}
+            })
+            .await;
+            drop(child);
         });
         Body::from_stream(futures_util::stream::poll_fn(move |cx| {
             rx.poll_recv(cx)
@@ -166,9 +340,11 @@ impl PaneStream {
 async fn dial_pane(
     connector: &dyn Connector,
     pairing: &Pairing,
+    desks: &Arc<PaneDesks>,
     session: &str,
     kind: PaneKind,
     lines: Option<u16>,
+    fit: Option<TerminalFit>,
 ) -> std::io::Result<Paned> {
     let key_file = pairing
         .key
@@ -199,8 +375,10 @@ async fn dial_pane(
         session,
         kind,
         lines,
+        fit,
         Timestamp::now(),
     );
+    let open_id = open.id.clone();
     write_frame(&mut writer, &Frame::PaneOpen(Box::new(open))).await?;
     let mut lines = reader.lines();
     let Some(first) = lines.next_line().await? else {
@@ -224,8 +402,17 @@ async fn dial_pane(
         _ => Ok(Paned::Stream(Box::new(PaneStream {
             first,
             lines,
-            _writer: writer,
-            _child: child,
+            writer,
+            child,
+            open_id,
+            signer: PaneSigner {
+                key: signing.clone(),
+                key_id: key_id.clone(),
+                viewer_host_id: pairing.local_host_id.clone(),
+                peer_host_id: pairing.peer_host_id.clone(),
+            },
+            session: session.to_owned(),
+            desk: (Arc::clone(desks), PaneDesks::key(&pairing.host_id, session)),
         }))),
     }
 }
@@ -239,6 +426,8 @@ pub struct Peers {
     pairings: Mutex<HashMap<String, Pairing>>,
     /// Opens the pane links; none for [`Peers::idle`].
     connector: Option<Arc<dyn Connector>>,
+    /// The open pane streams that take the board's inputs.
+    desks: Arc<PaneDesks>,
     tx: broadcast::Sender<PeerMessage>,
     timing: Timing,
     /// A damaged `state.db` is never written, not even a link state
@@ -253,6 +442,7 @@ impl Peers {
             queries: Mutex::default(),
             pairings: Mutex::default(),
             connector,
+            desks: Arc::default(),
             tx: broadcast::channel(256).0,
             timing,
             damage,
@@ -346,6 +536,7 @@ impl Peers {
         session: &str,
         kind: PaneKind,
         lines: Option<u16>,
+        fit: Option<TerminalFit>,
     ) -> Paned {
         let live = self
             .lock_views()
@@ -360,7 +551,15 @@ impl Peers {
         let (true, Some(pairing), Some(connector)) = (live, pairing, self.connector.clone()) else {
             return Paned::Unreachable;
         };
-        let dial = dial_pane(&*connector, &pairing, session, kind, lines);
+        let dial = dial_pane(
+            &*connector,
+            &pairing,
+            &self.desks,
+            session,
+            kind,
+            lines,
+            fit,
+        );
         match timeout(self.timing.query, dial).await {
             Ok(Ok(paned)) => paned,
             Ok(Err(error)) => {
@@ -368,6 +567,28 @@ impl Peers {
                 Paned::Unreachable
             }
             Err(_) => Paned::Unreachable,
+        }
+    }
+
+    /// Sends the owner's input or the board's new size to the open stream
+    /// on a peer's pane (`protocol.md` 10.7), and waits up to
+    /// `timing.query` for the peer's `result`. Nothing is queued past the
+    /// stream: no open stream is [`Typed::NoStream`].
+    pub async fn pane_act(&self, host_id: &str, session: &str, act: PaneAct) -> Typed {
+        let Some(desk) = self.desks.get(&PaneDesks::key(host_id, session), &act) else {
+            return Typed::NoStream;
+        };
+        let (reply, answer) = oneshot::channel();
+        // Inputs wait their turn on the link, so keys keep their order.
+        let deadline = Instant::now() + self.timing.query;
+        let queued = tokio::time::timeout_at(deadline, desk.send(PaneAsk { act, reply })).await;
+        if !matches!(queued, Ok(Ok(()))) {
+            return Typed::Unreachable;
+        }
+        match tokio::time::timeout_at(deadline, answer).await {
+            Ok(Ok(Some((status, body)))) => Typed::Answered(status, body),
+            Ok(Ok(None)) => Typed::Unreachable,
+            Ok(Err(_)) | Err(_) => Typed::Uncertain,
         }
     }
 

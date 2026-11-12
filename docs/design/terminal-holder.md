@@ -496,12 +496,14 @@ This affects the agents' own cards too, because their panes now carry `TILLER_PA
 ## 8. Peers and remote hosts
 
 **Now:**
-- The peer pane link (`protocol.md` 10.7, `daemon/peer/pane.rs`) moves to the peer's own holder. The board host still opens `tiller peer pane` over SSH, and the frames do not change. A peer view stays read-only, as it is today.
+- The peer pane link (`protocol.md` 10.7, `daemon/peer/pane.rs`) moves to the peer's own holder. The board host still opens `tiller peer pane` over SSH, and the `pane_open` frame keeps its fields, with an optional `fit`.
+- Remote input from the board (HR1): signed `pane_input` and `pane_fit` frames on the same pane link, allowed only with the `act` scope (`authority.md` G46, `protocol.md` 10.7). They reach the pane through the peer's own input path, holder or herdr, and a peer pane fits the stage and gives its size back as a local one does. Interrupt, prompt answers, steer and stop stay refused for a peer.
 - Saved herdr machines go away: `hosts.herdr_machine`, `tiller peer add --herdr-machine`, the remote herdr poller, the saved-machine tail and `herdr --machine` focus. A remote host must be a paired Tiller peer (ADR 0003). The cutover pairs or removes each saved-machine-only host first (section 11).
 - Open in terminal for a peer's agent uses `ssh -t <alias> tiller attach <session>` (section 5.3).
 
 **Later (not in this build):**
-- Remote input from the board: a signed `pane_input` frame over the peer link, allowed only with the `act` scope. It needs a new row in `authority.md` and its own spec task. The peer's holder already accepts input, so only the link and the authority rule are new.
+- The other agent verbs for a peer (interrupt, prompt answers, steer, stop), each a later owner choice with its own authority row.
+- One Fit turn across the peer's own board and its `peer pane` processes: the holder's lease (H11) gives it.
 
 ## 9. The test gate
 
@@ -682,6 +684,7 @@ Two points are open for the owner, found while H01 wrote the spec amendments:
 - **`tiller host remove`.** The 11.1 migration refusal names it as a way out, but the CLI has no such command, and no spec defines it. A row that names the host (its pane cache, its events) would need a rule, and the command must exist before step 2 of 11.3, which runs on the old binary. The owner picks: add it to `main` before H10 with its own contract, or make `tiller peer add` the only way out. Until then the specs repeat the 11.1 text.
 - **A binary check on `tiller attach`.** `tiller` runs outside the role sandbox, so on a host where hooks do not fire the deny rule is the only verb check against an agent that runs `tiller attach` (`authority.md` section 8). A refusal in the binary, as `tiller peer serve` has, must still let a notification click through: the click handler gets `TILLER_SESSION_ID` (section 7). The owner decides before H07.
 
-Two points are for later tasks, recorded here so they are not lost:
+One point is for a later task, recorded here so it is not lost:
 - Shorter Enter pacing with bracketed paste (section 4.5), once raw stream fixtures exist.
-- Remote input over the peer link (section 8), with its own authority row.
+
+Remote input over the peer link (section 8) has its row: `authority.md` G46 and `protocol.md` 10.7.

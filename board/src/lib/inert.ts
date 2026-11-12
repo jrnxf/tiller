@@ -26,6 +26,17 @@ export function holdInert(elements: Iterable<Element>): () => void {
   };
 }
 
+// Marks the whole page inert but `element` and what holds it: the rest of
+// each parent's children, up to the body. A dialog, a menu or a toast that
+// opens on the body later stays live.
+export function holdInertOutside(element: Element): () => void {
+  const others: Element[] = [];
+  for (let at = element; at.parentElement && at !== document.body; at = at.parentElement) {
+    for (const other of at.parentElement.children) if (other !== at) others.push(other);
+  }
+  return holdInert(others);
+}
+
 function hold(elements: Iterable<Element>, held: Element[]) {
   for (const element of elements) {
     if (element.hasAttribute("data-modal-exempt")) continue;

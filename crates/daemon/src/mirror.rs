@@ -48,7 +48,7 @@ pub const MAX_HISTORY: u16 = 1000;
 const INPUT_RATE: f64 = 20.0;
 const INPUT_BURST: f64 = 40.0;
 /// Lines waiting for a browser before its stream is dropped.
-const QUEUE: usize = 64;
+pub(crate) const QUEUE: usize = 64;
 /// The longest line herdr may write; a full frame of a large pane with
 /// heavy styling stays well under it.
 const MAX_LINE: usize = 4 << 20;
@@ -220,6 +220,10 @@ pub struct Fits {
     turns: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// The board's size for each pane a Fit streams now, for a refit.
     boards: Mutex<HashMap<String, watch::Sender<(u16, u16)>>>,
+    /// A count for each holder pane the daemon resized, which each view on
+    /// the pane follows: the slice's holder reports a resize only to the
+    /// subscription that asked for it (`holder_mirror`).
+    sized: Mutex<HashMap<String, watch::Sender<u64>>>,
 }
 
 impl Fits {
@@ -236,6 +240,7 @@ impl Fits {
             held: Mutex::new(held),
             turns: Mutex::new(HashMap::new()),
             boards: Mutex::new(HashMap::new()),
+            sized: Mutex::new(HashMap::new()),
         }
     }
 
@@ -277,12 +282,30 @@ impl Fits {
     }
 
     /// Starts following the board's size for the Fit on `pane`, at `fit`.
-    fn board(&self, pane: &str, fit: (u16, u16)) -> watch::Receiver<(u16, u16)> {
+    pub(crate) fn board(&self, pane: &str, fit: (u16, u16)) -> watch::Receiver<(u16, u16)> {
         let (sender, receiver) = watch::channel(fit);
         let mut boards = self.boards.lock().unwrap_or_else(PoisonError::into_inner);
         boards.retain(|_, sender| !sender.is_closed());
         boards.insert(pane.to_owned(), sender);
         receiver
+    }
+
+    /// Follows the daemon's resizes of the holder pane `pane`.
+    pub(crate) fn sized(&self, pane: &str) -> watch::Receiver<u64> {
+        let mut sized = self.sized.lock().unwrap_or_else(PoisonError::into_inner);
+        sized.retain(|_, sender| sender.receiver_count() > 0);
+        sized
+            .entry(pane.to_owned())
+            .or_insert_with(|| watch::channel(0).0)
+            .subscribe()
+    }
+
+    /// Tells each view on the holder pane `pane` that the daemon resized it.
+    pub(crate) fn resized(&self, pane: &str) {
+        let sized = self.sized.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(sender) = sized.get(pane) {
+            sender.send_modify(|count| *count = count.wrapping_add(1));
+        }
     }
 
     /// Gives the Fit streaming `pane` the board's new size; false when no
@@ -320,7 +343,7 @@ impl Fits {
 
     /// This pane's turn, once the Fit before it has given the pane back;
     /// `None` when that takes longer than `TURN_WAIT`.
-    async fn turn(&self, pane: &str) -> Option<OwnedMutexGuard<()>> {
+    pub(crate) async fn turn(&self, pane: &str) -> Option<OwnedMutexGuard<()>> {
         let turn = {
             let mut turns = self.turns.lock().unwrap_or_else(PoisonError::into_inner);
             turns.retain(|_, turn| Arc::strong_count(turn) > 1);
@@ -832,7 +855,7 @@ fn sizes(
 }
 
 /// Returns once the daemon is stopping; never when nothing can stop it.
-async fn stopping(stop: &mut watch::Receiver<bool>) {
+pub(crate) async fn stopping(stop: &mut watch::Receiver<bool>) {
     if stop.wait_for(|stop| *stop).await.is_err() {
         std::future::pending::<()>().await;
     }
@@ -885,7 +908,7 @@ struct Observed {
 
 /// Queues one NDJSON line without waiting; false when the browser left or
 /// fell a whole queue behind, which ends its stream.
-fn queue(tx: &mpsc::Sender<Bytes>, message: &TerminalLine) -> bool {
+pub(crate) fn queue(tx: &mpsc::Sender<Bytes>, message: &TerminalLine) -> bool {
     let Ok(mut line) = serde_json::to_vec(message) else {
         return false;
     };
@@ -893,7 +916,7 @@ fn queue(tx: &mpsc::Sender<Bytes>, message: &TerminalLine) -> bool {
     tx.try_send(Bytes::from(line)).is_ok()
 }
 
-fn unavailable(tx: &mpsc::Sender<Bytes>, message: &str) {
+pub(crate) fn unavailable(tx: &mpsc::Sender<Bytes>, message: &str) {
     let message = message.to_owned();
     queue(tx, &TerminalLine::Unavailable { message });
 }

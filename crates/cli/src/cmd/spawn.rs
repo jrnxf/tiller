@@ -15,7 +15,9 @@ use tiller_agents::spawn::trust::ClaudeConfig;
 use tiller_agents::spawn::{self as agents, Request, SpawnError, World, readings};
 use tiller_core::state::resolve_card;
 use tiller_daemon::api::{BoardRelaunch, Controlled, StartError};
+use tiller_daemon::holder::HolderLink;
 use tiller_herdr::client::{Cli, HerdrError};
+use tiller_panes::{Panes, PanesError};
 use tiller_reconcile::git::GitScanner;
 
 use super::admin::load_config;
@@ -67,7 +69,14 @@ pub fn failure(error: SpawnError) -> Failure {
         SpawnError::Herdr(error @ HerdrError::Unreachable(_)) => {
             Failure::unavailable(format!("herdr: {error}")).hint("start herdr, then retry")
         }
+        SpawnError::Panes(error @ PanesError::Unreachable(_)) => {
+            Failure::unavailable(error.to_string()).hint("start `tiller holder`, then retry")
+        }
+        SpawnError::Panes(error @ (PanesError::Refused { .. } | PanesError::Version { .. })) => {
+            Failure::refused(format!("the terminal holder: {error}"))
+        }
         error @ (SpawnError::Herdr(_)
+        | SpawnError::Panes(_)
         | SpawnError::Role(_)
         | SpawnError::Io(_)
         | SpawnError::Json(_)) => Failure::new("internal", 1, error.to_string()),
@@ -85,6 +94,9 @@ pub struct Tools {
     pub config: SpawnConfig,
     pool: Treehouse,
     herdr: Cli,
+    /// The terminal holder new agents launch in, when one has made its
+    /// socket in this home; else herdr.
+    holder: Option<HolderLink>,
     scanner: GitScanner,
     listeners: Lavish,
     tiller: PathBuf,
@@ -173,16 +185,21 @@ impl Tools {
             Some(root) => root.clone(),
             None => state_dir("spawn.scratch_root")?.join("runs"),
         };
+        let tiller_home = absolute_home(&app.home)?;
+        // A home whose holder has made its socket launches new agents
+        // there; agents already in herdr stay in herdr.
+        let holder = HolderLink::present(&tiller_home).then(|| HolderLink::new(&tiller_home));
         Ok(Self {
             pool: Treehouse::new(words(&config.spawn.treehouse)),
             herdr,
+            holder,
             scanner: GitScanner::new(),
             listeners: Lavish::new(
                 lavish_program(&config.spawn),
                 config.spawn.review_allowed_hosts.clone(),
             ),
             tiller: crate::stable::tiller_path()?,
-            tiller_home: absolute_home(&app.home)?,
+            tiller_home,
             scratch,
             claude: ClaudeConfig::from_env(),
             config,
@@ -209,6 +226,7 @@ impl Tools {
             config: &self.config,
             pool: &self.pool,
             herdr: &self.herdr,
+            panes: self.holder.as_ref().map(|holder| holder as &dyn Panes),
             scanner: &self.scanner,
             listeners: &self.listeners,
             tiller: &self.tiller,
@@ -619,6 +637,11 @@ pub fn focus(app: &App, target: &str) -> Done {
     let store = app.read()?;
     let session = resolve_session(&store, target)?;
     let (pane, machine) = tiller_core::state::runs::focus_target(store.conn(), &session)?;
+    if tiller_core::ids::is_holder_pane(&pane) {
+        return Err(failure(SpawnError::Refused(format!(
+            "focus is not ready yet for an agent in the terminal holder (pane {pane}); watch it in the board's live view"
+        ))));
+    }
     let herdr = match &machine {
         Some(machine) => tools.herdr.clone().on_machine(machine),
         None => tools.herdr.clone(),

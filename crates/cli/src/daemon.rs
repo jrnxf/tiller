@@ -208,6 +208,9 @@ pub fn run(args: &Args) -> anyhow::Result<ExitCode> {
         ssh: command_line("TILLER_SSH", "ssh"),
         gh: std::env::var("TILLER_GH").unwrap_or_else(|_| "gh".into()),
         assets: Assets::board(),
+        holder: Some(Arc::new(tiller_daemon::holder::HolderLink::new(
+            &std::path::absolute(&app.home)?,
+        ))),
         orchestrators: Some(Arc::new(BoardStart { app })),
     };
     match tiller_daemon::run(config)? {

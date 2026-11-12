@@ -259,6 +259,11 @@ fn read_tail(
         .ok_or("the run has no live session")?;
     let (pane, machine) = tiller_core::state::runs::focus_target(conn, &session)
         .map_err(|_| "the session has no pane".to_owned())?;
+    if tiller_core::ids::is_holder_pane(&pane) {
+        return Err(format!(
+            "the tail is not ready yet for an agent in the terminal holder (pane {pane})"
+        ));
+    }
     let host: tiller_core::domain::Host =
         get(conn, "host", &session.host_id).map_err(|error| error.to_string())?;
     if host.kind == tiller_core::domain::HostKind::Remote && machine.is_none() {

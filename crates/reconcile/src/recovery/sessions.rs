@@ -918,6 +918,15 @@ impl Reconciler {
         // `(project, line)` for the summary: what was not simply resumed.
         let mut summary: Vec<(String, String, String)> = Vec::new();
         for session in self.live_sessions()? {
+            // A pane in the terminal holder is restored by the holder's own
+            // path (H10), never relaunched in herdr.
+            if session
+                .pane_id
+                .as_deref()
+                .is_some_and(tiller_core::ids::is_holder_pane)
+            {
+                continue;
+            }
             let probe =
                 ladder::bound_pane(&snapshot, &session).map(|p| self.sources.probe.agent(p));
             if probe == Some(Probe::Unknown) && !self.hook_seen_after(&session.id, started)? {

@@ -529,6 +529,14 @@ impl<H: Herdr> Deliverer<H> {
         let Some(pane_id) = session.pane_id.clone() else {
             return Ok(Err(Defer::new(BUSY_DEFER_SECS, "session has no pane yet")));
         };
+        // Delivery moves onto the terminal holder in its own slice (H09);
+        // herdr has no such pane, so the message waits.
+        if tiller_core::ids::is_holder_pane(&pane_id) {
+            return Ok(Err(Defer::new(
+                BUSY_DEFER_SECS,
+                "delivery to an agent in the terminal holder is not ready yet",
+            )));
+        }
         let pane = match self.herdr.pane(&pane_id) {
             Ok(Some(pane)) => pane,
             Ok(None) => return Ok(Err(Defer::new(BUSY_DEFER_SECS, "pane is gone"))),

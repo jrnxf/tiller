@@ -4,6 +4,8 @@ import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "re
 import type { CSSProperties, KeyboardEvent as KeyEvent, RefObject } from "react";
 
 import type { AgentRow, Machine, PermissionPrompt, Project } from "../../lib/api-types";
+import { leavePageFullScreen, usePageFullScreen } from "../../lib/fullscreen";
+import { holdInertOutside } from "../../lib/inert";
 import { focusReason, ownerOf, projectKey, shownId } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import {
@@ -28,7 +30,7 @@ import { EmptyScope } from "./board-view";
 import { formatAge, formatLisbonMoment } from "./format";
 import { focusCommand, focusTooltip, useHerdrFocus, useOpenKey } from "./herdr";
 import { ChevronLeftIcon, InfoIcon, PaneIcon } from "./icons";
-import { LiveTerminal, usePhone } from "./live-terminal";
+import { LiveTerminal, isHolderPane, usePhone } from "./live-terminal";
 import type { SwitchKey, TerminalControl } from "./live-terminal";
 import { AsOf, HostChip, PeerNote } from "./host-chip";
 import { useAmbiguousIds, useStanding, useNamedProjects } from "./peer-state";
@@ -528,6 +530,51 @@ function Stage({
   onSwitch: (key: SwitchKey) => void;
 }) {
   const { agent, card } = line;
+  // The page in full screen pins this card over it, a switch to another
+  // agent included. Leaving the Agents view, or a turn to the phone layout,
+  // leaves full screen.
+  const pageFull = usePageFullScreen();
+  const full = pageFull && !phone;
+  useEffect(() => {
+    if (pageFull && phone) leavePageFullScreen();
+  }, [pageFull, phone]);
+  useEffect(() => leavePageFullScreen, []);
+  // In full screen the card covers the page, so Tab and assistive tech stay
+  // on it too. The terminal takes focus left under the card, such as on the
+  // rail, and focus goes back there when full screen ends.
+  const cardRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const cardBox = cardRef.current;
+    if (!full || !cardBox) return;
+    const before = document.activeElement;
+    const outside =
+      before instanceof HTMLElement && before !== document.body && !cardBox.contains(before)
+        ? before
+        : null;
+    const release = holdInertOutside(cardBox);
+    control.current?.takeFullScreenFocus(outside);
+    return () => {
+      release();
+      // Only from where this effect put it: focus the owner moved, such as
+      // into the terminal to type, stays.
+      const now = document.activeElement;
+      const lost = !now || now === document.body || now.hasAttribute("data-full-screen");
+      if (outside?.isConnected && lost) outside.focus();
+    };
+  }, [full, control]);
+  // The details drawer opens under the header, which wraps on a narrow stage.
+  const headRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const head = headRef.current;
+    const cardBox = cardRef.current;
+    if (!head || !cardBox) return;
+    const measure = () => cardBox.style.setProperty("--av-head", `${head.offsetHeight}px`);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(head);
+    return () => observer.disconnect();
+  }, []);
   const standing = useStanding(agent);
   const ambiguous = useAmbiguousIds();
   const off = focusReason(ownerOf(agent));
@@ -602,6 +649,8 @@ function Stage({
       // peer link; only a saved machine's is read as a tail.
       machine={remote && !peerHost ? host.label : undefined}
       peer={peerHost}
+      holder={(!remote || !!peerHost) && isHolderPane(agent.pane_id)}
+      full={full}
       strip={
         remote || peerHost ? null : (
           <AnswerStrip
@@ -626,8 +675,8 @@ function Stage({
     />
   );
   return (
-    <div className="av-card">
-      <div className="av-card-h">
+    <div className={full ? "av-card full" : "av-card"} ref={cardRef}>
+      <div className="av-card-h" ref={headRef}>
         {phone ? (
           <button type="button" className="ib av-back" aria-label="Back to agents" onClick={onBack}>
             <ChevronLeftIcon />
@@ -758,7 +807,8 @@ function Stage({
         {body}
         {
           // Steer and interrupt reach a pane on this machine only: a peer's
-          // pane is watch only, and a saved machine's pane is read as a tail.
+          // pane takes keys and the Fit alone, and a saved machine's pane is
+          // read as a tail.
           remote || peerHost ? null : (
             <SteerBar
               key={`${agent.session_id}:steer`}

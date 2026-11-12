@@ -1005,7 +1005,7 @@
             }
           },
           "502": {
-            "description": "`peer_refused`: not forwarded",
+            "description": "`peer_refused`: the peer refused the pane link",
             "content": {
               "application/json": {
                 "schema": {
@@ -1015,7 +1015,7 @@
             }
           },
           "503": {
-            "description": "herdr is unreachable, or too many terminal views are open",
+            "description": "herdr or the peer is unreachable, or too many terminal views are open",
             "content": {
               "application/json": {
                 "schema": {
@@ -1032,7 +1032,7 @@
         "tags": [
           "mutations"
         ],
-        "summary": "A new board size for the Fit an open stream holds on the agent's pane,\nsent to herdr's control session in place (`protocol.md` 7.4).",
+        "summary": "A new board size for the Fit an open stream holds on the agent's pane,\nsent to herdr's control session in place, or over the pane link to a\npeer's (`protocol.md` 7.4, 10.7).",
         "operationId": "terminal_fit",
         "parameters": [
           {
@@ -1103,7 +1103,27 @@
             }
           },
           "502": {
-            "description": "`peer_refused`: not forwarded",
+            "description": "`peer_refused`: a read-scope pairing, or the peer refused the signed Fit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "the peer is unreachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`forward_uncertain`: the peer link dropped before the peer answered",
             "content": {
               "application/json": {
                 "schema": {
@@ -1219,7 +1239,7 @@
         "tags": [
           "mutations"
         ],
-        "summary": "Keys or a paste for the agent's pane, through herdr (`protocol.md` 7.4).",
+        "summary": "Keys or a paste for the agent's pane, through herdr or the terminal\nholder, or over the pane link to a peer's (`protocol.md` 7.4, 10.7).",
         "operationId": "terminal_input",
         "parameters": [
           {
@@ -1279,7 +1299,7 @@
             }
           },
           "422": {
-            "description": "`refused`: the agent runs on a saved machine",
+            "description": "`refused`: the agent runs on a saved machine, its session ended, or no open stream shows a peer's pane",
             "content": {
               "application/json": {
                 "schema": {
@@ -1289,7 +1309,7 @@
             }
           },
           "502": {
-            "description": "`peer_refused`: not forwarded",
+            "description": "`peer_refused`: a read-scope pairing, or the peer refused the signed input",
             "content": {
               "application/json": {
                 "schema": {
@@ -1299,7 +1319,17 @@
             }
           },
           "503": {
-            "description": "herdr is unreachable, or input came faster than 20 a second; nothing was sent",
+            "description": "herdr or the peer is unreachable, or input came faster than 20 a second; nothing was sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`forward_uncertain`: the peer link dropped before the peer answered; the input may have reached the pane",
             "content": {
               "application/json": {
                 "schema": {
