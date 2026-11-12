@@ -42,6 +42,22 @@ const FIXTURE_V6: &str = "
     VALUES ('cfg-1', '{\"role\": \"r\", \"settings\": \"s\"}', '2026-11-02T09:10:00.000Z');
 ";
 
+/// Pairs the fixture's saved herdr machine, `host-b`, so migration 20 runs
+/// over it (`terminal-holder.md` 11.3, step 2).
+const PAIR_HOST_B: &str = "
+    UPDATE hosts SET peer_scope = 'read', peer_host_id = '01JC0000000000000000PEERB'
+    WHERE label = 'host-b';
+";
+
+/// Migrates an empty database up with [`FIXTURE_V1`] in it, loaded at the
+/// last schema that takes it, and its saved herdr machine paired.
+fn fixture_at_latest(conn: &mut Connection) {
+    to_version(conn, 19).unwrap();
+    conn.execute_batch(&format!("BEGIN; {FIXTURE_V1} {PAIR_HOST_B} COMMIT;"))
+        .unwrap();
+    up(conn).unwrap();
+}
+
 fn connection() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
@@ -119,6 +135,10 @@ fn migrations_run_both_ways_on_fixture() {
                 .unwrap();
             assert_eq!(foreign_key_violations(&conn), 0);
         }
+        if version == 19 {
+            // migration 20 refuses a saved herdr machine with no pairing
+            conn.execute_batch(PAIR_HOST_B).unwrap();
+        }
         schemas.push(schema(&conn));
     }
     let schema_version: String = conn
@@ -144,8 +164,9 @@ fn migrations_run_both_ways_on_fixture() {
 
     up(&mut conn).unwrap();
     assert_eq!(schema(&conn), schemas[LATEST]);
-    conn.execute_batch(&format!("BEGIN; {FIXTURE_V1} COMMIT;"))
-        .unwrap();
+    to_version(&mut conn, 0).unwrap();
+    fixture_at_latest(&mut conn);
+    assert_eq!(foreign_key_violations(&conn), 0);
 }
 
 /// Migration 15: a key stored before it keeps its row with no actor and no
@@ -388,6 +409,8 @@ fn existing_projects_read_launched_after_0002() {
     to_version(&mut conn, 2).unwrap();
     // Read through today's record, which needs every later column; no later
     // migration touches the stage.
+    to_version(&mut conn, 19).unwrap();
+    conn.execute_batch(PAIR_HOST_B).unwrap();
     to_version(&mut conn, LATEST).unwrap();
     let projects: Vec<crate::domain::Project> =
         crate::state::list(&conn, "1 ORDER BY id", &[]).unwrap();
@@ -543,12 +566,9 @@ fn older_binary_refuses_newer_schema_without_writing() {
     let path = dir.path().join("state.db");
     {
         let mut conn = Connection::open(&path).unwrap();
-        up(&mut conn).unwrap();
-        conn.execute_batch(&format!(
-            "BEGIN; {FIXTURE_V1} COMMIT; PRAGMA user_version = {};",
-            LATEST + 1
-        ))
-        .unwrap();
+        fixture_at_latest(&mut conn);
+        conn.execute_batch(&format!("PRAGMA user_version = {};", LATEST + 1))
+            .unwrap();
     }
     let before = {
         let conn = Connection::open(&path).unwrap();
@@ -577,4 +597,117 @@ fn open_current_refuses_an_unmigrated_database() {
     assert_eq!(error.code(), "unavailable");
     crate::Store::open(&path).unwrap();
     crate::Store::open_current(&path).unwrap();
+}
+
+
+/// Migration 20 on the newest schema before it, with every table's fixture
+/// rows and the saved herdr machine paired: the herdr panes go, the saved
+/// machine column goes, every host and observation stays, the holder's
+/// panes and observations fit the new checks, and going back down refuses
+/// while a holder observation exists.
+#[test]
+fn holder_panes_replace_herdr_panes_at_0020() {
+    let mut conn = connection();
+    to_version(&mut conn, 19).unwrap();
+    conn.execute_batch(&format!("BEGIN; {FIXTURE_V1} {FIXTURE_V4} {PAIR_HOST_B} COMMIT;"))
+        .unwrap();
+    conn.execute(
+        "INSERT INTO observations (id, session_id, source, event, verdict, observed_at, recorded_at)
+         VALUES ('01JC0000000000000000000OB8', '01JC0000000000000000000SW1', 'herdr', 'herdr:idle',
+                 'idle', '2026-11-02T09:30:00.000Z', '2026-11-02T09:30:00.000Z')",
+        [],
+    )
+    .unwrap();
+    let count = |conn: &Connection, sql: &str| -> i64 { conn.query_row(sql, [], |row| row.get(0)).unwrap() };
+    let hosts = count(&conn, "SELECT count(*) FROM hosts");
+    let observations = count(&conn, "SELECT count(*) FROM observations");
+    let herdr = count(&conn, "SELECT count(*) FROM observations WHERE source = 'herdr'");
+    assert!(count(&conn, "SELECT count(*) FROM panes") > 0);
+    assert_eq!(herdr, 1);
+
+    to_version(&mut conn, 20).unwrap();
+    assert_eq!(count(&conn, "SELECT count(*) FROM panes"), 0, "no herdr pane outlives 20");
+    assert_eq!(count(&conn, "SELECT count(*) FROM hosts"), hosts);
+    assert_eq!(
+        count(&conn, "SELECT count(*) FROM pragma_table_info('hosts') WHERE name = 'herdr_machine'"),
+        0
+    );
+    assert_eq!(count(&conn, "SELECT count(*) FROM observations"), observations);
+    assert_eq!(count(&conn, "SELECT count(*) FROM observations WHERE source = 'herdr'"), herdr);
+    let schema_version: String = conn
+        .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(schema_version, "20");
+
+    conn.execute(
+        "INSERT INTO panes (pane_id, host_id, holder_instance, session_id, pid, label, state,
+                            exit_code, exited_at, metadata, fetched_at)
+         VALUES ('p_01JC0000000000000000000PN1', '01JC00000000000000000HOST1', 'instance-1',
+                 '01JC0000000000000000000SW1', 4242, 'alpha-1-build', 'exited', 0,
+                 '2026-11-02T10:00:00.000Z', '{}', '2026-11-02T10:00:00.000Z')",
+        [],
+    )
+    .unwrap();
+    // a running pane has no exit
+    assert!(
+        conn.execute(
+            "INSERT INTO panes (pane_id, host_id, state, exit_code, fetched_at)
+             VALUES ('p_2', '01JC00000000000000000HOST1', 'running', 1, '2026-11-02T10:00:00.000Z')",
+            [],
+        )
+        .is_err()
+    );
+    assert!(
+        conn.execute(
+            "INSERT INTO panes (pane_id, host_id, state, fetched_at)
+             VALUES ('p_3', '01JC00000000000000000HOST1', 'gone', '2026-11-02T10:00:00.000Z')",
+            [],
+        )
+        .is_err()
+    );
+    conn.execute(
+        "INSERT INTO observations (id, session_id, source, event, verdict, observed_at, recorded_at)
+         VALUES ('01JC0000000000000000000OB9', '01JC0000000000000000000SW1', 'holder', 'holder:idle',
+                 'idle', '2026-11-02T10:00:00.000Z', '2026-11-02T10:00:00.000Z')",
+        [],
+    )
+    .unwrap();
+
+    let error = to_version(&mut conn, 19).unwrap_err().to_string();
+    assert!(error.contains("1 observations came from the terminal holder"), "{error}");
+    assert_eq!(current_version(&conn).unwrap(), 20);
+
+    conn.execute("DELETE FROM observations WHERE source = 'holder'", [])
+        .unwrap();
+    to_version(&mut conn, 19).unwrap();
+    assert_eq!(count(&conn, "SELECT count(*) FROM hosts"), hosts);
+    assert_eq!(count(&conn, "SELECT count(*) FROM hosts WHERE herdr_machine IS NOT NULL"), 0);
+    assert_eq!(count(&conn, "SELECT count(*) FROM panes"), 0);
+    assert_eq!(foreign_key_violations(&conn), 0);
+}
+
+/// Migration 20 refuses while a remote host is only a saved herdr machine,
+/// names the host and `tiller peer add`, and changes nothing.
+#[test]
+fn an_unpaired_saved_machine_refuses_0020() {
+    let mut conn = connection();
+    to_version(&mut conn, 19).unwrap();
+    conn.execute_batch(&format!("BEGIN; {FIXTURE_V1} COMMIT;"))
+        .unwrap();
+    let before = (schema(&conn), row_counts(&conn));
+
+    let error = to_version(&mut conn, 20).unwrap_err();
+    assert!(matches!(error, crate::Error::Refused { .. }), "{error:?}");
+    assert_eq!(
+        error.to_string(),
+        "schema migration: schema 20 drops saved herdr machines, and these remote hosts are only a saved \
+         herdr machine, with no peer pairing: host-b. Pair each one with `tiller peer add` on \
+         the old tiller first"
+    );
+    assert_eq!(current_version(&conn).unwrap(), 19);
+    assert_eq!((schema(&conn), row_counts(&conn)), before);
+    let machine: Option<String> = conn
+        .query_row("SELECT herdr_machine FROM hosts WHERE label = 'host-b'", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(machine.as_deref(), Some("machine-b"));
 }
