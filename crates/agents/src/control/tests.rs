@@ -1937,3 +1937,37 @@ fn a_resume_with_the_terminal_holder_and_no_claude_session_in_a_holder_pane_name
     assert!(text.contains("refused until H09"), "{text}");
     assert!(!text.contains("tiller agent relaunch"), "{text}");
 }
+
+#[test]
+fn a_relaunch_of_an_agent_in_a_holder_pane_is_refused_with_the_holder_down_and_resume_says_so() {
+    let mut rig = Rig::new();
+    let card = rig.card(CardKind::Ship, Some(Size::M));
+    let spawned = rig.spawn(&card, RunRole::Builder);
+    // The session ran in a holder pane, and the holder is down now.
+    let held = format!("p{}", tiller_core::ids::new_ulid());
+    rig.fleet
+        .store
+        .conn()
+        .execute(
+            "UPDATE sessions SET pane_id = ?1 WHERE id = ?2",
+            [&held, &spawned.session.id],
+        )
+        .unwrap();
+    let opened = workspaces_opened(&rig);
+
+    let advice = resume_it(&mut rig, &owner(), &patient(), &spawned.run.id)
+        .unwrap_err()
+        .to_string();
+    assert!(advice.contains("refused until H09"), "{advice}");
+    assert!(!advice.contains("tiller agent relaunch"), "{advice}");
+
+    let ctx = rig.orchestrator();
+    let error = relaunch_it(&mut rig, &ctx, &patient(), &spawned.run.id, note("n")).unwrap_err();
+    let text = error.to_string();
+    assert!(
+        text.contains("A relaunch is not ready yet with the terminal holder"),
+        "{text}"
+    );
+    assert!(session(&rig, &spawned.session.id).ended_at.is_none());
+    assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
+}

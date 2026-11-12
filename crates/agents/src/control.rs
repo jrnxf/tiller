@@ -804,29 +804,30 @@ fn holder_not_ready(what: &str, run: &Run) -> SpawnError {
 }
 
 /// Whether a relaunch of a run whose live session is `session` is refused
-/// for now: with the terminal holder up, a relaunch goes on only in a herdr
-/// pane that is still the session's own, as the holder takes a new pane for
-/// a relaunch only once its stop and forget land (H09).
+/// for now. An agent in a holder pane is never stopped for a relaunch, up
+/// or not. With the terminal holder up, a relaunch goes on only in a herdr
+/// pane that is still the session's own. The holder takes a relaunch only
+/// once its stop and forget land (H09).
 fn relaunch_held(store: &Store, world: &World<'_>, session: Option<&Session>) -> Result<bool> {
-    Ok(world.panes.is_some()
-        && own_herdr_pane(store, world.herdr, session, "A relaunch")?.is_none())
+    let in_holder = session
+        .and_then(|s| s.pane_id.as_deref())
+        .is_some_and(tiller_core::ids::is_holder_pane);
+    Ok(in_holder
+        || (world.panes.is_some()
+            && own_herdr_pane(store, world.herdr, session, "A relaunch")?.is_none()))
 }
 
-/// Why a relaunch is refused for now with the terminal holder up
-/// (`relaunch_held`), as the refusals and notes that point past it say.
-const HELD: &str = "with the terminal holder up, a relaunch with no herdr pane of its own is refused until H09, so the run waits for that or for a new start of its card";
+/// Why a relaunch is refused for now (`relaunch_held`), as the refusals
+/// and notes that point past it say.
+const HELD: &str = "a relaunch with no herdr pane of its own is refused until H09, when the terminal holder takes it, so the run waits for that or for a new start of its card";
 
 /// Whether the gate `relaunch_held` read refuses a relaunch, for the
-/// advice a refusal or a note gives. A refusal from the gate (an agent in a
-/// holder pane) is held. When the gate cannot be read now (herdr or the
-/// store failing), the relaunch advice stands, and the relaunch itself says
-/// why it stops, so the caller's own reason is never lost.
+/// advice a refusal or a note gives. When the gate cannot be read now
+/// (herdr or the store failing), the relaunch advice stands, and the
+/// relaunch itself says why it stops, so the caller's own reason is never
+/// lost.
 fn held_now(gate: Result<bool>) -> bool {
-    match gate {
-        Ok(held) => held,
-        Err(SpawnError::Refused(_)) => true,
-        Err(_) => false,
-    }
+    gate.unwrap_or(false)
 }
 
 /// What a refused resume tells the owner to do next: a relaunch, unless
