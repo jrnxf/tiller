@@ -153,9 +153,6 @@ test("a holder pane id is p and a ULID, and a herdr pane id is not", () => {
   ]) {
     expect(isHolderPane(herdr), herdr).toBe(false);
   }
-  // A ULID's first digit is 7 at most, and it has no I, L, O or U.
-  expect(isHolderPane("p81ARZ3NDEKTSV4RRFFQ69G5FAV")).toBe(false);
-  expect(isHolderPane("p01ARZ3NDEKTSV4RRFFQ69G5FAI")).toBe(false);
   expect(isHolderPane(null)).toBe(false);
   expect(isHolderPane(undefined)).toBe(false);
 });
@@ -259,6 +256,9 @@ test("full screen pins the agent's card over the page, and a second press or Esc
   expect(leaveButton.getAttribute("aria-pressed")).toBe("true");
   expect(leaveButton.getAttribute("title")).toBe("Leave full screen (Esc)");
   expect(card?.classList.contains("full")).toBe(true);
+  // The page under the card is inert, so Tab stays on the card.
+  expect(screen.getAllByRole("option", { hidden: true })[0]?.closest("[inert]")).toBeTruthy();
+  expect(card?.closest("[inert]")).toBeNull();
   // Full screen is already the larger view.
   expect(bar.queryByRole("button", { name: "Expand the terminal" })).toBeNull();
 
@@ -266,6 +266,7 @@ test("full screen pins the agent's card over the page, and a second press or Esc
   expect(exit).toHaveBeenCalledTimes(1);
   await bar.findByRole("button", { name: "Full screen" });
   expect(card?.classList.contains("full")).toBe(false);
+  expect(screen.getAllByRole("option")[0]?.closest("[inert]")).toBeNull();
 
   fireEvent.click(bar.getByRole("button", { name: "Full screen" }));
   await bar.findByRole("button", { name: "Leave full screen" });

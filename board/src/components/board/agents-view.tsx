@@ -5,6 +5,7 @@ import type { CSSProperties, KeyboardEvent as KeyEvent, RefObject } from "react"
 
 import type { AgentRow, Machine, PermissionPrompt, Project } from "../../lib/api-types";
 import { leavePageFullScreen, usePageFullScreen } from "../../lib/fullscreen";
+import { holdInert } from "../../lib/inert";
 import { focusReason, ownerOf, projectKey, shownId } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import {
@@ -538,6 +539,32 @@ function Stage({
     if (pageFull && phone) leavePageFullScreen();
   }, [pageFull, phone]);
   useEffect(() => leavePageFullScreen, []);
+  // In full screen the card covers the page, so Tab and assistive tech stay
+  // on it too. A dialog, a menu or a toast opens on the page's body after,
+  // so it stays live.
+  const cardRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const card = cardRef.current;
+    if (!full || !card) return;
+    const behind: Element[] = [];
+    for (let at: Element = card; at.parentElement && at !== document.body; at = at.parentElement) {
+      for (const other of at.parentElement.children) if (other !== at) behind.push(other);
+    }
+    return holdInert(behind);
+  }, [full]);
+  // The details drawer opens under the header, which wraps on a narrow stage.
+  const headRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const head = headRef.current;
+    const card = cardRef.current;
+    if (!head || !card) return;
+    const measure = () => card.style.setProperty("--av-head", `${head.offsetHeight}px`);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(head);
+    return () => observer.disconnect();
+  }, []);
   const standing = useStanding(agent);
   const ambiguous = useAmbiguousIds();
   const off = focusReason(ownerOf(agent));
@@ -613,6 +640,7 @@ function Stage({
       machine={remote && !peerHost ? host.label : undefined}
       peer={peerHost}
       holder={!remote && !peerHost && isHolderPane(agent.pane_id)}
+      full={full}
       strip={
         remote || peerHost ? null : (
           <AnswerStrip
@@ -637,8 +665,8 @@ function Stage({
     />
   );
   return (
-    <div className={full ? "av-card full" : "av-card"}>
-      <div className="av-card-h">
+    <div className={full ? "av-card full" : "av-card"} ref={cardRef}>
+      <div className="av-card-h" ref={headRef}>
         {phone ? (
           <button type="button" className="ib av-back" aria-label="Back to agents" onClick={onBack}>
             <ChevronLeftIcon />

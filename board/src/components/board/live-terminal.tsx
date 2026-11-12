@@ -12,7 +12,7 @@ import {
 } from "react";
 import type { MouseEvent as ReactMouseEvent, ReactNode, Ref } from "react";
 
-import { canFullScreen, usePageFullScreen } from "../../lib/fullscreen";
+import { canFullScreen, leavePageFullScreen } from "../../lib/fullscreen";
 import { shortcutsBlocked } from "../../lib/shortcuts";
 import { createStore, useStore } from "../../lib/store";
 import { CloseIcon } from "../shell/icons";
@@ -570,6 +570,7 @@ export function LiveTerminal({
   machine,
   peer,
   holder = false,
+  full: pinned = false,
   strip,
   onClose,
 }: {
@@ -599,6 +600,9 @@ export function LiveTerminal({
   // The pane is in the terminal holder, not herdr: the stage fits it by
   // default, since no other window shows it.
   holder?: boolean;
+  // The page is in full screen, and the Agents view pins the stage's card
+  // over it. The view decides, so the card and its stage always agree.
+  full?: boolean;
   // What the stage shows between the screen and its footer: the answer buttons.
   strip?: ReactNode;
   onClose?: () => void;
@@ -633,15 +637,14 @@ export function LiveTerminal({
   const fitChoiceFor = holder ? holderFit : herdrFit;
   const fitWanted = useStore(fitChoiceFor.store);
   const stageFont = useStore(stageFontStore);
-  // The stage in full screen: the page is, and the Agents view pins the
-  // stage's card over it, on a computer only.
-  const full = usePageFullScreen() && stage && !phone;
+  const full = pinned && stage;
   // Whether the stage font sets the text's size now. Without the Fit, the
   // stage's room can set a smaller one, and a larger font changes nothing.
   const [capped, setCapped] = useState(true);
   const visible = useVisible();
   const [unfit, setUnfit] = useState(false);
-  const fitting = stage && !phone && fitWanted && !unfit && visible && view === "inline";
+  // A tail or a peer's pane is never fitted: its stream has no Fit.
+  const fitting = stage && !phone && !watch && fitWanted && !unfit && visible && view === "inline";
   const fittingRef = useRef(fitting);
   // The stage's room in cells at the stage's font, kept up by the layout.
   const fitTarget = useRef<TerminalSize | null>(null);
@@ -952,25 +955,32 @@ export function LiveTerminal({
   // grows. The card outlives a switch to another agent, so full screen stays.
   // The browser's Esc leaves it.
   const fullScreenAble = stage && !phone && canFullScreen();
+  // A press while the browser has not yet answered the last one waits.
+  const entering = useRef(false);
   const toggleFull = useCallback(() => {
-    if (full) {
-      void document.exitFullscreen().catch(() => {});
+    if (entering.current) return;
+    if (document.fullscreenElement === document.documentElement) {
+      leavePageFullScreen();
       return;
     }
     const term = termRef.current;
     const wasTyping = term?.textarea !== undefined && document.activeElement === term.textarea;
+    entering.current = true;
     document.documentElement.requestFullscreen().then(
       () => {
+        entering.current = false;
         if (wasTyping) termRef.current?.focus();
       },
-      () =>
+      () => {
+        entering.current = false;
         showToast(
           "bad",
           "Full screen did not open",
           "The browser refused it. Expand shows the terminal larger.",
-        ),
+        );
+      },
     );
-  }, [full]);
+  }, []);
 
   const collapse = useCallback(() => {
     termRef.current?.blur();
@@ -1105,7 +1115,7 @@ export function LiveTerminal({
   // so any size shows. Without it, the readout is the size that shows, and
   // Smaller steps down from it. A press keeps focus where it was, so typing
   // goes on.
-  const larger = fitting || capped;
+  const larger = (fitting && !ended) || capped;
   const shownFont = larger ? stageFont : Math.min(stageFont, Math.floor(font));
   const fontControls =
     stage && !phone && screenShown && view === "inline" ? (
@@ -1125,14 +1135,18 @@ export function LiveTerminal({
           type="button"
           className="mir-fsz"
           title={
-            shownFont === STAGE_FONT
-              ? `Font size ${shownFont} px, the default`
-              : `Font size ${shownFont} px. Click for the default, ${STAGE_FONT} px`
+            stageFont !== STAGE_FONT
+              ? `Font size ${shownFont} px. Click for the default, ${STAGE_FONT} px`
+              : shownFont === STAGE_FONT
+                ? `Font size ${shownFont} px, the default`
+                : `Font size ${shownFont} px, as large as the stage holds the pane`
           }
           aria-label={
-            shownFont === STAGE_FONT
-              ? `Font size ${shownFont} px, the default`
-              : `Font size ${shownFont} px, back to ${STAGE_FONT} px`
+            stageFont !== STAGE_FONT
+              ? `Font size ${shownFont} px, back to ${STAGE_FONT} px`
+              : shownFont === STAGE_FONT
+                ? `Font size ${shownFont} px, the default`
+                : `Font size ${shownFont} px, as large as the stage holds the pane`
           }
           onMouseDown={keepFocus}
           onClick={() => setStageFont(STAGE_FONT)}
