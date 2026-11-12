@@ -243,7 +243,9 @@ in
             # clean stop (exit 0), as a holder that already runs exits.
             KeepAlive.SuccessfulExit = false;
             ThrottleInterval = 10;
-            ProcessType = "Background";
+            # Not "Background": every pane's shell and agent is a child of the
+            # holder, and launchd would throttle their CPU and I/O.
+            ProcessType = "Standard";
             StandardOutPath = holderLog;
             StandardErrorPath = holderLog;
           };
