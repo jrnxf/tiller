@@ -79,6 +79,8 @@ jobs:
       # clippy, fmt, nextest and the board checks run in the rust and board jobs.
       - name: Generated bun.nix is fresh
         run: nix build --print-build-logs .#checks.x86_64-linux.bunNixFresh
+      - name: Vendored alacritty_terminal is the crate plus its patch
+        run: nix build --print-build-logs .#checks.x86_64-linux.alacrittyPatchFresh
       # Evaluation alone catches a package the locked nixpkgs does not offer
       # on one listed system, so nothing for the other systems is built.
       - name: Every output of every listed system evaluates

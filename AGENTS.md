@@ -55,15 +55,15 @@ Nix:
 | Task | Command |
 |---|---|
 | Build the binary | `nix build` |
-| Run the Nix checks (clippy, fmt, nextest, the binary, `bunNixFresh`) | `nix flake check` |
+| Run the Nix checks (clippy, fmt, nextest, the binary, `bunNixFresh`, `alacrittyPatchFresh`) | `nix flake check` |
 | Check that every output of every listed system evaluates, without a build | `nix flake check --no-build --all-systems` |
 | Smoke test the embedded board | `scripts/smoke.sh result/bin/tiller` |
 | Regenerate `board/bun.nix` after changing board dependencies | `bun run --cwd board nix:sync` |
 | Pixel diff two screenshots | `odiff a.png b.png diff.png` |
 
-The full gate is the CI workflow (`.github/workflows/ci.yml`): its `rust` and `board` jobs run the Rust and board commands above, its `nix` job runs `bunNixFresh`, `nix flake check --no-build --all-systems`, `nix build` and `scripts/smoke.sh`, its `scrub` job runs `scripts/scrub-check.sh`, and its `evals` job runs the offline `evals/check.sh`. The role behavior evals call real models, so they run only on demand: the `Evals` workflow (`.github/workflows/evals.yml`), or `nix develop .#evals -c evals/run.sh` locally (`evals/README.md`). `nix flake check` does not run the board checks, the smoke test or the scrub check.
+The full gate is the CI workflow (`.github/workflows/ci.yml`): its `rust` and `board` jobs run the Rust and board commands above, its `nix` job runs `bunNixFresh`, `alacrittyPatchFresh`, `nix flake check --no-build --all-systems`, `nix build` and `scripts/smoke.sh`, its `scrub` job runs `scripts/scrub-check.sh`, and its `evals` job runs the offline `evals/check.sh`. The role behavior evals call real models, so they run only on demand: the `Evals` workflow (`.github/workflows/evals.yml`), or `nix develop .#evals -c evals/run.sh` locally (`evals/README.md`). `nix flake check` does not run the board checks, the smoke test or the scrub check.
 
-`board/bun.nix` and `board/src/routeTree.gen.ts` are generated. Never edit them by hand; the `bunNixFresh` flake check fails when `bun.nix` is stale. `crates/panes/tests/fixtures/board-key-names.json` is generated too: `UPDATE_KEY_NAMES=1 bun run --cwd board test` rewrites it, and that test fails when it is stale.
+`board/bun.nix` and `board/src/routeTree.gen.ts` are generated. Never edit them by hand; the `bunNixFresh` flake check fails when `bun.nix` is stale. `crates/panes/tests/fixtures/board-key-names.json` is generated too: `UPDATE_KEY_NAMES=1 bun run --cwd board test` rewrites it, and that test fails when it is stale. `crates/holder/tests/fixtures/handover-v1.bin` is the opposite: the fixed bytes of handover record version 1, which a later build must still read. Never write it again to make a test pass; a change to the record is a new version with a fixture of its own.
 
 ## Notes
 

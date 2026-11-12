@@ -9,16 +9,24 @@
 //! a client under it, and the long work, a repaint or a `screen` read's
 //! text, is formatted from a copy away from it.
 //!
-//! Locks are taken in one order: a pane's, then the table's, then the
-//! watchers', then a connection's list of streams. A pane's events go out
-//! under its lock, so they reach every watcher in the order they happened.
+//! Locks are taken in one order: a pane's, then its input queue's write
+//! turn, then the queue itself, then the table's, then the watchers', then
+//! a connection's list of streams. A pane's events go out under its lock,
+//! so they reach every watcher in the order they happened.
+//!
+//! The live upgrade (section 6.2) holds every pane still: it pauses the
+//! readers and writers, then takes each pane's lock and input queue in the
+//! table's order. A PTY is read only under its pane's lock and written
+//! only under its queue's write turn, each after a check of the pause, so
+//! the handover record has every byte read in the model and every byte
+//! written gone from the queue.
 
 use std::io;
-use std::os::fd::OwnedFd;
-use std::path::Path;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use alacritty_terminal::term::TermMode;
@@ -33,6 +41,7 @@ use tokio::io::unix::AsyncFd;
 use tokio::sync::{Notify, watch};
 use tokio::time::{Instant, Sleep};
 
+use crate::handover::{PaneRecord, Record, RecordError, Requester};
 use crate::input::{self, INPUT_CAP, InputQueue};
 use crate::lease::{self, LEASES_PER_PANE, Leases};
 use crate::model::{MAX_COLS, MAX_ROWS, MIN_COLS, MIN_ROWS, Model, ModelPanic, Told};
@@ -161,6 +170,9 @@ pub struct Conn {
     leased: Mutex<Vec<Arc<PaneCell>>>,
     /// Its requests answered from a task of their own, not answered yet.
     pub(crate) in_flight: Arc<AtomicUsize>,
+    /// Held by the writer for each frame: the live upgrade takes it, so no
+    /// frame is half written when the new image answers on the socket.
+    write_turn: Arc<tokio::sync::Mutex<()>>,
     /// Its hello named the client `attach`: it counts in `attach_clients`,
     /// and its watch gets `show` events.
     attach: AtomicBool,
@@ -175,12 +187,18 @@ impl Default for Conn {
             streams: Mutex::default(),
             leased: Mutex::default(),
             in_flight: Arc::default(),
+            write_turn: Arc::default(),
             attach: AtomicBool::new(false),
         }
     }
 }
 
 impl Conn {
+    /// The turn to write one frame on the socket.
+    pub async fn write_turn(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.write_turn.clone().lock_owned().await
+    }
+
     /// Queues a reply or an event. A full queue cuts the connection. False
     /// when the frame was not queued.
     pub fn send(&self, frame: Vec<u8>) -> bool {
@@ -348,9 +366,12 @@ struct Inner {
     /// The reaper has collected the child. Its exit goes into the record
     /// once its last output is in.
     reaped: bool,
+    /// The exit the reaper collected, until it goes into the record.
+    pending_exit: Option<Exit>,
     /// A close hung up the child's group and has not killed it yet: what is
-    /// left of it when the pane is forgotten is killed.
-    closing: bool,
+    /// left of it is killed at this deadline, the end of its grace, or when
+    /// the pane is forgotten.
+    closing: Option<Instant>,
     /// Takes the queries the model answers out of the subscribers' bytes.
     filter: QueryFilter,
     /// The synchronized frames' markers in those bytes, while a subscriber
@@ -458,6 +479,9 @@ pub struct PaneCell {
     exit: watch::Sender<Option<Exit>>,
     /// True once the pane is forgotten: its PTY read stops.
     forgotten: watch::Sender<bool>,
+    /// True while the live upgrade holds the panes still: the PTY is
+    /// neither read nor written.
+    paused: watch::Receiver<bool>,
     watchers: Arc<Watchers>,
     /// The fixture recorder's files for this pane (`terminal-holder.md` 12).
     #[cfg(feature = "record")]
@@ -595,8 +619,7 @@ impl PaneCell {
 
     /// One PTY read: into the model, with the queries in it answered, and
     /// out to every subscriber without them. Gives the pane's next timer.
-    fn output(&self, bytes: &[u8]) -> Option<Instant> {
-        let mut inner = self.inner();
+    fn output(&self, inner: &mut Inner, bytes: &[u8]) -> Option<Instant> {
         // Under the lock, so a read and a resize are logged in the order
         // the model took them.
         #[cfg(feature = "record")]
@@ -610,7 +633,7 @@ impl PaneCell {
         let mut from = 0;
         for end in filtered.xtversions {
             if self
-                .update(&mut inner, |model| model.feed(&bytes[from..end]))
+                .update(inner, |model| model.feed(&bytes[from..end]))
                 .is_err()
             {
                 return inner.next_timer();
@@ -619,7 +642,7 @@ impl PaneCell {
             from = end;
         }
         if self
-            .update(&mut inner, |model| model.feed(&bytes[from..]))
+            .update(inner, |model| model.feed(&bytes[from..]))
             .is_ok()
         {
             inner.fan_out(&filtered.pass, Instant::now());
@@ -688,7 +711,7 @@ impl PaneCell {
     /// A close's kill is spent once this runs.
     fn kill_what_is_left(&self) -> Result<bool, Failure> {
         let mut inner = self.live()?;
-        inner.closing = false;
+        inner.closing = None;
         let left = inner.running() || (inner.reaped && !*self.output_ended.borrow());
         if left {
             self.signal(Signal::KILL);
@@ -755,9 +778,55 @@ pub struct Holder {
     screen_reads: Arc<tokio::sync::Semaphore>,
     /// The connections open now.
     connections: Arc<AtomicUsize>,
+    /// True while the live upgrade holds the panes still.
+    paused: watch::Sender<bool>,
+    /// The upgrade under way: one at a time.
+    upgrades: Arc<AtomicUsize>,
+    /// The listener and the lock, as the handover gives them on.
+    handover: OnceLock<HandoverFds>,
     /// Where the fixture recorder writes, when it runs.
     #[cfg(feature = "record")]
     recorder: Option<crate::record::Recorder>,
+}
+
+/// Copies of the listening socket's fd and the `holder.lock` fd, which the
+/// live upgrade hands to the new program image. The lock is on the open
+/// file, which a copy shares, so it is held across the re-exec.
+#[derive(Debug)]
+pub struct HandoverFds {
+    pub listener: OwnedFd,
+    pub lock: OwnedFd,
+    /// The run directory, where the record goes on a system with no
+    /// `memfd`.
+    pub run: PathBuf,
+}
+
+/// The handover record, and the fds in it that the new program image
+/// inherits: the listener, the lock and every PTY master.
+#[derive(Debug)]
+pub struct Handover<'a> {
+    pub record: Record,
+    pub fds: Vec<BorrowedFd<'a>>,
+    pub run: &'a Path,
+}
+
+/// Every pane held still for the handover: its lock and its input queue's.
+type Still<'a> = Vec<(&'a Arc<PaneCell>, MutexGuard<'a, Inner>, input::Held<'a>)>;
+
+/// Sets the pause, and clears it when it drops.
+struct Pause<'a>(&'a watch::Sender<bool>);
+
+impl<'a> Pause<'a> {
+    fn new(paused: &'a watch::Sender<bool>) -> Self {
+        paused.send_replace(true);
+        Self(paused)
+    }
+}
+
+impl Drop for Pause<'_> {
+    fn drop(&mut self) {
+        self.0.send_replace(false);
+    }
 }
 
 /// A place under a limit, such as [`Limits::connections`] or
@@ -825,9 +894,217 @@ impl Holder {
             watchers: Arc::default(),
             screen_reads: Arc::new(tokio::sync::Semaphore::new(SCREEN_READS)),
             connections: Arc::default(),
+            paused: watch::Sender::new(false),
+            upgrades: Arc::default(),
+            handover: OnceLock::new(),
             #[cfg(feature = "record")]
             recorder: None,
         }
+    }
+
+    /// The holder the new program image makes from a handover record
+    /// (section 6.2 step 6), with the record's instance, its panes and a
+    /// PTY master for each. Each pane's model is rebuilt, and its reads,
+    /// its writes, a pending exit and a close's kill go on as they would
+    /// have. A model that does not rebuild is reset, as a panic resets it.
+    /// Runs inside the runtime, as it registers the masters.
+    pub fn resumed(record: Record, masters: Vec<OwnedFd>) -> io::Result<Arc<Self>> {
+        let holder = Arc::new(Self {
+            instance: record.instance,
+            boot_id: record.boot_id,
+            started_at: record.started_at,
+            ..Self::bare(Limits::default())
+        });
+        lock(&holder.table).next_num = record.next_num;
+        let now = Instant::now();
+        for (pane, master) in record.panes.into_iter().zip(masters) {
+            holder.adopt(pane, master, now)?;
+        }
+        holder.reap.notify_one();
+        Ok(holder)
+    }
+
+    fn adopt(self: &Arc<Self>, pane: PaneRecord, master: OwnedFd, now: Instant) -> io::Result<()> {
+        let PaneRecord {
+            pane: record,
+            output_ended,
+            pending_exit,
+            close_in,
+            input,
+            model,
+            ..
+        } = pane;
+        let pid = i32::try_from(record.pid)
+            .ok()
+            .and_then(Pid::from_raw)
+            .ok_or_else(|| io::Error::other(format!("pane {} has no pid", record.pane)))?;
+        let (model, reset) = match Model::import(&model) {
+            Ok(model) => (model, false),
+            Err(err) => {
+                tracing::error!(pane = %record.pane, %err, "the pane's screen model did not rebuild and was reset");
+                (Model::new(model.size), true)
+            }
+        };
+        // The query filter holds back the end of the held tail, as it did
+        // before: the held bytes are fed through it again.
+        let mut filter = QueryFilter::new();
+        let _ = filter.filter(model.held());
+        let cell = Arc::new(PaneCell {
+            id: record.pane.clone(),
+            num: record.num,
+            pid,
+            master: register(master)?,
+            input: InputQueue::resumed(input),
+            answerer: Arc::default(),
+            inner: Mutex::new(Inner {
+                reaped: pending_exit.is_some() || record.state == PaneState::Exited,
+                pending_exit,
+                closing: close_in.map(|left| now + left),
+                model,
+                subscribers: Vec::new(),
+                filter,
+                marks: Marks::default(),
+                leases: Leases::default(),
+                rate: Rate::default(),
+                title_owed: false,
+                record: record.clone(),
+            }),
+            output_ended: watch::Sender::new(output_ended),
+            exit: watch::Sender::new(record.exit),
+            forgotten: watch::Sender::new(false),
+            paused: self.paused.subscribe(),
+            watchers: self.watchers.clone(),
+            #[cfg(feature = "record")]
+            tap: None,
+        });
+        lock(&self.table).panes.push(cell.clone());
+        tracing::info!(pane = %record.pane, num = record.num, pid = record.pid, "resumed");
+        if reset && cell.inner().running() {
+            cell.redraw();
+        }
+        if !output_ended {
+            tokio::spawn(read_pty(cell.clone()));
+        }
+        tokio::spawn(write_input(cell.clone()));
+        if let Some(deadline) = cell.inner().closing {
+            tokio::spawn(close_resumed(cell.clone(), deadline));
+        }
+        if cell.inner().pending_exit.is_some() {
+            tokio::spawn(deliver_exit(self.clone(), cell));
+        }
+        Ok(())
+    }
+
+    /// Keeps copies of the listener's fd and the lock's, for a live
+    /// upgrade to hand over.
+    pub fn keep_for_handover(&self, fds: HandoverFds) {
+        if self.handover.set(fds).is_err() {
+            tracing::warn!("the holder kept its fds for the handover already");
+        }
+    }
+
+    /// The live upgrade's place: one runs at a time.
+    pub fn take_upgrade_slot(&self) -> Option<Slot> {
+        Slot::take(&self.upgrades, 1)
+    }
+
+    /// The turn of a whole `spawn`, so no pane is added while the upgrade
+    /// holds the panes still.
+    pub async fn spawn_turn(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.spawning.clone().lock_owned().await
+    }
+
+    /// Holds every pane still and builds the handover record (section 6.2
+    /// steps 3 and 4), then runs `then` with it, while they are held: the
+    /// dry run reads the record, and the upgrade re-executes. They are let
+    /// go, and their reads and writes go on, when `then` returns. `turn` is
+    /// the [`Holder::spawn_turn`]. Nothing here waits, so it runs on a
+    /// blocking thread.
+    pub fn quiesced<R>(
+        &self,
+        turn: tokio::sync::OwnedMutexGuard<()>,
+        requester: Option<Requester>,
+        then: impl FnOnce(Result<Handover<'_>, RecordError>) -> R,
+    ) -> R {
+        let pause = Pause::new(&self.paused);
+        let cells = self.panes();
+        let mut still: Still<'_> = Vec::new();
+        for cell in &cells {
+            let inner = cell.inner();
+            // Forgotten since the table was read: it is out of the table.
+            if *cell.forgotten.borrow() {
+                continue;
+            }
+            still.push((cell, inner, cell.input.hold()));
+        }
+        let table = lock(&self.table);
+        let record = self.record(&table, &still, requester);
+        let out = then(record);
+        drop(table);
+        drop(still);
+        drop(pause);
+        drop(turn);
+        out
+    }
+
+    fn record<'a>(
+        &'a self,
+        table: &Table,
+        still: &Still<'a>,
+        requester: Option<Requester>,
+    ) -> Result<Handover<'a>, RecordError> {
+        let fds = self
+            .handover
+            .get()
+            .ok_or_else(|| RecordError::Unfit("this holder has no listener to hand over".into()))?;
+        if table.panes.len() != still.len() {
+            return Err(RecordError::Unfit(
+                "the table changed while it was held".into(),
+            ));
+        }
+        let now = Instant::now();
+        let panes = still
+            .iter()
+            .map(|(cell, inner, input)| {
+                Ok(PaneRecord {
+                    pane: Pane {
+                        subscribers: 0,
+                        attach_clients: 0,
+                        ..inner.record.clone()
+                    },
+                    master: cell.master.get_ref().as_raw_fd(),
+                    output_ended: *cell.output_ended.borrow(),
+                    pending_exit: inner.pending_exit,
+                    close_in: inner
+                        .closing
+                        .map(|deadline| deadline.saturating_duration_since(now)),
+                    input: input.queued(),
+                    model: inner
+                        .model
+                        .export()
+                        .map_err(|err| RecordError::Unfit(format!("pane {}: {err}", cell.id)))?,
+                })
+            })
+            .collect::<Result<_, RecordError>>()?;
+        let record = Record {
+            instance: self.instance.clone(),
+            boot_id: self.boot_id.clone(),
+            started_at: self.started_at,
+            next_num: table.next_num,
+            listener: fds.listener.as_raw_fd(),
+            lock: fds.lock.as_raw_fd(),
+            requester,
+            panes,
+        };
+        let masters = still.iter().map(|(cell, ..)| cell.master.get_ref().as_fd());
+        Ok(Handover {
+            record,
+            fds: [fds.listener.as_fd(), fds.lock.as_fd()]
+                .into_iter()
+                .chain(masters)
+                .collect(),
+            run: &fds.run,
+        })
     }
 
     pub fn limits(&self) -> Limits {
@@ -967,7 +1244,8 @@ impl Holder {
                 model: Model::new(size),
                 subscribers: Vec::new(),
                 reaped: false,
-                closing: false,
+                pending_exit: None,
+                closing: None,
                 filter: QueryFilter::new(),
                 marks: Marks::default(),
                 leases: Leases::default(),
@@ -977,6 +1255,7 @@ impl Holder {
             output_ended: watch::Sender::new(false),
             exit: watch::Sender::new(None),
             forgotten: watch::Sender::new(false),
+            paused: self.paused.subscribe(),
             watchers: self.watchers.clone(),
             #[cfg(feature = "record")]
             tap: self
@@ -1407,16 +1686,16 @@ impl Holder {
         let known = |failure: Failure, exit: &watch::Receiver<Option<Exit>>| {
             (*exit.borrow()).ok_or(failure)
         };
+        let deadline = Instant::now() + grace;
         match cell.live() {
             Ok(mut inner) => {
                 if inner.running() {
-                    inner.closing = true;
+                    inner.closing = Some(deadline);
                     cell.signal(Signal::HUP);
                 }
             }
             Err(failure) => return known(failure, &exit),
         }
-        let deadline = Instant::now() + grace;
         let has_exit = |exit: &Option<Exit>| exit.is_some();
         if let Ok(Ok(got)) = tokio::time::timeout_at(deadline, exit.wait_for(has_exit)).await
             && let Some(got) = *got
@@ -1472,7 +1751,7 @@ impl Holder {
         }
         // A close kills what is left of the group at the end of its grace:
         // with the pane gone, nothing else would.
-        if inner.closing && inner.reaped && !*cell.output_ended.borrow() {
+        if inner.closing.is_some() && inner.reaped && !*cell.output_ended.borrow() {
             cell.signal(Signal::KILL);
         }
         cell.forgotten.send_replace(true);
@@ -1631,9 +1910,10 @@ impl Holder {
                 }
             };
             inner.reaped = true;
+            inner.pending_exit = Some(exit);
             drop(inner);
             tracing::info!(pane = %cell.id, code = ?exit.code, signal = ?exit.signal, "the child exited");
-            tokio::spawn(deliver_exit(self.clone(), cell, exit));
+            tokio::spawn(deliver_exit(self.clone(), cell));
         }
     }
 
@@ -1688,6 +1968,10 @@ async fn read_pty(cell: Arc<PaneCell>) {
     tokio::pin!(quiet);
     let mut quiet_at = None;
     let mut last_output = Instant::now();
+    let mut paused = cell.paused.clone();
+    // A resumed pane may hold an open synchronized update.
+    let next = cell.inner().next_timer();
+    arm(timer.as_mut(), &mut timer_at, next);
     loop {
         // In this order: a forgotten pane reads no more, and a deadline that
         // passed is kept even while a flooding app keeps the PTY readable.
@@ -1720,10 +2004,34 @@ async fn read_pty(cell: Arc<PaneCell>) {
                 break;
             }
         };
-        match guard.try_io(|fd| rustix::io::read(fd.get_ref(), &mut buf).map_err(io::Error::from)) {
-            Ok(Ok(0)) => break,
-            Ok(Ok(len)) => {
-                arm(timer.as_mut(), &mut timer_at, cell.output(&buf[..len]));
+        // Read and fed under the pane's lock, so the handover never comes
+        // between the two.
+        let read = guard.try_io(|fd| {
+            // Checked before the lock too, so the reader does not wait on a
+            // pane the upgrade holds.
+            if *cell.paused.borrow() {
+                return Ok(PtyRead::Paused);
+            }
+            let mut inner = cell.inner();
+            if *cell.paused.borrow() {
+                return Ok(PtyRead::Paused);
+            }
+            let len = rustix::io::read(fd.get_ref(), &mut buf).map_err(io::Error::from)?;
+            if len == 0 {
+                return Ok(PtyRead::End);
+            }
+            Ok(PtyRead::Fed(cell.output(&mut inner, &buf[..len])))
+        });
+        match read {
+            Ok(Ok(PtyRead::End)) => break,
+            Ok(Ok(PtyRead::Paused)) => {
+                tokio::select! {
+                    _ = forgotten.wait_for(|forgotten| *forgotten) => break,
+                    _ = paused.wait_for(|paused| !*paused) => {}
+                }
+            }
+            Ok(Ok(PtyRead::Fed(next))) => {
+                arm(timer.as_mut(), &mut timer_at, next);
                 last_output = Instant::now();
                 if quiet_at.is_none() {
                     arm(
@@ -1745,6 +2053,16 @@ async fn read_pty(cell: Arc<PaneCell>) {
         }
     }
     cell.output_ended.send_replace(true);
+}
+
+/// What one turn of a pane's reader did.
+enum PtyRead {
+    /// It read and fed output, and the pane's next timer is this.
+    Fed(Option<Instant>),
+    /// The PTY read no more.
+    End,
+    /// The live upgrade holds the pane still.
+    Paused,
 }
 
 /// Sets `timer` to `next`, when that is not when it is set for already.
@@ -1771,6 +2089,26 @@ async fn kill_at(cell: Arc<PaneCell>, deadline: Instant) {
     }
 }
 
+/// A close the old image began goes on in the new one, as
+/// [`Holder::close`] runs it: a child that has not exited by the deadline
+/// is killed, and so is what it left of its group.
+async fn close_resumed(cell: Arc<PaneCell>, deadline: Instant) {
+    let mut exit = cell.exit.subscribe();
+    let exited = matches!(
+        tokio::time::timeout_at(deadline, exit.wait_for(Option::is_some)).await,
+        Ok(Ok(_))
+    );
+    if exited {
+        if !*cell.output_ended.borrow() {
+            kill_at(cell, deadline).await;
+        }
+        return;
+    }
+    if let Ok(true) = cell.kill_what_is_left() {
+        tracing::info!(pane = %cell.id, "the child outlived the close grace it had before the upgrade and was killed");
+    }
+}
+
 /// Pasted text with each line ended by a carriage return, as a terminal
 /// pastes it without bracketed paste.
 fn paste_lines(text: &str) -> String {
@@ -1786,51 +2124,86 @@ async fn write_input(cell: Arc<PaneCell>) {
     cell.input.close();
 }
 
+/// The writer holds no frame while it waits: each write takes the next
+/// frame under the queue's write turn, and puts back what the PTY did not
+/// take, so the handover finds every unwritten byte in the queue. It takes
+/// no pane lock, so input does not wait behind the output feed.
 async fn write_all_input(cell: &PaneCell) {
     let mut ended = cell.output_ended.subscribe();
+    let mut paused = cell.paused.clone();
     loop {
-        let mut chunk = tokio::select! {
-            chunk = cell.input.next() => chunk,
+        tokio::select! {
+            () = cell.input.ready() => {}
+            _ = ended.wait_for(|ended| *ended) => return,
+        }
+        let writable = tokio::select! {
+            writable = cell.master.writable() => writable,
             _ = ended.wait_for(|ended| *ended) => return,
         };
-        while !chunk.rest().is_empty() {
-            let writable = tokio::select! {
-                writable = cell.master.writable() => writable,
-                _ = ended.wait_for(|ended| *ended) => return,
-            };
-            let Ok(mut guard) = writable.inspect_err(|err| {
-                tracing::warn!(pane = %cell.id, %err, "the PTY cannot be polled for raw input; the pane takes no more");
-                cell.input.break_off();
-            }) else {
-                return;
-            };
-            let rest = chunk.rest();
-            match guard.try_io(|fd| rustix::io::write(fd.get_ref(), rest).map_err(io::Error::from))
-            {
-                Ok(Ok(len)) => chunk.wrote(len),
-                Ok(Err(err)) if err.kind() == io::ErrorKind::Interrupted => {}
-                Ok(Err(err)) => {
-                    // None may be written after a gap: every client that
-                    // sends more is cut.
-                    tracing::warn!(pane = %cell.id, %err, "the PTY refused raw input; the pane takes no more");
-                    cell.input.break_off();
-                    return;
-                }
-                Err(_would_block) => {}
+        let Ok(mut guard) = writable.inspect_err(|err| {
+            tracing::warn!(pane = %cell.id, %err, "the PTY cannot be polled for raw input; the pane takes no more");
+            cell.input.break_off();
+        }) else {
+            return;
+        };
+        let wrote = guard.try_io(|fd| {
+            if *cell.paused.borrow() {
+                return Ok(Write::Paused);
             }
+            let _turn = cell.input.write_turn();
+            if *cell.paused.borrow() {
+                return Ok(Write::Paused);
+            }
+            let Some(mut chunk) = cell.input.try_next() else {
+                return Ok(Write::Wrote);
+            };
+            let wrote = rustix::io::write(fd.get_ref(), chunk.rest()).map_err(io::Error::from);
+            if let Ok(len) = wrote {
+                chunk.wrote(len);
+            }
+            chunk.put_back();
+            wrote.map(|_| Write::Wrote)
+        });
+        match wrote {
+            Ok(Ok(Write::Wrote)) => {}
+            Ok(Ok(Write::Paused)) => {
+                tokio::select! {
+                    _ = paused.wait_for(|paused| !*paused) => {}
+                    _ = ended.wait_for(|ended| *ended) => return,
+                }
+            }
+            Ok(Err(err)) if err.kind() == io::ErrorKind::Interrupted => {}
+            Ok(Err(err)) => {
+                // None may be written after a gap: every client that
+                // sends more is cut.
+                tracing::warn!(pane = %cell.id, %err, "the PTY refused raw input; the pane takes no more");
+                cell.input.break_off();
+                return;
+            }
+            Err(_would_block) => {}
         }
     }
+}
+
+/// What one turn of a pane's writer did.
+enum Write {
+    Wrote,
+    /// The live upgrade holds the pane still.
+    Paused,
 }
 
 /// Records a reaped child's exit and tells its subscribers, once its last
 /// output is in: when the PTY read ends, or after [`EXIT_DRAIN`] when
 /// something else still holds the PTY open. The PTY is still read after.
 /// Then the exited panes past the limits are dropped.
-async fn deliver_exit(holder: Arc<Holder>, cell: Arc<PaneCell>, exit: Exit) {
+async fn deliver_exit(holder: Arc<Holder>, cell: Arc<PaneCell>) {
     let mut ended = cell.output_ended.subscribe();
     let _ = tokio::time::timeout(EXIT_DRAIN, ended.wait_for(|ended| *ended)).await;
     {
         let mut inner = cell.inner();
+        let Some(exit) = inner.pending_exit.take() else {
+            return;
+        };
         // What is held goes out before the exit: the start of a sequence
         // the query filter held, and each subscriber's held frame.
         let rest = inner.filter.flush();

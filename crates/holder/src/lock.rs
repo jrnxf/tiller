@@ -8,6 +8,7 @@
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::fd::{AsFd, BorrowedFd};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -25,7 +26,7 @@ pub fn lock_path(run_dir: &Path) -> PathBuf {
 /// The held lock. Dropping it frees the lock.
 #[derive(Debug)]
 pub struct HolderLock {
-    _file: File,
+    file: File,
 }
 
 /// What taking the lock found.
@@ -63,7 +64,19 @@ impl HolderLock {
         file.write_all(pid.as_bytes())?;
         file.set_len(pid.len() as u64)?;
         file.flush()?;
-        Ok(Acquired::Held(HolderLock { _file: file }))
+        Ok(Acquired::Held(HolderLock { file }))
+    }
+
+    /// The lock the old program image held, handed over by the live
+    /// upgrade: the lock is on the open file, so it was never free.
+    pub fn adopt(file: File) -> Self {
+        HolderLock { file }
+    }
+}
+
+impl AsFd for HolderLock {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.file.as_fd()
     }
 }
 

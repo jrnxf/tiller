@@ -3,6 +3,7 @@
 //! handshake and frames.
 
 use std::io;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,10 +19,11 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 
-use crate::holder::{Conn, Holder, Slot, message_frame, ok};
+use crate::holder::{Conn, HandoverFds, Holder, Slot, message_frame, ok};
 use crate::lock::{Acquired, HolderLock, lock_path};
 use crate::outbox::{self, OUTBOX_CAP};
 use crate::peer::{self, PeerCred};
+use crate::upgrade::{self, ResumeError};
 
 /// How long a client has to send `hello`.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -61,6 +63,16 @@ pub enum HolderError {
 
     #[error("the holder's runtime: {0}")]
     Runtime(io::Error),
+
+    /// The new program image of a live upgrade cannot take over.
+    #[error(transparent)]
+    Resume(#[from] ResumeError),
+
+    #[error("the handover's {what}: {source}")]
+    Handover {
+        what: &'static str,
+        source: io::Error,
+    },
 }
 
 fn io_error(what: &'static str, path: &Path) -> impl FnOnce(io::Error) -> HolderError + use<> {
@@ -82,12 +94,76 @@ pub fn run_recording(home: &Path, out: &Path) -> Result<Outcome, HolderError> {
 }
 
 fn run_with(home: &Path, holder: impl FnOnce() -> Arc<Holder>) -> Result<Outcome, HolderError> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    runtime()?.block_on(serve(home, holder))
+}
+
+/// The new program image of a live upgrade (section 6.2 step 6): takes
+/// over the old image's panes, listener and lock from the handover record
+/// behind `fd`, and runs as [`run`] does.
+pub fn resume(home: &Path, fd: i32) -> Result<Outcome, HolderError> {
+    // Before anything opens an fd, so no fd the record names is taken.
+    let resumed = upgrade::resume(fd)?;
+    let socket = socket_path(home);
+    let run = run_dir(home);
+    runtime()?.block_on(async move {
+        let listener = std::os::unix::net::UnixListener::from(resumed.listener);
+        let listener = listener
+            .set_nonblocking(true)
+            .and_then(|()| UnixListener::from_std(listener))
+            .map_err(|source| HolderError::Handover {
+                what: "listener",
+                source,
+            })?;
+        let lock = HolderLock::adopt(std::fs::File::from(resumed.lock));
+        // The reaper's signal is in place before the panes are, so no exit
+        // is missed.
+        let sigchld = signal(SignalKind::child()).map_err(HolderError::Runtime)?;
+        let holder = Holder::resumed(resumed.record, resumed.masters).map_err(|source| {
+            HolderError::Handover {
+                what: "panes",
+                source,
+            }
+        })?;
+        keep_for_handover(&holder, &listener, &lock, run)?;
+        if let Some((requester, id)) = resumed.requester {
+            tokio::task::spawn_blocking(move || upgrade::answer(requester, id));
+        }
+        tracing::info!(
+            holder = env!("CARGO_PKG_VERSION"),
+            "the holder re-executed and resumed its panes"
+        );
+        listen(&socket, holder, listener, lock, sigchld).await
+    })
+}
+
+fn runtime() -> Result<tokio::runtime::Runtime, HolderError> {
+    tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("tiller-holder")
         .build()
-        .map_err(HolderError::Runtime)?;
-    runtime.block_on(serve(home, holder))
+        .map_err(HolderError::Runtime)
+}
+
+/// Gives the holder copies of the listener's fd and the lock's, for a live
+/// upgrade.
+fn keep_for_handover(
+    holder: &Holder,
+    listener: &UnixListener,
+    lock: &HolderLock,
+    run: PathBuf,
+) -> Result<(), HolderError> {
+    let copy = |fd: BorrowedFd<'_>, what| -> Result<OwnedFd, HolderError> {
+        rustix::io::fcntl_dupfd_cloexec(fd, 3).map_err(|err| HolderError::Handover {
+            what,
+            source: err.into(),
+        })
+    };
+    holder.keep_for_handover(HandoverFds {
+        listener: copy(listener.as_fd(), "listener")?,
+        lock: copy(lock.as_fd(), "lock")?,
+        run,
+    });
+    Ok(())
 }
 
 async fn serve(home: &Path, holder: impl FnOnce() -> Arc<Holder>) -> Result<Outcome, HolderError> {
@@ -104,15 +180,28 @@ async fn serve(home: &Path, holder: impl FnOnce() -> Arc<Holder>) -> Result<Outc
         .map_err(io_error("chmod", &run))?;
 
     let lock_file = lock_path(&run);
-    let _lock = match HolderLock::acquire(&lock_file).map_err(io_error("lock", &lock_file))? {
+    let lock = match HolderLock::acquire(&lock_file).map_err(io_error("lock", &lock_file))? {
         Acquired::Held(lock) => lock,
         Acquired::Taken { pid } => return Ok(Outcome::AlreadyRuns { pid }),
     };
     let listener = bind(&socket)?;
 
     let holder = holder();
+    keep_for_handover(&holder, &listener, &lock, run)?;
     // The reaper listens before the first spawn, so no exit is missed.
     let sigchld = signal(SignalKind::child()).map_err(HolderError::Runtime)?;
+    listen(&socket, holder, listener, lock, sigchld).await
+}
+
+/// Serves the socket until `SIGTERM` or `SIGINT`, and then hangs up the
+/// panes. The lock is held until it returns.
+async fn listen(
+    socket: &Path,
+    holder: Arc<Holder>,
+    listener: UnixListener,
+    _lock: HolderLock,
+    sigchld: tokio::signal::unix::Signal,
+) -> Result<Outcome, HolderError> {
     let mut sigterm = signal(SignalKind::terminate()).map_err(HolderError::Runtime)?;
     let mut sigint = signal(SignalKind::interrupt()).map_err(HolderError::Runtime)?;
     tokio::spawn(holder.clone().reaper(sigchld));
@@ -140,7 +229,7 @@ async fn serve(home: &Path, holder: impl FnOnce() -> Arc<Holder>) -> Result<Outc
     }
     tracing::info!("the holder is stopping and hangs up its panes");
     holder.hang_up_all();
-    if let Err(err) = std::fs::remove_file(&socket) {
+    if let Err(err) = std::fs::remove_file(socket) {
         tracing::warn!(%err, "the socket could not be removed");
     }
     Ok(Outcome::Stopped)
@@ -221,6 +310,7 @@ async fn connection(holder: Arc<Holder>, stream: UnixStream, _slot: Slot) {
 /// the cut's deadline.
 async fn write_loop(conn: Arc<Conn>, mut out: OwnedWriteHalf) {
     while let Some(frame) = conn.outbox.next().await {
+        let _turn = conn.write_turn().await;
         let write = out.write_all(&frame);
         tokio::pin!(write);
         let written = tokio::select! {
@@ -230,6 +320,9 @@ async fn write_loop(conn: Arc<Conn>, mut out: OwnedWriteHalf) {
             }
         };
         if !written {
+            // Closed under the turn, so a turn taken after this one sees
+            // that a frame may be half written.
+            conn.outbox.close();
             return;
         }
     }
@@ -266,7 +359,7 @@ async fn read_loop(holder: &Arc<Holder>, conn: &Arc<Conn>, mut input: OwnedReadH
                 }
             };
             let next = if greeted {
-                frame_in(holder, conn, frame)
+                frame_in(holder, conn, input.as_ref().as_fd(), frame)
             } else {
                 greeted = true;
                 hello(holder, conn, frame)
@@ -350,7 +443,7 @@ fn hello(holder: &Holder, conn: &Conn, frame: Frame) -> Next {
 }
 
 /// A frame after the handshake.
-fn frame_in(holder: &Arc<Holder>, conn: &Arc<Conn>, frame: Frame) -> Next {
+fn frame_in(holder: &Arc<Holder>, conn: &Arc<Conn>, socket: BorrowedFd<'_>, frame: Frame) -> Next {
     match frame {
         Frame::Input { num, bytes } => {
             holder.input(conn, num, bytes);
@@ -367,7 +460,7 @@ fn frame_in(holder: &Arc<Holder>, conn: &Arc<Conn>, frame: Frame) -> Next {
         }
         Frame::Message(text) => match Request::decode(&text) {
             Ok(request) => {
-                request_in(holder, conn, request);
+                request_in(holder, conn, socket, request);
                 Next::Go
             }
             // A message that is no JSON object breaks the protocol, and ends
@@ -392,8 +485,9 @@ fn frame_in(holder: &Arc<Holder>, conn: &Arc<Conn>, frame: Frame) -> Next {
 /// spawn, a long screen read or a child's exit, is answered from a task of
 /// its own, so it holds up none of the connection's other replies (section
 /// 2.4). The rest are answered before the next frame is read, so text typed with `input`,
-/// `paste` or `keys` keeps its place among the raw input frames.
-fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
+/// `paste` or `keys` keeps its place among the raw input frames. `socket`
+/// is the connection's, which the live upgrade hands over to answer on.
+fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, socket: BorrowedFd<'_>, request: Request) {
     let request_id = request.id();
     let reply = match request {
         Request::Hello(_) => Err((ErrorCode::BadRequest, "hello comes once, first".to_owned())),
@@ -487,11 +581,29 @@ fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
             clients: Some(clients),
         }),
         Request::Ping { id } => Ok(HolderMessage::Pong { id }),
-        // The holder's upgrade comes with H05.
-        request @ Request::Upgrade { .. } => Err((
-            ErrorCode::Unsupported,
-            format!("this holder does not serve {} yet", request.kind()),
-        )),
+        Request::Upgrade {
+            id,
+            binary,
+            dry_run,
+        } => {
+            // The copy is taken now, while this connection's reader holds
+            // the socket open.
+            let socket = (!dry_run)
+                .then(|| rustix::io::fcntl_dupfd_cloexec(socket, 3).map_err(io::Error::from));
+            let holder = holder.clone();
+            let requester = conn.clone();
+            answer_later(holder.limits().in_flight, conn, id, async move {
+                let binary = PathBuf::from(binary);
+                Ok(
+                    match upgrade::upgrade(&holder, &requester, id, &binary, dry_run, socket).await
+                    {
+                        Ok(()) => HolderMessage::Upgrading { id },
+                        Err(reason) => HolderMessage::UpgradeRefused { id, reason },
+                    },
+                )
+            });
+            return;
+        }
     };
     send_reply(conn, request_id, reply);
 }
@@ -886,7 +998,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_request_this_holder_does_not_serve_yet_is_unsupported_and_a_ping_is_answered() {
+    async fn an_upgrade_to_a_binary_that_does_not_run_is_refused_and_a_ping_is_answered() {
         let holder = Holder::new();
         let (theirs, mut ours) = UnixStream::pair().unwrap();
         admit(&holder, theirs, peer::own_uid());
@@ -894,7 +1006,7 @@ mod tests {
             Request::Hello(Hello::new("daemon")),
             Request::Upgrade {
                 id: 7,
-                binary: "/home/user/tiller".into(),
+                binary: "/home/user/no-such-tiller".into(),
                 dry_run: false,
             },
             Request::Ping { id: 8 },
@@ -905,16 +1017,17 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(read_message(&mut ours).await["type"], "welcome");
-        let unsupported = read_message(&mut ours).await;
-        assert_eq!(
-            unsupported,
-            serde_json::json!({"type":"error","id":7,"code":"unsupported",
-                "message":"this holder does not serve upgrade yet"})
+        // The upgrade is answered from a task of its own, so the ping may
+        // come first.
+        let mut replies = [read_message(&mut ours).await, read_message(&mut ours).await];
+        replies.sort_by_key(|reply| reply["id"].as_u64());
+        assert_eq!(replies[0]["type"], "upgrade_refused", "{}", replies[0]);
+        let reason = replies[0]["reason"].as_str().unwrap();
+        assert!(
+            reason.starts_with("preflight: /home/user/no-such-tiller did not run"),
+            "{reason}"
         );
-        assert_eq!(
-            read_message(&mut ours).await,
-            serde_json::json!({"type":"pong","id":8})
-        );
+        assert_eq!(replies[1], serde_json::json!({"type":"pong","id":8}));
     }
 
     fn resize(id: u64, pane: &PaneId, cols: u16, rows: u16, lease: &str) -> Request {

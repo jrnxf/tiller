@@ -79,11 +79,17 @@ pub enum Refused {
 #[derive(Debug, Default)]
 pub struct InputQueue {
     state: Mutex<State>,
+    /// The writer's turn: held from the frame it takes to the part it puts
+    /// back, so the handover never finds a frame in the writer's hands.
+    writing: Mutex<()>,
     wake: Notify,
 }
 
 #[derive(Debug, Default)]
 struct State {
+    /// The rest of a frame the writer wrote part of and put back: it goes
+    /// first, and to its end, even when its client is cut since.
+    partial: Option<(Arc<Sender>, Vec<u8>)>,
     /// Each frame not yet taken by the writer, and its client.
     chunks: VecDeque<(Arc<Sender>, Vec<u8>)>,
     /// Each client's unwritten bytes, in `chunks` and in the writer's
@@ -129,6 +135,8 @@ impl State {
 pub struct InFlight<'a> {
     bytes: Vec<u8>,
     written: usize,
+    /// Part of the frame was written before it was taken this time.
+    started: bool,
     queue: &'a InputQueue,
     sender: Arc<Sender>,
 }
@@ -147,6 +155,31 @@ impl InFlight<'_> {
     }
 }
 
+impl InFlight<'_> {
+    /// Puts the unwritten part back at the front of the queue, still its
+    /// client's, for the writer's next turn: the writer holds no frame
+    /// while it waits, so the live upgrade's handover (section 6.2) takes
+    /// the queue whole. A frame written in part is written to its end.
+    pub fn put_back(mut self) {
+        let started = self.started || self.written > 0;
+        let rest = self.bytes.split_off(self.written);
+        if rest.is_empty() {
+            return;
+        }
+        let mut state = self.queue.state();
+        if state.closed.is_some() {
+            state.give_back(self.sender.id, rest.len());
+        } else if started {
+            state.partial = Some((self.sender.clone(), rest));
+        } else {
+            state.chunks.push_front((self.sender.clone(), rest));
+        }
+        drop(state);
+        // Counted in the queue now, not in the writer's hands.
+        self.written = self.bytes.len();
+    }
+}
+
 impl Drop for InFlight<'_> {
     fn drop(&mut self) {
         let unwritten = self.bytes.len() - self.written;
@@ -154,9 +187,57 @@ impl Drop for InFlight<'_> {
     }
 }
 
+/// A queue held still: nothing is pushed or taken while it lives.
+#[derive(Debug)]
+pub struct Held<'a> {
+    state: MutexGuard<'a, State>,
+    _writing: MutexGuard<'a, ()>,
+}
+
+impl Held<'_> {
+    /// What waits, for the handover, in the order it is written. A cut
+    /// client's input is left out: it would be dropped, not written. A
+    /// frame written in part is kept, as it is written to its end.
+    pub fn queued(&self) -> Queued {
+        let state = &self.state;
+        Queued {
+            chunks: state
+                .partial
+                .iter()
+                .map(|(_, bytes)| bytes.clone())
+                .chain(
+                    state
+                        .chunks
+                        .iter()
+                        .filter(|(sender, _)| !sender.is_cut())
+                        .map(|(_, bytes)| bytes.clone()),
+                )
+                .collect(),
+            closed: state.closed,
+        }
+    }
+}
+
+/// A queue's state for the live upgrade's handover (section 6.2): what
+/// waits, in order, with the clients it came from left out, as every
+/// connection ends at the upgrade.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Queued {
+    /// The unwritten frames, in the order they are written.
+    pub chunks: Vec<Vec<u8>>,
+    /// The queue takes no more input.
+    pub closed: Option<Refused>,
+}
+
 impl InputQueue {
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The writer's turn, held from [`InputQueue::try_next`] to
+    /// [`InFlight::put_back`]. A push does not wait for it.
+    pub fn write_turn(&self) -> MutexGuard<'_, ()> {
+        self.writing.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Queues `bytes` from `sender`. A frame is taken whole while the
@@ -200,42 +281,99 @@ impl InputQueue {
         let mut state = self.state();
         state.closed.get_or_insert(refused);
         let chunks = std::mem::take(&mut state.chunks);
-        for (sender, bytes) in chunks {
+        for (sender, bytes) in state.partial.take().into_iter().chain(chunks) {
             state.give_back(sender.id, bytes.len());
         }
     }
 
-    /// The next frame to write, in the order frames came. A cut client's
-    /// frames are dropped, not written.
-    pub async fn next(&self) -> InFlight<'_> {
+    /// The next frame to write, in the order frames came, or `None` when
+    /// none waits. A cut client's frames are dropped, not written.
+    pub fn try_next(&self) -> Option<InFlight<'_>> {
+        let mut state = self.state();
+        let started = state.partial.is_some();
+        let (sender, bytes) = match state.partial.take() {
+            Some(partial) => partial,
+            None => loop {
+                match state.chunks.pop_front()? {
+                    (sender, bytes) if sender.is_cut() => state.give_back(sender.id, bytes.len()),
+                    next => break next,
+                }
+            },
+        };
+        Some(InFlight {
+            bytes,
+            written: 0,
+            started,
+            queue: self,
+            sender,
+        })
+    }
+
+    /// Waits until a frame waits. It may be a cut client's, which
+    /// [`InputQueue::try_next`] drops.
+    pub async fn ready(&self) {
         loop {
             let wake = self.wake.notified();
-            let next = {
-                let mut state = self.state();
-                loop {
-                    match state.chunks.pop_front() {
-                        Some((sender, bytes)) if sender.is_cut() => {
-                            state.give_back(sender.id, bytes.len());
-                        }
-                        next => break next,
-                    }
+            {
+                let state = self.state();
+                if state.partial.is_some() || !state.chunks.is_empty() {
+                    return;
                 }
-            };
-            if let Some((sender, bytes)) = next {
-                return InFlight {
-                    bytes,
-                    written: 0,
-                    queue: self,
-                    sender,
-                };
             }
             wake.await;
         }
     }
 
+    /// The next frame to write, once one waits.
+    #[cfg(test)]
+    async fn next(&self) -> InFlight<'_> {
+        loop {
+            self.ready().await;
+            if let Some(next) = self.try_next() {
+                return next;
+            }
+        }
+    }
+
+    /// Holds the queue still, for the handover: it waits for the writer's
+    /// turn, so no frame is in the writer's hands, and a push waits until
+    /// it is let go.
+    pub fn hold(&self) -> Held<'_> {
+        let writing = self.write_turn();
+        Held {
+            state: self.state(),
+            _writing: writing,
+        }
+    }
+
+    /// What waits, for the handover.
+    #[cfg(test)]
+    fn queued(&self) -> Queued {
+        self.hold().queued()
+    }
+
+    /// A queue that holds `queued`, as the new image takes it over. It all
+    /// counts as one client's, the handover's, which sends no more.
+    pub fn resumed(queued: Queued) -> Self {
+        let sender = Arc::new(Sender::default());
+        let mut state = State {
+            closed: queued.closed,
+            ..State::default()
+        };
+        for bytes in queued.chunks.into_iter().filter(|bytes| !bytes.is_empty()) {
+            *state.by_sender.entry(sender.id).or_default() += bytes.len();
+            state.chunks.push_back((sender.clone(), bytes));
+        }
+        Self {
+            state: Mutex::new(state),
+            writing: Mutex::new(()),
+            wake: Notify::new(),
+        }
+    }
+
     /// Bytes waiting in all, in the queue and in the writer's hands.
     #[cfg(test)]
-    fn queued(&self) -> usize {
+    fn unwritten(&self) -> usize {
         self.state().by_sender.values().sum()
     }
 }
@@ -263,7 +401,7 @@ mod tests {
         // Written input makes room again.
         drop(queue.next().await);
         queue.push(&one, vec![0; 1]).unwrap();
-        assert_eq!(queue.queued(), 10 + 1 + 1);
+        assert_eq!(queue.unwritten(), 10 + 1 + 1);
     }
 
     #[tokio::test]
@@ -275,7 +413,7 @@ mod tests {
         let mut first = queue.next().await;
         first.wrote(INPUT_CAP);
         // Most of the paste is written, so a key from its client is taken.
-        assert_eq!(queue.queued(), 100 + 3);
+        assert_eq!(queue.unwritten(), 100 + 3);
         queue.push(&one, b"key".to_vec()).unwrap();
         assert_eq!(first.rest(), [1; 100]);
         first.wrote(100);
@@ -283,7 +421,7 @@ mod tests {
         drop(first);
         assert_eq!(queue.next().await.rest(), b"two");
         assert_eq!(queue.next().await.rest(), b"key");
-        assert_eq!(queue.queued(), 0);
+        assert_eq!(queue.unwritten(), 0);
         assert!(queue.state().by_sender.is_empty());
         // An empty frame is nothing to write.
         queue.push(&one, Vec::new()).unwrap();
@@ -304,10 +442,10 @@ mod tests {
         assert_eq!(in_flight.rest(), b"a1");
         queue.drop_cut();
         // The frame in flight counts until the writer lets it go.
-        assert_eq!(queue.queued(), 4);
+        assert_eq!(queue.unwritten(), 4);
         drop(in_flight);
         assert_eq!(queue.next().await.rest(), b"b1");
-        assert_eq!(queue.queued(), 0);
+        assert_eq!(queue.unwritten(), 0);
         assert!(queue.state().by_sender.is_empty());
         // Frames queued after the sweep are dropped as the writer comes
         // to them.
@@ -316,7 +454,7 @@ mod tests {
         queue.push(&two, b"b2".to_vec()).unwrap();
         three.cut();
         assert_eq!(queue.next().await.rest(), b"b2");
-        assert_eq!(queue.queued(), 0);
+        assert_eq!(queue.unwritten(), 0);
     }
 
     #[tokio::test]
@@ -326,11 +464,78 @@ mod tests {
         queue.push(&one, vec![0; 1000]).unwrap();
         queue.push(&two, vec![0; 1000]).unwrap();
         queue.close();
-        assert_eq!(queue.queued(), 0);
+        assert_eq!(queue.unwritten(), 0);
         assert_eq!(queue.push(&one, vec![0; 1]), Err(Refused::Closed));
         let broken = InputQueue::default();
         broken.break_off();
         broken.close();
         assert_eq!(broken.push(&one, vec![0; 1]), Err(Refused::Broken));
+    }
+
+    #[tokio::test]
+    async fn a_paused_writers_frame_goes_back_first_and_the_handover_keeps_the_order() {
+        let queue = InputQueue::default();
+        let (one, two) = senders();
+        queue.push(&one, b"half".to_vec()).unwrap();
+        queue.push(&two, b"next".to_vec()).unwrap();
+        let cut = Arc::new(Sender::default());
+        queue.push(&cut, b"gone".to_vec()).unwrap();
+        cut.cut();
+        let mut in_flight = queue.next().await;
+        in_flight.wrote(2);
+        in_flight.put_back();
+        // The rest still counts as the client's.
+        assert_eq!(queue.state().by_sender.get(&one.id), Some(&2));
+        let queued = queue.queued();
+        assert_eq!(
+            queued,
+            Queued {
+                chunks: vec![b"lf".to_vec(), b"next".to_vec()],
+                closed: None,
+            }
+        );
+        let resumed = InputQueue::resumed(queued);
+        assert_eq!(resumed.unwritten(), 6);
+        assert_eq!(resumed.next().await.rest(), b"lf");
+        assert_eq!(resumed.next().await.rest(), b"next");
+        assert_eq!(resumed.unwritten(), 0);
+
+        queue.close();
+        let closed = InputQueue::resumed(queue.queued());
+        assert_eq!(closed.push(&one, vec![0; 1]), Err(Refused::Closed));
+    }
+
+    #[tokio::test]
+    async fn a_frame_written_in_part_goes_first_and_to_its_end_after_its_client_is_cut() {
+        let queue = InputQueue::default();
+        let (one, two) = senders();
+        queue.push(&one, b"\x1b[A".to_vec()).unwrap();
+        queue.push(&one, b"more".to_vec()).unwrap();
+        queue.push(&two, b"two".to_vec()).unwrap();
+        let mut first = queue.try_next().unwrap();
+        first.wrote(1);
+        first.put_back();
+        // Taken again and put back with nothing more written, it is still
+        // the rest of a frame.
+        let again = queue.try_next().unwrap();
+        assert_eq!(again.rest(), b"[A");
+        again.put_back();
+        queue.push(&two, b"three".to_vec()).unwrap();
+        one.cut();
+        queue.drop_cut();
+        assert_eq!(
+            queue.queued().chunks,
+            [b"[A".to_vec(), b"two".to_vec(), b"three".to_vec()],
+            "the cut client's rest of a sequence is kept, its next frame is not"
+        );
+        assert_eq!(queue.try_next().unwrap().rest(), b"[A");
+        // A frame not started goes back as it was.
+        let two_frame = queue.try_next().unwrap();
+        assert_eq!(two_frame.rest(), b"two");
+        two_frame.put_back();
+        assert_eq!(queue.try_next().unwrap().rest(), b"two");
+        assert_eq!(queue.try_next().unwrap().rest(), b"three");
+        assert!(queue.try_next().is_none());
+        assert_eq!(queue.unwritten(), 0);
     }
 }

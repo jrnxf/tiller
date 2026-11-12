@@ -13,10 +13,11 @@ alacritty_terminal.workspace = true
 jiff.workspace = true
 libc.workspace = true
 rustix = { workspace = true, features = ["fs", "pipe", "process", "pty", "stdio", "termios"] }
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tiller-panes.workspace = true
-tokio = { workspace = true, features = ["io-util", "net", "signal", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "net", "process", "signal", "sync", "time"] }
 tracing.workspace = true
 ulid.workspace = true
 

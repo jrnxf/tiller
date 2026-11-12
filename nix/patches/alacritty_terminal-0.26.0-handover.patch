@@ -1,0 +1,75 @@
+diff -ru a/src/term/mod.rs b/src/term/mod.rs
+--- a/src/term/mod.rs
++++ b/src/term/mod.rs
+@@ -953,6 +953,71 @@
+         &self.colors
+     }
+ 
++    /// Access to the inactive grid: the primary screen while the alternate screen is active, the
++    /// alternate screen otherwise.
++    pub fn inactive_grid(&self) -> &Grid<Cell> {
++        &self.inactive_grid
++    }
++
++    /// Mutable access to the inactive grid.
++    pub fn inactive_grid_mut(&mut self) -> &mut Grid<Cell> {
++        &mut self.inactive_grid
++    }
++
++    /// The keyboard mode stack of the active screen, bottom first.
++    pub fn keyboard_mode_stack(&self) -> &[KeyboardModes] {
++        &self.keyboard_mode_stack
++    }
++
++    /// The keyboard mode stack of the inactive screen, bottom first.
++    pub fn inactive_keyboard_mode_stack(&self) -> &[KeyboardModes] {
++        &self.inactive_keyboard_mode_stack
++    }
++
++    /// Replace both keyboard mode stacks, bottom first.
++    ///
++    /// The active keyboard mode is left as it is.
++    pub fn set_keyboard_mode_stacks(
++        &mut self,
++        active: Vec<KeyboardModes>,
++        inactive: Vec<KeyboardModes>,
++    ) {
++        self.keyboard_mode_stack = active;
++        self.inactive_keyboard_mode_stack = inactive;
++    }
++
++    /// Tabstops, one entry per column. The list can be longer than the terminal is wide.
++    pub fn tab_stops(&self) -> &[bool] {
++        &self.tabs.tabs
++    }
++
++    /// Replace the tabstops, one entry per column.
++    ///
++    /// A list shorter than the terminal is wide grows with the default tabstops.
++    pub fn set_tab_stops(&mut self, tabs: Vec<bool>) {
++        self.tabs.tabs = tabs;
++        self.tabs.resize(self.columns());
++    }
++
++    /// Scroll region, indexed from the top of the viewport.
++    pub fn scroll_region(&self) -> Range<Line> {
++        self.scroll_region.clone()
++    }
++
++    /// Replace the scroll region, indexed from the top of the viewport.
++    ///
++    /// Both ends are clamped to the screen, like the escape that sets the region.
++    pub fn set_scroll_region(&mut self, region: Range<Line>) {
++        let screen_lines = Line(self.screen_lines() as i32);
++        self.scroll_region.start = cmp::min(region.start, screen_lines);
++        self.scroll_region.end = cmp::min(region.end, screen_lines);
++    }
++
++    /// Index into the cursor's charsets of the charset that is currently in use.
++    pub fn active_charset(&self) -> CharsetIndex {
++        self.active_charset
++    }
++
+     /// Insert a linebreak at the current cursor position.
+     #[inline]
+     fn wrapline(&mut self)
