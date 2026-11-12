@@ -64,22 +64,28 @@ fn verdict(composer: &Composer) -> Value {
 
 /// The prompt reads at a screen: the tool or `input` that gave a dialog, with
 /// the dialog as JSON and without its screen hash. None when nothing reads.
+/// Two waits that both read one screen fail here, so a wrong read cannot hide
+/// behind the order of the waits.
 fn prompt(screen: &str) -> Value {
-    let mut found = Value::Null;
-    let mut keep = |wait: &str, dialog: Dialog| {
-        let mut json = serde_json::to_value(&dialog.prompt).unwrap();
-        json.as_object_mut().unwrap().remove("screen");
-        found = serde_json::json!({ "wait": wait, "dialog": json });
-    };
-    for tool in ["Bash", "Write", "Edit"] {
-        if let Some(dialog) = read(screen, &Wait::Permission(tool.to_owned())) {
-            keep(tool, dialog);
+    let mut found = Vec::new();
+    let waits = [
+        ("Bash", Wait::Permission("Bash".to_owned())),
+        ("Write", Wait::Permission("Write".to_owned())),
+        ("Edit", Wait::Permission("Edit".to_owned())),
+        ("input", Wait::Input),
+    ];
+    for (name, wait) in waits {
+        if let Some(Dialog { prompt, .. }) = read(screen, &wait) {
+            let mut json = serde_json::to_value(&prompt).unwrap();
+            json.as_object_mut().unwrap().remove("screen");
+            found.push(serde_json::json!({ "wait": name, "dialog": json }));
         }
     }
-    if let Some(dialog) = read(screen, &Wait::Input) {
-        keep("input", dialog);
-    }
-    found
+    assert!(
+        found.len() <= 1,
+        "more than one wait reads the screen: {found:?}"
+    );
+    found.pop().unwrap_or(Value::Null)
 }
 
 /// Replays one recording and checks every mark. Returns the verdicts and
@@ -134,6 +140,14 @@ fn replay(name: &str) -> Seen {
         if note.contains("queued") && mark["composer"] == "Busy" {
             seen.queued_busy = true;
         }
+    }
+    // Resizes after the last mark are replayed too.
+    for resize in resizes {
+        model.feed(&raw[pos..offset(resize)]).unwrap();
+        pos = offset(resize);
+        model
+            .resize(size(&resize["cols"], &resize["rows"]))
+            .unwrap();
     }
     seen
 }

@@ -581,11 +581,13 @@ impl PaneCell {
     /// One PTY read: into the model, with the queries in it answered, and
     /// out to every subscriber without them. Gives the pane's next timer.
     fn output(&self, bytes: &[u8]) -> Option<Instant> {
+        let mut inner = self.inner();
+        // Under the lock, so a read and a resize are logged in the order
+        // the model took them.
         #[cfg(feature = "record")]
         if let Some(tap) = &self.tap {
             tap.output(bytes);
         }
-        let mut inner = self.inner();
         inner.record.last_output_at = Some(Timestamp::now());
         let filtered = inner.filter.filter(bytes);
         // The model answers each query as it reads it, and the holder

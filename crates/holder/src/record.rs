@@ -9,8 +9,9 @@
 //!   offset and new size) as they happen, and `exit`. An offset counts bytes
 //!   of the `.raw` file, so a resize sits between two reads.
 //!
-//! A write that fails is logged once. Later writes still try, and a failure
-//! never reaches the pane: a recording never changes what a pane does.
+//! A write that fails is logged once and ends that pane's recording, so the
+//! files never disagree on an offset. A failure never reaches the pane: a
+//! recording never changes what a pane does.
 
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
@@ -69,8 +70,16 @@ struct Files {
 
 impl PaneTap {
     fn create(dir: &Path, pane: &PaneId, size: Size) -> io::Result<Self> {
-        let raw = File::create(dir.join(format!("{pane}.raw")))?;
-        let events = File::create(dir.join(format!("{pane}.jsonl")))?;
+        // A pane id is a fresh ULID. `create_new` keeps a reused directory's
+        // earlier recording from being truncated.
+        let create = |ext: &str| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(dir.join(format!("{pane}.{ext}")))
+        };
+        let raw = create("raw")?;
+        let events = create("jsonl")?;
         let tap = Self {
             pane: pane.to_string(),
             started: Instant::now(),
@@ -87,6 +96,9 @@ impl PaneTap {
 
     /// One PTY read.
     pub(crate) fn output(&self, bytes: &[u8]) {
+        if self.failed.load(Ordering::Relaxed) {
+            return;
+        }
         let mut files = self.files();
         let result = files.raw.write_all(bytes).and_then(|()| {
             let line = self.line(
@@ -116,6 +128,9 @@ impl PaneTap {
     }
 
     fn event(&self, name: &str, fields: impl FnOnce(u64) -> serde_json::Value) {
+        if self.failed.load(Ordering::Relaxed) {
+            return;
+        }
         let mut files = self.files();
         let line = self.line(name, fields(files.offset));
         let result = writeln!(files.events, "{line}").and_then(|()| files.events.flush());
