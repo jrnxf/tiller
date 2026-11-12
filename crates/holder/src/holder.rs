@@ -303,6 +303,21 @@ impl PaneCell {
         }
     }
 
+    /// Runs `change` on the pane's model, sends what the app told it, and
+    /// resets the pane when the model panicked.
+    fn update<T>(
+        &self,
+        inner: &mut Inner,
+        change: impl FnOnce(&mut Model) -> Result<T, ModelPanic>,
+    ) -> Result<T, ModelPanic> {
+        let changed = change(&mut inner.model);
+        self.told(inner);
+        if let Err(panic) = &changed {
+            self.model_reset(inner, panic);
+        }
+        changed
+    }
+
     /// A model panic: the model is fresh already. The app in front redraws
     /// on `SIGWINCH`, every subscriber of the pane is cut, and watchers get
     /// `model_reset` (section 3.5).
@@ -348,10 +363,7 @@ impl PaneCell {
     fn output(&self, bytes: &[u8]) {
         let mut inner = self.inner();
         inner.record.last_output_at = Some(Timestamp::now());
-        let fed = inner.model.feed(bytes);
-        self.told(&mut inner);
-        if let Err(panic) = fed {
-            self.model_reset(&mut inner, &panic);
+        if self.update(&mut inner, |model| model.feed(bytes)).is_err() {
             return;
         }
         inner.fan_out(|stream| {
@@ -365,21 +377,13 @@ impl PaneCell {
     /// The open synchronized update's deadline passed.
     fn end_sync(&self) {
         let mut inner = self.inner();
-        let ended = inner.model.end_sync();
-        self.told(&mut inner);
-        if let Err(panic) = ended {
-            self.model_reset(&mut inner, &panic);
-        }
+        _ = self.update(&mut inner, Model::end_sync);
     }
 
     /// Ends the synchronized update the model holds open, if there is one.
     fn end_open_sync(&self, inner: &mut Inner) {
         if inner.model.sync_deadline().is_some() {
-            let ended = inner.model.end_sync();
-            self.told(inner);
-            if let Err(panic) = ended {
-                self.model_reset(inner, &panic);
-            }
+            _ = self.update(inner, Model::end_sync);
         }
     }
 
@@ -623,6 +627,8 @@ impl Holder {
         read: Read,
         format: Format,
     ) -> Result<Screen, Failure> {
+        // A read out of range waits for no other read.
+        check_read(read)?;
         let permit = self
             .screen_reads
             .clone()
@@ -649,22 +655,20 @@ impl Holder {
     }
 
     /// `screen`: a read of the pane's model, running or exited. A model
-    /// that panics while it is read is reset, and the read fails.
+    /// that panics while it is read is reset, and the read fails. A read
+    /// inside an open synchronized update shows the last whole frame, as a
+    /// terminal shows it, and leaves the update open.
     pub fn screen(&self, pane: &PaneId, read: Read, format: Format) -> Result<Screen, Failure> {
-        if !read.in_range() {
-            return Err(bad_request(format!(
-                "recent takes 1 to {MAX_RECENT} rows, not {read:?}"
-            )));
-        }
+        check_read(read)?;
         let cell = self.cell(pane)?;
         let mut inner = cell.live()?;
-        inner.model.screen(read, format).map_err(|panic| {
-            cell.model_reset(&mut inner, &panic);
-            (
-                ErrorCode::Internal,
-                format!("the screen read failed: {}", panic.message),
-            )
-        })
+        cell.update(&mut inner, |model| model.screen(read, format))
+            .map_err(|panic| {
+                (
+                    ErrorCode::Internal,
+                    format!("the screen read failed: {}", panic.message),
+                )
+            })
     }
 
     /// `input`: text typed as it is.
@@ -737,17 +741,14 @@ impl Holder {
         // and the new subscriber never got its start: the update ends here,
         // so the repaint shows it and the bytes after it pass as they are.
         cell.end_open_sync(&mut inner);
-        let repaint = match inner.model.repaint() {
+        let repaint = match cell.update(&mut inner, Model::repaint) {
             Ok(repaint) => repaint,
-            Err(panic) => {
-                cell.model_reset(&mut inner, &panic);
-                inner.model.repaint().map_err(|panic| {
-                    (
-                        ErrorCode::Internal,
-                        format!("the repaint failed: {}", panic.message),
-                    )
-                })?
-            }
+            Err(_) => inner.model.repaint().map_err(|panic| {
+                (
+                    ErrorCode::Internal,
+                    format!("the repaint failed: {}", panic.message),
+                )
+            })?,
         };
         let stream = self.next_stream.fetch_add(1, Ordering::Relaxed);
         let Size { cols, rows } = inner.model.size();
@@ -827,11 +828,7 @@ impl Holder {
             return Err(exited(pane));
         }
         pty::set_size(cell.master.get_ref(), size).map_err(|err| internal(&err))?;
-        let resized = inner.model.resize(size);
-        cell.told(&mut inner);
-        if let Err(panic) = resized {
-            cell.model_reset(&mut inner, &panic);
-        }
+        _ = cell.update(&mut inner, |model| model.resize(size));
         let changed = (inner.record.cols, inner.record.rows) != (size.cols, size.rows);
         inner.record.cols = size.cols;
         inner.record.rows = size.rows;
@@ -892,15 +889,26 @@ impl Holder {
     pub async fn close(&self, pane: &PaneId, grace: Duration) -> Result<Exit, Failure> {
         let cell = self.cell(pane)?;
         let mut exit = cell.exit.subscribe();
-        cell.signal_running(Signal::HUP)?;
+        // Only an exited pane can be forgotten, so a pane forgotten since
+        // its exit came in answers with that exit.
+        let known = |failure: Failure, exit: &watch::Receiver<Option<Exit>>| {
+            (*exit.borrow()).ok_or(failure)
+        };
+        if let Err(failure) = cell.signal_running(Signal::HUP) {
+            return known(failure, &exit);
+        }
         let has_exit = |exit: &Option<Exit>| exit.is_some();
         if let Ok(Ok(exit)) = tokio::time::timeout(grace, exit.wait_for(has_exit)).await
             && let Some(exit) = *exit
         {
             return Ok(exit);
         }
-        if cell.signal_running(Signal::KILL)? {
-            tracing::info!(pane = %pane, grace_ms = grace.as_millis(), "the child outlived its close grace and was killed");
+        match cell.signal_running(Signal::KILL) {
+            Ok(true) => {
+                tracing::info!(pane = %pane, grace_ms = grace.as_millis(), "the child outlived its close grace and was killed")
+            }
+            Ok(false) => {}
+            Err(failure) => return known(failure, &exit),
         }
         match tokio::time::timeout(KILL_WAIT, exit.wait_for(has_exit)).await {
             Ok(Ok(exit)) => (*exit).ok_or_else(|| close_failure(pane)),
@@ -1237,6 +1245,16 @@ fn check_size(size: Size) -> Result<(), Failure> {
         )));
     }
     Ok(())
+}
+
+fn check_read(read: Read) -> Result<(), Failure> {
+    if read.in_range() {
+        Ok(())
+    } else {
+        Err(bad_request(format!(
+            "recent takes 1 to {MAX_RECENT} rows, not {read:?}"
+        )))
+    }
 }
 
 fn bad_request(message: String) -> Failure {

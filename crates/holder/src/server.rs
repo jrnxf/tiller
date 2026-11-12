@@ -357,21 +357,17 @@ async fn frame_in(holder: &Arc<Holder>, conn: &Arc<Conn>, frame: Frame) -> Next 
 /// One request, answered on its connection. A request that waits, for a
 /// spawn, a long screen read or a child's exit, is answered from a task of
 /// its own, so it holds up none of the connection's other replies (section
-/// 2.4). The rest are
-/// answered before the next frame is read, so text typed with `input`,
+/// 2.4). The rest are answered before the next frame is read, so text typed with `input`,
 /// `paste` or `keys` keeps its place among the raw input frames.
 fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
     let request_id = request.id();
     let reply = match request {
         Request::Hello(_) => Err((ErrorCode::BadRequest, "hello comes once, first".to_owned())),
         Request::Spawn { id, spawn } => {
-            let (holder, conn) = (holder.clone(), conn.clone());
-            tokio::spawn(async move {
-                let reply = holder
-                    .spawn(spawn)
-                    .await
-                    .map(|(pane, existing)| HolderMessage::Pane { id, pane, existing });
-                send_reply(&conn, Some(id), reply);
+            let holder = holder.clone();
+            answer_later(conn, id, async move {
+                let (pane, existing) = holder.spawn(spawn).await?;
+                Ok(HolderMessage::Pane { id, pane, existing })
             });
             return;
         }
@@ -390,13 +386,10 @@ fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
             read,
             format,
         } => {
-            let (holder, conn) = (holder.clone(), conn.clone());
-            tokio::spawn(async move {
-                let reply = holder
-                    .screen_read(pane, read, format)
-                    .await
-                    .map(|screen| HolderMessage::Screen { id, screen });
-                send_reply(&conn, Some(id), reply);
+            let holder = holder.clone();
+            answer_later(conn, id, async move {
+                let screen = holder.screen_read(pane, read, format).await?;
+                Ok(HolderMessage::Screen { id, screen })
             });
             return;
         }
@@ -421,19 +414,9 @@ fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
             lease: _,
         } => holder
             .resize(&pane, tiller_panes::Size { cols, rows })
-            .map(|size| HolderMessage::Ok {
-                id,
-                cols: Some(size.cols),
-                rows: Some(size.rows),
-                clients: None,
-            }),
+            .map(|size| ok_size(id, size)),
         Request::Release { id, pane, lease: _ } => {
-            holder.release(&pane).map(|size| HolderMessage::Ok {
-                id,
-                cols: Some(size.cols),
-                rows: Some(size.rows),
-                clients: None,
-            })
+            holder.release(&pane).map(|size| ok_size(id, size))
         }
         Request::Meta {
             id,
@@ -449,17 +432,14 @@ fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
             }),
         Request::Signal { id, pane, signal } => holder.signal(&pane, signal).map(|()| ok(id)),
         Request::Close { id, pane, grace_ms } => {
-            let (holder, conn) = (holder.clone(), conn.clone());
-            tokio::spawn(async move {
-                let reply = holder
-                    .close(&pane, Duration::from_millis(grace_ms))
-                    .await
-                    .map(|exit| HolderMessage::Exited {
-                        id: Some(id),
-                        pane,
-                        exit,
-                    });
-                send_reply(&conn, Some(id), reply);
+            let holder = holder.clone();
+            answer_later(conn, id, async move {
+                let exit = holder.close(&pane, Duration::from_millis(grace_ms)).await?;
+                Ok(HolderMessage::Exited {
+                    id: Some(id),
+                    pane,
+                    exit,
+                })
             });
             return;
         }
@@ -482,6 +462,29 @@ fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
         )),
     };
     send_reply(conn, request_id, reply);
+}
+
+/// Answers request `id` from a task of its own, once `reply` is ready.
+fn answer_later(
+    conn: &Arc<Conn>,
+    id: u64,
+    reply: impl Future<Output = Result<HolderMessage, (ErrorCode, String)>> + Send + 'static,
+) {
+    let conn = conn.clone();
+    tokio::spawn(async move {
+        let reply = reply.await;
+        send_reply(&conn, Some(id), reply);
+    });
+}
+
+/// The bare `ok` with the pane's size after the request.
+fn ok_size(id: u64, size: tiller_panes::Size) -> HolderMessage {
+    HolderMessage::Ok {
+        id,
+        cols: Some(size.cols),
+        rows: Some(size.rows),
+        clients: None,
+    }
 }
 
 fn send_reply(conn: &Conn, id: Option<u64>, reply: Result<HolderMessage, (ErrorCode, String)>) {

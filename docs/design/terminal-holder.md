@@ -178,7 +178,7 @@ A subscriber gets one **repaint**, then **passthrough**:
 
 ### 3.1 The pick: `alacritty_terminal` 0.26
 
-I compared `vt100` 0.18.1 and `alacritty_terminal` 0.26.0 in a throwaway crate on Wednesday 2026-11-11. Both read the nine Claude Code fixtures in `crates/herdr/tests/fixtures/claude/`. Each fixture was fed in, and the model's screen was read back and given to `composer::classify`.
+I compared `vt100` 0.18.1 and `alacritty_terminal` 0.26.0 in a throwaway crate on Wednesday 2026-11-11. Both read the nine Claude Code fixtures, then in `crates/herdr/tests/fixtures/claude/` and now in `crates/panes/tests/fixtures/claude/`. Each fixture was fed in, and the model's screen was read back and given to `composer::classify`.
 
 | Check | `vt100` 0.18 | `alacritty_terminal` 0.26 |
 |---|---|---|
@@ -234,7 +234,7 @@ The holder feeds the model only whole escape sequences and whole UTF-8 character
 
 Each pane's model update (`vte::ansi::Processor::advance` into the pane's `Term`) runs inside `catch_unwind`. On a panic:
 1. The holder logs the panic and the last 4 KiB of input.
-2. It makes a fresh model at the same size and sends the child `SIGWINCH`, so the app redraws.
+2. It makes a fresh model at the same size, with the modes the app set (the alternate screen, keyboard, mouse, paste and cursor modes), and sends the child `SIGWINCH`, so the app redraws. An app sets its modes once and does not set them again when it redraws.
 3. It cuts every subscriber of that pane (`lagged`), and they subscribe again for a repaint.
 4. It sends the event `model_reset {pane}`. The daemon records it as an observation.
 
@@ -505,7 +505,7 @@ This affects the agents' own cards too, because their panes now carry `TILLER_PA
 
 ### 9.1 Parser results must not change
 
-- **H00 freezes today's results** before any code moves. For each fixture in `crates/herdr/tests/fixtures/claude/`, it stores `composer::classify` and the `prompt.rs` parse result as `insta` snapshots, made with today's herdr-era code.
+- **H00 freezes today's results** before any code moves. For each fixture, then in `crates/herdr/tests/fixtures/claude/`, it stores `composer::classify` and the `prompt.rs` parse result as `insta` snapshots, made with today's herdr-era code.
 - **Model gate.** Each fixture is fed into the holder's model at 119 by its row count. The model's `screen(visible, ansi)` then goes to `classify` and to the prompt parser. Both results must equal the frozen snapshots. The fixtures move to `crates/panes/tests/fixtures/claude/`, unchanged.
 - **Raw stream gate (H08).** Raw PTY recordings of real Claude Code sessions: start, a draft, a turn, a permission dialog, a trust dialog, `/exit`, and a 40 to 120 column resize in the middle of a turn. Each recording marks moments with a known verdict. Replayed through the model, each marked moment must give that verdict. The recordings are scrubbed (section 12) before they are committed.
 - **Repaint round trip.** proptest: random byte streams and every fixture, fed in, repainted, and fed into a fresh model, give the same grid.

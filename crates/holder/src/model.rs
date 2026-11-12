@@ -14,7 +14,7 @@ use std::time::Instant;
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::vte::ansi::{CursorStyle, Processor};
 use alacritty_terminal::vte::{Params, Parser, Perform};
 use tiller_panes::Size;
 use tiller_panes::message::{Format, Read, Screen as ScreenRead};
@@ -55,7 +55,7 @@ const TITLE_STACK: usize = 4096;
 pub const NOTIFY_MAX: usize = 8;
 
 /// The most bytes of a title, or of a notification's title or body, that
-/// is told. The rest is cut, so no one app's text fills a watcher's queue.
+/// is told. The rest is cut, so each event stays small.
 pub const TEXT_MAX: usize = 4 * 1024;
 
 /// `text` cut to [`TEXT_MAX`] bytes, at a character's start.
@@ -81,7 +81,8 @@ fn capped(mut text: String) -> String {
 /// One PTY read can tell a flood (`yes $'\a'` rings a bell every two
 /// bytes), and each thing told is an event to every watcher. So between
 /// two takes it keeps the latest title only, one bell and the first
-/// [`NOTIFY_MAX`] notifications. Its parser splits an OSC at `;` into 16
+/// [`NOTIFY_MAX`] notifications. That bounds one read, not a rate: a
+/// flood over many reads tells this much for each read. Its parser splits an OSC at `;` into 16
 /// parts at most, as the model's does, so a body with more than 13 `;` in
 /// it loses its end.
 #[derive(Debug, Default)]
@@ -252,6 +253,20 @@ impl Screen {
             teller_parser: Parser::new(),
         }
     }
+
+    /// A blank screen with `mode` and `style` set. Should setting them
+    /// panic, the screen is blank with none.
+    fn with_modes(size: Size, mode: TermMode, style: CursorStyle) -> Self {
+        let bytes = repaint::mode_bytes(mode, style);
+        let mut screen = Screen::new(size);
+        let set = catch_unwind(AssertUnwindSafe(|| {
+            screen.parser.advance(&mut screen.term, &bytes);
+        }));
+        if set.is_err() {
+            screen = Screen::new(size);
+        }
+        screen
+    }
 }
 
 /// One pane's screen.
@@ -376,9 +391,13 @@ impl Model {
                     .unwrap_or_else(|| "a panic with no message".to_owned());
                 // The teller read the bytes whole, and what it read stands:
                 // only the screen is lost. Its parser starts afresh, as the
-                // model's does.
+                // model's does. The app set its modes once and does not set
+                // them again when it redraws, so the fresh screen keeps them:
+                // keys and pastes still reach the app in its form.
+                let mode = *self.screen.term.mode();
+                let style = self.screen.term.cursor_style();
                 let teller = std::mem::take(&mut self.screen.teller);
-                self.screen = Screen::new(self.size);
+                self.screen = Screen::with_modes(self.size, mode, style);
                 self.screen.teller = teller;
                 self.scanner = Scanner::new();
                 Err(ModelPanic {
@@ -620,6 +639,24 @@ mod tests {
             .feed(b"\x1b]9;4;1;50\x07\x1b]9;12\x07\x1b]9;13;x\x07\x1b]9;04\x07")
             .unwrap();
         assert_eq!(model.take_told(), [notify("", "13;x"), notify("", "04")]);
+    }
+
+    #[test]
+    fn a_model_reset_keeps_the_modes_the_app_set() {
+        let mut model = Model::new(size());
+        model
+            .feed(b"\x1b[?1049h\x1b[?2004h\x1b[?1h\x1b[>1u\x1b[?25l\x1b[5 qtext")
+            .unwrap();
+        let before = model.mode();
+        model.fail_next();
+        model.feed(b"x").unwrap_err();
+        assert_eq!(model.mode(), before);
+        assert_eq!(
+            model.term().cursor_style().shape,
+            alacritty_terminal::vte::ansi::CursorShape::Beam
+        );
+        // The screen itself is fresh.
+        assert_eq!(row(&model, 0), "");
     }
 
     #[test]
