@@ -110,7 +110,7 @@ JSON keeps the control path easy to read in logs and easy to extend. Bulk bytes 
 | `close {pane, grace_ms}` | `exited {pane}` | `hup` to the group, then `kill` after `grace_ms` (default 3,000). It answers when the child is reaped. When the child exits first, what is left of the group still gets the `kill` at the deadline |
 | `forget {pane}` | `ok` | Drops an exited pane and its screen. A running pane is refused |
 | `watch {}` | `watching` | Starts `event` messages on this connection |
-| `switch {pane}` | `ok {clients}` | Tells every attach client on this host to show `pane` (section 5.3) |
+| `switch {pane}` | `ok {clients}` | Tells every attach client on this host to show `pane`: each one's watch gets a `show {pane}` event, and `clients` counts them (section 5.3) |
 | `upgrade {binary, dry_run}` | `upgrading` or `upgrade_refused {reason}` | Section 6.2 |
 | `ping {}` | `pong {}` | Health check |
 
@@ -127,7 +127,7 @@ A `pane` record is:
 - `state` is `running` or `exited`. `exit` is `{code, signal, at}` once the holder has reaped the child. An exited pane keeps its last screen until `forget`, so the board can show the last frame and the ladder has positive evidence.
 - `meta` holds the old row tokens (`project`, `card`, `role`, `run`, `model`, `session`) and `label`. It lives in the holder, so a daemon restart cannot lose it, and a live upgrade carries it.
 
-**Events** (after `watch`): `spawned`, `exited {pane, exit}`, `resized {pane, cols, rows}`, `meta {pane}`, `title {pane, title}`, `bell {pane}`, `notify {pane, title, body}` (OSC 9 or OSC 777 from the app), `quiet {pane, at}` (no output for 500 ms after output), `model_reset {pane}` (section 3.5), `forgotten {pane, reason}` (by `forget`, or by a limit in section 2.8) and `upgraded {holder}`. Events replace the herdr poller's 2-second snapshot. The daemon still runs a `list` every 30 s as a check, and once after each reconnect.
+**Events** (after `watch`): `spawned`, `exited {pane, exit}`, `resized {pane, cols, rows}`, `meta {pane}`, `title {pane, title}`, `bell {pane}`, `notify {pane, title, body}` (OSC 9 or OSC 777 from the app), `quiet {pane, at}` (no output for 500 ms after output), `model_reset {pane}` (section 3.5), `forgotten {pane, reason}` (by `forget`, or by a limit in section 2.8), `upgraded {holder}`, and `show {pane}` (after a `switch`, to the watches of attach clients only: a connection whose hello names the client `attach`). Events replace the herdr poller's 2-second snapshot. The daemon still runs a `list` every 30 s as a check, and once after each reconnect.
 
 **Errors** are `{"type":"error","id":n,"code":c,"message":m}`. The codes are `not_found`, `exited`, `bad_request`, `unsupported`, `busy` (a limit, section 2.8) and `internal`.
 
@@ -381,8 +381,10 @@ tiller attach [<run|session|card>] [--read-only]
 
 With no target, it shows the switcher first.
 
-- **Raw mode.** It puts the owner's terminal in raw mode, subscribes with `sync: "pass"`, writes the repaint, then passes the bytes through. It takes a size lease at the window's size and moves it on `SIGWINCH`.
-- **Input.** Keys go to the pane as kind 2 frames, as the terminal sent them, so the agent gets exactly what the owner typed. The lease moves to the top on each key.
+- **Owner only (D12).** An agent never attaches. Before it touches the terminal, `tiller attach` runs the owner check of `authority::principal`: no `CLAUDECODE`, stdin a terminal, and no Claude Code process among its ancestors. A fleet caller gets `forbidden`, as `tiller peer serve` refuses one. `TILLER_SESSION_ID` plays no part, so a notification click, whose handler gets it (section 7), passes.
+- **Raw mode.** It puts the owner's terminal in raw mode, subscribes with `sync: "pass"`, writes the repaint, then passes the bytes through. It takes a size lease at the window's size and moves it on a window change (it reads the size every 100 ms, so it needs no signal handler).
+- **One screen.** The whole session runs on the owner's alternate screen, so the owner's own screen and scrollback come back untouched on detach. Attach takes the app's screen switches (`?1049`, `?1047` and `?47`) out of the repaint and the live bytes, and asks for a repaint when the app switches screens.
+- **Input.** Keys go to the pane as kind 2 frames, as the terminal sent them, so the agent gets exactly what the owner typed. The lease moves to the top on each key: when the pane's size (from the repaint and the watch's `resized` events) is not the size this client last set, attach sends `resize` again before the key.
 - **The prefix is `Ctrl-\`**, as in the demo the owner tried. After the prefix:
   - `d` detaches.
   - `s` opens the switcher.
@@ -390,11 +392,12 @@ With no target, it shows the switcher first.
   - `Ctrl-\` sends one `Ctrl-\` to the agent.
   - `?` shows a help screen over the pane that lists every prefix key. It sends nothing to the pane. Any key closes it and asks for a repaint. That key is swallowed and never reaches the pane.
   - Any other key closes the prefix and does nothing.
-  - `[attach] prefix` in `config.toml` can change the prefix key.
+  - `[attach] prefix` in `config.toml` can change the prefix key to another Ctrl chord: a letter, or `\` or `]`. Ctrl-i, Ctrl-j and Ctrl-m are refused, because they send the bytes of Tab and Enter.
+  - A kitty press of a modifier key alone, such as the Shift before `?`, leaves the prefix waiting.
 - **The kitty keyboard.** When the agent pushed kitty keyboard flags, the owner's terminal sends `Ctrl-\` as `CSI 92;5u`, not as byte `0x1c`. `tiller attach` knows the pane's mode from the holder and reads both forms.
 - **Detach.** It drops the lease, then restores the terminal: it pops the kitty flags, turns off bracketed paste, mouse and focus modes, leaves the alternate screen, shows the cursor and resets SGR. Then it leaves raw mode. The pane runs on.
 - **Many clients.** Any number of attach clients and board views can watch one pane. All of them see the same output. Input from all of them goes to the pane in the order it arrives, with no lock. The size follows the client that typed last.
-- **Read-only.** `--read-only` sends no input and takes no lease.
+- **Read-only.** `--read-only` sends no input and takes no lease. It still counts in `attach_clients`, which counts each pane's streams on attach connections.
 - **The switcher (layout A).** An overlay drawn over the pane, listing every pane by project block, with a status glyph, the label and the age. The data comes from the holder's `list` and `meta`, so the switcher works while the daemon is down. When the daemon answers, its activity (`working`, `waiting_permission` and so on) gives the glyph. Otherwise the holder's `running` or `exited` does. Up and Down move, Enter attaches, and Escape closes it and asks for a repaint.
 - **When the pane exits.** Attach shows a one-line note under the last frame ("the agent exited with code 0. Ctrl-\ s for the list, Ctrl-\ d to detach") and stays, so the last screen stays readable.
 - **Errors.** No holder: "no holder runs on this host (start it with `tiller holder`, or run `tiller doctor`)". An ended session: it says so and opens the switcher.
@@ -683,9 +686,11 @@ Each task but S1P, HA1 and H15 is one builder, one branch, one worktree and one 
 
 ## 14. What stays open
 
-Two points are open for the owner, found while H01 wrote the spec amendments:
+One point is open for the owner, found while H01 wrote the spec amendments:
 - **`tiller host remove`.** The 11.1 migration refusal names it as a way out, but the CLI has no such command, and no spec defines it. A row that names the host (its pane cache, its events) would need a rule, and the command must exist before step 2 of 11.3, which runs on the old binary. The owner picks: add it to `main` before H10 with its own contract, or make `tiller peer add` the only way out. Until then the specs repeat the 11.1 text.
-- **A binary check on `tiller attach`.** `tiller` runs outside the role sandbox, so on a host where hooks do not fire the deny rule is the only verb check against an agent that runs `tiller attach` (`authority.md` section 8). A refusal in the binary, as `tiller peer serve` has, must still let a notification click through: the click handler gets `TILLER_SESSION_ID` (section 7). The owner decides before H07.
+
+Decided:
+- **D12, a binary check on `tiller attach`.** `tiller` runs outside the role sandbox, so on a host where hooks do not fire the deny rule is the only verb check against an agent that runs `tiller attach` (`authority.md` section 8). The owner chose a refusal in the binary, as `tiller peer serve` has, that still lets a notification click through. Section 5.2 has the rule.
 
 One point is for a later task, recorded here so it is not lost:
 - Shorter Enter pacing with bracketed paste (section 4.5), once raw stream fixtures exist.

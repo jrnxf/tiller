@@ -695,6 +695,11 @@ pub enum HolderMessage {
     Upgraded {
         holder: String,
     },
+    /// Event, to attach watchers only: a `switch` asks every attach client
+    /// to show this pane (`terminal-holder.md` 5.3).
+    Show {
+        pane: PaneId,
+    },
     /// The holder cut subscription `stream`, which fell behind its queue.
     /// The subscriber may subscribe again for a fresh repaint.
     Lagged {
@@ -740,6 +745,7 @@ impl HolderMessage {
             | HolderMessage::ModelReset { .. }
             | HolderMessage::Forgotten { .. }
             | HolderMessage::Upgraded { .. }
+            | HolderMessage::Show { .. }
             | HolderMessage::Unknown => None,
         }
     }
@@ -767,6 +773,7 @@ impl HolderMessage {
             HolderMessage::ModelReset { pane } => Event::ModelReset { pane },
             HolderMessage::Forgotten { pane, reason } => Event::Forgotten { pane, reason },
             HolderMessage::Upgraded { holder } => Event::Upgraded { holder },
+            HolderMessage::Show { pane } => Event::Show { pane },
             message => return Err(Box::new(message)),
         })
     }
@@ -816,6 +823,10 @@ pub enum Event {
     Upgraded {
         holder: String,
     },
+    /// Only an attach client's watch gets it: show this pane.
+    Show {
+        pane: PaneId,
+    },
 }
 
 impl Event {
@@ -837,6 +848,7 @@ impl Event {
             Event::ModelReset { pane } => HolderMessage::ModelReset { pane },
             Event::Forgotten { pane, reason } => HolderMessage::Forgotten { pane, reason },
             Event::Upgraded { holder } => HolderMessage::Upgraded { holder },
+            Event::Show { pane } => HolderMessage::Show { pane },
         }
     }
 }
@@ -1395,6 +1407,10 @@ mod tests {
                     holder: "0.2.0".into(),
                 },
                 json!({"type":"upgraded","holder":"0.2.0"}),
+            ),
+            (
+                Event::Show { pane: p1() },
+                json!({"type":"show","pane":"p1"}),
             ),
         ];
         for (event, wire) in events {

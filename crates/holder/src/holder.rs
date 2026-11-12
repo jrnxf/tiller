@@ -17,7 +17,7 @@ use std::io;
 use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -161,6 +161,9 @@ pub struct Conn {
     leased: Mutex<Vec<Arc<PaneCell>>>,
     /// Its requests answered from a task of their own, not answered yet.
     pub(crate) in_flight: Arc<AtomicUsize>,
+    /// Its hello named the client `attach`: it counts in `attach_clients`,
+    /// and its watch gets `show` events.
+    attach: AtomicBool,
 }
 
 impl Default for Conn {
@@ -172,6 +175,7 @@ impl Default for Conn {
             streams: Mutex::default(),
             leased: Mutex::default(),
             in_flight: Arc::default(),
+            attach: AtomicBool::new(false),
         }
     }
 }
@@ -193,6 +197,15 @@ impl Conn {
             }
             Err(Refused::Gone) => false,
         }
+    }
+
+    /// Marks this connection as a `tiller attach` client, from its hello.
+    pub fn mark_attach(&self) {
+        self.attach.store(true, Ordering::Relaxed);
+    }
+
+    fn is_attach(&self) -> bool {
+        self.attach.load(Ordering::Relaxed)
     }
 
     pub fn send_message(&self, message: &HolderMessage) -> bool {
@@ -352,8 +365,10 @@ struct Inner {
 impl Inner {
     /// The pane's record as `list` shows it.
     fn record(&self) -> Pane {
+        let attach = self.subscribers.iter().filter(|sub| sub.conn.is_attach());
         Pane {
             subscribers: u32::try_from(self.subscribers.len()).unwrap_or(u32::MAX),
+            attach_clients: u32::try_from(attach.count()).unwrap_or(u32::MAX),
             ..self.record.clone()
         }
     }
@@ -1470,15 +1485,19 @@ impl Holder {
         }
     }
 
-    /// `switch`: tells every attach client to show a running pane, and
-    /// answers with how many were told. No attach client exists before
-    /// `tiller attach` (H07), so none is.
+    /// `switch`: tells every attach client to show a running pane, with a
+    /// `show` event on its watch, and answers with how many were told.
     pub fn switch(&self, pane: &PaneId) -> Result<usize, Failure> {
-        if self.cell(pane)?.live()?.running() {
-            Ok(0)
-        } else {
-            Err(exited(pane))
+        if !self.cell(pane)?.live()?.running() {
+            return Err(exited(pane));
         }
+        let show = HolderMessage::Show { pane: pane.clone() };
+        let watchers = lock(&self.watchers.0);
+        Ok(watchers
+            .iter()
+            .filter(|conn| conn.is_attach())
+            .filter(|conn| conn.send_message(&show))
+            .count())
     }
 
     /// A kind 2 frame from `conn`: raw bytes for the pane `num`, with no

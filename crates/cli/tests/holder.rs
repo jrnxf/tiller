@@ -989,6 +989,50 @@ fn switch_answers_for_a_running_pane_only() {
     assert!(matches!(err, PanesError::NotFound(_)), "{err}");
 }
 
+// Section 5.3: `switch` tells each attach client's watch to show the pane,
+// and `attach_clients` counts the attach clients' streams on a pane.
+#[test]
+fn switch_tells_each_attach_watch_and_the_pane_counts_its_attach_streams() {
+    let world = World::new();
+    let holder = Holder::start(&world);
+    let pane = holder.spawn(&world, &["/bin/cat"]);
+    let daemon_watch = Watch::start(&holder);
+    let attach = HolderClient::connect(&holder.socket, "attach").unwrap();
+    let mut events = attach.watch().unwrap();
+    let mut stream = attach
+        .subscribe(
+            &pane.pane,
+            Subscribe {
+                sync: SyncMode::Pass,
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        stream.recv().unwrap(),
+        Some(Update::Repaint { .. })
+    ));
+    // The daemon's own stream is no attach client.
+    let _daemon_stream = holder.updates(&pane);
+    let got = holder.client.get(&pane.pane).unwrap().unwrap();
+    assert_eq!((got.attach_clients, got.subscribers), (1, 2));
+
+    assert_eq!(holder.client.switch(&pane.pane).unwrap(), 1);
+    assert_eq!(
+        events.recv().unwrap(),
+        Some(Event::Show {
+            pane: pane.pane.clone()
+        })
+    );
+    // The daemon's watch never hears it: the next event it sees is the exit.
+    holder.client.signal(&pane.pane, Signal::Kill).unwrap();
+    let seen = daemon_watch.until(&holder, "exited", |event| {
+        matches!(event, Event::Exited { .. } | Event::Show { .. })
+    });
+    assert!(matches!(seen, Event::Exited { .. }), "{seen:?}");
+
+    stream.handle().end();
+}
+
 // Section 2.5: the spawn's env is the child's whole env, and the holder
 // adds three vars and nothing of its own.
 #[test]
@@ -1518,6 +1562,14 @@ fn rss_kib(pid: u32) -> u64 {
 // 50 ms.
 #[test]
 fn a_flood_keeps_the_holders_memory_bound_and_every_ping_fast() {
+    // It times the wall clock, so `.config/nextest.toml` runs it alone.
+    if std::env::var_os("NEXTEST_RUN_ID").is_some() {
+        assert_eq!(
+            std::env::var("NEXTEST_TEST_GROUP").as_deref(),
+            Ok("wall-clock"),
+            "the nextest override that runs this test alone no longer matches it"
+        );
+    }
     let world = World::new();
     let holder = Holder::start(&world);
     let script = concat!(
