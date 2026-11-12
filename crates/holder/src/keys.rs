@@ -173,6 +173,13 @@ fn kitty(out: &mut String, key: Key, modes: Modes) {
     match key.base {
         Base::Named(named) => {
             if let Some((number, last, _)) = function(named) {
+                // The kitty protocol sends F3 as `CSI 13 ~`: `CSI R` reads
+                // as a cursor position report.
+                let (number, last) = if named == Named::F(3) {
+                    (13, '~')
+                } else {
+                    (number, last)
+                };
                 csi(out, number, last, mods);
                 return;
             }
@@ -327,6 +334,9 @@ mod tests {
             ("up", "\x1b[A"),
             ("ctrl+left", "\x1b[1;5D"),
             ("f1", "\x1b[P"),
+            ("f3", "\x1b[13~"),
+            ("shift+f3", "\x1b[13;2~"),
+            ("f4", "\x1b[S"),
             ("f5", "\x1b[15~"),
         ];
         for (name, want) in cases {

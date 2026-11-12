@@ -59,6 +59,16 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The `ok` reply that carries nothing but its request's id.
+pub(crate) fn ok(id: u64) -> HolderMessage {
+    HolderMessage::Ok {
+        id,
+        cols: None,
+        rows: None,
+        clients: None,
+    }
+}
+
 /// A kind 0 frame, encoded.
 pub fn message_frame(message: &HolderMessage) -> Option<Vec<u8>> {
     let text = match serde_json::to_string(message) {
@@ -163,10 +173,14 @@ impl Watchers {
     /// Sends `event` to every watcher, and drops each whose connection is
     /// cut or gone.
     fn emit(&self, event: &HolderMessage) {
+        let mut watchers = lock(&self.0);
+        if watchers.is_empty() {
+            return;
+        }
         let Some(frame) = message_frame(event) else {
             return;
         };
-        lock(&self.0).retain(|conn| conn.send(frame.clone()));
+        watchers.retain(|conn| conn.send(frame.clone()));
     }
 }
 
@@ -249,9 +263,22 @@ impl PaneCell {
         lock(&self.inner)
     }
 
-    /// An event about this pane, to every watcher.
+    /// The pane's lock, for a request: a pane forgotten since the request
+    /// found it is not found. `forget` marks the pane under this lock.
+    fn live(&self) -> Result<MutexGuard<'_, Inner>, Failure> {
+        let inner = self.inner();
+        if *self.forgotten.borrow() {
+            return Err(not_found(&self.id));
+        }
+        Ok(inner)
+    }
+
+    /// An event about this pane, to every watcher. Called under the pane's
+    /// lock, so no event follows its `forgotten`.
     fn emit(&self, event: &HolderMessage) {
-        self.watchers.emit(event);
+        if !*self.forgotten.borrow() {
+            self.watchers.emit(event);
+        }
     }
 
     /// Sends the events for what the app told the model: titles, bells and
@@ -344,6 +371,7 @@ impl PaneCell {
 
     /// No output for [`QUIET_AFTER`] after output.
     fn quiet(&self) {
+        let _inner = self.inner();
         self.emit(&HolderMessage::Quiet {
             pane: self.id.clone(),
             at: Timestamp::now(),
@@ -546,7 +574,7 @@ impl Holder {
 
     /// `get`: one pane.
     pub fn get(&self, pane: &PaneId) -> Result<Pane, Failure> {
-        Ok(self.cell(pane)?.inner().record())
+        Ok(self.cell(pane)?.live()?.record())
     }
 
     /// `screen`: a read of the pane's model, running or exited. A model
@@ -558,7 +586,7 @@ impl Holder {
             )));
         }
         let cell = self.cell(pane)?;
-        let mut inner = cell.inner();
+        let mut inner = cell.live()?;
         inner.model.screen(read, format).map_err(|panic| {
             cell.model_reset(&mut inner, &panic);
             (
@@ -606,7 +634,7 @@ impl Holder {
     ) -> Result<(), Failure> {
         let cell = self.cell(pane)?;
         let bytes = {
-            let inner = cell.inner();
+            let inner = cell.live()?;
             if !inner.running() {
                 return Err(exited(pane));
             }
@@ -630,7 +658,7 @@ impl Holder {
     /// all queued under the pane's lock so no byte comes between them.
     pub fn subscribe(&self, conn: &Arc<Conn>, id: u64, pane: &PaneId) -> Result<(), Failure> {
         let cell = self.cell(pane)?;
-        let mut inner = cell.inner();
+        let mut inner = cell.live()?;
         // The model holds an open synchronized update apart from its screen,
         // and the new subscriber never got its start: the update ends here,
         // so the repaint shows it and the bytes after it pass as they are.
@@ -717,12 +745,7 @@ impl Holder {
         let mut inner = cell.inner();
         inner.subscribers.retain(|sub| sub.stream != stream);
         conn.forget(stream);
-        conn.send_message(&HolderMessage::Ok {
-            id,
-            cols: None,
-            rows: None,
-            clients: None,
-        });
+        conn.send_message(&ok(id));
         Ok(())
     }
 
@@ -731,7 +754,7 @@ impl Holder {
     pub fn resize(&self, pane: &PaneId, size: Size) -> Result<Size, Failure> {
         check_size(size)?;
         let cell = self.cell(pane)?;
-        let mut inner = cell.inner();
+        let mut inner = cell.live()?;
         if inner.record.state == PaneState::Exited {
             return Err(exited(pane));
         }
@@ -758,8 +781,8 @@ impl Holder {
     /// come with H04, so no connection holds one: the size stays as it is,
     /// as it does when no lease is left (section 2.6).
     pub fn release(&self, pane: &PaneId) -> Result<Size, Failure> {
-        let inner = self.cell(pane)?;
-        let inner = inner.inner();
+        let cell = self.cell(pane)?;
+        let inner = cell.live()?;
         Ok(Size {
             cols: inner.record.cols,
             rows: inner.record.rows,
@@ -770,7 +793,7 @@ impl Holder {
     /// An exited pane keeps its metadata, so it takes changes too.
     pub fn meta(&self, pane: &PaneId, set: Meta, remove: &[String]) -> Result<Pane, Failure> {
         let cell = self.cell(pane)?;
-        let mut inner = cell.inner();
+        let mut inner = cell.live()?;
         inner.record.meta.extend(set);
         for key in remove {
             inner.record.meta.remove(key);
@@ -787,7 +810,11 @@ impl Holder {
             tiller_panes::Signal::Hup => Signal::HUP,
             tiller_panes::Signal::Kill => Signal::KILL,
         };
-        if self.cell(pane)?.signal_running(signal) {
+        let cell = self.cell(pane)?;
+        let inner = cell.live()?;
+        // Under the pane's lock, the reaper cannot free the pid in between.
+        if inner.running() {
+            cell.signal(signal);
             Ok(())
         } else {
             Err(exited(pane))
@@ -821,7 +848,7 @@ impl Holder {
     /// pane whose exit is not in yet is refused.
     pub fn forget(&self, pane: &PaneId) -> Result<(), Failure> {
         let cell = self.cell(pane)?;
-        let mut inner = cell.inner();
+        let mut inner = cell.live()?;
         if inner.record.state != PaneState::Exited {
             return Err(bad_request(format!("{pane} is running")));
         }
@@ -839,7 +866,8 @@ impl Holder {
         }
         cell.forgotten.send_replace(true);
         tracing::info!(pane = %pane, "forgotten");
-        cell.emit(&HolderMessage::Forgotten {
+        // The pane's last event: [`PaneCell::emit`] sends no more.
+        self.watchers.emit(&HolderMessage::Forgotten {
             pane: pane.clone(),
             reason: "forget".to_owned(),
         });
@@ -862,7 +890,7 @@ impl Holder {
     /// answers with how many were told. No attach client exists before
     /// `tiller attach` (H07), so none is.
     pub fn switch(&self, pane: &PaneId) -> Result<usize, Failure> {
-        if self.cell(pane)?.inner().running() {
+        if self.cell(pane)?.live()?.running() {
             Ok(0)
         } else {
             Err(exited(pane))
@@ -1000,6 +1028,9 @@ async fn read_pty(cell: Arc<PaneCell>) {
     loop {
         let sync_at = cell.sync_deadline();
         let ready = tokio::select! {
+            // A forgotten pane reads no more, and tells of no quiet.
+            biased;
+            _ = forgotten.wait_for(|forgotten| *forgotten) => break,
             ready = cell.master.readable() => ready,
             () = until(sync_at) => {
                 cell.end_sync();
@@ -1010,7 +1041,6 @@ async fn read_pty(cell: Arc<PaneCell>) {
                 cell.quiet();
                 continue;
             }
-            _ = forgotten.wait_for(|forgotten| *forgotten) => break,
         };
         let mut guard = match ready {
             Ok(guard) => guard,

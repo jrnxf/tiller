@@ -18,7 +18,7 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 
-use crate::holder::{Conn, Holder};
+use crate::holder::{Conn, Holder, ok};
 use crate::lock::{Acquired, HolderLock, lock_path};
 use crate::peer::{self, PeerCred};
 
@@ -361,12 +361,6 @@ async fn frame_in(holder: &Arc<Holder>, conn: &Arc<Conn>, frame: Frame) -> Next 
 /// `paste` or `keys` keeps its place among the raw input frames.
 fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
     let request_id = request.id();
-    let ok = |id| HolderMessage::Ok {
-        id,
-        cols: None,
-        rows: None,
-        clients: None,
-    };
     let reply = match request {
         Request::Hello(_) => Err((ErrorCode::BadRequest, "hello comes once, first".to_owned())),
         Request::Spawn { id, spawn } => {

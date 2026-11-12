@@ -67,14 +67,22 @@ impl Pen {
         flags: Flags::empty(),
     };
 
+    /// The flags a pen keeps: those in [`ATTRIBUTES`].
+    const FLAGS: Flags = {
+        let mut flags = Flags::empty();
+        let mut index = 0;
+        while index < ATTRIBUTES.len() {
+            flags = flags.union(ATTRIBUTES[index].0);
+            index += 1;
+        }
+        flags
+    };
+
     fn of(cell: &Cell) -> Pen {
-        let pen_flags = ATTRIBUTES
-            .iter()
-            .fold(Flags::empty(), |flags, (flag, _)| flags | *flag);
         Pen {
             fg: cell.fg,
             bg: cell.bg,
-            flags: cell.flags & pen_flags,
+            flags: cell.flags.intersection(Pen::FLAGS),
         }
     }
 
