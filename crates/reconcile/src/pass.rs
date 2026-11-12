@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use tiller_core::domain::{Card, OutboxKind, Project, Session};
 use tiller_core::ids::HOST_HEALTH_CARD;
 use tiller_core::state::attention::NewAttention;
-use tiller_core::state::caches::{WorktreeReading, landed_heads};
+use tiller_core::state::caches::{PaneHolder, WorktreeReading, landed_heads};
 use tiller_core::state::outbox::{NewMessage, live_orchestrator};
 use tiller_core::state::{find, get, list};
 use tiller_core::{Actor, Ctx, Result, Store, Timestamp};
@@ -225,11 +225,13 @@ impl Reconciler {
             // The pane cache the pass reads is the one it just saw.
             match layout::bindings(self.store.conn(), &self.config.host_id) {
                 Ok(bindings) => {
-                    let readings = crate::recovery::evidence::pane_readings(&snapshot, &bindings);
-                    if let Err(error) =
-                        self.store
-                            .cache_panes(&self.ctx(now), &self.config.host_id, readings)
-                    {
+                    let readings = tiller_herdr::poller::readings(&snapshot, &bindings);
+                    if let Err(error) = self.store.cache_panes(
+                        &self.ctx(now),
+                        &self.config.host_id,
+                        PaneHolder::Herdr,
+                        readings,
+                    ) {
                         report.error("pane cache", &error);
                     }
                 }

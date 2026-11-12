@@ -1370,10 +1370,6 @@ pub(crate) fn pane_tail_of(
             .map(|screen| pane_tail(&screen.text(), PANE_TAIL))
             .unwrap_or_default();
     }
-    let herdr = match target.machine {
-        Some(machine) => herdr.on_machine(machine),
-        None => herdr,
-    };
     herdr
         .read_visible(&target.pane)
         .map(|screen| pane_tail(&screen, PANE_TAIL))
@@ -3208,7 +3204,6 @@ async fn pair_host(
                 ctx,
                 NewPairing {
                     label: label.clone(),
-                    herdr_machine: None,
                     scope,
                     peer_host_id,
                 },
@@ -3306,7 +3301,6 @@ async fn pair_host(
                 ctx,
                 NewPairing {
                     label: label.clone(),
-                    herdr_machine: None,
                     scope,
                     peer_host_id: reply.host_id.clone(),
                 },
@@ -4392,8 +4386,8 @@ async fn away_brief(State(state): State<AppState>) -> ApiResult<AwayBriefRespons
     .map(Json)
 }
 
-/// An agent's session id, its pane, and the saved machine it runs on, if
-/// any.
+/// An agent's session id, its pane, and the label of the remote host it
+/// runs on, if any: this host's pane calls reach its own panes only.
 async fn pane_of(
     state: &AppState,
     session: String,
@@ -4408,29 +4402,32 @@ pub(crate) fn pane_target(
 ) -> tiller_core::Result<(String, String, Option<String>)> {
     let id = resolve_id(store.conn(), "sessions", "session", session)?;
     let session: Session = get_row(store.conn(), "session", &id)?;
-    let (pane, machine) = tiller_core::state::runs::focus_target(store.conn(), &session)?;
-    Ok((session.id, pane, machine))
+    let pane = tiller_core::state::runs::focus_target(store.conn(), &session)?;
+    let host: tiller_core::domain::Host = get_row(store.conn(), "host", &session.host_id)?;
+    let remote = (host.kind == tiller_core::domain::HostKind::Remote).then_some(host.label);
+    Ok((session.id, pane, remote))
 }
 
 /// An agent's pane on this machine, for the terminal mirror; an agent on a
-/// saved machine is refused, since herdr's observe stream stays local.
+/// remote host is refused: its pane is read through its peer.
 async fn local_pane(state: &AppState, session: String) -> Result<(String, String), ApiError> {
-    let (session_id, pane, machine) = pane_of(state, session).await?;
-    if let Some(machine) = machine {
-        return Err(saved_machine(&machine));
+    let (session_id, pane, remote) = pane_of(state, session).await?;
+    if let Some(label) = remote {
+        return Err(remote_pane(&label, "the terminal mirror shows panes on this machine only"));
     }
     Ok((session_id, pane))
 }
 
-/// The refusal for an agent on a saved machine, on the stream and the
-/// history of this host's own panes and of a peer's alike.
-pub(crate) fn saved_machine(machine: &str) -> ApiError {
+/// The refusal for an agent on a remote host, on the stream and the history
+/// of this host's own panes and of a peer's alike: `what` says what reaches
+/// this machine's panes only.
+pub(crate) fn remote_pane(label: &str, what: &str) -> ApiError {
     ApiError::new(
         StatusCode::UNPROCESSABLE_ENTITY,
         "refused",
-        format!("the agent runs on the saved machine {machine}; the terminal mirror shows panes on this machine only"),
+        format!("the agent runs on the remote host {label}; {what}"),
     )
-    .hint("open it in herdr instead")
+    .hint(&format!("open it on {label} through its peer link"))
 }
 
 /// herdr's answer to a pane call, as the board API's error.
@@ -4469,7 +4466,7 @@ pub(crate) fn pane_gone(pane: &str) -> ApiError {
                description = "One `TerminalLine` per line: `size`, then `frame`s, until `closed` or `unavailable` or the end of the body; `unfit` when herdr would not resize the pane for the Fit"),
               (status = 400, body = ErrorBody, description = "a `fit` outside 20 to 500 cols by 5 to 200 rows"),
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such agent, or its pane closed"),
-              (status = 422, body = ErrorBody, description = "`refused`: the agent runs on a saved machine"),
+              (status = 422, body = ErrorBody, description = "`refused`: the agent runs on a remote host"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: the peer refused the pane link"),
               (status = 503, body = ErrorBody, description = "herdr or the peer is unreachable, or too many terminal views are open")))]
 async fn terminal(
@@ -4600,7 +4597,7 @@ async fn terminal(
     params(("session" = String, Path)),
     responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody),
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
-              (status = 422, body = ErrorBody, description = "`refused`: the agent runs on a saved machine, its session ended, or no open stream shows a peer's pane"),
+              (status = 422, body = ErrorBody, description = "`refused`: the agent runs on a remote host, its session ended, or no open stream shows a peer's pane"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: a read-scope pairing, or the peer refused the signed input"),
               (status = 503, body = ErrorBody, description = "herdr or the peer is unreachable, or input came faster than 20 a second; nothing was sent"),
               (status = 504, body = ErrorBody, description = "`forward_uncertain`: the peer link dropped before the peer answered; the input may have reached the pane")))]
@@ -4933,7 +4930,7 @@ async fn dialog_left(state: &AppState, pane: &str, wait: prompt::Wait, screen: &
     params(("session" = String, Path)),
     responses((status = 200, body = PromptRead),
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such agent, or its pane closed"),
-              (status = 422, body = ErrorBody, description = "`refused`: the agent runs on a saved machine"),
+              (status = 422, body = ErrorBody, description = "`refused`: the agent runs on a remote host"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
               (status = 503, body = ErrorBody, description = "herdr is unreachable, or reads and input came faster than 20 a second")))]
 async fn prompt_read(
@@ -4980,7 +4977,7 @@ async fn prompt_read(
               (status = 400, body = ErrorBody, description = "an option the dialog does not offer"),
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such agent, or its pane closed"),
               (status = 409, body = ErrorBody, description = "`screen_changed`: the agent no longer waits, or the dialog on its screen is not the one `screen` names; nothing was sent"),
-              (status = 422, body = ErrorBody, description = "`refused`: the agent runs on a saved machine"),
+              (status = 422, body = ErrorBody, description = "`refused`: the agent runs on a remote host"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
               (status = 503, body = ErrorBody, description = "herdr is unreachable, or input came faster than 20 a second; nothing was sent")))]
 async fn prompt_answer(
@@ -5057,7 +5054,7 @@ async fn prompt_answer(
     responses((status = 200, body = MutationResponse),
               (status = 400, body = ErrorBody, description = "a size outside 20 to 500 cols by 5 to 200 rows"),
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
-              (status = 422, body = ErrorBody, description = "`refused`: no open stream holds a Fit on the pane, or the agent runs on a saved machine"),
+              (status = 422, body = ErrorBody, description = "`refused`: no open stream holds a Fit on the pane, or the agent runs on a remote host"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: a read-scope pairing, or the peer refused the signed Fit"),
               (status = 503, body = ErrorBody, description = "the peer is unreachable"),
               (status = 504, body = ErrorBody, description = "`forward_uncertain`: the peer link dropped before the peer answered")))]
@@ -5113,7 +5110,7 @@ pub(crate) fn fit_sent(session_id: &str, (cols, rows): (u16, u16)) -> MutationRe
     params(("session" = String, Path)),
     responses((status = 200, body = TerminalHistory), (status = 400, body = ErrorBody, description = "`lines` outside 1 to 1000"),
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such agent, or its pane closed"),
-              (status = 422, body = ErrorBody, description = "`refused`: the agent runs on a saved machine"),
+              (status = 422, body = ErrorBody, description = "`refused`: the agent runs on a remote host"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
               (status = 503, body = ErrorBody, description = "herdr is unreachable")))]
 async fn terminal_history(
@@ -5173,16 +5170,15 @@ async fn terminal_history(
 const MAX_TAIL_READS: usize = 4;
 static TAIL_READS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(MAX_TAIL_READS);
 
-/// The pane's visible screen and its size, read once, for an agent on a
-/// saved machine: herdr's observe stream stays on the machine the pane runs
-/// on, but its read goes there with `--machine` (`protocol.md` 7.4). A POST
-/// with every mutation check, as the mirror is, though it writes nothing.
+/// The pane's visible screen and its size, read once, for an agent on this
+/// machine (`protocol.md` 7.4). A POST with every mutation check, as the
+/// mirror is, though it writes nothing.
 #[utoipa::path(post, path = "/api/v1/agents/{session}/terminal/tail", tag = "mutations", request_body = TerminalTailAsk,
     params(("session" = String, Path)),
     responses((status = 200, body = TerminalTail),
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such agent, or its pane closed"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
-              (status = 503, body = ErrorBody, description = "herdr, or the saved machine, is unreachable, or 4 tail reads are in flight")))]
+              (status = 503, body = ErrorBody, description = "herdr is unreachable, or 4 tail reads are in flight")))]
 async fn terminal_tail(
     State(state): State<AppState>,
     Path(session): Path<String>,
@@ -5197,7 +5193,10 @@ async fn terminal_tail(
         "the terminal tail (only keys and the Fit reach a peer pane)",
     )
     .await?;
-    let (session_id, pane, machine) = pane_of(&state, session).await?;
+    let (session_id, pane, remote) = pane_of(&state, session).await?;
+    if let Some(label) = remote {
+        return Err(remote_pane(&label, "the terminal tail reads panes on this machine only"));
+    }
     if ids::is_holder_pane(&pane) {
         let holder = holder_of(&state)?;
         let id = tiller_panes::PaneId::from(pane.as_str());
@@ -5225,10 +5224,7 @@ async fn terminal_tail(
             format!("{MAX_TAIL_READS} tail reads are in flight; the next read tries again"),
         )
     })?;
-    let herdr = match machine {
-        Some(machine) => state.0.herdr.clone().on_machine(machine),
-        None => state.0.herdr.clone(),
-    };
+    let herdr = state.0.herdr.clone();
     let target = pane.clone();
     // The read holds its place until herdr answers, even when the board
     // has gone.
@@ -5325,15 +5321,13 @@ async fn interrupt_agent(
         "an interrupt (only keys and the Fit reach a peer pane)",
     )
     .await?;
-    // herdr's pane calls here reach this machine's panes only, and a pane
-    // id on a saved machine may name another agent's pane here.
-    if let (_, _, Some(machine)) = pane_of(&state, session.clone()).await? {
-        return Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "refused",
-            format!("the agent runs on the saved machine {machine}; an interrupt reaches panes on this machine only, so nothing was sent"),
-        )
-        .hint("open it in herdr instead"));
+    // The pane calls here reach this machine's panes only, and a pane id
+    // on a remote host may name another agent's pane here.
+    if let (_, _, Some(label)) = pane_of(&state, session.clone()).await? {
+        return Err(remote_pane(
+            &label,
+            "an interrupt reaches panes on this machine only, so nothing was sent",
+        ));
     }
     let herdr = Routed::new(
         state.0.herdr.clone(),
@@ -5421,7 +5415,7 @@ fn session_run(store: &Store, session: &str, what: &str) -> tiller_core::Result<
     params(("session" = String, Path)),
     responses((status = 200, body = MutationResponse, description = "`data` is the stop: `session`, `stop_proof`, `cleaned`, `closed_pane`, `warning`"),
               (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
-              (status = 422, body = ErrorBody, description = "`refused`: the run is active, the pane holds a draft or a dialog, or the agent runs on another host or a saved machine; nothing was sent"),
+              (status = 422, body = ErrorBody, description = "`refused`: the run is active, the pane holds a draft or a dialog, or the agent runs on another host; nothing was sent"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
               (status = 503, body = ErrorBody, description = "herdr is unreachable")))]
 async fn stop_agent(
@@ -5681,14 +5675,14 @@ async fn focus(
     guard(&state, &headers).await?;
     let request: FocusBody = body(&bytes)?;
     not_forwarded(&state, request.host.as_deref(), "a focus").await?;
-    let (session_id, pane, machine) = pane_of(&state, session).await?;
+    let (session_id, pane, remote) = pane_of(&state, session).await?;
+    if let Some(label) = remote {
+        return Err(remote_pane(&label, "a focus reaches panes on this machine only"));
+    }
     if ids::is_holder_pane(&pane) {
         return focus_held(&state, session_id, pane).await;
     }
-    let herdr = match machine {
-        Some(machine) => state.0.herdr.clone().on_machine(machine),
-        None => state.0.herdr.clone(),
-    };
+    let herdr = state.0.herdr.clone();
     let screen = state.0.herdr.clone().timeout(PROBE_TIMEOUT);
     let terminal = state.0.terminal.clone();
     let app = terminal.as_ref().map(|terminal| terminal.name().to_owned());
@@ -8765,7 +8759,6 @@ pub(crate) mod tests {
                 &Ctx::new(Actor::Owner),
                 NewPairing {
                     label: "laptop".into(),
-                    herdr_machine: None,
                     scope: PeerScope::Act,
                     peer_host_id: "01JC00000000000000000PEER2".into(),
                 },
@@ -8805,7 +8798,6 @@ pub(crate) mod tests {
                 &Ctx::new(Actor::Owner),
                 NewPairing {
                     label: "host-b".into(),
-                    herdr_machine: None,
                     scope: PeerScope::Read,
                     peer_host_id: "01JC00000000000000000PEER1".into(),
                 },
@@ -9062,7 +9054,6 @@ pub(crate) mod tests {
                 &Ctx::new(Actor::Owner),
                 NewPairing {
                     label: "laptop".into(),
-                    herdr_machine: None,
                     scope: PeerScope::Act,
                     peer_host_id: "01JC00000000000000000PEER1".into(),
                 },
@@ -9536,7 +9527,7 @@ esac"#,
             .open()
             .conn()
             .execute_batch(&format!(
-                "INSERT INTO hosts (id, label, kind, herdr_machine) VALUES ('h-r', 'remote-a', 'remote', 'm-1');
+                "INSERT INTO hosts (id, label, kind) VALUES ('h-r', 'remote-a', 'remote');
                  UPDATE sessions SET host_id = 'h-r' WHERE id = '{remote}'"
             ))
             .unwrap();
@@ -9603,15 +9594,22 @@ esac"#,
             "Ghostty did not open: Unable to find application named 'Ghostty'"
         );
 
-        // A remote agent: the probe asks the local server, the focus goes
-        // to the saved machine.
+        // A remote agent: its pane is not this machine's, so nothing runs
+        // (saved herdr machines went with schema 20).
         std::fs::remove_file(dir.join("calls")).unwrap();
-        let data = focus(app(None), remote, "k-4").await;
-        assert_eq!(data["opened"], "focused");
-        assert_eq!(
-            calls().lines().collect::<Vec<_>>(),
-            ["terminal title clear", "--machine m-1 agent focus w3:p1"]
-        );
+        let answer = send(
+            &app(None),
+            mutation(
+                "POST",
+                &format!("/api/v1/agents/{remote}/focus"),
+                json!({"idempotency_key": "k-4"}),
+                &[("cookie", cookie.as_str())],
+            ),
+        )
+        .await;
+        assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", answer.body);
+        assert!(answer.body.contains("the remote host remote-a"), "{}", answer.body);
+        assert_eq!(calls(), "", "no herdr call for a remote pane");
     }
 
     /// A herdr for the terminal mirror: it logs each call, gives the pane
@@ -11918,7 +11916,7 @@ esac"#,
             .open()
             .conn()
             .execute_batch(&format!(
-                "INSERT INTO hosts (id, label, kind, herdr_machine) VALUES ('h-r', 'remote-a', 'remote', 'm-1');
+                "INSERT INTO hosts (id, label, kind) VALUES ('h-r', 'remote-a', 'remote');
                  UPDATE sessions SET host_id = 'h-r' WHERE id = '{remote}'"
             ))
             .unwrap();
@@ -11927,7 +11925,7 @@ esac"#,
         let app = agent_app(&fleet, scratch.path());
         let cookie = owner_cookie(fleet.dir.path());
         let cases = [
-            (remote.clone(), "saved machine m-1"),
+            (remote.clone(), "the remote host remote-a"),
             (fleet.orchestrator_session.clone(), "no run to interrupt"),
         ];
         for (session, why) in cases {
@@ -11967,14 +11965,14 @@ esac"#,
     }
 
     #[tokio::test]
-    async fn a_remote_agent_gets_a_tail_and_no_terminal_mirror() {
+    async fn a_remote_agent_gets_no_terminal_mirror_and_no_tail() {
         let mut fleet = Fleet::new();
         let remote = fleet.worker("w3:p1");
         fleet
             .open()
             .conn()
             .execute_batch(&format!(
-                "INSERT INTO hosts (id, label, kind, herdr_machine) VALUES ('h-r', 'remote-a', 'remote', 'm-1');
+                "INSERT INTO hosts (id, label, kind) VALUES ('h-r', 'remote-a', 'remote');
                  UPDATE sessions SET host_id = 'h-r' WHERE id = '{remote}'"
             ))
             .unwrap();
@@ -12012,38 +12010,17 @@ esac"#,
         }
         assert!(!scratch.path().join("calls").exists());
 
-        // Its tail is read through the saved machine instead: the pane's
-        // size, then its visible screen, colors kept.
+        // Nor a tail: saved herdr machines went with schema 20, and a peer's
+        // pane is read through its peer link.
         let tail = format!("/api/v1/agents/{remote}/terminal/tail");
         let read = send(
             &app,
             mutation("POST", &tail, json!({}), &[("cookie", &cookie)]),
         )
         .await;
-        assert_eq!(read.status, StatusCode::OK, "{}", read.body);
-        let read: Value = serde_json::from_str(&read.body).unwrap();
-        assert_eq!(read["session_id"], remote);
-        assert_eq!(
-            (read["cols"].clone(), read["rows"].clone()),
-            (json!(80), json!(24))
-        );
-        assert_eq!(read["text"], "one\n\u{1b}[34mtwo\u{1b}[0m\n");
-        let calls = std::fs::read_to_string(scratch.path().join("calls")).unwrap();
-        assert_eq!(
-            calls.lines().collect::<Vec<_>>(),
-            [
-                "--machine m-1 pane layout --pane w3:p1",
-                "--machine m-1 pane read w3:p1 --source visible --format ansi"
-            ]
-        );
-        // A closed pane is a 404.
-        std::fs::write(scratch.path().join("gone"), "").unwrap();
-        let closed = send(
-            &app,
-            mutation("POST", &tail, json!({}), &[("cookie", &cookie)]),
-        )
-        .await;
-        assert_eq!(closed.status, StatusCode::NOT_FOUND, "{}", closed.body);
+        assert_eq!(read.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", read.body);
+        assert!(read.body.contains("the remote host remote-a"), "{}", read.body);
+        assert!(!scratch.path().join("calls").exists());
     }
 
     #[tokio::test]
@@ -13016,7 +12993,6 @@ esac"#,
                 &owner,
                 NewPairing {
                     label: "laptop".into(),
-                    herdr_machine: None,
                     scope: PeerScope::Act,
                     peer_host_id: "01JC00000000000000000PEER2".into(),
                 },

@@ -1135,7 +1135,6 @@ async fn memory_changes_need_the_owner_and_stay_on_this_host() {
             &owner(),
             NewPairing {
                 label: "peer".into(),
-                herdr_machine: None,
                 scope: PeerScope::Act,
                 peer_host_id: peer.host.clone(),
             },

@@ -35,7 +35,6 @@ pub struct Initialized {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NewRemoteHost {
     pub label: String,
-    pub herdr_machine: String,
 }
 
 /// The owner-editable host fields; `None` leaves a field as it is.
@@ -498,17 +497,14 @@ impl Store {
         })
     }
 
-    /// `host.add` for a remote peer (`tiller peer add`). Natural: the same
-    /// label and machine return the existing row.
+    /// `host.add` for a remote host. Natural: the same label returns the
+    /// existing remote row.
     pub fn host_add(&mut self, ctx: &Ctx, new: NewRemoteHost) -> Result<Applied<Host>> {
         require_owner(&ctx.actor, "host.add")?;
         required("host label", &new.label)?;
-        required("herdr machine", &new.herdr_machine)?;
         self.write(ctx, "host.add", None, |tx| {
             if let Some(host) = find::<Host>(tx.conn(), "label = ?1", &[&new.label])? {
-                if host.kind == HostKind::Remote
-                    && host.herdr_machine.as_deref() == Some(&new.herdr_machine)
-                {
+                if host.kind == HostKind::Remote {
                     return Ok(host);
                 }
                 return Err(Error::refused(
@@ -519,11 +515,11 @@ impl Store {
             }
             let id = ids::new_ulid();
             tx.conn().execute(
-                "INSERT INTO hosts (id, label, kind, herdr_machine) VALUES (?1, ?2, 'remote', ?3)",
-                params![id, new.label, new.herdr_machine],
+                "INSERT INTO hosts (id, label, kind) VALUES (?1, ?2, 'remote')",
+                params![id, new.label],
             )?;
             tx.event(NewEvent::new("host", &id, "host.added").rev(1).payload(
-                json!({"label": new.label, "kind": "remote", "herdr_machine": new.herdr_machine}),
+                json!({"label": new.label, "kind": "remote"}),
             ))?;
             get(tx.conn(), "host", &id)
         })

@@ -637,7 +637,7 @@ pub fn focus(app: &App, target: &str) -> Done {
     let tools = Tools::load(app)?;
     let store = app.read()?;
     let session = resolve_session(&store, target)?;
-    let (pane, machine) = tiller_core::state::runs::focus_target(store.conn(), &session)?;
+    let pane = tiller_core::state::runs::focus_target(store.conn(), &session)?;
     if tiller_core::ids::is_holder_pane(&pane) {
         // Open in terminal (`terminal-holder.md` 5.3), from this shell: the
         // attach clients switch to the pane, and with none the command to
@@ -665,16 +665,21 @@ pub fn focus(app: &App, target: &str) -> Done {
         }))
         .with_warning(warning));
     }
-    let herdr = match &machine {
-        Some(machine) => tools.herdr.clone().on_machine(machine),
-        None => tools.herdr.clone(),
-    };
-    herdr
+    let host: tiller_core::domain::Host =
+        tiller_core::state::get(store.conn(), "host", &session.host_id)?;
+    if host.kind == tiller_core::domain::HostKind::Remote {
+        return Err(Failure::refused(format!(
+            "the agent runs on the remote host {}; tiller agent focus reaches panes on this host only",
+            host.label
+        )));
+    }
+    tools
+        .herdr
         .focus_agent(&pane)
         .map_err(|error| failure(SpawnError::Herdr(error)))?;
     Ok(Outcome::read(json!({
         "session_id": session.id,
         "pane_id": pane,
-        "machine": machine,
+        "machine": null,
     })))
 }

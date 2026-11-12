@@ -402,7 +402,7 @@
             }
           },
           "422": {
-            "description": "`refused`: the agent runs on a saved machine",
+            "description": "`refused`: the agent runs on a remote host",
             "content": {
               "application/json": {
                 "schema": {
@@ -511,7 +511,7 @@
             }
           },
           "422": {
-            "description": "`refused`: the agent runs on a saved machine",
+            "description": "`refused`: the agent runs on a remote host",
             "content": {
               "application/json": {
                 "schema": {
@@ -895,7 +895,7 @@
             }
           },
           "422": {
-            "description": "`refused`: the run is active, the pane holds a draft or a dialog, or the agent runs on another host or a saved machine; nothing was sent",
+            "description": "`refused`: the run is active, the pane holds a draft or a dialog, or the agent runs on another host; nothing was sent",
             "content": {
               "application/json": {
                 "schema": {
@@ -995,7 +995,7 @@
             }
           },
           "422": {
-            "description": "`refused`: the agent runs on a saved machine",
+            "description": "`refused`: the agent runs on a remote host",
             "content": {
               "application/json": {
                 "schema": {
@@ -1093,7 +1093,7 @@
             }
           },
           "422": {
-            "description": "`refused`: no open stream holds a Fit on the pane, or the agent runs on a saved machine",
+            "description": "`refused`: no open stream holds a Fit on the pane, or the agent runs on a remote host",
             "content": {
               "application/json": {
                 "schema": {
@@ -1202,7 +1202,7 @@
             }
           },
           "422": {
-            "description": "`refused`: the agent runs on a saved machine",
+            "description": "`refused`: the agent runs on a remote host",
             "content": {
               "application/json": {
                 "schema": {
@@ -1299,7 +1299,7 @@
             }
           },
           "422": {
-            "description": "`refused`: the agent runs on a saved machine, its session ended, or no open stream shows a peer's pane",
+            "description": "`refused`: the agent runs on a remote host, its session ended, or no open stream shows a peer's pane",
             "content": {
               "application/json": {
                 "schema": {
@@ -1346,7 +1346,7 @@
         "tags": [
           "mutations"
         ],
-        "summary": "The pane's visible screen and its size, read once, for an agent on a\nsaved machine: herdr's observe stream stays on the machine the pane runs\non, but its read goes there with `--machine` (`protocol.md` 7.4). A POST\nwith every mutation check, as the mirror is, though it writes nothing.",
+        "summary": "The pane's visible screen and its size, read once, for an agent on this\nmachine (`protocol.md` 7.4). A POST with every mutation check, as the\nmirror is, though it writes nothing.",
         "operationId": "terminal_tail",
         "parameters": [
           {
@@ -1408,7 +1408,7 @@
             }
           },
           "503": {
-            "description": "herdr, or the saved machine, is unreachable, or 4 tail reads are in flight",
+            "description": "herdr is unreachable, or 4 tail reads are in flight",
             "content": {
               "application/json": {
                 "schema": {

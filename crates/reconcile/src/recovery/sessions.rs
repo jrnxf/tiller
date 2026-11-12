@@ -1103,7 +1103,7 @@ impl Reconciler {
             &format!("{} rebooted", host.label),
             &format!("{resumed_total} of {workers_total} workers resumed"),
         );
-        self.store.daemon_boot_id(&self.ctx(now), &boot_id)?;
+        self.store.daemon_boot_id(&self.ctx(now), &boot_id, None)?;
         report.repair(format!("R04 restore complete: boot id {boot_id} written"));
         Ok(())
     }

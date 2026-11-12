@@ -760,59 +760,6 @@ impl Source for MemoryLoads {
     }
 }
 
-// -- remote machines ----------------------------------------------------------------
-
-/// Gives every saved remote machine its own cache poller, including one the
-/// owner adds while the daemon runs. Checks the host list every 30 s.
-pub struct Machines {
-    store: Store,
-    home: PathBuf,
-    db: PathBuf,
-    herdr: Cli,
-    registry: Registry,
-    stop: watch::Receiver<bool>,
-    runtime: tokio::runtime::Handle,
-}
-
-impl Source for Machines {
-    fn name(&self) -> String {
-        "machines".to_owned()
-    }
-
-    fn interval(&self) -> Duration {
-        Duration::from_secs(30)
-    }
-
-    fn poll(&mut self, _now: Timestamp) -> Result<(), PollError> {
-        let remotes: Vec<Host> = list(
-            self.store.conn(),
-            "kind = 'remote' AND herdr_machine IS NOT NULL ORDER BY id",
-            &[],
-        )?;
-        let running: Vec<String> = self
-            .registry
-            .health()
-            .into_iter()
-            .map(|health| health.source)
-            .collect();
-        for host in remotes {
-            let Some(machine) = host.herdr_machine else {
-                continue;
-            };
-            if running.contains(&format!("herdr:{machine}")) {
-                continue;
-            }
-            let herdr = self.herdr.clone().on_machine(machine.clone());
-            let source = HerdrSource::remote(herdr, Store::open(&self.db)?, &host.id, machine);
-            if let Ok(poller) = self.registry.register(Gated::new(&self.home, source)) {
-                // Ends with the daemon, like every other poller.
-                self.runtime.spawn(poller.run(self.stop.clone()));
-            }
-        }
-        Ok(())
-    }
-}
-
 // -- starting them --------------------------------------------------------------
 
 /// Spawns `poller` on the runtime until `stop` turns true.
@@ -858,15 +805,6 @@ pub fn start(
     // starts: a failure here leaves nothing running, and the next attempt
     // registers each name afresh.
     let herdr = HerdrSource::local(tools.herdr.clone(), open()?, &local);
-    let machines = Machines {
-        store,
-        home: home.to_owned(),
-        db: db.clone(),
-        herdr: tools.herdr.clone(),
-        registry: registry.clone(),
-        stop: stop.clone(),
-        runtime: tokio::runtime::Handle::current(),
-    };
     let delivery = Deliverer::new(open()?, tools.routed(), &local);
     // The owner's `[notify] command` when set; herdr's notification until
     // the cutover drops herdr otherwise.
@@ -959,7 +897,6 @@ pub fn start(
     // names another system (R20). A reconcile pass checks the marker
     // itself, so it sees the flip back and runs its full pass.
     spawn(registry, Gated::new(home, herdr), stop, &mut handles);
-    spawn(registry, Gated::new(home, machines), stop, &mut handles);
     spawn(registry, Gated::new(home, delivery), stop, &mut handles);
     spawn(registry, Gated::new(home, notify), stop, &mut handles);
     spawn(registry, reconcile, stop, &mut handles);

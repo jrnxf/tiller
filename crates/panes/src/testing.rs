@@ -176,7 +176,7 @@ impl Fleet {
             .unwrap();
     }
 
-    /// A saved machine. Returns its host id.
+    /// A remote host. Returns its host id.
     pub fn remote_host(&self, label: &str) -> String {
         let mut store = self.open();
         store
@@ -184,7 +184,6 @@ impl Fleet {
                 &owner(),
                 NewRemoteHost {
                     label: label.into(),
-                    herdr_machine: label.into(),
                 },
             )
             .unwrap()

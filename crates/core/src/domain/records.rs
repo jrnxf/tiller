@@ -51,7 +51,6 @@ record!(Host in "hosts" {
     id: String,
     label: String,
     kind: HostKind,
-    herdr_machine: Option<String>,
     lane_capacity: Option<i64>,
     ram_floor_mb: Option<i64>,
     disk_floor_mb: Option<i64>,
@@ -473,17 +472,37 @@ record!(Reply in "replies" {
     rev: i64,
 });
 
-record!(Pane in "panes" {
-    pane_id: String,
-    host_id: String,
-    workspace_label: Option<String>,
-    agent_name: Option<String>,
-    agent_status: Option<String>,
-    session_id: Option<String>,
-    metadata: Value,
-    fetched_at: Timestamp,
-    gone_at: Option<Timestamp>,
-});
+record!(
+    /// One pane as its holder last reported it: the terminal holder, or
+    /// herdr until the cutover (`holder_instance` null).
+    Pane in "panes" {
+        pane_id: String,
+        host_id: String,
+        holder_instance: Option<String>,
+        session_id: Option<String>,
+        pid: Option<i64>,
+        label: Option<String>,
+        state: PaneState,
+        exit_code: Option<i64>,
+        exit_signal: Option<i64>,
+        exited_at: Option<Timestamp>,
+        metadata: Value,
+        fetched_at: Timestamp,
+        gone_at: Option<Timestamp>,
+    }
+);
+
+impl Pane {
+    /// The agent herdr names in a herdr pane; `None` for a holder pane.
+    pub fn herdr_agent(&self) -> Option<&str> {
+        self.metadata.get("agent").and_then(Value::as_str)
+    }
+
+    /// herdr's `agent_status` of a herdr pane; `None` for a holder pane.
+    pub fn herdr_status(&self) -> Option<&str> {
+        self.metadata.get("agent_status").and_then(Value::as_str)
+    }
+}
 
 record!(Worktree in "worktrees" {
     path: String,

@@ -251,7 +251,7 @@ fn session_row(store: &Store, session: &Session) -> Result<Value, Failure> {
     };
     let name = match (&run, &card) {
         (Some(run), Some(card)) => Some(herdr_name(&card.display_id, run)),
-        _ => pane.as_ref().and_then(|pane| pane.agent_name.clone()),
+        _ => pane.as_ref().and_then(|pane| pane.herdr_agent().map(str::to_owned)),
     };
     Ok(json!({
         "session_id": session.id,
@@ -267,7 +267,7 @@ fn session_row(store: &Store, session: &Session) -> Result<Value, Failure> {
         "last_status_at": run.as_ref().and_then(|run| run.last_status_at),
         "herdr_name": name,
         "pane_id": session.pane_id,
-        "workspace_label": pane.and_then(|pane| pane.workspace_label),
+        "workspace_label": pane.and_then(|pane| pane.label),
     }))
 }
 
@@ -364,7 +364,8 @@ fn machines_data(store: &Store, local_only: bool) -> Result<Value, Failure> {
         } else {
             store.conn().query_row(
                 "SELECT count(*) FROM panes
-                 WHERE host_id = ?1 AND gone_at IS NULL AND coalesce(agent_status, '') != 'done'",
+                 WHERE host_id = ?1 AND gone_at IS NULL AND state = 'running'
+                   AND coalesce(json_extract(metadata, '$.agent_status'), '') != 'done'",
                 [&host.id],
                 |row| row.get(0),
             )

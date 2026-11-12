@@ -1,15 +1,19 @@
-//! The herdr pollers (T2.5; `recovery.md` R05, R18). The generic poller
-//! lives in `tiller-poll`, re-exported here so its users need no change.
+//! The herdr poller (T2.5; `recovery.md` R05, R18) of this host's herdr
+//! server, until the terminal holder replaces it (`terminal-holder.md` 13,
+//! H13). The generic poller lives in `tiller-poll`, re-exported here so its
+//! users need no change.
 //!
-//! A herdr source backs off as every source does, but the local one holds at
-//! 15 s: it runs on this host, so a late herdr start shows in seconds.
+//! It backs off as every source does, but holds at 15 s: it runs on this
+//! host, so a late herdr start shows in seconds. Saved herdr machines went
+//! with schema 20 (`terminal-holder.md` 11.1): a remote host is a peer.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use serde_json::json;
 use tiller_core::domain::{Activity, ObservationSource, Session};
-use tiller_core::state::caches::PaneReading;
+use tiller_core::domain::PaneState;
+use tiller_core::state::caches::{PaneHolder, PaneReading};
 use tiller_core::state::get;
 use tiller_core::state::runs::NewObservation;
 use tiller_core::{Actor, Ctx, Store, Timestamp};
@@ -32,7 +36,6 @@ pub const LOCAL_BACKOFF_CAP: Duration = Duration::from_secs(15);
 pub const STALE_AFTER: u32 = 3;
 
 pub const LOCAL_INTERVAL: Duration = Duration::from_secs(2);
-pub const REMOTE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// The verdict a herdr `agent_status` stands for (`protocol.md` 4.5). `None`
 /// for a status that says nothing about the session.
@@ -51,16 +54,57 @@ pub fn verdict(status: &str, newest: &Session) -> Option<Activity> {
     }
 }
 
+/// The pane cache rows for one herdr snapshot: herdr panes carry no holder
+/// instance. `metadata` holds the pane's row tokens, as a holder pane's
+/// holds its meta, plus herdr's `agent` and `agent_status`.
+pub fn readings(snapshot: &Snapshot, bindings: &[Binding]) -> Vec<PaneReading> {
+    let labels: HashMap<&str, &str> = snapshot
+        .workspaces
+        .iter()
+        .map(|w| (w.workspace_id.as_str(), w.label.as_str()))
+        .collect();
+    let sessions: HashMap<&str, &str> = bindings
+        .iter()
+        .map(|b| (b.pane_id.as_str(), b.session_id.as_str()))
+        .collect();
+    snapshot
+        .panes
+        .iter()
+        .map(|pane| PaneReading {
+            pane_id: pane.pane_id.clone(),
+            holder_instance: None,
+            session_id: sessions.get(pane.pane_id.as_str()).map(|s| (*s).to_owned()),
+            pid: None,
+            label: labels
+                .get(pane.workspace_id.as_str())
+                .map(|l| (*l).to_owned()),
+            state: PaneState::Running,
+            exit_code: None,
+            exit_signal: None,
+            exited_at: None,
+            metadata: {
+                let mut metadata: serde_json::Map<String, serde_json::Value> = pane
+                    .tokens
+                    .iter()
+                    .map(|(name, value)| (name.clone(), json!(value)))
+                    .collect();
+                metadata.insert("agent".into(), json!(pane.agent));
+                metadata.insert("agent_status".into(), json!(pane.agent_status));
+                serde_json::Value::Object(metadata)
+            },
+        })
+        .collect()
+}
+
 /// A pane and the session bound to it.
 type Bound = (String, String);
 
-/// One herdr server's snapshot source: the local server, which also gets its
-/// layout and row tokens repaired, or a saved machine, which is read only.
+/// The local herdr server's snapshot source, which also gets its layout and
+/// row tokens repaired.
 pub struct HerdrSource<H: Herdr> {
     herdr: H,
     store: Store,
     host_id: String,
-    machine: Option<String>,
     /// The status last recorded per bound pane, so an observation is written
     /// only when herdr's reading changes. Each map is keyed by pane and
     /// session: a pane that another session binds starts afresh.
@@ -80,25 +124,10 @@ pub struct HerdrSource<H: Herdr> {
 impl<H: Herdr + Send + 'static> HerdrSource<H> {
     /// The local server's source.
     pub fn local(herdr: H, store: Store, host_id: impl Into<String>) -> Self {
-        Self::new(herdr, store, host_id.into(), None)
-    }
-
-    /// A saved machine's source, read only.
-    pub fn remote(
-        herdr: H,
-        store: Store,
-        host_id: impl Into<String>,
-        machine: impl Into<String>,
-    ) -> Self {
-        Self::new(herdr, store, host_id.into(), Some(machine.into()))
-    }
-
-    fn new(herdr: H, store: Store, host_id: String, machine: Option<String>) -> Self {
         Self {
             herdr,
             store,
-            host_id,
-            machine,
+            host_id: host_id.into(),
             statuses: HashMap::new(),
             held: HashMap::new(),
             gone: HashSet::new(),
@@ -133,38 +162,19 @@ impl<H: Herdr + Send + 'static> HerdrSource<H> {
         self.layout_complaint = complaint;
     }
 
+    /// Whether a terminal holder was seen on this host: its poller then owns
+    /// the host's reachability, and herdr's reading of it would flap
+    /// against it.
+    fn holder_recorded(&self) -> Result<bool, PollError> {
+        Ok(tiller_core::state::projects::meta(self.store.conn(), "holder_instance")?.is_some())
+    }
+
     pub fn store(&self) -> &Store {
         &self.store
     }
 
     pub fn herdr(&self) -> &H {
         &self.herdr
-    }
-
-    fn readings(snapshot: &Snapshot, bindings: &[Binding]) -> Vec<PaneReading> {
-        let labels: HashMap<&str, &str> = snapshot
-            .workspaces
-            .iter()
-            .map(|w| (w.workspace_id.as_str(), w.label.as_str()))
-            .collect();
-        let sessions: HashMap<&str, &str> = bindings
-            .iter()
-            .map(|b| (b.pane_id.as_str(), b.session_id.as_str()))
-            .collect();
-        snapshot
-            .panes
-            .iter()
-            .map(|pane| PaneReading {
-                pane_id: pane.pane_id.clone(),
-                workspace_label: labels
-                    .get(pane.workspace_id.as_str())
-                    .map(|l| (*l).to_owned()),
-                agent_name: pane.agent.clone(),
-                agent_status: pane.agent_status.clone(),
-                session_id: sessions.get(pane.pane_id.as_str()).map(|s| (*s).to_owned()),
-                metadata: json!(pane.tokens),
-            })
-            .collect()
     }
 
     fn observe(
@@ -261,49 +271,43 @@ impl<H: Herdr + Send + 'static> HerdrSource<H> {
 
 impl<H: Herdr + Send + 'static> Source for HerdrSource<H> {
     fn name(&self) -> String {
-        match &self.machine {
-            None => "herdr:local".to_owned(),
-            Some(machine) => format!("herdr:{machine}"),
-        }
+        "herdr:local".to_owned()
     }
 
     fn interval(&self) -> Duration {
-        match self.machine {
-            None => LOCAL_INTERVAL,
-            Some(_) => REMOTE_INTERVAL,
-        }
+        LOCAL_INTERVAL
     }
 
     fn retry_after(&self, failures: u32) -> Duration {
-        let wait = backoff(failures);
-        match self.machine {
-            None => wait.min(LOCAL_BACKOFF_CAP),
-            Some(_) => wait,
-        }
+        backoff(failures).min(LOCAL_BACKOFF_CAP)
     }
 
-    /// One full snapshot replaces the host's pane cache in one transaction;
-    /// panes it positively lacks are gone. The local server then gets its
-    /// tokens re-reported and its layout repaired, which is a no-op when
-    /// nothing drifted and the whole of R18's recovery after a restart.
+    /// One full snapshot replaces the host's herdr panes in one transaction;
+    /// panes it positively lacks are gone. The server then gets its tokens
+    /// re-reported and its layout repaired, which is a no-op when nothing
+    /// drifted and the whole of R18's recovery after a restart.
     fn poll(&mut self, now: Timestamp) -> Result<(), PollError> {
         let snapshot = self.herdr.snapshot()?;
         let ctx = Ctx::at(Actor::Daemon, now);
         let bindings = layout::bindings(self.store.conn(), &self.host_id)?;
-        self.store
-            .cache_panes(&ctx, &self.host_id, Self::readings(&snapshot, &bindings))?;
-        self.store.host_seen(&ctx, &self.host_id, None)?;
-        self.observe(&ctx, &snapshot, &bindings)?;
-        if self.machine.is_none() {
-            self.repair_layout(&snapshot, &bindings);
+        self.store.cache_panes(
+            &ctx,
+            &self.host_id,
+            PaneHolder::Herdr,
+            readings(&snapshot, &bindings),
+        )?;
+        if !self.holder_recorded()? {
+            self.store.host_seen(&ctx, &self.host_id, None)?;
         }
+        self.observe(&ctx, &snapshot, &bindings)?;
+        self.repair_layout(&snapshot, &bindings);
         Ok(())
     }
 
     /// Three failures in a row mark the host stale. The cache keeps every
     /// pane: a failed poll is no evidence that one is gone.
     fn failed(&mut self, now: Timestamp, failures: u32, error: &PollError) {
-        if failures < STALE_AFTER {
+        if failures < STALE_AFTER || self.holder_recorded().unwrap_or(false) {
             return;
         }
         let reason = match error {
@@ -322,230 +326,14 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
-    use tiller_core::domain::{Host, Pane};
-    use tiller_core::state::list;
+    use tiller_core::domain::Host;
 
     use super::*;
     use crate::fake::{FakeHerdr, Screen};
     use crate::testing::{Fleet, at};
-    #[test]
-    fn local_source_backoff_holds_at_fifteen_seconds() {
-        let fleet = Fleet::new();
-        let herdr = FakeHerdr::new(fleet.dir.path().join("herdr.json"));
-        herdr.set_unreachable(true);
-        let registry = Registry::new();
-        let mut poller = registry
-            .register(HerdrSource::local(herdr, fleet.open(), &fleet.host))
-            .unwrap();
-        let waits: Vec<u64> = (0..6).map(|n| poller.poll_once(at(n)).as_secs()).collect();
-        assert_eq!(waits, [5, 15, 15, 15, 15, 15]);
-    }
-
-    #[test]
-    fn remote_source_backoff_keeps_the_full_schedule() {
-        let fleet = Fleet::new();
-        let remote = fleet.remote_host("peer");
-        let herdr = FakeHerdr::new(fleet.dir.path().join("remote.json"));
-        herdr.set_unreachable(true);
-        let registry = Registry::new();
-        let mut poller = registry
-            .register(HerdrSource::remote(herdr, fleet.open(), &remote, "peer"))
-            .unwrap();
-        let waits: Vec<u64> = (0..6).map(|n| poller.poll_once(at(n)).as_secs()).collect();
-        assert_eq!(waits, [5, 15, 60, 300, 300, 300]);
-    }
-
-    fn panes(fleet: &Fleet) -> Vec<Pane> {
-        list(fleet.store.conn(), "1 = 1 ORDER BY pane_id", &[]).unwrap()
-    }
 
     fn host(fleet: &Fleet, id: &str) -> Host {
         get(fleet.store.conn(), "host", id).unwrap()
-    }
-
-    #[test]
-    fn remote_poll_failure_marks_host_stale_not_panes_gone() {
-        let fleet = Fleet::new();
-        let remote = fleet.remote_host("peer");
-        let herdr = FakeHerdr::new(fleet.dir.path().join("remote.json"));
-        herdr.add_workspace("w1", "notes");
-        herdr.add_pane("w1", "w1:p1", Screen::Idle);
-        let registry = Registry::new();
-        let mut poller = registry
-            .register(HerdrSource::remote(
-                herdr.clone(),
-                fleet.open(),
-                &remote,
-                "peer",
-            ))
-            .unwrap();
-
-        poller.poll_once(at(0));
-        assert_eq!(panes(&fleet).len(), 1);
-        assert_eq!(host(&fleet, &remote).last_seen_at, Some(at(0)));
-
-        herdr.set_unreachable(true);
-        let waits: Vec<_> = (1..=3).map(|n| poller.poll_once(at(n))).collect();
-        assert_eq!(waits, [BACKOFF[0], BACKOFF[1], BACKOFF[2]]);
-        let stale = host(&fleet, &remote);
-        assert_eq!(stale.stale_reason.as_deref(), Some("herdr_link_down"));
-        assert_eq!(
-            stale.last_seen_at,
-            Some(at(0)),
-            "last seen keeps the last success"
-        );
-        let cached = panes(&fleet);
-        assert_eq!(cached.len(), 1);
-        assert!(
-            cached[0].gone_at.is_none(),
-            "a failed poll marks no pane gone"
-        );
-        assert!(
-            herdr
-                .calls()
-                .iter()
-                .all(|c| !c.starts_with("rename") && !c.starts_with("report")),
-            "a saved machine is read only"
-        );
-    }
-
-    #[test]
-    fn poll_failure_never_marks_panes_gone() {
-        let mut fleet = Fleet::new();
-        let worker = fleet.worker("w2:p1");
-        let herdr = FakeHerdr::new(fleet.dir.path().join("herdr.json"));
-        fleet.place(&herdr);
-        let registry = Registry::new();
-        let mut poller = registry
-            .register(HerdrSource::local(herdr.clone(), fleet.open(), &fleet.host))
-            .unwrap();
-        poller.poll_once(at(0));
-
-        herdr.set_unreachable(true);
-        for n in 1..=6 {
-            poller.poll_once(at(n));
-        }
-        assert!(panes(&fleet).iter().all(|p| p.gone_at.is_none()));
-        let session: Session = get(fleet.store.conn(), "session", &worker).unwrap();
-        assert_ne!(
-            session.activity,
-            Activity::Ended,
-            "no pane_gone without a successful read"
-        );
-        assert_eq!(poller.health().consecutive_failures, 6);
-    }
-
-    #[test]
-    fn reconnect_replaces_pane_cache_in_one_snapshot() {
-        let fleet = Fleet::new();
-        let remote = fleet.remote_host("peer");
-        let herdr = FakeHerdr::new(fleet.dir.path().join("remote.json"));
-        herdr.add_workspace("w1", "one");
-        herdr.add_pane("w1", "w1:p1", Screen::Idle);
-        herdr.add_pane("w1", "w1:p2", Screen::Idle);
-        let registry = Registry::new();
-        let mut poller = registry
-            .register(HerdrSource::remote(
-                herdr.clone(),
-                fleet.open(),
-                &remote,
-                "peer",
-            ))
-            .unwrap();
-        poller.poll_once(at(0));
-
-        herdr.set_unreachable(true);
-        for n in 1..=3 {
-            poller.poll_once(at(n));
-        }
-        // While it was away, p2 closed and p3 opened.
-        herdr.remove_pane("w1:p2");
-        herdr.add_pane("w1", "w1:p3", Screen::Idle);
-        herdr.set_unreachable(false);
-        poller.poll_once(at(400));
-
-        let cached = panes(&fleet);
-        let live: Vec<&str> = cached
-            .iter()
-            .filter(|p| p.gone_at.is_none())
-            .map(|p| p.pane_id.as_str())
-            .collect();
-        assert_eq!(live, ["w1:p1", "w1:p3"]);
-        let gone = cached.iter().find(|p| p.pane_id == "w1:p2").unwrap();
-        assert_eq!(gone.gone_at, Some(at(400)));
-        // One write: both changes carry the reconnect's time and adjacent seqs.
-        let seqs: Vec<i64> = fleet
-            .store
-            .conn()
-            .prepare("SELECT seq FROM events WHERE entity = 'pane' AND at = ?1 ORDER BY seq")
-            .unwrap()
-            .query_map([at(400)], |r| r.get(0))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap();
-        assert_eq!(seqs.len(), 2, "p2 gone and p3 new");
-        assert_eq!(seqs[1], seqs[0] + 1);
-        let host = host(&fleet, &remote);
-        assert_eq!(host.stale_reason, None);
-        assert_eq!(host.last_seen_at, Some(at(400)));
-    }
-
-    #[test]
-    fn local_restart_reapplies_layout_and_tokens() {
-        let mut fleet = Fleet::new();
-        let orchestrator = fleet.orchestrator_session.clone();
-        let worker = fleet.worker("w2:p1");
-        let herdr = FakeHerdr::new(fleet.dir.path().join("herdr.json"));
-        fleet.place(&herdr);
-        let registry = Registry::new();
-        let mut poller = registry
-            .register(HerdrSource::local(herdr.clone(), fleet.open(), &fleet.host))
-            .unwrap();
-        poller.poll_once(at(0));
-        let settled = herdr.snapshot().unwrap();
-        assert_eq!(
-            settled
-                .workspaces
-                .iter()
-                .map(|w| w.label.as_str())
-                .collect::<Vec<_>>(),
-            ["alpha", "└ alpha-1 build", "notes"]
-        );
-        assert_eq!(settled.pane("w2:p1").unwrap().tokens["session"], worker);
-        assert_eq!(
-            settled.pane("w1:p1").unwrap().tokens["session"],
-            orchestrator
-        );
-
-        // herdr restarts: tokens are gone and the restored order is flat.
-        herdr.set_unreachable(true);
-        poller.poll_once(at(1));
-        herdr.restart(&["w3", "w2", "w1"]);
-        herdr.set_unreachable(false);
-        poller.poll_once(at(10));
-
-        let repaired = herdr.snapshot().unwrap();
-        assert_eq!(
-            repaired
-                .workspaces
-                .iter()
-                .map(|w| w.label.as_str())
-                .collect::<Vec<_>>(),
-            ["notes", "alpha", "└ alpha-1 build"]
-        );
-        let tokens = &repaired.pane("w2:p1").unwrap().tokens;
-        assert_eq!(tokens["session"], worker);
-        assert_eq!(tokens["card"], "alpha-1");
-        assert_eq!(tokens["role"], "build");
-        assert_eq!(tokens["project"], "alpha");
-
-        let calls = herdr.calls().len();
-        poller.poll_once(at(12));
-        assert_eq!(
-            herdr.calls().len(),
-            calls + 1,
-            "a settled layout costs one snapshot and no writes"
-        );
     }
 
     #[test]

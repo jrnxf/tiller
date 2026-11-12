@@ -169,7 +169,6 @@ impl World {
                 &owner(),
                 NewPairing {
                     label: LABEL.into(),
-                    herdr_machine: None,
                     scope: PeerScope::Act,
                     peer_host_id: peer.host.clone(),
                 },

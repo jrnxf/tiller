@@ -263,23 +263,19 @@ pub fn lease_holder(conn: &Connection, run: &Run) -> Result<String> {
 
 /// Where `herdr agent focus` finds a session's agent (`tiller agent focus`,
 /// the board's "Open in herdr"): its pane, from the `panes` cache first and
-/// the session's own `pane_id` after, and the saved herdr machine of a
-/// remote host. An ended session is refused: its pane may hold another.
-pub fn focus_target(conn: &Connection, session: &Session) -> Result<(String, Option<String>)> {
+/// the session's own `pane_id` after. An ended session is refused: its pane
+/// may hold another.
+pub fn focus_target(conn: &Connection, session: &Session) -> Result<String> {
     if session.ended_at.is_some() {
         return Err(Error::refused("session", &session.id, "the session ended"));
     }
-    let host: Host = get(conn, "host", &session.host_id)?;
     let pane = find::<Pane>(conn, "session_id = ?1 AND gone_at IS NULL", &[&session.id])?
         .map(|pane| pane.pane_id)
         .or(session.pane_id.clone())
         .ok_or_else(|| {
             Error::refused("session", &session.id, "the session has no pane to focus")
         })?;
-    let machine = (host.kind == HostKind::Remote)
-        .then_some(host.herdr_machine)
-        .flatten();
-    Ok((pane, machine))
+    Ok(pane)
 }
 
 fn load_run(tx: &Tx<'_>, run: &str) -> Result<Run> {

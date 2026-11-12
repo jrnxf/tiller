@@ -108,7 +108,6 @@ fn pair_onto(board: &Fleet, peer: &Fleet, label: &str) -> (SigningKey, String) {
             &owner(),
             NewPairing {
                 label: label.into(),
-                herdr_machine: None,
                 scope: PeerScope::Act,
                 peer_host_id: peer.host.clone(),
             },
