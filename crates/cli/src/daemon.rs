@@ -128,15 +128,19 @@ fn follow_config(initial: Cli, config: std::path::PathBuf) -> Cli {
 pub fn refuse_db(db: Option<&Path>) -> Option<String> {
     let db = db?;
     let home = crate::app::App::from_env(None).home;
-    let own = home.join("state.db");
-    if same_path(db, &own) {
+    if is_home_db(db, &home) {
         return None;
     }
     Some(format!(
         "--db and TILLER_DB do not apply to the daemon: it opens {} and keeps its lock, backups and mirror in {}. Set TILLER_HOME to the directory that holds the database to serve.",
-        own.display(),
+        home.join("state.db").display(),
         home.display()
     ))
+}
+
+/// Whether `db` names `home`'s own `state.db`.
+pub fn is_home_db(db: &Path, home: &Path) -> bool {
+    same_path(db, &home.join("state.db"))
 }
 
 /// Whether two paths name one file, even when it does not exist yet.
