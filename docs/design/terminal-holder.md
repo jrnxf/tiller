@@ -98,7 +98,7 @@ JSON keeps the control path easy to read in logs and easy to extend. Bulk bytes 
 | `get {pane}` | `pane {pane}` | One pane, or `not_found` |
 | `screen {pane, read, format}` | `screen {...}` | `read` is `visible` or `{recent: lines}` (1 to 10,000). `format` is `text` or `ansi`. The reply holds `rows`, `cols`, `cursor`, `modes` and `rows_text` |
 | `input {pane, text}` | `ok` | Types text as keystrokes, with no paste brackets |
-| `paste {pane, text}` | `ok` | Sends text inside bracketed paste when the app turned mode 2004 on, else as `input` |
+| `paste {pane, text}` | `ok` | Sends text inside bracketed paste when the app turned mode 2004 on, else as `input` with each line ended by a carriage return |
 | `keys {pane, keys: [name]}` | `ok` | Named keys (section 4.3), encoded for the app's current keyboard mode |
 | kind 2 frame | none | Raw bytes from `tiller attach`, passed to the PTY as they are |
 | `resize {pane, cols, rows, lease}` | `ok {cols, rows}` | Sets the PTY size through a lease (section 2.6) |
@@ -107,7 +107,7 @@ JSON keeps the control path easy to read in logs and easy to extend. Bulk bytes 
 | `unsubscribe {stream}` | `ok` | Stops them |
 | `meta {pane, set, remove}` | `pane {pane}` | Merges string keys into the pane's metadata |
 | `signal {pane, signal}` | `ok` | `int`, `term`, `hup` or `kill`, to the child's process group |
-| `close {pane, grace_ms}` | `exited {pane}` | `hup` to the group, then `kill` after `grace_ms` (default 3,000). It answers when the child is reaped |
+| `close {pane, grace_ms}` | `exited {pane}` | `hup` to the group, then `kill` after `grace_ms` (default 3,000). It answers when the child is reaped. When the child exits first, what is left of the group still gets the `kill` at the deadline |
 | `forget {pane}` | `ok` | Drops an exited pane and its screen. A running pane is refused |
 | `watch {}` | `watching` | Starts `event` messages on this connection |
 | `switch {pane}` | `ok {clients}` | Tells every attach client on this host to show `pane` (section 5.3) |
@@ -158,7 +158,7 @@ A subscriber gets one **repaint**, then **passthrough**:
 
 - **Repaint.** The holder renders the pane's model into a byte string that draws the current screen on an empty terminal of the same size (section 3.4). It is the first kind 1 frame, and a JSON `repaint` message comes before it with the size. The board's first frame, the first frame of `tiller attach` and the upgrade handover all use the same renderer.
 - **Passthrough.** After the repaint, the subscriber gets the PTY's own bytes, as the child wrote them, less the query sequences (below). Raw bytes keep full fidelity: the board's xterm.js or the owner's terminal draws what the agent drew.
-- **Queries.** An app asks its terminal questions: DA1, DA2, cursor position (CPR), DECRQM, the kitty keyboard query, XTVERSION, and OSC 10 and 11 colors. With many viewers, many terminals would answer, or none would. So the holder answers them from its model, as one terminal, and cuts them from the passthrough stream. A test feeds each query and checks one answer on the PTY and none in any subscriber's stream. The answer to XTVERSION is `tiller <version>`.
+- **Queries.** An app asks its terminal questions: DA1, DA2, cursor position (CPR), DECRQM, the kitty keyboard query, XTVERSION, the window size reports (`14t`, `18t`), and OSC 4, 10, 11 and 12 colors. With many viewers, many terminals would answer, or none would. So the holder answers them from its model, as one terminal, and cuts them from the passthrough stream. A test feeds each query and checks one answer on the PTY and none in any subscriber's stream. The answer to XTVERSION is `tiller <version>`.
 - **Synchronized output (mode 2026).** The model holds a frame until its end marker, so a `screen` read never sees half a frame. The passthrough stream keeps the markers. A subscriber can ask `sync: "buffer"`, and the holder then holds that subscriber's bytes from the start marker to the end marker (at most 150 ms or 1 MiB) and sends them as one frame. The board asks for it, because the board's xterm.js may not honor mode 2026. `tiller attach` asks `sync: "pass"`, because modern terminals honor it.
 - **Back-pressure.** Each subscriber has a queue of 4 MiB. A subscriber that falls behind it is cut (`{"type":"lagged","stream":n}`) and may subscribe again for a fresh repaint. The PTY reader never waits for a subscriber.
 
