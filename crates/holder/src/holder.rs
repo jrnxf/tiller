@@ -21,9 +21,9 @@ use tiller_panes::handshake::Welcome;
 use tiller_panes::message::{ErrorCode, HolderMessage};
 use tiller_panes::{Exit, Listing, Pane, PaneId, PaneState, Size, Spawn};
 use tokio::io::unix::AsyncFd;
-use tokio::sync::{Notify, mpsc, watch};
+use tokio::sync::{Notify, watch};
 
-use crate::input::{Chunk, INPUT_CAP, InputQueue, PANE_INPUT_CAP};
+use crate::input::{self, INPUT_CAP, InputQueue};
 use crate::model::{MAX_COLS, MAX_ROWS, MIN_COLS, MIN_ROWS, Model, ModelPanic};
 use crate::outbox::{Outbox, Refused};
 use crate::pty;
@@ -207,9 +207,8 @@ pub struct PaneCell {
     /// The child's pid, which is also its process group's id.
     pid: Pid,
     master: AsyncFd<OwnedFd>,
-    input: mpsc::UnboundedSender<Chunk>,
-    /// The raw input not yet written, and its caps.
-    input_queue: Arc<InputQueue>,
+    /// The raw input not yet written.
+    input: InputQueue,
     inner: Mutex<Inner>,
     /// True once the PTY read ends: every holder of the slave closed it.
     output_ended: watch::Sender<bool>,
@@ -417,14 +416,12 @@ impl Holder {
             attach_clients: 0,
             subscribers: 0,
         };
-        let (input, input_rx) = mpsc::unbounded_channel();
         let cell = Arc::new(PaneCell {
             id,
             num,
             pid: started.pid,
             master,
-            input,
-            input_queue: Arc::default(),
+            input: InputQueue::default(),
             inner: Mutex::new(Inner {
                 record: record.clone(),
                 model: Model::new(size),
@@ -437,7 +434,7 @@ impl Holder {
         drop(table);
         tracing::info!(pane = %record.pane, num, pid = record.pid, argv = ?record.argv, "spawned");
         tokio::spawn(read_pty(cell.clone()));
-        tokio::spawn(write_input(cell, input_rx));
+        tokio::spawn(write_input(cell));
         self.reap.notify_one();
         Ok((record, false))
     }
@@ -547,7 +544,8 @@ impl Holder {
     /// A kind 2 frame from `conn`: raw bytes for the pane `num`, with no
     /// reply. Input for a pane that is gone or has exited is dropped. Input
     /// is never waited for, as that would hold up every other request on
-    /// the connection: input past a cap of `crate::input` cuts `conn`.
+    /// the connection: past [`INPUT_CAP`] (see `crate::input`), `conn` is
+    /// cut.
     pub fn input(&self, conn: &Conn, num: u32, bytes: Vec<u8>) {
         let Some(cell) = self.by_num(num) else {
             tracing::debug!(num, "raw input for no pane");
@@ -557,25 +555,36 @@ impl Holder {
             tracing::debug!(pane = %cell.id, "raw input for an exited pane");
             return;
         }
-        let Some(chunk) = cell.input_queue.take(conn.id, bytes) else {
-            if conn.cut() {
-                tracing::warn!(
-                    pane = %cell.id,
-                    "the pane's app left raw input unread past a cap ({INPUT_CAP} bytes for one client, {PANE_INPUT_CAP} in all), so the client that sent more was cut"
-                );
+        match cell.input.push(conn.id, bytes) {
+            Ok(()) => {}
+            Err(input::Refused::Full(unread)) => {
+                if conn.cut() {
+                    tracing::warn!(
+                        pane = %cell.id,
+                        unread,
+                        "the pane's app left {INPUT_CAP} bytes of a client's raw input unread, so the client was cut when it sent more"
+                    );
+                }
+                cell.input.drop_conn(conn.id);
             }
-            return;
-        };
-        if cell.input.send(chunk).is_err() {
-            tracing::debug!(pane = %cell.id, "raw input for a pane whose PTY is closed");
+            Err(input::Refused::Closed) => {
+                tracing::debug!(pane = %cell.id, "raw input for a pane whose PTY is closed");
+            }
         }
     }
 
     /// A connection ended: its subscriptions end with it.
+    /// A cut connection's unwritten input goes too, as the client knows
+    /// it has a gap. A connection that closed keeps its input.
     pub fn drop_conn(&self, conn: &Arc<Conn>) {
         for (stream, cell) in conn.take_streams() {
             let mut inner = cell.inner();
             inner.subscribers.retain(|sub| sub.stream != stream);
+        }
+        if conn.outbox.cut_at().is_some() {
+            for cell in self.panes() {
+                cell.input.drop_conn(conn.id);
+            }
         }
     }
 
@@ -673,11 +682,19 @@ async fn read_pty(cell: Arc<PaneCell>) {
 /// Writes raw input to a pane's PTY, in order, as fast as it takes it.
 /// It ends once the PTY's output ends: with the slave closed, the master
 /// takes a few KiB and then is never writable again.
-/// A chunk counts toward the pane's input caps until it is written, or
-/// dropped with the rest of the queue when this ends.
-async fn write_input(cell: Arc<PaneCell>, mut input: mpsc::UnboundedReceiver<Chunk>) {
+/// When it ends, the input still queued is dropped.
+async fn write_input(cell: Arc<PaneCell>) {
+    write_all_input(&cell).await;
+    cell.input.close();
+}
+
+async fn write_all_input(cell: &PaneCell) {
     let mut ended = cell.output_ended.subscribe();
-    while let Some(chunk) = input.recv().await {
+    loop {
+        let chunk = tokio::select! {
+            chunk = cell.input.next() => chunk,
+            _ = ended.wait_for(|ended| *ended) => return,
+        };
         let mut rest = chunk.bytes.as_slice();
         while !rest.is_empty() {
             let writable = tokio::select! {

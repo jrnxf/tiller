@@ -357,8 +357,8 @@ fn input_past_the_cap_for_an_app_that_reads_none_cuts_that_client_only() {
     let pane = holder.spawn(&world, &["/bin/sh", "-c", "sleep 30"]);
     // Whole lines, so the PTY's line buffer fills and then takes no more.
     let chunk = b"0123456789abcdef\n".repeat(4 * 1024);
-    // About 2 MiB: past the PTY's buffer and the holder's 1 MiB queue.
-    for _ in 0..30 {
+    // About 6.6 MiB: past the PTY's buffer and the client's 4 MiB cap.
+    for _ in 0..100 {
         if holder.client.raw_input(pane.num, &chunk).is_err() {
             break;
         }
@@ -387,7 +387,7 @@ fn a_client_cut_for_a_stuck_pane_leaves_other_clients_and_panes_alone() {
     // Another client fills the stuck pane's queue and is cut for it.
     let flooder = HolderClient::connect(&holder.socket, "daemon").unwrap();
     let chunk = b"0123456789abcdef\n".repeat(4 * 1024);
-    for _ in 0..30 {
+    for _ in 0..100 {
         if flooder.raw_input(stuck.num, &chunk).is_err() {
             break;
         }

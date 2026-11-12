@@ -181,7 +181,7 @@ async fn connection(holder: Arc<Holder>, stream: UnixStream) {
         () = &mut writer => {
             // The writer ends first on a cut or a broken socket. The reader
             // runs nothing more, but takes what the client still sends for a
-            // short time, so a client that stops sends in time reads the
+            // short time, so a client that stops sending in time reads the
             // close and not a reset.
             conn.outbox.close();
             let _ = tokio::time::timeout(CLOSE_FLUSH, &mut reader).await;
