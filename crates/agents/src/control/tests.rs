@@ -1830,7 +1830,7 @@ fn a_relaunch_with_the_terminal_holder_that_fails_in_its_kept_pane_names_no_retr
     let text = error.to_string();
     assert!(
         text.contains("the relaunch is recorded")
-            && text.contains("a relaunch with no herdr pane of its own is refused until H09"),
+            && text.contains("a relaunch goes on only in a herdr pane the session still owns"),
         "{text}"
     );
     assert!(!text.contains("tiller agent relaunch"), "{text}");
@@ -1934,7 +1934,7 @@ fn a_resume_with_the_terminal_holder_and_no_claude_session_in_a_holder_pane_name
     let error = resume_it(&mut rig, &owner(), &patient(), &spawned.run.id).unwrap_err();
     let text = error.to_string();
     assert!(text.contains("never bound a Claude session"), "{text}");
-    assert!(text.contains("refused until H09"), "{text}");
+    assert!(text.contains("until H09"), "{text}");
     assert!(!text.contains("tiller agent relaunch"), "{text}");
 }
 
@@ -1953,21 +1953,25 @@ fn a_relaunch_of_an_agent_in_a_holder_pane_is_refused_with_the_holder_down_and_r
             [&held, &spawned.session.id],
         )
         .unwrap();
+    assert!(rig.panes.is_none());
     let opened = workspaces_opened(&rig);
 
     let advice = resume_it(&mut rig, &owner(), &patient(), &spawned.run.id)
         .unwrap_err()
         .to_string();
-    assert!(advice.contains("refused until H09"), "{advice}");
+    assert!(advice.contains("until H09"), "{advice}");
     assert!(!advice.contains("tiller agent relaunch"), "{advice}");
 
     let ctx = rig.orchestrator();
     let error = relaunch_it(&mut rig, &ctx, &patient(), &spawned.run.id, note("n")).unwrap_err();
     let text = error.to_string();
     assert!(
-        text.contains("A relaunch is not ready yet with the terminal holder"),
+        text.contains(&format!(
+            "A relaunch is not ready yet for an agent in the terminal holder (pane {held})"
+        )),
         "{text}"
     );
+    assert!(!typed(&rig, &spawned.pane_id, "/exit"));
     assert!(session(&rig, &spawned.session.id).ended_at.is_none());
     assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
 }

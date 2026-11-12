@@ -574,7 +574,11 @@ pub fn relaunch(
     // With no herdr pane to go on in, the relaunch would open a new one, and
     // a new pane belongs in the terminal holder, which takes a relaunch only
     // once its stop and forget land (H09). An agent whose herdr pane is still
-    // its own goes on there.
+    // its own goes on there. An agent in a holder pane is refused naming
+    // its pane, holder up or down.
+    if let Some(pane) = old.as_ref().and_then(|s| s.pane_id.as_deref()) {
+        herdr_only(pane, "A relaunch")?;
+    }
     if relaunch_held(store, world, old.as_ref())? {
         return Err(holder_not_ready("A relaunch", run));
     }
@@ -793,8 +797,9 @@ fn ready_to_stop(
     Ok(Ready::Exit(pane_id))
 }
 
-/// Refuses `what` for a run that would need a new pane while the terminal
-/// holder is up: herdr opens no new pane then, and the holder takes it only
+/// Refuses `what` for a run that `relaunch_held` holds: one that would
+/// need a new pane while the terminal holder is up (herdr opens no new pane
+/// then), or whose agent is in a holder pane. The holder takes either only
 /// in its own slice (H09).
 fn holder_not_ready(what: &str, run: &Run) -> SpawnError {
     SpawnError::Refused(format!(
@@ -819,13 +824,14 @@ fn relaunch_held(store: &Store, world: &World<'_>, session: Option<&Session>) ->
 
 /// Why a relaunch is refused for now (`relaunch_held`), as the refusals
 /// and notes that point past it say.
-const HELD: &str = "a relaunch with no herdr pane of its own is refused until H09, when the terminal holder takes it, so the run waits for that or for a new start of its card";
+const HELD: &str = "until H09 a relaunch goes on only in a herdr pane the session still owns while the terminal holder is up, and never for an agent in a holder pane, so the run waits for that or for a new start of its card";
 
 /// Whether the gate `relaunch_held` read refuses a relaunch, for the
 /// advice a refusal or a note gives. When the gate cannot be read now
 /// (herdr or the store failing), the relaunch advice stands, and the
 /// relaunch itself says why it stops, so the caller's own reason is never
-/// lost.
+/// lost. `relaunch_held` gives its answer as a value: a refusal it returned
+/// would read as not held here, so a new hold goes in as `Ok(true)`.
 fn held_now(gate: Result<bool>) -> bool {
     gate.unwrap_or(false)
 }
