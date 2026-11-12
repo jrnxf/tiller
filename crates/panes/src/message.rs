@@ -157,8 +157,23 @@ pub struct Listing {
 pub enum Read {
     /// The visible screen: `"visible"` on the wire.
     Visible,
-    /// The last `n` rows, scrollback included (1 to 10,000): `{"recent": n}`.
+    /// The last `n` rows, scrollback included (1 to [`MAX_RECENT`]):
+    /// `{"recent": n}`.
     Recent(u16),
+}
+
+/// The most rows a `recent` read takes (spec 2.4).
+pub const MAX_RECENT: u16 = 10_000;
+
+impl Read {
+    /// Whether the holder takes this read: a `recent` read is 1 to
+    /// [`MAX_RECENT`] rows.
+    pub fn in_range(self) -> bool {
+        match self {
+            Read::Visible => true,
+            Read::Recent(n) => (1..=MAX_RECENT).contains(&n),
+        }
+    }
 }
 
 /// How a `screen` reply draws its rows.

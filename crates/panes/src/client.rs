@@ -4,9 +4,11 @@
 //! overlap: each caller registers its request id, writes its frame, and
 //! waits for its own reply, which one reader thread hands over by id. Raw
 //! input takes only the write side, so a keystroke never waits here for
-//! another call's reply. (How soon the holder serves it is the holder's
-//! part: spec 2.4 has it serve a connection's requests concurrently.) Each [`Subscription`] and each [`Events`] has a connection
-//! of its own: its frames never wait behind a request, and a size a
+//! another call's reply. How soon the holder serves a request is the
+//! holder's part: it serves a connection's frames in order for now (spec
+//! 2.4 allows them to overlap). Each [`Subscription`] and each [`Events`]
+//! has a connection of its own: its frames never wait behind a request,
+//! and a size a
 //! subscription sets through its lease ends when it is dropped, because its
 //! connection ends. A [`StreamHandle`] resizes or ends a subscription from
 //! another thread while one thread waits in [`Subscription::recv`].
@@ -37,8 +39,8 @@ use crate::handshake::{Hello, ProtoRange, SUPPORTED, Welcome};
 use crate::keys::Key;
 use crate::live::{Control, EventFeed, Events, Feed, Subscribe, Subscription, Update};
 use crate::message::{
-    ErrorCode, Event, Exit, Format, HolderMessage, Listing, Meta, Pane, PaneId, Read, Request,
-    Screen, Signal, Spawn,
+    ErrorCode, Event, Exit, Format, HolderMessage, Listing, MAX_RECENT, Meta, Pane, PaneId, Read,
+    Request, Screen, Signal, Spawn,
 };
 use crate::panes::{Live, Panes};
 use crate::paths::check_socket_path;
@@ -761,6 +763,12 @@ impl Panes for HolderClient {
     }
 
     fn screen(&self, pane: &PaneId, read: Read, format: Format) -> Result<Screen> {
+        if !read.in_range() {
+            return Err(refused(
+                "screen",
+                format_args!("recent takes 1 to {MAX_RECENT} rows, not {read:?}"),
+            ));
+        }
         let request = Request::Screen {
             id: self.id(),
             pane: pane.clone(),

@@ -31,8 +31,8 @@ pub use error::{PanesError, Result};
 pub use keys::{BadKey, Key};
 pub use live::{Events, EventsEnd, StreamHandle, Subscribe, Subscription, Update};
 pub use message::{
-    Cursor, Event, Exit, Format, Listing, Meta, Pane, PaneId, PaneState, Read, Screen, Signal,
-    Size, Spawn,
+    Cursor, Event, Exit, Format, Listing, MAX_RECENT, Meta, Pane, PaneId, PaneState, Read, Screen,
+    Signal, Size, Spawn,
 };
 pub use panes::{Live, Panes};
 pub use paths::{run_dir, socket_path};

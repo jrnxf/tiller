@@ -11,8 +11,8 @@ use tiller_panes::frame::{Frame, FrameError, MAX_FRAME_LEN, read_frame, write_fr
 use tiller_panes::handshake::{ProtoRange, Refused, SUPPORTED, Welcome, negotiate};
 use tiller_panes::message::{ErrorCode, HolderMessage, Request, SyncMode};
 use tiller_panes::{
-    Exit, HolderClient, Listing, Live, Meta, Pane, PaneId, PaneState, Panes, PanesError, Spawn,
-    Subscribe, Update, socket_path,
+    Exit, Format, HolderClient, Listing, Live, MAX_RECENT, Meta, Pane, PaneId, PaneState, Panes,
+    PanesError, Read, Spawn, Subscribe, Update, socket_path,
 };
 
 /// The holder's end of one connection.
@@ -898,6 +898,41 @@ fn a_request_too_large_to_send_is_refused_and_keeps_the_connection() {
             .starts_with("spawn refused: bad_request: not sent: "),
         "{err}"
     );
+    assert!(client.list().unwrap().panes.is_empty());
+    holder.join();
+}
+
+#[test]
+fn a_recent_read_out_of_range_is_refused_before_it_is_sent() {
+    let holder = Holder::serve(vec![Box::new(|mut peer: Peer| {
+        peer.handshake(SUPPORTED);
+        let Request::List { id } = peer.request() else {
+            panic!("the out-of-range read reached the holder");
+        };
+        peer.send(&HolderMessage::Panes {
+            id,
+            listing: Listing {
+                instance: INSTANCE.into(),
+                panes: Vec::new(),
+            },
+        });
+    })]);
+    let client = HolderClient::connect(&holder.path, "daemon").unwrap();
+    let pane = PaneId::from("p1");
+    for read in [Read::Recent(0), Read::Recent(MAX_RECENT + 1)] {
+        let err = client.screen(&pane, read, Format::Text).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PanesError::Refused {
+                    request: "screen",
+                    code: ErrorCode::BadRequest,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
     assert!(client.list().unwrap().panes.is_empty());
     holder.join();
 }

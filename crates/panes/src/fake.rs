@@ -19,8 +19,8 @@ use crate::error::{PanesError, Result};
 use crate::keys::Key;
 use crate::live::{Control, EventFeed, Events, Feed, Subscribe, Subscription, Update};
 use crate::message::{
-    Cursor, DEFAULT_SIZE, ErrorCode, Event, Exit, Format, Listing, Meta, Pane, PaneId, PaneState,
-    Read, Screen, Signal, Spawn,
+    Cursor, DEFAULT_SIZE, ErrorCode, Event, Exit, Format, Listing, MAX_RECENT, Meta, Pane, PaneId,
+    PaneState, Read, Screen, Signal, Spawn,
 };
 use crate::panes::{Live, Panes};
 
@@ -33,9 +33,6 @@ pub const EXITED_LIMIT: usize = 64;
 
 /// The first fake pid.
 const FIRST_PID: u32 = 1 << 31;
-
-/// The most lines a `recent` read takes (spec 2.5).
-const MAX_RECENT: u16 = 10_000;
 
 /// The signal number `close` reports, as a child that `hup` ended.
 const SIGHUP: i32 = 1;
@@ -416,17 +413,20 @@ impl Panes for FakePanes {
         let world = self.call(format!("screen {pane} {read:?} {format:?}"))?;
         let record = world.pane(pane)?;
         let mut rows_text = world.screens.get(pane).cloned().unwrap_or_default();
-        if let Read::Recent(n) = read {
-            if !(1..=MAX_RECENT).contains(&n) {
-                return Err(PanesError::Refused {
-                    request: "screen",
-                    code: ErrorCode::BadRequest,
-                    message: format!("recent takes 1 to {MAX_RECENT} lines, not {n}"),
-                });
-            }
-            let skip = rows_text.len().saturating_sub(usize::from(n));
-            rows_text.drain(..skip);
+        if !read.in_range() {
+            return Err(PanesError::Refused {
+                request: "screen",
+                code: ErrorCode::BadRequest,
+                message: format!("recent takes 1 to {MAX_RECENT} rows, not {read:?}"),
+            });
         }
+        // The visible screen is the last `rows` rows, with no scrollback.
+        let lines = match read {
+            Read::Visible => usize::from(record.rows),
+            Read::Recent(n) => usize::from(n),
+        };
+        let skip = rows_text.len().saturating_sub(lines);
+        rows_text.drain(..skip);
         Ok(Screen {
             cols: record.cols,
             rows: record.rows,
@@ -555,15 +555,20 @@ impl Live for FakePanes {
         }
         drop(world);
         let lease = lease_of(stream);
+        let ended = Arc::new(AtomicBool::new(false));
         let control = Arc::new(FakeControl {
             world: Arc::clone(&self.world),
             pane: pane.clone(),
             stream,
             lease: lease.clone(),
             tx,
-            ended: AtomicBool::new(false),
+            ended: Arc::clone(&ended),
         });
-        let feed = FakeFeed { rx, done: false };
+        let feed = FakeFeed {
+            rx,
+            done: false,
+            ended,
+        };
         Ok(Subscription::from_parts(
             pane.clone(),
             stream,
@@ -583,14 +588,18 @@ impl Live for FakePanes {
         world.watchers.push((id, tx.clone()));
         drop(world);
         let shared = Arc::clone(&self.world);
+        let ended = Arc::new(AtomicBool::new(false));
+        let feed = FakeEvents {
+            rx,
+            done: false,
+            ended: Arc::clone(&ended),
+        };
         let end = move || {
+            ended.store(true, Ordering::SeqCst);
             let _ = tx.send(Msg::End);
             lock(&shared).watchers.retain(|(watch, _)| *watch != id);
         };
-        Ok(Events::from_parts(
-            Box::new(FakeEvents { rx, done: false }),
-            Arc::new(end),
-        ))
+        Ok(Events::from_parts(Box::new(feed), Arc::new(end)))
     }
 }
 
@@ -603,11 +612,13 @@ fn lease_of(stream: u32) -> String {
 struct FakeFeed {
     rx: Receiver<Msg<Update>>,
     done: bool,
+    /// Set by the end, which yields nothing more, as a closed socket does.
+    ended: Arc<AtomicBool>,
 }
 
 impl Feed for FakeFeed {
     fn recv(&mut self) -> Result<Option<Update>> {
-        if self.done {
+        if self.done || self.ended.load(Ordering::SeqCst) {
             return Ok(None);
         }
         match self.rx.recv() {
@@ -635,7 +646,7 @@ struct FakeControl {
     stream: u32,
     lease: String,
     tx: Sender<Msg<Update>>,
-    ended: AtomicBool,
+    ended: Arc<AtomicBool>,
 }
 
 impl FakeControl {
@@ -724,11 +735,13 @@ impl Control for FakeControl {
 struct FakeEvents {
     rx: Receiver<Msg<Event>>,
     done: bool,
+    /// Set by the end, as for [`FakeFeed`].
+    ended: Arc<AtomicBool>,
 }
 
 impl EventFeed for FakeEvents {
     fn recv(&mut self) -> Result<Option<Event>> {
-        if self.done {
+        if self.done || self.ended.load(Ordering::SeqCst) {
             return Ok(None);
         }
         match self.rx.recv() {
@@ -748,7 +761,7 @@ impl EventFeed for FakeEvents {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::Meta;
+    use crate::message::{Meta, Size};
     use std::collections::BTreeMap;
 
     fn spawn(key: &str) -> Spawn {
@@ -1063,10 +1076,38 @@ mod tests {
     }
 
     #[test]
+    fn a_visible_read_has_no_scrollback() {
+        let fake = FakePanes::new();
+        let mut req = spawn("s1");
+        req.size = Some(Size { cols: 80, rows: 2 });
+        let pane = fake.spawn(&req).unwrap().pane;
+        fake.set_screen(&pane, &["old", "one", "two"]);
+        let visible = fake.screen(&pane, Read::Visible, Format::Text).unwrap();
+        assert_eq!(visible.rows_text, ["one", "two"]);
+        let recent = fake.screen(&pane, Read::Recent(3), Format::Text).unwrap();
+        assert_eq!(recent.rows_text, ["old", "one", "two"]);
+    }
+
+    #[test]
+    fn an_ended_stream_yields_nothing_it_had_queued() {
+        let fake = FakePanes::new();
+        let pane = fake.spawn(&spawn("s1")).unwrap().pane;
+        let mut subscription = fake.subscribe(&pane, Subscribe::default()).unwrap();
+        let mut events = fake.watch().unwrap();
+        assert!(fake.output(&pane, b"queued"));
+        fake.emit(&Event::Bell { pane: pane.clone() });
+        subscription.handle().end();
+        events.ender().end();
+        assert_eq!(subscription.recv().unwrap(), None);
+        assert_eq!(events.recv().unwrap(), None);
+    }
+
+    #[test]
     fn a_recent_read_outside_its_range_is_refused() {
         let fake = FakePanes::new();
         let pane = fake.spawn(&spawn("s1")).unwrap().pane;
         for lines in [0, MAX_RECENT + 1] {
+            assert!(!Read::Recent(lines).in_range());
             assert!(matches!(
                 fake.screen(&pane, Read::Recent(lines), Format::Text),
                 Err(PanesError::Refused {
