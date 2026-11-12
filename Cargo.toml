@@ -7,6 +7,7 @@ members = [
     "crates/daemon",
     "crates/delivery",
     "crates/herdr",
+    "crates/holder",
     "crates/observe",
     "crates/panes",
     "crates/reconcile",
@@ -29,12 +30,15 @@ tiller-core = { path = "crates/core" }
 tiller-daemon = { path = "crates/daemon" }
 tiller-delivery = { path = "crates/delivery" }
 tiller-herdr = { path = "crates/herdr" }
+tiller-holder = { path = "crates/holder" }
 tiller-observe = { path = "crates/observe" }
 tiller-panes = { path = "crates/panes" }
 tiller-reconcile = { path = "crates/reconcile" }
 tiller-replay = { path = "crates/replay" }
 
 # Runtime
+# The holder's screen model; a bump is its own task (terminal-holder.md 3.1).
+alacritty_terminal = { version = "=0.26.0", default-features = false }
 anyhow = "1"
 axum = "0.8"
 base64 = "0.22"
@@ -42,6 +46,7 @@ clap = { version = "4", features = ["derive", "env"] }
 ed25519-dalek = "3"
 getrandom = "0.4"
 jiff = { version = "0.2.38", features = ["serde"] }
+libc = "0.2"
 notify = "8"
 qrcode = { version = "0.14", default-features = false }
 regex = "1"
