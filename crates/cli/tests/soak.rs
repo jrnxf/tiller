@@ -206,11 +206,12 @@ impl Counter {
     }
 
     /// Checks a read of the pane's scrollback against what was verified
-    /// before, and takes it in. The newest line is not taken: a read may
-    /// land inside it.
+    /// before, and takes it in. The newest line of text is not taken: a
+    /// read may land inside it. An epoch's first read starts at 1.
     fn verify(&mut self, text: &str) -> Result<(), String> {
-        let mut numbers = self.numbers(text);
-        numbers.pop();
+        let text = text.trim_end();
+        let complete = text.rfind('\n').map_or("", |end| &text[..end]);
+        let numbers = self.numbers(complete);
         let Some((&first, &last)) = numbers.first().zip(numbers.last()) else {
             return Ok(());
         };
@@ -224,6 +225,12 @@ impl Counter {
                     if b <= a { " (repeat or reset)" } else { "" }
                 ));
             }
+        }
+        if self.last.is_none() && first != 1 {
+            return Err(format!(
+                "gap in {} e{}: the first read starts at {first}, not 1",
+                self.key, self.epoch
+            ));
         }
         if let Some(before) = self.last {
             if first > before + 1 {
@@ -239,11 +246,7 @@ impl Counter {
                 ));
             }
         }
-        let new = match self.last {
-            Some(before) => last.saturating_sub(before),
-            None => numbers.len() as u64,
-        };
-        self.verified += new;
+        self.verified += last - self.last.unwrap_or(0);
         self.reads += 1;
         self.last = Some(last);
         Ok(())
@@ -538,13 +541,21 @@ impl Soak {
             ));
         }
         self.upgrades += 1;
-        let log = holder_log(&self.world);
-        let reexecs = log.matches("the holder re-executed").count();
-        if reexecs != self.upgrades {
-            return Err(format!(
-                "{} upgrades ran, the holder log shows {reexecs} re-executions",
-                self.upgrades
-            ));
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let reexecs = holder_log(&self.world)
+                .matches("the holder re-executed")
+                .count();
+            if reexecs == self.upgrades {
+                break;
+            }
+            if Instant::now() > deadline {
+                return Err(format!(
+                    "{} upgrades ran, the holder log shows {reexecs} re-executions",
+                    self.upgrades
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
         if self.holder.running.try_wait().ok().flatten().is_some() {
             return Err("the holder process exited in the upgrade".into());
@@ -720,8 +731,12 @@ impl Soak {
             ));
         }
         md.push_str(
-            "\nThe holder kill ends an epoch: its panes are gone, and numbers written after the last read are lost with them (spec 6.4). Inside an epoch, no number is missing or repeated.\n\n",
+            "\nThe holder kill ends an epoch: its panes are gone, and numbers written after the last read are lost with them (spec 6.4).",
         );
+        if self.failure.is_none() {
+            md.push_str(" Inside an epoch, no number is missing or repeated.");
+        }
+        md.push_str("\n\n");
         md.push_str("## Events\n\n");
         for l in &self.log {
             md.push_str(&format!(
@@ -852,15 +867,25 @@ fn the_counter_check_finds_a_missing_repeated_and_reset_number() {
     // The next read overlaps and goes on.
     counter.verify(&lines(&[2, 3, 4, 5, 6])).unwrap();
     assert_eq!(counter.last, Some(5));
+    // A read that lands inside the newest line sets aside only that line.
+    counter
+        .verify(&format!("{}\nSEQ pane e", lines(&[4, 5, 6])))
+        .unwrap();
+    assert_eq!((counter.last, counter.verified), (Some(6), 6));
 
     for (numbers, wants) in [
         (vec![1, 2, 4, 5], "2 is followed by 4"),
         (vec![1, 2, 2, 3], "repeat"),
         (vec![8, 9, 10], "starts at 8"),
         (vec![1, 2, 3], "ends at 2"),
+        (vec![3, 4, 5], "first read starts at 3"),
     ] {
         let mut counter = Counter::new("pane");
-        counter.last = Some(if wants.contains("starts") { 5 } else { 4 });
+        counter.last = match wants {
+            w if w.starts_with("first") => None,
+            w if w.contains("starts") => Some(5),
+            _ => Some(4),
+        };
         let error = counter
             .verify(&lines(&numbers))
             .expect_err(&format!("{numbers:?}"));
