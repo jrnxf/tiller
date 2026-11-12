@@ -31,9 +31,9 @@ use crate::pty;
 /// sent, when something else still holds the PTY open.
 pub const EXIT_DRAIN: Duration = Duration::from_millis(250);
 
-/// The most raw input bytes of one connection that may wait for the apps
-/// to read them. Input past it cuts that connection, so a gap in a paste is
-/// never silent. One frame is taken whole when none of its input waits.
+/// The most raw input bytes that may wait for a pane's app to read them.
+/// Input past it cuts the connection that sent it, so a gap in a paste is
+/// never silent. One frame is taken whole when no input waits.
 pub const INPUT_CAP: usize = 1024 * 1024;
 
 /// The most a PTY read takes at once.
@@ -74,24 +74,6 @@ pub struct Conn {
     pub outbox: Outbox,
     /// This connection's subscriptions: each stream and its pane.
     streams: Mutex<Vec<(u32, Arc<PaneCell>)>>,
-    /// This connection's raw input bytes not yet written to a PTY.
-    input_queued: AtomicUsize,
-}
-
-/// Raw input on its way to a PTY. It counts toward its connection's
-/// [`INPUT_CAP`] until it is written or dropped.
-#[derive(Debug)]
-struct Chunk {
-    bytes: Vec<u8>,
-    from: Arc<Conn>,
-}
-
-impl Drop for Chunk {
-    fn drop(&mut self) {
-        self.from
-            .input_queued
-            .fetch_sub(self.bytes.len(), Ordering::AcqRel);
-    }
 }
 
 impl Conn {
@@ -216,7 +198,10 @@ pub struct PaneCell {
     /// The child's pid, which is also its process group's id.
     pid: Pid,
     master: AsyncFd<OwnedFd>,
-    input: mpsc::UnboundedSender<Chunk>,
+    input: mpsc::UnboundedSender<Vec<u8>>,
+    /// Raw input bytes queued or being written, at most [`INPUT_CAP`] but
+    /// for one whole frame.
+    input_queued: AtomicUsize,
     inner: Mutex<Inner>,
     /// True once the PTY read ends: every holder of the slave closed it.
     output_ended: watch::Sender<bool>,
@@ -431,6 +416,7 @@ impl Holder {
             pid: started.pid,
             master,
             input,
+            input_queued: AtomicUsize::new(0),
             inner: Mutex::new(Inner {
                 record: record.clone(),
                 model: Model::new(size),
@@ -553,8 +539,9 @@ impl Holder {
     /// A kind 2 frame from `conn`: raw bytes for the pane `num`, with no
     /// reply. Input for a pane that is gone or has exited is dropped. Input
     /// is never waited for, as that would hold up every other request on
-    /// the connection: past [`INPUT_CAP`] unwritten bytes, `conn` is cut.
-    pub fn input(&self, conn: &Arc<Conn>, num: u32, bytes: Vec<u8>) {
+    /// the connection: past the pane's [`INPUT_CAP`], `conn` is cut. Its
+    /// input to other panes counts apart, so it is not cut for them.
+    pub fn input(&self, conn: &Conn, num: u32, bytes: Vec<u8>) {
         let Some(cell) = self.by_num(num) else {
             tracing::debug!(num, "raw input for no pane");
             return;
@@ -564,7 +551,7 @@ impl Holder {
             return;
         }
         let len = bytes.len();
-        let taken = conn
+        let taken = cell
             .input_queued
             .try_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
                 (queued == 0 || queued + len <= INPUT_CAP).then_some(queued + len)
@@ -573,16 +560,13 @@ impl Holder {
             if conn.cut() {
                 tracing::warn!(
                     pane = %cell.id,
-                    "a client's raw input passed its {INPUT_CAP}-byte queue, as an app did not read it, and the client was cut"
+                    "the pane's app left {INPUT_CAP} bytes of raw input unread, so the client that sent more was cut"
                 );
             }
             return;
         }
-        let chunk = Chunk {
-            bytes,
-            from: conn.clone(),
-        };
-        if cell.input.send(chunk).is_err() {
+        if cell.input.send(bytes).is_err() {
+            cell.input_queued.fetch_sub(len, Ordering::AcqRel);
             tracing::debug!(pane = %cell.id, "raw input for a pane whose PTY is closed");
         }
     }
@@ -689,11 +673,15 @@ async fn read_pty(cell: Arc<PaneCell>) {
 /// Writes raw input to a pane's PTY, in order, as fast as it takes it.
 /// It ends once the PTY's output ends: with the slave closed, the master
 /// takes a few KiB and then is never writable again.
-/// A chunk counts toward its connection's cap until it is written.
-async fn write_input(cell: Arc<PaneCell>, mut input: mpsc::UnboundedReceiver<Chunk>) {
+/// A chunk counts toward the pane's [`INPUT_CAP`] until it is written.
+async fn write_input(cell: Arc<PaneCell>, mut input: mpsc::UnboundedReceiver<Vec<u8>>) {
     let mut ended = cell.output_ended.subscribe();
-    while let Some(chunk) = input.recv().await {
-        let mut rest = chunk.bytes.as_slice();
+    while let Some(bytes) = input.recv().await {
+        let _counted = Counted {
+            queued: &cell.input_queued,
+            len: bytes.len(),
+        };
+        let mut rest = bytes.as_slice();
         while !rest.is_empty() {
             let writable = tokio::select! {
                 writable = cell.master.writable() => writable,
@@ -713,6 +701,18 @@ async fn write_input(cell: Arc<PaneCell>, mut input: mpsc::UnboundedReceiver<Chu
                 Err(_would_block) => {}
             }
         }
+    }
+}
+
+/// Input bytes that count toward a pane's queue until this drops.
+struct Counted<'a> {
+    queued: &'a AtomicUsize,
+    len: usize,
+}
+
+impl Drop for Counted<'_> {
+    fn drop(&mut self) {
+        self.queued.fetch_sub(self.len, Ordering::AcqRel);
     }
 }
 
@@ -792,17 +792,20 @@ fn spawn_failure(req: &Spawn, err: &io::Error) -> Failure {
 
 /// This boot's id, so a client can tell a reboot from a holder restart:
 /// Linux's `boot_id`, or macOS's boot session id. Empty when the system
-/// reports neither. The daemon reads the same two (`workers::boot_id`).
+/// reports neither. The daemon reads the same two (`workers::boot_id`);
+/// the two move to one place once the daemon runs on the holder.
 fn boot_id() -> String {
     if let Ok(id) = std::fs::read_to_string("/proc/sys/kernel/random/boot_id") {
         return id.trim().to_owned();
     }
-    std::process::Command::new("sysctl")
+    // By its full path: a `sysctl` earlier on PATH may not know the name.
+    std::process::Command::new("/usr/sbin/sysctl")
         .args(["-n", "kern.bootsessionuuid"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output()
         .ok()
+        .filter(|output| output.status.success())
         .and_then(|output| String::from_utf8(output.stdout).ok())
         .map(|id| id.trim().to_owned())
         .unwrap_or_default()

@@ -330,7 +330,8 @@ fn main() -> ExitCode {
         // would suggest a home it does not serve.
         if daemon::refuse_db(cli.db.as_deref()).is_some() {
             eprintln!(
-                "tiller holder: --db and TILLER_DB do not apply to the holder: it serves the home TILLER_HOME names, with its socket and lock in its run directory. Set TILLER_HOME to choose the home."
+                "tiller holder: --db and TILLER_DB do not apply to the holder: it serves the home {}. Set TILLER_HOME to choose another.",
+                App::from_env(None).home.display()
             );
             return ExitCode::from(2);
         }

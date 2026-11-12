@@ -373,6 +373,51 @@ fn input_past_the_cap_for_an_app_that_reads_none_cuts_that_client_only() {
 }
 
 #[test]
+fn a_client_cut_for_a_stuck_pane_leaves_input_to_other_panes_alone() {
+    let world = World::new();
+    let holder = Holder::start(&world);
+    let stuck = holder.spawn(&world, &["/bin/sh", "-c", "sleep 30"]);
+    let reading = holder.spawn(&world, &["/bin/cat"]);
+    let updates = holder.updates(&reading);
+    assert!(matches!(
+        next(&updates, &holder, "repaint"),
+        Update::Repaint { .. }
+    ));
+
+    // Another client fills the stuck pane's queue and is cut for it.
+    let flooder = HolderClient::connect(&holder.socket, "daemon").unwrap();
+    let chunk = b"0123456789abcdef\n".repeat(4 * 1024);
+    for _ in 0..30 {
+        if flooder.raw_input(stuck.num, &chunk).is_err() {
+            break;
+        }
+    }
+    let err = flooder.list().unwrap_err();
+    assert!(matches!(err, PanesError::Unreachable(_)), "{err}");
+
+    // This client's input to the pane that reads still goes through.
+    holder
+        .client
+        .raw_input(reading.num, b"cross-pane\n")
+        .unwrap();
+    let mut seen = Vec::new();
+    while !String::from_utf8_lossy(&seen).contains("cross-pane") {
+        match next(&updates, &holder, "the reading pane's output") {
+            Update::Output(bytes) => seen.extend(bytes),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert_eq!(holder.client.list().unwrap().panes.len(), 2);
+    assert_eq!(
+        holder.log().matches("was cut").count(),
+        1,
+        "{}",
+        holder.log()
+    );
+    drop(updates);
+}
+
+#[test]
 fn a_db_other_than_the_homes_is_refused() {
     let world = World::new();
     let output = world

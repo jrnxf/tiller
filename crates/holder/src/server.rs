@@ -25,7 +25,8 @@ use crate::peer::{self, PeerCred};
 /// How long a client has to send `hello`.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long a closing connection has to take what is queued for it.
+/// How long a closing connection has to take what is queued for it, and
+/// a cut one to stop sending.
 const CLOSE_FLUSH: Duration = Duration::from_secs(1);
 
 /// The most a socket read takes at once.
@@ -174,9 +175,16 @@ async fn connection(holder: Arc<Holder>, stream: UnixStream) {
     let conn = Arc::new(Conn::default());
     let writer = write_loop(conn.clone(), write);
     tokio::pin!(writer);
+    let reader = read_loop(&holder, &conn, read);
+    tokio::pin!(reader);
     tokio::select! {
-        () = &mut writer => {}
-        () = read_loop(&holder, &conn, read) => {
+        () = &mut writer => {
+            // The writer ends first on a cut or a broken socket. The reader
+            // goes on taking what the client still sends, for a short time,
+            // so the client reads the close and not a reset.
+            let _ = tokio::time::timeout(CLOSE_FLUSH, &mut reader).await;
+        }
+        () = &mut reader => {
             conn.outbox.close();
             let _ = tokio::time::timeout(CLOSE_FLUSH, &mut writer).await;
         }
@@ -228,14 +236,19 @@ async fn read_loop(holder: &Arc<Holder>, conn: &Arc<Conn>, mut input: OwnedReadH
                     return;
                 }
             };
+            // A cut connection takes nothing more, so no input comes after
+            // a gap. Its frames are still read, so the socket closes clean
+            // once its last frames are out.
+            if conn.outbox.is_closed() {
+                continue;
+            }
             let next = if greeted {
                 frame_in(holder, conn, frame).await
             } else {
                 greeted = true;
                 hello(holder, conn, frame)
             };
-            // A cut connection takes nothing more: no input after a gap.
-            if matches!(next, Next::End) || conn.outbox.is_closed() {
+            if let Next::End = next {
                 return;
             }
         }
