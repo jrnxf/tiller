@@ -516,8 +516,8 @@ ADR 0004, accepted Wednesday 2026-11-11. A holder process per host owns the agen
 ### S1b The minimal holder (first slice)
 `opus` high - 2.5 h - after S1a
 
-- [ ] `tiller holder`: socket at mode 0600 with the peer check, lock, PTY spawn and reaping with exit codes, `alacritty_terminal` model with `catch_unwind`, `subscribe` (repaint, then passthrough), raw input, resize, one fixed cap per client queue
-- [ ] Check: an end-to-end test that spawns a shell, types and reads the repaint; a peer check test; an exit code test
+- [x] `tiller holder`: socket at mode 0600 with the peer check, lock, PTY spawn and reaping with exit codes, `alacritty_terminal` model with `catch_unwind`, `subscribe` (repaint, then passthrough), raw input, resize, one fixed cap per client queue
+- [x] Check: an end-to-end test that spawns a shell, types and reads the repaint; a peer check test; an exit code test
 - [ ] Delivered
 
 ### S1c The minimal daemon wiring (first slice, `holder-port`)
