@@ -4,6 +4,7 @@ import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "re
 import type { CSSProperties, KeyboardEvent as KeyEvent, RefObject } from "react";
 
 import type { AgentRow, Machine, PermissionPrompt, Project } from "../../lib/api-types";
+import { usePageFullScreen } from "../../lib/fullscreen";
 import { focusReason, ownerOf, projectKey, shownId } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import {
@@ -528,7 +529,17 @@ function Stage({
   onSwitch: (key: SwitchKey) => void;
 }) {
   const { agent, card } = line;
-  const [fullRoot, setFullRoot] = useState<HTMLDivElement | null>(null);
+  // The page in full screen pins this card over it, a switch to another
+  // agent included; leaving the Agents view leaves full screen.
+  const full = usePageFullScreen() && !phone;
+  useEffect(
+    () => () => {
+      if (document.fullscreenElement === document.documentElement) {
+        void document.exitFullscreen().catch(() => {});
+      }
+    },
+    [],
+  );
   const standing = useStanding(agent);
   const ambiguous = useAmbiguousIds();
   const off = focusReason(ownerOf(agent));
@@ -604,7 +615,6 @@ function Stage({
       machine={remote && !peerHost ? host.label : undefined}
       peer={peerHost}
       holder={!remote && !peerHost && isHolderPane(agent.pane_id)}
-      fullScreenRoot={fullRoot}
       strip={
         remote || peerHost ? null : (
           <AnswerStrip
@@ -629,7 +639,7 @@ function Stage({
     />
   );
   return (
-    <div className="av-card">
+    <div className={full ? "av-card full" : "av-card"}>
       <div className="av-card-h">
         {phone ? (
           <button type="button" className="ib av-back" aria-label="Back to agents" onClick={onBack}>
@@ -758,11 +768,7 @@ function Stage({
         />
       ) : null}
       <div className="av-card-b" ref={bodyRef}>
-        {/* What goes full screen: it outlives the terminal, so a switch to
-            another agent stays in full screen. */}
-        <div className="av-full" ref={setFullRoot}>
-          {body}
-        </div>
+        {body}
         {
           // Steer and interrupt reach a pane on this machine only: a peer's
           // pane is watch only, and a saved machine's pane is read as a tail.

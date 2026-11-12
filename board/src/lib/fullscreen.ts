@@ -1,12 +1,12 @@
 import { useSyncExternalStore } from "react";
 
-// Whether this browser can put an element in full screen. iPhone Safari
-// cannot (only a video), and there the phone's sheet is the full view.
+// Whether this browser can put the page in full screen. iPhone Safari cannot
+// (only a video), and there the phone's sheet is the full view.
 export function canFullScreen(): boolean {
   try {
     return (
       document.fullscreenEnabled === true &&
-      typeof Element.prototype.requestFullscreen === "function"
+      typeof document.documentElement.requestFullscreen === "function"
     );
   } catch {
     return false;
@@ -18,17 +18,13 @@ function subscribeFullScreen(change: () => void) {
   return () => document.removeEventListener("fullscreenchange", change);
 }
 
-// The element in full screen, or null.
-export function useFullScreenElement(): Element | null {
+// Whether the whole page is in full screen. The stage goes full screen this
+// way, and pins its card over the page, so a dialog, a menu or a toast that
+// opens on the page's body still shows.
+export function usePageFullScreen(): boolean {
   return useSyncExternalStore(
     subscribeFullScreen,
-    () => document.fullscreenElement ?? null,
-    () => null,
+    () => document.fullscreenElement === document.documentElement,
+    () => false,
   );
-}
-
-// Where a dialog or a toast goes: only the element in full screen and what it
-// holds show, so there while one is, and the page's body otherwise.
-export function useLayerRoot(): Element {
-  return useFullScreenElement() ?? document.body;
 }

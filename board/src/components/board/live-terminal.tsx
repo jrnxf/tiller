@@ -12,7 +12,7 @@ import {
 } from "react";
 import type { MouseEvent as ReactMouseEvent, ReactNode, Ref } from "react";
 
-import { canFullScreen, useFullScreenElement } from "../../lib/fullscreen";
+import { canFullScreen, usePageFullScreen } from "../../lib/fullscreen";
 import { shortcutsBlocked } from "../../lib/shortcuts";
 import { createStore, useStore } from "../../lib/store";
 import { CloseIcon } from "../shell/icons";
@@ -569,7 +569,6 @@ export function LiveTerminal({
   machine,
   peer,
   holder = false,
-  fullScreenRoot = null,
   strip,
   onClose,
 }: {
@@ -599,8 +598,6 @@ export function LiveTerminal({
   // The pane is in the terminal holder, not herdr: the stage fits it by
   // default, since no other window shows it.
   holder?: boolean;
-  // The stage's full screen element, when the caller keeps one across agents.
-  fullScreenRoot?: HTMLElement | null;
   // What the stage shows between the screen and its footer: the answer buttons.
   strip?: ReactNode;
   onClose?: () => void;
@@ -637,12 +634,10 @@ export function LiveTerminal({
   const stageFont = useStore(stageFontStore);
   // The stage in full screen: its own element, so a dialog or another
   // agent's stage never reads as it.
-  const [root, setRoot] = useState<HTMLDivElement | null>(null);
-  // What goes full screen: the caller's wrapper, which outlives a switch to
-  // another agent, or else this stage itself.
-  const fullTarget = fullScreenRoot ?? root;
-  const fullElement = useFullScreenElement();
-  const full = stage && fullTarget !== null && fullElement === fullTarget;
+  const full = usePageFullScreen() && stage;
+  // Whether the stage font sets the pane's size now. Without the Fit, the
+  // stage's room can set a smaller one, and a larger font changes nothing.
+  const [capped, setCapped] = useState(true);
   const visible = useVisible();
   const [unfit, setUnfit] = useState(false);
   const fitting = stage && !phone && fitWanted && !unfit && visible && view === "inline";
@@ -853,6 +848,7 @@ export function LiveTerminal({
       }
     }
     setFont(term.options.fontSize ?? BASE_FONT);
+    if (stage && view === "inline") setCapped(cell >= Math.floor(most * ratio));
   }, [host, box, view, scale, stage, stageFont]);
 
   // Put the one xterm in the view that shows it, opening it there the first
@@ -950,18 +946,19 @@ export function LiveTerminal({
     setView("dialog");
   }, [phone, closeHistory]);
 
-  // Full screen holds the stage, its strip and its footer; the layout fits
-  // the pane to the screen as the stage grows. The browser's Esc leaves it.
+  // Full screen puts the page in full screen, and the Agents view pins the
+  // stage's card over it; the layout fits the pane to the screen as the stage
+  // grows. The card outlives a switch to another agent, so full screen stays.
+  // The browser's Esc leaves it.
   const fullScreenAble = stage && !phone && canFullScreen();
   const toggleFull = useCallback(() => {
     if (full) {
       void document.exitFullscreen().catch(() => {});
       return;
     }
-    if (!fullTarget) return;
     const term = termRef.current;
     const wasTyping = term?.textarea !== undefined && document.activeElement === term.textarea;
-    fullTarget.requestFullscreen().then(
+    document.documentElement.requestFullscreen().then(
       () => {
         if (wasTyping) termRef.current?.focus();
       },
@@ -972,7 +969,7 @@ export function LiveTerminal({
           "The browser refused it. Expand shows the terminal larger.",
         ),
     );
-  }, [full, fullTarget]);
+  }, [full]);
 
   const collapse = useCallback(() => {
     termRef.current?.blur();
@@ -1065,8 +1062,7 @@ export function LiveTerminal({
       </span>
     );
 
-  // A dialog opens over the page, outside the full screen: the stage leaves
-  // full screen first, so Expand waits for that.
+  // Full screen is already the larger view, so Expand waits for it to end.
   const expandButton =
     screenShown && !ended && view === "inline" && !full ? (
       <button
@@ -1106,52 +1102,54 @@ export function LiveTerminal({
     ) : null;
   // The stage's font size, on a computer. A press keeps focus where it was,
   // so typing goes on.
-  const stageControls =
+  const fontControls =
     stage && !phone && screenShown && view === "inline" ? (
-      <>
-        <span className="mir-font" role="group" aria-label="Font size">
-          <button
-            type="button"
-            className="ib sm"
-            title="Smaller text"
-            aria-label="Smaller text"
-            disabled={stageFont <= STAGE_FONT_MIN}
-            onMouseDown={keepFocus}
-            onClick={() => setStageFont(stageFont - 1)}
-          >
-            <FontSmallerIcon />
-          </button>
-          <button
-            type="button"
-            className="mir-fsz"
-            title={
-              stageFont === STAGE_FONT
-                ? `Font size ${stageFont} px, the default`
-                : `Font size ${stageFont} px. Click for the default, ${STAGE_FONT} px`
-            }
-            aria-label={
-              stageFont === STAGE_FONT
-                ? `Font size ${stageFont} px, the default`
-                : `Font size ${stageFont} px, back to ${STAGE_FONT} px`
-            }
-            onMouseDown={keepFocus}
-            onClick={() => setStageFont(STAGE_FONT)}
-          >
-            {stageFont}
-          </button>
-          <button
-            type="button"
-            className="ib sm"
-            title="Larger text"
-            aria-label="Larger text"
-            disabled={stageFont >= STAGE_FONT_MAX}
-            onMouseDown={keepFocus}
-            onClick={() => setStageFont(stageFont + 1)}
-          >
-            <FontLargerIcon />
-          </button>
-        </span>
-      </>
+      <span className="mir-font" role="group" aria-label="Font size">
+        <button
+          type="button"
+          className="ib sm"
+          title="Smaller text"
+          aria-label="Smaller text"
+          disabled={stageFont <= STAGE_FONT_MIN}
+          onMouseDown={keepFocus}
+          onClick={() => setStageFont(stageFont - 1)}
+        >
+          <FontSmallerIcon />
+        </button>
+        <button
+          type="button"
+          className="mir-fsz"
+          title={
+            stageFont === STAGE_FONT
+              ? `Font size ${stageFont} px, the default`
+              : `Font size ${stageFont} px. Click for the default, ${STAGE_FONT} px`
+          }
+          aria-label={
+            stageFont === STAGE_FONT
+              ? `Font size ${stageFont} px, the default`
+              : `Font size ${stageFont} px, back to ${STAGE_FONT} px`
+          }
+          onMouseDown={keepFocus}
+          onClick={() => setStageFont(STAGE_FONT)}
+        >
+          {stageFont}
+        </button>
+        <button
+          type="button"
+          className="ib sm"
+          title={
+            capped
+              ? "Larger text"
+              : "The pane fills the stage at this size. Fit pane sizes it to the text"
+          }
+          aria-label="Larger text"
+          disabled={stageFont >= STAGE_FONT_MAX || !capped}
+          onMouseDown={keepFocus}
+          onClick={() => setStageFont(stageFont + 1)}
+        >
+          <FontLargerIcon />
+        </button>
+      </span>
     ) : null;
   // In full screen the way out stays, whatever the stream does.
   const fullButton =
@@ -1168,6 +1166,12 @@ export function LiveTerminal({
         {full ? <LeaveFullScreenIcon /> : <FullScreenIcon />}
       </button>
     ) : null;
+  const viewControls = (
+    <>
+      {fontControls}
+      {fullButton}
+    </>
+  );
   // The scrollback is the stage's, while the screen shows inline.
   const canHistory = stage && !tail && screenShown && !ended && view === "inline";
   const historyButton =
@@ -1274,8 +1278,7 @@ export function LiveTerminal({
             switch agents
           </span>
         ) : null}
-        {stageControls}
-        {fullButton}
+        {viewControls}
         <button type="button" className="btn sm" onClick={done}>
           Done
         </button>
@@ -1285,26 +1288,27 @@ export function LiveTerminal({
     <>
       <span className="tx">
         <HistoryIcon />
-        {phone
+        {phone || full
           ? "Scrollback, read-only"
           : "Scrollback, read-only. Esc goes back to the live screen."}
       </span>
       <span className="mir-fr">
-        {stageControls}
-        {fullButton}
+        {viewControls}
         <button type="button" className="btn sm primary" onClick={closeHistory}>
           Back to live
         </button>
       </span>
     </>
+  ) : !screenShown ? (
+    // In full screen with no screen: only the way out.
+    <span className="mir-fr">{viewControls}</span>
   ) : (
     <>
       {footer("inline")}
       <span className="mir-fr">
         {sizeText ? <span className="mir-sz">{sizeText}</span> : null}
         {historyButton}
-        {stageControls}
-        {fullButton}
+        {viewControls}
         {fitButton}
         {expandButton}
       </span>
@@ -1314,10 +1318,7 @@ export function LiveTerminal({
   return (
     // A popup has no inline view: only its dialog or sheet, which a portal
     // puts over the page.
-    <div
-      ref={stage ? setRoot : undefined}
-      className={popup ? "mir-popup" : `mir${stage ? " stage" : ""}${full ? " full" : ""}${state}`}
-    >
+    <div className={popup ? "mir-popup" : `mir${stage ? " stage" : ""}${state}`}>
       {stage || popup ? null : (
         <div className="mir-h">
           <StatusMark status={status} />

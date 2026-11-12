@@ -1,7 +1,4 @@
 import { useEffect } from "react";
-import { createPortal } from "react-dom";
-
-import { useLayerRoot } from "../../lib/fullscreen";
 
 import { createStore, useStore } from "../../lib/store";
 import { CheckIcon } from "../shell/icons";
@@ -29,7 +26,6 @@ function clearToast() {
 // The shell mounts one, so every screen has it. A status line that fades after a few seconds; a failure stays longer.
 export function ToastHost() {
   const toast = useStore(toastStore);
-  const layer = useLayerRoot();
   const id = toast?.id;
   const tone = toast?.tone;
   useEffect(() => {
@@ -38,7 +34,7 @@ export function ToastHost() {
     return () => clearTimeout(timer);
   }, [id, tone]);
 
-  const host = (
+  return (
     <div
       className="toast"
       data-testid="toast"
@@ -59,6 +55,4 @@ export function ToastHost() {
       ) : null}
     </div>
   );
-  // In full screen only that element shows, so the toast goes in it.
-  return layer === document.body ? host : createPortal(host, layer);
 }

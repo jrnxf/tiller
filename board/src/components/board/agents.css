@@ -465,15 +465,20 @@
   min-height: 0;
 }
 
-.av-full {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-height: 0;
+/* Full screen: the page is, and the agent's card covers it, under the
+   toasts (50), the dialogs (70) and the menus (90) that open over it. */
+.av-card.full {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  border: 0;
+  border-radius: 0;
 }
 
-.av-full:fullscreen {
-  background: var(--bg-panel);
+/* No sidebar shows in full screen, so the toast centers on the screen. */
+:root:fullscreen .toast {
+  left: 50%;
+  max-width: min(520px, calc(100% - 32px));
 }
 
 .av-body-note {

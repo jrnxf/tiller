@@ -381,11 +381,6 @@
   color: var(--accent);
 }
 
-/* The stage in full screen: the screen, its strip and its footer fill it. */
-.mir.stage.full {
-  padding-top: 10px;
-}
-
 .mir-sw {
   display: inline-flex;
   align-items: center;

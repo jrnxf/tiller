@@ -233,28 +233,27 @@ test("the stage font clamps to 9 to 24 px in whole pixels", () => {
   expect([STAGE_FONT_MIN, STAGE_FONT_MAX]).toEqual([9, 24]);
 });
 
-test("full screen holds the stage, and a second press or Esc leaves it", async () => {
+test("full screen pins the agent's card over the page, and a second press or Esc leaves it", async () => {
   const { request, exit, leave } = stubFullScreen();
   const bar = await renderStage("holder");
-  const stage = document.querySelector(".mir.stage");
+  const card = document.querySelector(".av-card");
   expect(bar.getByRole("button", { name: "Expand the terminal" })).toBeTruthy();
 
   fireEvent.click(bar.getByRole("button", { name: "Full screen" }));
   expect(request).toHaveBeenCalledTimes(1);
-  // The stage's wrapper, which outlives a switch to another agent.
-  expect(request.mock.contexts[0]).toBe(document.querySelector(".av-full"));
-  expect(stage?.parentElement).toBe(request.mock.contexts[0]);
+  // The page goes full screen, so dialogs, menus and toasts still show.
+  expect(request.mock.contexts[0]).toBe(document.documentElement);
   const leaveButton = await bar.findByRole("button", { name: "Leave full screen" });
   expect(leaveButton.getAttribute("aria-pressed")).toBe("true");
   expect(leaveButton.getAttribute("title")).toBe("Leave full screen (Esc)");
-  expect(stage?.classList.contains("full")).toBe(true);
-  // The dialog would open outside the full screen.
+  expect(card?.classList.contains("full")).toBe(true);
+  // Full screen is already the larger view.
   expect(bar.queryByRole("button", { name: "Expand the terminal" })).toBeNull();
 
   fireEvent.click(leaveButton);
   expect(exit).toHaveBeenCalledTimes(1);
   await bar.findByRole("button", { name: "Full screen" });
-  expect(stage?.classList.contains("full")).toBe(false);
+  expect(card?.classList.contains("full")).toBe(false);
 
   fireEvent.click(bar.getByRole("button", { name: "Full screen" }));
   await bar.findByRole("button", { name: "Leave full screen" });
@@ -281,12 +280,12 @@ test("a switch to another agent stays in full screen, and a toast shows in it", 
   );
   expect(await footer().findByRole("button", { name: "Leave full screen" })).toBeTruthy();
   expect(request).toHaveBeenCalledTimes(1);
-  expect(document.fullscreenElement).toBe(document.querySelector(".av-full"));
+  expect(document.fullscreenElement).toBe(document.documentElement);
+  expect(document.querySelector(".av-card")?.classList.contains("full")).toBe(true);
 
-  // Only the element in full screen shows: a toast goes in it.
+  // The page is in full screen, so a toast shows over the card.
   act(() => showToast("bad", "The pane kept its own size"));
-  const toast = screen.getByTestId("toast");
-  expect(document.querySelector(".av-full")?.contains(toast)).toBe(true);
+  expect(screen.getByTestId("toast").textContent).toContain("The pane kept its own size");
 });
 
 test("with no Fullscreen API the button is not there, and Expand still is", async () => {
