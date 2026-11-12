@@ -1,6 +1,6 @@
 import { QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { hydrateFromSnapshot } from "../../lib/boot";
@@ -9,12 +9,11 @@ import { fixtureMutation } from "../../lib/fixture-mutations";
 import { fixtureResource, fixtureSnapshot } from "../../lib/fixtures";
 import { changeSession, resetLifecycleFixture } from "../../lib/fixtures-lifecycle";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
-import { receiptsStore } from "../../lib/receipts";
+import { receiptsStore, recordProgress, saveReceipt } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
 import { ActionError } from "../attention/api";
 import { resetBoardLook } from "./board-prefs";
-import { stopRefusal } from "./run-menu";
-import { NO_RUN } from "./steer-bar";
+import { ResumedNote, stopRefusal } from "./run-menu";
 import { createTestQueryClient, loadRouteChunks } from "../../test-app";
 
 await loadRouteChunks();
@@ -58,13 +57,20 @@ async function renderApp(path: string) {
   );
 }
 
-// The Stage of one agent, once its header shows.
-async function stageOf(session: string, name: string) {
-  await renderApp(`/agents?agent=${session}`);
-  await screen.findByRole("form", { name: `Message ${name}` });
+// The Stage's actions, once its header names the agent.
+async function stageActs(name: string) {
+  await waitFor(() =>
+    expect(document.querySelector(".av-card-h .av-who-1 .nm")?.textContent).toBe(name),
+  );
   const acts = document.querySelector<HTMLElement>(".av-acts");
   if (!acts) throw new Error("no agent on the stage");
   return acts;
+}
+
+// The Stage of one agent, once its header shows.
+async function stageOf(session: string, name: string) {
+  await renderApp(`/agents?agent=${session}`);
+  return stageActs(name);
 }
 
 async function openRunMenu(scope: HTMLElement) {
@@ -201,8 +207,7 @@ test("one agent's Resume does not hold the next paused agent's Resume", async ()
   );
   if (!row) throw new Error("no alpha-42 row");
   fireEvent.click(row);
-  await screen.findByRole("form", { name: "Message alpha-42" });
-  const next = within(document.querySelector<HTMLElement>(".av-acts") as HTMLElement)
+  const next = within(await stageActs("alpha-42"))
     .getAllByRole("button")
     .at(-1) as HTMLButtonElement;
   expect(next.textContent).toBe("Resume");
@@ -270,12 +275,9 @@ test("Stop on a worker whose run is open says why and sends nothing", async () =
   expect(posted).toHaveLength(0);
 });
 
-test("an orchestrator has no run: its menu holds Restart and Stop, and Interrupt is off", async () => {
+test("an orchestrator has no run: its menu holds Restart and Stop", async () => {
   const posted = stubDaemon();
   const acts = await stageOf(GAMMA, "gamma");
-  const interrupt = screen.getByRole("button", { name: "Interrupt..." }) as HTMLButtonElement;
-  expect(interrupt.disabled).toBe(true);
-  expect(interrupt.title).toBe(NO_RUN);
   const menu = await openRunMenu(acts);
   expect(itemsOf(menu)).toEqual(["Restart...", "Stop agent..."]);
   fireEvent.click(within(menu).getByRole("menuitem", { name: "Stop agent..." }));
@@ -311,4 +313,33 @@ test("a refused stop says what to do next where the board can, and the daemon's 
     ),
   ).toMatch(/^Not stopped: its run is still open\./);
   expect(refusal("herdr is down")).toBe("herdr is down");
+});
+
+test("a working agent's stage has no message bar: the terminal takes the input (D15)", async () => {
+  stubDaemon();
+  const acts = await stageOf(ALPHA_42, "alpha-42");
+  expect(within(acts).getByRole("button", { name: "Run actions" })).toBeTruthy();
+  expect(screen.queryByRole("form", { name: "Message alpha-42" })).toBeNull();
+  expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Interrupt..." })).toBeNull();
+  expect(screen.queryByText(/One line per send/)).toBeNull();
+});
+
+const line = () => document.querySelector(".av-steer-line")?.textContent;
+
+test("Resume's go on line shows queued, then typed, or not typed when delivery fails", () => {
+  const receipt = { recorded_at: "2026-11-11T10:00:00Z", approval_id: null, replayed: false };
+  saveReceipt("k1", { ...receipt, outbox_id: "o1" });
+  saveReceipt("k2", { ...receipt, outbox_id: "o2" });
+  render(<ResumedNote receiptKey="k1" />);
+  expect(line()).toBe("Queued.go onTyped when the pane is idle.");
+  act(() => recordProgress("o1", "delivered", "2026-11-11T10:00:07Z"));
+  expect(line()).toMatch(/^Typed\.go onInto the pane at /);
+  cleanup();
+  render(<ResumedNote receiptKey="k2" />);
+  act(() => recordProgress("o2", "failed", "2026-11-11T10:00:07Z"));
+  expect(screen.getByRole("alert").textContent).toBe(
+    "Not typed.go onDelivery failed, so the daemon opened a recovery item for it.",
+  );
 });

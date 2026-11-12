@@ -1201,7 +1201,9 @@ function agentsFor(
     });
   return {
     orchestrators: [
-      ...(scenario === "holder" ? localOrchestrators.map(inHolder) : localOrchestrators),
+      ...(scenario === "holder"
+        ? justStarted(localOrchestrators.map(inHolder), now)
+        : localOrchestrators),
       ...peerAgents(now, board.rows, peerProjectRows, staleTiller ? staleOf : undefined),
     ],
     tiller_version: FIXTURE_TILLER_VERSION,
@@ -1221,6 +1223,30 @@ function inHolder(agent: AgentRow): AgentRow {
     pane_id: holderPaneOf(agent.session_id),
     workers: agent.workers.map(inHolder),
   };
+}
+
+// The last local worker has just started in the holder: the daemon has not
+// read its pane yet.
+function justStarted(orchestrators: AgentRow[], now: number): AgentRow[] {
+  const index = orchestrators.map((agent) => agent.workers.length > 0).lastIndexOf(true);
+  return orchestrators.map((agent, at) =>
+    at === index
+      ? {
+          ...agent,
+          workers: agent.workers.map((worker, n) =>
+            n === agent.workers.length - 1
+              ? {
+                  ...worker,
+                  activity: "unknown",
+                  activity_observed_at: null,
+                  state_since: minutes(now, -0.2),
+                  last_output_at: null,
+                }
+              : worker,
+          ),
+        }
+      : agent,
+  );
 }
 
 // ---- details served for a card, its timeline and a run ----

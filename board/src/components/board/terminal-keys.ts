@@ -1,10 +1,10 @@
 // What the owner typed into the mirror, as the key names `herdr pane
 // send-keys` takes. xterm turns each key press into the bytes a terminal
 // would send; this reads them back into names. herdr 0.9.5 has no names for
-// Home, End, Delete, Insert, Page Up and Page Down, so those are reported
-// instead of sent. Any other escape sequence (a terminal's answer to a query,
-// a mouse or focus report) is dropped: only keys a person pressed reach the
-// agent.
+// Home, End, Delete, Insert, Page Up and Page Down, and a key name has no
+// Meta, so those are reported instead of sent. Any other escape sequence (a
+// terminal's answer to a query, a mouse or focus report) is dropped: only
+// keys a person pressed reach the agent.
 
 export interface TypedKeys {
   keys: string[];
@@ -42,11 +42,26 @@ const TILDE_UNSENT: Record<string, string> = {
 };
 const LETTER_UNSENT: Record<string, string> = { H: "Home", F: "End" };
 
-// xterm's modifier parameter: 1 + shift(1) + alt(2) + ctrl(4).
+// xterm's modifier parameter: 1 + shift(1) + alt(2) + ctrl(4) + meta(8).
 function modifiers(param: string | undefined): string {
   const value = Number(param ?? "1") - 1;
   if (!Number.isInteger(value) || value <= 0) return "";
   return (value & 4 ? "ctrl+" : "") + (value & 2 ? "alt+" : "") + (value & 1 ? "shift+" : "");
+}
+
+// Whether the parameter holds xterm's meta bit (Cmd on a Mac). A key name has
+// no meta prefix (terminal-holder.md 4.3), and the key without it is another
+// key, so a key with Meta is reported, not sent.
+function hasMeta(param: string | undefined): boolean {
+  const value = Number(param ?? "1") - 1;
+  return Number.isInteger(value) && value >= 8;
+}
+
+// A modified key: its name, or the name a person knows it by with Meta.
+function withModifiers(param: string | undefined, key: string): { key?: string; unsent?: string } {
+  if (!hasMeta(param)) return { key: modifiers(param) + key };
+  const name = key.length > 1 ? key[0]?.toUpperCase() + key.slice(1) : key;
+  return { unsent: `Meta+${name}` };
 }
 
 // One printable character, as herdr names it.
@@ -107,17 +122,16 @@ function escape(rest: string): { length: number; key?: string; unsent?: string }
     if (marker) return { length: match.length };
     const parts = params.split(";");
     if (ARROWS[final]) {
-      return { length: match.length, key: modifiers(parts[1]) + ARROWS[final] };
+      return { length: match.length, ...withModifiers(parts[1], ARROWS[final]) };
     }
     if (final === "Z") return { length: match.length, key: "shift+tab" };
     // `ESC[1;5R` is Ctrl+F3 and also a cursor position report for row 1, so
     // an `R` is always read as the report. F3 itself comes as `ESC O R`.
     if (SS3_F[final] && final !== "R" && parts[0] === "1") {
-      return { length: match.length, key: modifiers(parts[1]) + SS3_F[final] };
+      return { length: match.length, ...withModifiers(parts[1], SS3_F[final]) };
     }
-    if (final === "~" && parts[0] && TILDE[parts[0]]) {
-      return { length: match.length, key: modifiers(parts[1]) + TILDE[parts[0]] };
-    }
+    const tilde = final === "~" && parts[0] ? TILDE[parts[0]] : undefined;
+    if (tilde) return { length: match.length, ...withModifiers(parts[1], tilde) };
     if (final === "~" && parts[0] && TILDE_UNSENT[parts[0]]) {
       return { length: match.length, unsent: TILDE_UNSENT[parts[0]] };
     }
@@ -170,6 +184,26 @@ export function typedKeys(data: string): TypedKeys {
     }
   }
   return { keys, unsent };
+}
+
+function list(names: string[]): string {
+  if (names.length < 2) return names.join("");
+  return `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+}
+
+// What the board says of keys it did not send. A holder pane takes every key
+// through `tiller attach`, which passes the owner's bytes through as typed; a
+// herdr pane takes them in herdr itself.
+export function unsentNote(unsent: string[], holder: boolean): { title: string; detail: string } {
+  return holder
+    ? {
+        title: `The board can't send ${list(unsent)}`,
+        detail: "Nothing was sent for that key. Use tiller attach for it.",
+      }
+    : {
+        title: `herdr can't send ${list(unsent)}`,
+        detail: "Nothing was sent for that key. Use herdr itself for it.",
+      };
 }
 
 // The controls a press on the stage leaves alone.

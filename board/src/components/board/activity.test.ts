@@ -44,6 +44,14 @@ test("an activity the board does not know reads as unknown, not as working", () 
   expect(agentActivity(agent("unknown", 1), NOW).label).toBe("Unknown");
 });
 
+test("an agent the daemon never observed reads as not observed yet, not as unknown", () => {
+  const view = agentActivity(
+    { activity: "unknown", activity_observed_at: null, role: "build" },
+    NOW,
+  );
+  expect(view).toEqual({ dot: "unknown", label: "Not observed yet", old: false });
+});
+
 test("without thresholds in the snapshot the defaults apply", () => {
   expect(agentActivity(agent("working", 16), NOW).dot).toBe("stale");
 });

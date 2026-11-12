@@ -66,7 +66,12 @@ function OrchestratorMini({
       <i className={`ld ${view.dot}${view.dot === "live" ? " pulse" : ""}`} />
       <span className="tx">
         {orchestrator.model ? `orchestrator ${orchestrator.model}` : "orchestrator"},{" "}
-        {view.label.toLowerCase()}, <Ago at={orchestrator.activity_observed_at} prefix="observed" />
+        {view.label.toLowerCase()}
+        {orchestrator.activity_observed_at ? (
+          <>
+            , <Ago at={orchestrator.activity_observed_at} prefix="observed" />
+          </>
+        ) : null}
       </span>
       <StaleChip agent={orchestrator} />
     </span>

@@ -180,17 +180,6 @@ export interface SteerQueued {
   body: string;
 }
 
-// `data` of `POST /api/v1/agents/{session}/interrupt` (protocol.md 6.4, 7.4):
-// `confirmed` only when a hook or the transcript showed the turn end within
-// 10 s.
-export interface Interrupted {
-  run: string;
-  session: string;
-  pane_id: string;
-  cancel: "confirmed" | "unconfirmed";
-  evidence: string;
-}
-
 export interface AttentionResponse {
   items: AttentionItem[];
   permission_prompts: PermissionPrompt[];
@@ -201,7 +190,7 @@ export interface AgentRow extends Federated {
   role: string;
   model: string;
   activity: string;
-  activity_observed_at: string;
+  activity_observed_at: string | null;
   last_status_line: string | null;
   herdr_name: string | null;
   card_id: string | null;

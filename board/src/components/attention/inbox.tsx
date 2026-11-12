@@ -122,7 +122,7 @@ function waitKey(entry: Entry): string | null {
 }
 
 // When the entry began to wait on the owner.
-function sinceOfEntry(entry: Entry): string {
+function sinceOfEntry(entry: Entry): string | null {
   if (entry.type === "decision") return entry.item.opened_at;
   if (entry.type === "permission") return entry.prompt.since;
   return entry.agent.state_since ?? entry.agent.activity_observed_at;

@@ -39,11 +39,6 @@
   margin: 0;
 }
 
-.run-paused .av-steer-st {
-  min-height: 0;
-  padding: 8px 0 0;
-}
-
 .run-note {
   margin: 8px 0 0;
   font-size: var(--fs-mini);
