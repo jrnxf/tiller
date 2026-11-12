@@ -3,8 +3,9 @@
 //! [`HolderClient`] holds one connection for requests. Requests on it may
 //! overlap: each caller registers its request id, writes its frame, and
 //! waits for its own reply, which one reader thread hands over by id. Raw
-//! input takes only the write side, so a keystroke never waits for another
-//! call's reply. Each [`Subscription`] and each [`Events`] has a connection
+//! input takes only the write side, so a keystroke never waits here for
+//! another call's reply. (How soon the holder serves it is the holder's
+//! part: spec 2.4 has it serve a connection's requests concurrently.) Each [`Subscription`] and each [`Events`] has a connection
 //! of its own: its frames never wait behind a request, and a size a
 //! subscription sets through its lease ends when it is dropped, because its
 //! connection ends. A [`StreamHandle`] resizes or ends a subscription from
@@ -209,14 +210,17 @@ fn connect_by(path: &Path, deadline: Instant) -> Result<UnixStream> {
     ioctl_fionbio(&fd, true).map_err(io::Error::from)?;
     loop {
         match connect(&fd, &addr) {
-            Ok(()) => break,
+            // A connect that already went through, after a signal cut the
+            // call short and it ran again.
+            Ok(()) | Err(Errno::ISCONN) => break,
             Err(Errno::INTR) => {}
             // Linux: the listen queue is full. Try again until the deadline.
             Err(Errno::AGAIN) => {
                 let left = time_left(path, deadline)?;
                 std::thread::sleep(CONNECT_RETRY.min(left));
             }
-            Err(Errno::INPROGRESS) => {
+            // `ALREADY`: the connect a signal cut short is still going.
+            Err(Errno::INPROGRESS | Errno::ALREADY) => {
                 wait_writable(path, &fd, deadline)?;
                 match sockopt::socket_error(&fd).map_err(io::Error::from)? {
                     Ok(()) => break,
@@ -597,8 +601,11 @@ impl HolderClient {
         wait: Duration,
     ) -> Result<HolderMessage> {
         let (reply, answer) = mpsc::sync_channel(1);
+        let mut writer = lock(&self.writer);
         // The waiter is in place before the bytes leave, so a fast reply
-        // finds it.
+        // finds it, and only once this request holds the write side, so the
+        // waiters are the requests sent or being sent: an error with no id
+        // never goes to a request still waiting to be written.
         if self
             .shared
             .waiters()
@@ -610,7 +617,8 @@ impl HolderClient {
         let forget = || {
             self.shared.waiters().remove(&id);
         };
-        let mut writer = lock(&self.writer);
+        // After the insert: a retire that drained the waiters before it
+        // shows here.
         if let Err(err) = self.check() {
             forget();
             return Err(err);

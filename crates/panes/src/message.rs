@@ -399,6 +399,32 @@ impl Request {
         "ping",
     ];
 
+    /// The request's `type` on the wire, one of [`Request::TYPES`].
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Request::Hello(_) => "hello",
+            Request::Spawn { .. } => "spawn",
+            Request::List { .. } => "list",
+            Request::Subscribe { .. } => "subscribe",
+            Request::Resize { .. } => "resize",
+            Request::Get { .. } => "get",
+            Request::Screen { .. } => "screen",
+            Request::Input { .. } => "input",
+            Request::Paste { .. } => "paste",
+            Request::Keys { .. } => "keys",
+            Request::Release { .. } => "release",
+            Request::Unsubscribe { .. } => "unsubscribe",
+            Request::Meta { .. } => "meta",
+            Request::Signal { .. } => "signal",
+            Request::Close { .. } => "close",
+            Request::Forget { .. } => "forget",
+            Request::Watch { .. } => "watch",
+            Request::Switch { .. } => "switch",
+            Request::Upgrade { .. } => "upgrade",
+            Request::Ping { .. } => "ping",
+        }
+    }
+
     /// The request's `id`; a hello has none.
     pub fn id(&self) -> Option<u64> {
         match self {
@@ -1064,6 +1090,7 @@ mod tests {
         assert_eq!(requests.len(), Request::TYPES.len());
         for request in requests {
             let wire = serde_json::to_value(&request).unwrap();
+            assert_eq!(wire["type"], request.kind());
             assert!(
                 Request::TYPES.contains(&wire["type"].as_str().unwrap()),
                 "{wire}"

@@ -393,11 +393,12 @@ async fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
                 rows: Some(size.rows),
                 clients: None,
             }),
+        Request::Ping { id } => Ok(HolderMessage::Pong { id }),
         // The rest of the protocol comes with the holder's later tasks
         // (H04 and on).
         request => Err((
             ErrorCode::Unsupported,
-            format!("this holder does not serve {} yet", request_type(&request)),
+            format!("this holder does not serve {} yet", request.kind()),
         )),
     };
     match reply {
@@ -406,14 +407,6 @@ async fn request_in(holder: &Arc<Holder>, conn: &Arc<Conn>, request: Request) {
         }
         Err((code, message)) => reply_error(conn, request_id, code, message),
     }
-}
-
-/// A request's `type` on the wire.
-fn request_type(request: &Request) -> String {
-    serde_json::to_value(request)
-        .ok()
-        .and_then(|wire| wire["type"].as_str().map(str::to_owned))
-        .unwrap_or_else(|| "that request".to_owned())
 }
 
 fn reply_error(conn: &Conn, id: Option<u64>, code: ErrorCode, message: String) {
@@ -476,14 +469,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_request_this_holder_does_not_serve_yet_is_unsupported_and_keeps_the_connection() {
+    async fn a_request_this_holder_does_not_serve_yet_is_unsupported_and_a_ping_is_answered() {
         let holder = Holder::new();
         let (theirs, mut ours) = UnixStream::pair().unwrap();
         admit(&holder, theirs, peer::own_uid());
         for request in [
             Request::Hello(Hello::new("daemon")),
-            Request::Ping { id: 7 },
-            Request::List { id: 8 },
+            Request::Forget {
+                id: 7,
+                pane: "p1".into(),
+            },
+            Request::Ping { id: 8 },
         ] {
             let text = serde_json::to_string(&request).unwrap();
             ours.write_all(&Frame::Message(text).to_bytes().unwrap())
@@ -495,8 +491,11 @@ mod tests {
         assert_eq!(
             unsupported,
             serde_json::json!({"type":"error","id":7,"code":"unsupported",
-                "message":"this holder does not serve ping yet"})
+                "message":"this holder does not serve forget yet"})
         );
-        assert_eq!(read_message(&mut ours).await["type"], "panes");
+        assert_eq!(
+            read_message(&mut ours).await,
+            serde_json::json!({"type":"pong","id":8})
+        );
     }
 }

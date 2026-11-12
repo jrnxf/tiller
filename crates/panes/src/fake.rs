@@ -303,11 +303,21 @@ impl FakePanes {
     }
 
     /// Cuts every subscriber of `pane`, as the holder does one that falls
-    /// behind its queue.
+    /// behind its queue. Their leases end with their connections.
     pub fn lag(&self, pane: &PaneId) {
         let mut world = self.world();
         world.tell(pane, &Update::Lagged);
+        let cut: Vec<String> = world
+            .subscribers
+            .iter()
+            .filter(|slot| slot.pane == *pane)
+            .map(|slot| lease_of(slot.stream))
+            .collect();
         world.subscribers.retain(|slot| slot.pane != *pane);
+        if let Some(leases) = world.leases.get_mut(pane) {
+            leases.retain(|(lease, ..)| !cut.contains(lease));
+        }
+        let _ = world.apply_leases(pane);
     }
 
     /// Sends `event` to every watch.
@@ -537,7 +547,7 @@ impl Live for FakePanes {
             }),
         }
         drop(world);
-        let lease = format!("stream-{stream}");
+        let lease = lease_of(stream);
         let control = Arc::new(FakeControl {
             world: Arc::clone(&self.world),
             pane: pane.clone(),
@@ -569,6 +579,11 @@ impl Live for FakePanes {
             Arc::new(end),
         ))
     }
+}
+
+/// The lease a fake subscription's resizes name.
+fn lease_of(stream: u32) -> String {
+    format!("stream-{stream}")
 }
 
 /// A fake subscription's channel end.
@@ -995,10 +1010,17 @@ mod tests {
         let fake = FakePanes::new();
         let pane = fake.spawn(&spawn("s1")).unwrap().pane;
         let mut subscription = fake.subscribe(&pane, Subscribe::default()).unwrap();
+        subscription.resize(100, 30).unwrap();
         fake.lag(&pane);
+        // Its lease ended with it, before the subscription value is dropped.
+        assert!(fake.leases(&pane).is_empty());
         assert!(matches!(
             subscription.recv(),
             Ok(Some(Update::Repaint { .. }))
+        ));
+        assert!(matches!(
+            subscription.recv(),
+            Ok(Some(Update::Resized { .. }))
         ));
         assert_eq!(subscription.recv().unwrap(), Some(Update::Lagged));
         assert_eq!(subscription.recv().unwrap(), None);
