@@ -160,7 +160,7 @@ A subscriber gets one **repaint**, then **passthrough**:
 - **Passthrough.** After the repaint, the subscriber gets the PTY's own bytes, as the child wrote them, less the query sequences (below). Raw bytes keep full fidelity: the board's xterm.js or the owner's terminal draws what the agent drew.
 - **Queries.** An app asks its terminal questions: DA1, DA2, cursor position (CPR), DECRQM, the kitty keyboard query, XTVERSION, the window size reports (`14t`, `18t`), and OSC 4, 10, 11 and 12 colors. With many viewers, many terminals would answer, or none would. So the holder answers them from its model, as one terminal, and cuts them from the passthrough stream. A test feeds each query and checks one answer on the PTY and none in any subscriber's stream. The answer to XTVERSION is `tiller <version>`.
 - **Synchronized output (mode 2026).** The model holds a frame until its end marker, so a `screen` read never sees half a frame. The passthrough stream keeps the markers. A subscriber can ask `sync: "buffer"`, and the holder then holds that subscriber's bytes from the start marker to the end marker (at most 150 ms or 1 MiB) and sends them as one frame. The board asks for it, because the board's xterm.js may not honor mode 2026. `tiller attach` asks `sync: "pass"`, because modern terminals honor it.
-- **Back-pressure.** Each subscriber has a queue of 4 MiB. A subscriber that falls behind it is cut (`{"type":"lagged","stream":n}`) and may subscribe again for a fresh repaint. The PTY reader never waits for a subscriber.
+- **Back-pressure.** Each subscriber has a queue of 4 MiB. Past it, that stream's queued live output is dropped and the stream gets `{"type":"lagged","stream":n}`. The connection and its other streams go on, and the client may subscribe again for a fresh repaint. The PTY reader never waits for a subscriber.
 
 ### 2.8 Limits
 
@@ -172,7 +172,7 @@ A subscriber gets one **repaint**, then **passthrough**:
 | Subscribers per pane | 16 | `subscribe` answers `busy` |
 | Connections | 64 | new connections are closed |
 | Frame size | 16 MiB | the connection ends |
-| Subscriber queue | 4 MiB | the subscriber is cut |
+| Subscriber queue | 4 MiB | that stream's queued output is dropped and it gets `lagged`, and the connection stays |
 | One reply frame, against a connection's 4 MiB queue | 4 MiB | the request answers `busy`, and the connection stays |
 | A client's input the app left unread | 4 MiB | `input`, `paste` and `keys` answer `busy`, and raw input cuts the client |
 | Leases per pane | 64 | `resize` with a new lease id answers `busy` |
@@ -538,7 +538,7 @@ With 8 live `fake-agent` panes, two of them in the alternate screen, one with ki
 
 - `SIGKILL` the holder: the daemon sees a new instance, the ladder runs, sessions are resumed (R21), and one notification is sent.
 - A forced model panic (a test-only feature flag): only that pane's model resets, and the child lives.
-- A slow subscriber: it is cut at 4 MiB, and the agent's writes never wait.
+- A slow subscriber: its stream gets `lagged` at 4 MiB, its connection stays, and the agent's writes never wait.
 - A flood: 200 MiB of output in 10 s. The holder's memory stays bound, and every reply to `ping` takes under 50 ms.
 - A wrong uid on the socket: tested by calling the peer check with injected credentials, because a test cannot change its uid.
 - A stale socket file, a lock held by a live holder, and two holders started at once: exactly one serves.
