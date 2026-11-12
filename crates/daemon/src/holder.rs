@@ -366,13 +366,20 @@ pub(crate) mod fake {
             self.screens().inputs.clone()
         }
 
-        /// Another client resizes the pane's PTY; each subscription sees it.
+        /// Another client resizes the pane's PTY; each subscription sees it,
+        /// as it will once `watch` events land.
         pub(crate) fn resize(&self, pane: &PaneId, cols: u16, rows: u16) {
             let mut screens = self.screens();
             screens.sizes.insert(pane.clone(), (cols, rows));
             if let Some(live) = screens.live.get_mut(pane) {
                 live.retain(|(_, tx)| tx.send(Update::Resized { cols, rows }).is_ok());
             }
+        }
+
+        /// Another client resizes the pane's PTY, and no subscription hears
+        /// of it, as with the slice's holder.
+        pub(crate) fn resize_unseen(&self, pane: &PaneId, cols: u16, rows: u16) {
+            self.screens().sizes.insert(pane.clone(), (cols, rows));
         }
 
         /// Each size the daemon set, with its pane, in order.
@@ -387,10 +394,7 @@ pub(crate) mod fake {
 
         /// The pane's PTY size now.
         pub(crate) fn size(&self, pane: &PaneId) -> Option<(u16, u16)> {
-            if let Some(size) = self.screens().sizes.get(pane) {
-                return Some(*size);
-            }
-            let listing = self.panes.list().ok()?;
+            let listing = self.list().ok()?;
             let found = listing.panes.into_iter().find(|p| &p.pane == pane)?;
             Some((found.cols, found.rows))
         }
@@ -406,23 +410,27 @@ pub(crate) mod fake {
             self.panes.spawn(req)
         }
 
+        /// As the holder's listing does, each pane has its PTY's size.
         fn list(&self) -> Result<Listing> {
-            self.panes.list()
+            let mut listing = self.panes.list()?;
+            let screens = self.screens();
+            for pane in &mut listing.panes {
+                if let Some((cols, rows)) = screens.sizes.get(&pane.pane) {
+                    (pane.cols, pane.rows) = (*cols, *rows);
+                }
+            }
+            Ok(listing)
         }
     }
 
     impl Holder for FakeHolder {
         fn subscribe(&self, pane: &PaneId) -> Result<Box<dyn Live>> {
-            let listing = self.panes.list()?;
+            let listing = self.list()?;
             let found = running(&listing, pane)?;
+            let (cols, rows) = (found.cols, found.rows);
             let (tx, rx) = channel();
             let mut screens = self.screens();
             let bytes = screens.written.get(pane).cloned().unwrap_or_default();
-            let (cols, rows) = screens
-                .sizes
-                .get(pane)
-                .copied()
-                .unwrap_or((found.cols, found.rows));
             let _ = tx.send(Update::Repaint { cols, rows, bytes });
             let id = screens.next;
             screens.next += 1;

@@ -10036,6 +10036,73 @@ esac"#,
     }
 
     #[tokio::test]
+    async fn a_size_another_client_sets_unseen_during_a_fit_is_the_one_given_back() {
+        let mut fleet = Fleet::new();
+        let holder = crate::holder::fake::FakeHolder::default();
+        let pane = holder_pane(&holder, "s-1");
+        let session = fleet.worker(pane.as_str());
+        let home = fleet.dir.path();
+        let app = holder_app(home, &holder);
+        let response = open_stream(
+            &app,
+            home,
+            &session,
+            json!({"fit": {"cols": 100, "rows": 30}}),
+        )
+        .await;
+        let mut body = response.into_body().into_data_stream();
+        let mut pending = String::new();
+        assert_eq!(
+            next_line(&mut body, &mut pending).await,
+            json!({"type": "size", "cols": 100, "rows": 30})
+        );
+        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
+
+        // Another client resizes the PTY, which the holder tells no view. The
+        // viewer leaves: the pane keeps that size.
+        holder.resize_unseen(&pane, 90, 25);
+        drop(body);
+        assert!(eventually(|| holder.subscribers(&pane) == 0).await);
+
+        // The next Fit waits for the first to give back, so by its first
+        // line the first gave nothing back.
+        let response = open_stream(
+            &app,
+            home,
+            &session,
+            json!({"fit": {"cols": 100, "rows": 30}}),
+        )
+        .await;
+        let mut body = response.into_body().into_data_stream();
+        assert_eq!(
+            next_line(&mut body, &mut pending).await,
+            json!({"type": "size", "cols": 100, "rows": 30})
+        );
+        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
+        let sizes = || {
+            holder
+                .sizes_set()
+                .into_iter()
+                .map(|(_, size)| size)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(sizes(), [(100, 30), (100, 30)]);
+
+        // Another client resizes it unseen again, and the board refits: the
+        // view gives back the other client's size.
+        holder.resize_unseen(&pane, 95, 28);
+        let refit = holder_refit(&app, home, &session, 110, 35).await;
+        assert_eq!(refit.status, StatusCode::OK, "{}", refit.body);
+        assert_eq!(
+            next_line(&mut body, &mut pending).await,
+            json!({"type": "size", "cols": 110, "rows": 35})
+        );
+        drop(body);
+        assert!(eventually(|| holder.size(&pane) == Some((95, 28))).await);
+        assert_eq!(sizes(), [(100, 30), (100, 30), (110, 35), (95, 28)]);
+    }
+
+    #[tokio::test]
     async fn a_view_without_a_fit_follows_the_size_a_fit_sets_and_gives_back() {
         let mut fleet = Fleet::new();
         let holder = crate::holder::fake::FakeHolder::default();

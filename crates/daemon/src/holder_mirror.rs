@@ -148,8 +148,19 @@ struct Fit {
     back: Option<(u16, u16)>,
     /// The size this Fit last set.
     set: Option<(u16, u16)>,
-    /// The pane's size at the view's last repaint.
-    now: Option<(u16, u16)>,
+}
+
+/// The pane's size in the holder now, read off the async threads, since
+/// the holder tells the view of no other client's resize. None when the
+/// holder does not answer in time or no longer lists the pane.
+async fn size_now(holder: &Arc<dyn Holder>, pane: &PaneId) -> Option<(u16, u16)> {
+    let (lister, asked) = (Arc::clone(holder), pane.clone());
+    let task = tokio::task::spawn_blocking(move || {
+        let listing = lister.list().ok()?;
+        let found = listing.panes.into_iter().find(|p| p.pane == asked)?;
+        Some((found.cols, found.rows))
+    });
+    tokio::time::timeout(RESIZE_WAIT, task).await.ok()?.ok()?
 }
 
 /// Sets the pane to `size` off the async threads, and tells every view on
@@ -178,14 +189,15 @@ async fn set_size(
 }
 
 /// Gives the pane back the size it had before the Fit, or the size another
-/// client set since, if the pane is not at it now. A Fit that never set a
+/// client set since, if the pane is still at the size this Fit last set. A
+/// pane another client sized since keeps that size. A Fit that never set a
 /// size, a pane that has exited, or a holder that is gone, has nothing to
 /// give back.
 async fn give_back(holder: &Arc<dyn Holder>, fits: &Fits, pane: &PaneId, fit: Fit) {
     let (Some(back), Some(set)) = (fit.back, fit.set) else {
         return;
     };
-    if back == fit.now.unwrap_or(set) {
+    if back == set || size_now(holder, pane).await != Some(set) {
         return;
     }
     match set_size(holder, fits, pane, back).await {
@@ -235,7 +247,6 @@ async fn mirror(
                     board: fits.board(pane.as_str(), size),
                     back: None,
                     set: None,
-                    now: None,
                 });
             }
             None => {
@@ -266,7 +277,8 @@ enum Woke {
 }
 
 /// Sets the Fit's size, or ends the Fit with an `unfit` line when the
-/// holder would not take it. False when the browser left.
+/// holder would not take it. A size another client set since the Fit last
+/// set one is the size to give back. False when the browser left.
 async fn fit_to(
     holder: &Arc<dyn Holder>,
     fits: &Fits,
@@ -275,6 +287,13 @@ async fn fit_to(
     size: (u16, u16),
     tx: &mpsc::Sender<Bytes>,
 ) -> bool {
+    if let Some(fit) = held.as_mut()
+        && let Some(set) = fit.set
+        && let Some(now) = size_now(holder, pane).await
+        && now != set
+    {
+        fit.back = Some(now);
+    }
     match set_size(holder, fits, pane, size).await {
         Ok(()) => {
             if let Some(fit) = held.as_mut() {
@@ -373,7 +392,6 @@ async fn view(
                 && let Some(fit) = held.as_mut()
             {
                 let own = (*cols, *rows);
-                fit.now = Some(own);
                 match fit.set {
                     Some(set) if set != own => fit.back = Some(own),
                     _ => {
