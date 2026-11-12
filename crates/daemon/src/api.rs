@@ -9937,15 +9937,6 @@ esac"#,
         );
         assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
 
-        // Another client resizes the PTY: the view shows that size, and the
-        // Fit does not fight it.
-        holder.resize(&pane, 90, 25);
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "size", "cols": 90, "rows": 25})
-        );
-        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
-
         // The viewer leaves: the pane gets back the size it had before the Fit.
         drop(body);
         assert!(eventually(|| holder.size(&pane) == Some((120, 40))).await);
@@ -9965,6 +9956,82 @@ esac"#,
             StatusCode::UNPROCESSABLE_ENTITY,
             "{}",
             late.body
+        );
+    }
+
+    #[tokio::test]
+    async fn a_size_another_client_sets_during_a_fit_is_the_one_given_back() {
+        let mut fleet = Fleet::new();
+        let holder = crate::holder::fake::FakeHolder::default();
+        let pane = holder_pane(&holder, "s-1");
+        let session = fleet.worker(pane.as_str());
+        let home = fleet.dir.path();
+        let app = holder_app(home, &holder);
+        let response = open_stream(
+            &app,
+            home,
+            &session,
+            json!({"fit": {"cols": 100, "rows": 30}}),
+        )
+        .await;
+        let mut body = response.into_body().into_data_stream();
+        let mut pending = String::new();
+        assert_eq!(
+            next_line(&mut body, &mut pending).await,
+            json!({"type": "size", "cols": 100, "rows": 30})
+        );
+        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
+
+        // Another client resizes the PTY: the view shows that size, and the
+        // Fit does not fight it.
+        holder.resize(&pane, 90, 25);
+        assert_eq!(
+            next_line(&mut body, &mut pending).await,
+            json!({"type": "size", "cols": 90, "rows": 25})
+        );
+        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
+
+        // The viewer leaves while the pane has that size: nothing to give back.
+        drop(body);
+        assert!(eventually(|| holder.subscribers(&pane) == 0).await);
+        assert_eq!(holder.size(&pane), Some((90, 25)));
+
+        // A new board size after it sets the Fit again, and the view gives
+        // back the other client's size, not the one from before the Fit.
+        let response = open_stream(
+            &app,
+            home,
+            &session,
+            json!({"fit": {"cols": 100, "rows": 30}}),
+        )
+        .await;
+        let mut body = response.into_body().into_data_stream();
+        assert_eq!(
+            next_line(&mut body, &mut pending).await,
+            json!({"type": "size", "cols": 100, "rows": 30})
+        );
+        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
+        holder.resize(&pane, 95, 28);
+        assert_eq!(
+            next_line(&mut body, &mut pending).await,
+            json!({"type": "size", "cols": 95, "rows": 28})
+        );
+        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
+        let refit = holder_refit(&app, home, &session, 110, 35).await;
+        assert_eq!(refit.status, StatusCode::OK, "{}", refit.body);
+        assert_eq!(
+            next_line(&mut body, &mut pending).await,
+            json!({"type": "size", "cols": 110, "rows": 35})
+        );
+        drop(body);
+        assert!(eventually(|| holder.size(&pane) == Some((95, 28))).await);
+        assert_eq!(
+            holder
+                .sizes_set()
+                .into_iter()
+                .map(|(_, size)| size)
+                .collect::<Vec<_>>(),
+            [(100, 30), (100, 30), (110, 35), (95, 28)]
         );
     }
 

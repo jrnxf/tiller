@@ -143,10 +143,13 @@ struct Fit {
     _turn: OwnedMutexGuard<()>,
     /// The board's size, as it refits.
     board: watch::Receiver<(u16, u16)>,
-    /// The pane's size before the Fit, from the first repaint.
+    /// The size to give the pane back: its size before the Fit, from the
+    /// first repaint, or the size another client set since.
     back: Option<(u16, u16)>,
     /// The size this Fit last set.
     set: Option<(u16, u16)>,
+    /// The pane's size at the view's last repaint.
+    now: Option<(u16, u16)>,
 }
 
 /// Sets the pane to `size` off the async threads, and tells every view on
@@ -174,14 +177,15 @@ async fn set_size(
     result
 }
 
-/// Gives the pane back the size it had before the Fit, if the Fit changed
-/// it. A pane that has exited, or a holder that is gone, has nothing to
-/// give back to.
+/// Gives the pane back the size it had before the Fit, or the size another
+/// client set since, if the pane is not at it now. A Fit that never set a
+/// size, a pane that has exited, or a holder that is gone, has nothing to
+/// give back.
 async fn give_back(holder: &Arc<dyn Holder>, fits: &Fits, pane: &PaneId, fit: Fit) {
     let (Some(back), Some(set)) = (fit.back, fit.set) else {
         return;
     };
-    if back == set {
+    if back == fit.now.unwrap_or(set) {
         return;
     }
     match set_size(holder, fits, pane, back).await {
@@ -231,6 +235,7 @@ async fn mirror(
                     board: fits.board(pane.as_str(), size),
                     back: None,
                     set: None,
+                    now: None,
                 });
             }
             None => {
@@ -325,7 +330,13 @@ async fn view(
                 } {
                     Woke::Update(update) => update,
                     Woke::Refit(size) => {
-                        if held.as_ref().and_then(|fit| fit.set) == Some(size) {
+                        // Before the first repaint the size to give back is
+                        // not known yet: the repaint fits to the board's
+                        // newest size.
+                        if held
+                            .as_ref()
+                            .is_none_or(|fit| fit.back.is_none() || fit.set == Some(size))
+                        {
                             continue;
                         }
                         if !fit_to(holder, fits, pane, held, size, tx).await {
@@ -357,12 +368,18 @@ async fn view(
             };
             // The first repaint of a Fit is the size to give back. A Fit
             // sets its size once: a pane another client sized since shows
-            // at that size.
+            // at that size, and that size is the one to give back.
             if let Some(Ok(Some(Update::Repaint { cols, rows, .. }))) = &update
                 && let Some(fit) = held.as_mut()
             {
                 let own = (*cols, *rows);
-                fit.back.get_or_insert(own);
+                fit.now = Some(own);
+                match fit.set {
+                    Some(set) if set != own => fit.back = Some(own),
+                    _ => {
+                        fit.back.get_or_insert(own);
+                    }
+                }
                 let board = *fit.board.borrow_and_update();
                 if own != board && fit.set != Some(board) {
                     if !fit_to(holder, fits, pane, held, board, tx).await {

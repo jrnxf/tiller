@@ -176,8 +176,8 @@ impl Holder for HolderLink {
     /// Through a subscription of its own, which ends once the holder took
     /// the size: the slice's holder keeps no leases, so the size stays
     /// when it ends (H11 makes the Fit a lease on the view's own
-    /// subscription). A resize may be sent twice: the second sets the same
-    /// size.
+    /// subscription). Only the subscribe is tried twice; a resize the
+    /// holder does not answer fails the Fit.
     fn set_size(&self, pane: &PaneId, cols: u16, rows: u16) -> Result<()> {
         let mut sizer = self.twice(|client| client.subscribe(pane, Subscribe::default()))?;
         sizer.resize(cols, rows)?;
