@@ -73,19 +73,19 @@ export async function enterPageFullScreen(): Promise<void> {
     console.debug("tiller: Esc is not held in full screen: this browser has no Keyboard Lock");
     return;
   }
-  if (window.top !== window) {
-    console.debug(
-      "tiller: Esc may not hold in full screen: the board is in a frame, and the browser locks keys only for a top-level page",
-    );
-  }
+  // Browsers lock keys only for a top-level page.
+  const framed = window.top !== window ? ", and the board is in a frame" : "";
   try {
     await keyboard.lock(["Escape"]);
   } catch (error) {
     console.debug(
-      "tiller: Esc is not held in full screen: the browser refused the Keyboard Lock",
+      `tiller: Esc is not held in full screen: the browser refused the Keyboard Lock${framed}`,
       error,
     );
     return;
+  }
+  if (framed) {
+    console.debug("tiller: Esc may not hold in full screen: the board is in a frame");
   }
   if (document.fullscreenElement !== document.documentElement) {
     console.debug("tiller: Esc is not held: full screen ended before the Keyboard Lock took");

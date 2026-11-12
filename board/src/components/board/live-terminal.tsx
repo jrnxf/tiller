@@ -328,6 +328,23 @@ export function gridCell(view: {
   return cell;
 }
 
+// Whether the stage keeps the chosen font over the grid it has. Under the
+// Fit, while the pane's new size is on its way, the old grid shows at the
+// chosen font, clipped by the stage, and never scaled down to it. Once the
+// size lands, or the wait runs out, the grid is the pane's own and scales
+// as without the Fit. The answer strip's loan shrinks the text too, so the
+// dialog under the strip stays in view.
+export function holdsFont(stage: {
+  held: boolean;
+  sizing: boolean;
+  lent: number;
+  grid: TerminalSize;
+  target: TerminalSize;
+}): boolean {
+  if (!stage.held || !stage.sizing || stage.lent !== 0) return false;
+  return stage.grid.cols !== stage.target.cols || stage.grid.rows !== stage.target.rows;
+}
+
 function cellAt(fontSize: number, dpr: number): Cell | null {
   const key = `${fontSize}@${dpr}`;
   const known = measured.get(key);
@@ -362,6 +379,9 @@ const clampFit = (cols: number, rows: number): TerminalSize => ({
 
 // How long the stage's size has to hold before the pane follows it.
 const REFIT_DELAY = 300;
+// How long the stage keeps the chosen font over the old grid while a new
+// size is on its way: the refit's delay and the daemon's 5 s resize wait.
+const SIZE_WAIT = REFIT_DELAY + 5000;
 
 function fontReady(): Promise<unknown> {
   try {
@@ -706,6 +726,15 @@ export function LiveTerminal({
   const fitTarget = useRef<TerminalSize | null>(null);
   const stripBox = useRef<HTMLDivElement>(null);
   const refitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // A Fit that holds a live pane: the layout reads it, so a change of
+  // visibility does not rebuild the layout.
+  const fitHeld = useRef(false);
+  // The stage changed size under the Fit, and the pane's size for it has
+  // not landed yet. The wait runs out after SIZE_WAIT, so a pane that keeps
+  // another size (a client that resized it, or a refused resize) scales.
+  const sizing = useRef(false);
+  const sizingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const layoutRef = useRef<() => void>(() => {});
   // The web font is in, so xterm measures its cells right when it opens.
   const [ready, setReady] = useState(false);
   // The pane's scrollback, read on the owner's ask and shown over the live
@@ -755,7 +784,13 @@ export function LiveTerminal({
               // A closed pane has no scrollback left to read.
               if (next.kind === "ended") closeHistory();
             },
-            size: setSize,
+            size: (next) => {
+              const target = fitTarget.current;
+              if (target && target.cols === next.cols && target.rows === next.rows) {
+                sizing.current = false;
+              }
+              setSize(next);
+            },
             typing: (on) => {
               setTyping(on);
               // Typing goes to the live screen, so the scrollback gives way.
@@ -845,9 +880,13 @@ export function LiveTerminal({
     fittingRef.current = fitting;
     streamRef.current?.refit();
   }, [fitting]);
+  useEffect(() => {
+    fitHeld.current = fitting && status.kind !== "ended";
+  }, [fitting, status.kind]);
   useEffect(
     () => () => {
       if (refitTimer.current !== null) clearTimeout(refitTimer.current);
+      if (sizingTimer.current !== null) clearTimeout(sizingTimer.current);
     },
     [],
   );
@@ -884,19 +923,18 @@ export function LiveTerminal({
     // The answer strip borrows its height from the stage: the pane keeps
     // its size under it, since a resize redraws the dialog it answers.
     const lent = inStage ? (stripBox.current?.offsetHeight ?? 0) : 0;
-    // Under the Fit the text stays at the chosen size: a pane whose new size
-    // is still on its way shows clipped by the stage, never scaled down to
-    // its old grid. Only the strip's loan shrinks it, so the dialog under the
-    // strip stays in view.
-    const pinned = inStage && fitting && lent === 0;
+    let pinned = false;
     // What the stage holds at its own font, for the Fit. A new size waits
     // for the stage to settle, so a drag of the window opens the stream once.
     if (inStage) {
       const stageCell = Math.floor(stageFont * ratio);
       const metrics = cellAt(sized(stageCell), dpr);
       const high = metrics?.height ?? (screen.offsetHeight / term.rows) * dpr;
+      // A column is drawn a hair over the cell (`sized`), so the grid is
+      // counted at that width: else a wide grid comes out a few pixels over
+      // the stage, and the text steps down a size to fit.
       const target = clampFit(
-        Math.floor((width * dpr) / stageCell),
+        Math.floor((width * dpr) / (stageCell + 0.05)),
         Math.floor(((box.clientHeight + lent - PAD * 2) * dpr) / high),
       );
       const before = fitTarget.current;
@@ -907,7 +945,23 @@ export function LiveTerminal({
           refitTimer.current = null;
           streamRef.current?.refit();
         }, REFIT_DELAY);
+        if (fitHeld.current) {
+          sizing.current = true;
+          if (sizingTimer.current !== null) clearTimeout(sizingTimer.current);
+          sizingTimer.current = setTimeout(() => {
+            sizingTimer.current = null;
+            sizing.current = false;
+            layoutRef.current();
+          }, SIZE_WAIT);
+        }
       }
+      pinned = holdsFont({
+        held: fitHeld.current,
+        sizing: sizing.current,
+        lent,
+        grid: { cols: term.cols, rows: term.rows },
+        target,
+      });
     }
     // Rows are whole pixels, so their height does not grow evenly with the
     // font: a guess from the height now can flip between two sizes on every
@@ -953,7 +1007,10 @@ export function LiveTerminal({
       const next = fits(stageFont + 1);
       setRoomFont((was) => (was.shown === shown && was.next === next ? was : { shown, next }));
     }
-  }, [host, box, view, scale, stage, stageFont, fitting]);
+  }, [host, box, view, scale, stage, stageFont]);
+  useEffect(() => {
+    layoutRef.current = layout;
+  }, [layout]);
 
   // Put the one xterm in the view that shows it, opening it there the first
   // time (xterm measures its cells on open, so the host must be on the page),

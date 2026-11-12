@@ -19,6 +19,7 @@ import {
   clampStageFont,
   fontReadout,
   gridCell,
+  holdsFont,
   isHolderPane,
   reloadTerminalPrefs,
 } from "./live-terminal";
@@ -308,23 +309,48 @@ const rowsHigh = (rows: number) => (its: number) => (its / 2) * 1.2 * rows;
 test("under the Fit the font size stays fixed across a stage resize", () => {
   // A 14 px font on a 2x screen: a 28 px cell, and rows 17 CSS px high.
   const cell = 14 * 2;
-  // The pane's grid is still 150 by 40 from the wide stage.
-  const grid = { cell, least: 12, cols: 150, rowsHigh: rowsHigh(40), fit: true };
-  const wide = { ...grid, width: 150 * cell, room: 40 * 17 };
-  // The window goes narrower and lower: half the width and two thirds the height.
-  const narrow = { ...grid, width: 75 * cell, room: 27 * 17 };
+  const old = { cols: 150, rows: 40 };
+  const target = { cols: 75, rows: 27 };
+  // The window goes narrower and lower. The grid is still the wide stage's,
+  // and the pane's new size is on its way.
+  const narrow = { cell, least: 12, width: 75 * cell, room: 27 * 17, fit: true };
+  const stage = { held: true, sizing: true, lent: 0, grid: old, target };
+  const pinned = holdsFont(stage);
+  expect(pinned).toBe(true);
+  // The cell stays at the chosen font: the stage clips the old grid.
+  expect(gridCell({ ...narrow, cols: old.cols, rowsHigh: rowsHigh(old.rows), pinned })).toBe(cell);
 
-  // Under the Fit the cell stays at the chosen font while the new size is on
-  // its way: the stage clips the old grid.
-  expect(gridCell({ ...wide, pinned: true })).toBe(cell);
-  expect(gridCell({ ...narrow, pinned: true })).toBe(cell);
-  expect(fontReadout(STAGE_FONT, true, room(STAGE_FONT)).shown).toBe(STAGE_FONT);
+  // The new size lands: the grid fills the stage at the same font.
+  const landed = holdsFont({ ...stage, sizing: false, grid: target });
+  expect(landed).toBe(false);
+  expect(
+    gridCell({ ...narrow, cols: target.cols, rowsHigh: rowsHigh(target.rows), pinned: landed }),
+  ).toBe(cell);
+});
 
-  // Without the Fit the text scales down so the old grid shows whole.
-  expect(gridCell({ ...wide, pinned: false })).toBe(cell);
-  const scaled = gridCell({ ...narrow, pinned: false });
-  expect(scaled).toBeLessThanOrEqual(Math.floor((75 * cell) / 150));
-  expect(rowsHigh(40)(scaled)).toBeLessThanOrEqual(narrow.room);
+test("only a new size on its way holds the font; a grid that stays another size scales", () => {
+  const old = { cols: 150, rows: 40 };
+  const target = { cols: 75, rows: 27 };
+  const stage = { held: true, sizing: true, lent: 0, grid: old, target };
+  // Without the Fit, or once the wait ran out (another client kept its own
+  // size), the old grid shows whole, scaled down.
+  expect(holdsFont({ ...stage, held: false })).toBe(false);
+  expect(holdsFont({ ...stage, sizing: false })).toBe(false);
+  // The answer strip's loan keeps the dialog under it in view.
+  expect(holdsFont({ ...stage, lent: 40 })).toBe(false);
+  // A grid already at the target needs no hold.
+  expect(holdsFont({ ...stage, grid: target })).toBe(false);
+
+  const cell = 14 * 2;
+  const narrow = { cell, least: 12, width: 75 * cell, room: 27 * 17, fit: true };
+  const scaled = gridCell({
+    ...narrow,
+    cols: old.cols,
+    rowsHigh: rowsHigh(old.rows),
+    pinned: false,
+  });
+  expect(scaled).toBeLessThanOrEqual(Math.floor((75 * cell) / old.cols));
+  expect(rowsHigh(old.rows)(scaled)).toBeLessThanOrEqual(narrow.room);
 });
 
 test("full screen pins the agent's card over the page, and a second press or Esc leaves it", async () => {
