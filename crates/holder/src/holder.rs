@@ -6,6 +6,10 @@
 //! One reaper serves every pane. A pane's lock covers its record, model and
 //! subscribers, so a new subscriber's repaint and the live bytes after it
 //! are queued in order, and nothing waits for a client under it.
+//!
+//! Locks are taken in one order: a pane's, then the table's, then the
+//! watchers', then a connection's list of streams. A pane's events go out
+//! under its lock, so they reach every watcher in the order they happened.
 
 use std::io;
 use std::os::fd::OwnedFd;
@@ -14,19 +18,21 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use alacritty_terminal::term::TermMode;
 use jiff::Timestamp;
 use rustix::process::{Pid, Signal, WaitOptions};
 use tiller_panes::frame::Frame;
 use tiller_panes::handshake::Welcome;
-use tiller_panes::message::{ErrorCode, HolderMessage};
-use tiller_panes::{Exit, Listing, Pane, PaneId, PaneState, Size, Spawn};
+use tiller_panes::keys::Key;
+use tiller_panes::message::{ErrorCode, Format, HolderMessage, MAX_RECENT, Read, Screen};
+use tiller_panes::{Exit, Listing, Meta, Pane, PaneId, PaneState, Size, Spawn};
 use tokio::io::unix::AsyncFd;
 use tokio::sync::{Notify, watch};
 
 use crate::input::{self, INPUT_CAP, InputQueue};
-use crate::model::{MAX_COLS, MAX_ROWS, MIN_COLS, MIN_ROWS, Model, ModelPanic};
+use crate::model::{MAX_COLS, MAX_ROWS, MIN_COLS, MIN_ROWS, Model, ModelPanic, Told};
 use crate::outbox::{Outbox, Refused};
-use crate::pty;
+use crate::{keys, pty};
 
 /// How long an exit waits for the child's last output before `exited` is
 /// sent, when something else still holds the PTY open.
@@ -35,8 +41,19 @@ pub const EXIT_DRAIN: Duration = Duration::from_millis(250);
 /// The most a PTY read takes at once.
 const READ_CHUNK: usize = 64 * 1024;
 
+/// How long a pane is silent after output before its `quiet` event.
+pub const QUIET_AFTER: Duration = Duration::from_millis(500);
+
+/// How long `close` waits for the reaper after `kill`. A killed child ends
+/// at once unless the kernel holds it, so a longer wait is an error.
+const KILL_WAIT: Duration = Duration::from_secs(5);
+
+/// The start and end of a bracketed paste (mode 2004).
+const PASTE_START: &str = "\x1b[200~";
+const PASTE_END: &str = "\x1b[201~";
+
 /// An error reply's code and message.
-type Failure = (ErrorCode, String);
+pub(crate) type Failure = (ErrorCode, String);
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -138,6 +155,21 @@ impl Conn {
     }
 }
 
+/// The connections that asked for events (`watch`).
+#[derive(Debug, Default)]
+struct Watchers(Mutex<Vec<Arc<Conn>>>);
+
+impl Watchers {
+    /// Sends `event` to every watcher, and drops each whose connection is
+    /// cut or gone.
+    fn emit(&self, event: &HolderMessage) {
+        let Some(frame) = message_frame(event) else {
+            return;
+        };
+        lock(&self.0).retain(|conn| conn.send(frame.clone()));
+    }
+}
+
 /// A subscriber of one pane.
 #[derive(Debug)]
 struct Subscriber {
@@ -205,6 +237,11 @@ pub struct PaneCell {
     inner: Mutex<Inner>,
     /// True once the PTY read ends: every holder of the slave closed it.
     output_ended: watch::Sender<bool>,
+    /// The child's exit, once it is in the record.
+    exit: watch::Sender<Option<Exit>>,
+    /// True once the pane is forgotten: its PTY read stops.
+    forgotten: watch::Sender<bool>,
+    watchers: Arc<Watchers>,
 }
 
 impl PaneCell {
@@ -212,8 +249,33 @@ impl PaneCell {
         lock(&self.inner)
     }
 
+    /// An event about this pane, to every watcher.
+    fn emit(&self, event: &HolderMessage) {
+        self.watchers.emit(event);
+    }
+
+    /// Sends the events for what the app told the model: titles, bells and
+    /// notifications. A title that did not change is no event.
+    fn told(&self, inner: &mut Inner) {
+        for told in inner.model.take_told() {
+            let pane = self.id.clone();
+            match told {
+                Told::Title(title) if title == inner.record.title => {}
+                Told::Title(title) => {
+                    inner.record.title.clone_from(&title);
+                    self.emit(&HolderMessage::Title { pane, title });
+                }
+                Told::Bell => self.emit(&HolderMessage::Bell { pane }),
+                Told::Notify { title, body } => {
+                    self.emit(&HolderMessage::Notify { pane, title, body });
+                }
+            }
+        }
+    }
+
     /// A model panic: the model is fresh already. The app in front redraws
-    /// on `SIGWINCH`, and every subscriber of the pane is cut (section 3.5).
+    /// on `SIGWINCH`, every subscriber of the pane is cut, and watchers get
+    /// `model_reset` (section 3.5).
     fn model_reset(&self, inner: &mut Inner, panic: &ModelPanic) {
         tracing::error!(
             pane = %self.id,
@@ -225,6 +287,9 @@ impl PaneCell {
             self.redraw();
         }
         inner.lag_all();
+        self.emit(&HolderMessage::ModelReset {
+            pane: self.id.clone(),
+        });
     }
 
     /// Asks the terminal's foreground process group to redraw. That is the
@@ -253,7 +318,9 @@ impl PaneCell {
     fn output(&self, bytes: &[u8]) {
         let mut inner = self.inner();
         inner.record.last_output_at = Some(Timestamp::now());
-        if let Err(panic) = inner.model.feed(bytes) {
+        let fed = inner.model.feed(bytes);
+        self.told(&mut inner);
+        if let Err(panic) = fed {
             self.model_reset(&mut inner, &panic);
             return;
         }
@@ -268,9 +335,30 @@ impl PaneCell {
     /// The open synchronized update's deadline passed.
     fn end_sync(&self) {
         let mut inner = self.inner();
-        if let Err(panic) = inner.model.end_sync() {
+        let ended = inner.model.end_sync();
+        self.told(&mut inner);
+        if let Err(panic) = ended {
             self.model_reset(&mut inner, &panic);
         }
+    }
+
+    /// No output for [`QUIET_AFTER`] after output.
+    fn quiet(&self) {
+        self.emit(&HolderMessage::Quiet {
+            pane: self.id.clone(),
+            at: Timestamp::now(),
+        });
+    }
+
+    /// Sends `signal` to the child's group while the child runs. Under the
+    /// pane's lock, the reaper cannot free the pid in between.
+    fn signal_running(&self, signal: Signal) -> bool {
+        let inner = self.inner();
+        let running = inner.running();
+        if running {
+            self.signal(signal);
+        }
+        running
     }
 
     fn sync_deadline(&self) -> Option<tokio::time::Instant> {
@@ -304,6 +392,7 @@ pub struct Holder {
     /// Wakes the reaper after a spawn, so an exit that came before the pane
     /// was in the table is not missed.
     reap: Notify,
+    watchers: Arc<Watchers>,
 }
 
 impl Holder {
@@ -316,6 +405,7 @@ impl Holder {
             spawning: Mutex::new(()),
             next_stream: AtomicU32::new(1),
             reap: Notify::new(),
+            watchers: Arc::default(),
         })
     }
 
@@ -342,6 +432,10 @@ impl Holder {
             .iter()
             .find(|cell| cell.id == *pane)
             .cloned()
+    }
+
+    fn cell(&self, pane: &PaneId) -> Result<Arc<PaneCell>, Failure> {
+        self.find(pane).ok_or_else(|| not_found(pane))
     }
 
     fn by_num(&self, num: u32) -> Option<Arc<PaneCell>> {
@@ -422,10 +516,16 @@ impl Holder {
                 reaped: false,
             }),
             output_ended: watch::Sender::new(false),
+            exit: watch::Sender::new(None),
+            forgotten: watch::Sender::new(false),
+            watchers: self.watchers.clone(),
         });
         table.panes.push(cell.clone());
         drop(table);
         tracing::info!(pane = %record.pane, num, pid = record.pid, argv = ?record.argv, "spawned");
+        self.watchers.emit(&HolderMessage::Spawned {
+            pane: record.pane.clone(),
+        });
         tokio::spawn(read_pty(cell.clone()));
         tokio::spawn(write_input(cell));
         self.reap.notify_one();
@@ -444,18 +544,102 @@ impl Holder {
         }
     }
 
+    /// `get`: one pane.
+    pub fn get(&self, pane: &PaneId) -> Result<Pane, Failure> {
+        Ok(self.cell(pane)?.inner().record())
+    }
+
+    /// `screen`: a read of the pane's model, running or exited. A model
+    /// that panics while it is read is reset, and the read fails.
+    pub fn screen(&self, pane: &PaneId, read: Read, format: Format) -> Result<Screen, Failure> {
+        if !read.in_range() {
+            return Err(bad_request(format!(
+                "recent takes 1 to {MAX_RECENT} rows, not {read:?}"
+            )));
+        }
+        let cell = self.cell(pane)?;
+        let mut inner = cell.inner();
+        inner.model.screen(read, format).map_err(|panic| {
+            cell.model_reset(&mut inner, &panic);
+            (
+                ErrorCode::Internal,
+                format!("the screen read failed: {}", panic.message),
+            )
+        })
+    }
+
+    /// `input`: text typed as it is.
+    pub fn input_text(&self, conn: &Conn, pane: &PaneId, text: String) -> Result<(), Failure> {
+        self.type_in(conn, pane, |_| text.into_bytes())
+    }
+
+    /// `paste`: text inside bracketed paste when the app turned mode 2004
+    /// on, else as `input`. An end marker inside the text is dropped, so
+    /// the text cannot end the paste early.
+    pub fn paste(&self, conn: &Conn, pane: &PaneId, text: String) -> Result<(), Failure> {
+        self.type_in(conn, pane, |mode| {
+            if !mode.contains(TermMode::BRACKETED_PASTE) {
+                return text.into_bytes();
+            }
+            let mut inside = text;
+            while inside.contains(PASTE_END) {
+                inside = inside.replace(PASTE_END, "");
+            }
+            format!("{PASTE_START}{inside}{PASTE_END}").into_bytes()
+        })
+    }
+
+    /// `keys`: named keys, encoded for the app's keyboard mode.
+    pub fn keys(&self, conn: &Conn, pane: &PaneId, keys: &[Key]) -> Result<(), Failure> {
+        self.type_in(conn, pane, |mode| keys::encode(keys, mode))
+    }
+
+    /// Queues bytes made for the pane's modes as `conn`'s input, behind
+    /// its raw input, and answers once they are queued. Past the input cap
+    /// the request is refused with `busy` and nothing is queued: the client
+    /// learns of it, so it is not cut as a raw sender is.
+    fn type_in(
+        &self,
+        conn: &Conn,
+        pane: &PaneId,
+        bytes: impl FnOnce(TermMode) -> Vec<u8>,
+    ) -> Result<(), Failure> {
+        let cell = self.cell(pane)?;
+        let bytes = {
+            let inner = cell.inner();
+            if !inner.running() {
+                return Err(exited(pane));
+            }
+            bytes(inner.model.mode())
+        };
+        match cell.input.push(&conn.sender, bytes) {
+            Ok(()) => Ok(()),
+            Err(input::Refused::Full(unread)) => Err((
+                ErrorCode::Busy,
+                format!("the pane's app left {unread} bytes of this client's input unread"),
+            )),
+            Err(input::Refused::Closed) => Err(exited(pane)),
+            Err(input::Refused::Broken) => Err((
+                ErrorCode::Internal,
+                format!("pane {pane}'s PTY refused input, and takes no more"),
+            )),
+        }
+    }
+
     /// `subscribe`: the reply, the repaint and its frame, then live output,
     /// all queued under the pane's lock so no byte comes between them.
     pub fn subscribe(&self, conn: &Arc<Conn>, id: u64, pane: &PaneId) -> Result<(), Failure> {
-        let cell = self.find(pane).ok_or_else(|| not_found(pane))?;
+        let cell = self.cell(pane)?;
         let mut inner = cell.inner();
         // The model holds an open synchronized update apart from its screen,
         // and the new subscriber never got its start: the update ends here,
         // so the repaint shows it and the bytes after it pass as they are.
-        if inner.model.sync_deadline().is_some()
-            && let Err(panic) = inner.model.end_sync()
-        {
-            cell.model_reset(&mut inner, &panic);
+        if inner.model.sync_deadline().is_some() {
+            let ended = inner.model.end_sync();
+            cell.told(&mut inner);
+            if let Err(panic) = ended {
+                cell.model_reset(&mut inner, &panic);
+            }
         }
         let repaint = match inner.model.repaint() {
             Ok(repaint) => repaint,
@@ -517,22 +701,172 @@ impl Holder {
         Ok(())
     }
 
+    /// `unsubscribe`: ends one of this connection's streams. The reply is
+    /// queued under the pane's lock, so no output for the stream follows it.
+    pub fn unsubscribe(&self, conn: &Conn, id: u64, stream: u32) -> Result<(), Failure> {
+        let cell = lock(&conn.streams)
+            .iter()
+            .find(|(own, _)| *own == stream)
+            .map(|(_, cell)| cell.clone())
+            .ok_or_else(|| {
+                (
+                    ErrorCode::NotFound,
+                    format!("no stream {stream} on this connection"),
+                )
+            })?;
+        let mut inner = cell.inner();
+        inner.subscribers.retain(|sub| sub.stream != stream);
+        conn.forget(stream);
+        conn.send_message(&HolderMessage::Ok {
+            id,
+            cols: None,
+            rows: None,
+            clients: None,
+        });
+        Ok(())
+    }
+
     /// `resize`: sets the PTY's size and the model's. Leases come with H04;
-    /// the slice takes every resize as it comes.
+    /// until then every resize is taken as it comes.
     pub fn resize(&self, pane: &PaneId, size: Size) -> Result<Size, Failure> {
         check_size(size)?;
-        let cell = self.find(pane).ok_or_else(|| not_found(pane))?;
+        let cell = self.cell(pane)?;
         let mut inner = cell.inner();
         if inner.record.state == PaneState::Exited {
-            return Err((ErrorCode::Exited, format!("pane {pane} has exited")));
+            return Err(exited(pane));
         }
         pty::set_size(cell.master.get_ref(), size).map_err(|err| internal(&err))?;
-        if let Err(panic) = inner.model.resize(size) {
+        let resized = inner.model.resize(size);
+        cell.told(&mut inner);
+        if let Err(panic) = resized {
             cell.model_reset(&mut inner, &panic);
         }
+        let changed = (inner.record.cols, inner.record.rows) != (size.cols, size.rows);
         inner.record.cols = size.cols;
         inner.record.rows = size.rows;
+        if changed {
+            cell.emit(&HolderMessage::Resized {
+                pane: pane.clone(),
+                cols: size.cols,
+                rows: size.rows,
+            });
+        }
         Ok(size)
+    }
+
+    /// `release`: drops a lease and answers with the size after it. Leases
+    /// come with H04, so no connection holds one: the size stays as it is,
+    /// as it does when no lease is left (section 2.6).
+    pub fn release(&self, pane: &PaneId) -> Result<Size, Failure> {
+        let inner = self.cell(pane)?;
+        let inner = inner.inner();
+        Ok(Size {
+            cols: inner.record.cols,
+            rows: inner.record.rows,
+        })
+    }
+
+    /// `meta`: merges `set` into the pane's metadata, then drops `remove`.
+    /// An exited pane keeps its metadata, so it takes changes too.
+    pub fn meta(&self, pane: &PaneId, set: Meta, remove: &[String]) -> Result<Pane, Failure> {
+        let cell = self.cell(pane)?;
+        let mut inner = cell.inner();
+        inner.record.meta.extend(set);
+        for key in remove {
+            inner.record.meta.remove(key);
+        }
+        cell.emit(&HolderMessage::Meta { pane: pane.clone() });
+        Ok(inner.record())
+    }
+
+    /// `signal`: a signal to the child's process group, while it runs.
+    pub fn signal(&self, pane: &PaneId, signal: tiller_panes::Signal) -> Result<(), Failure> {
+        let signal = match signal {
+            tiller_panes::Signal::Int => Signal::INT,
+            tiller_panes::Signal::Term => Signal::TERM,
+            tiller_panes::Signal::Hup => Signal::HUP,
+            tiller_panes::Signal::Kill => Signal::KILL,
+        };
+        if self.cell(pane)?.signal_running(signal) {
+            Ok(())
+        } else {
+            Err(exited(pane))
+        }
+    }
+
+    /// `close`: `hup` to the child's group, then `kill` after `grace`, and
+    /// the exit once the child is reaped and its last output is in. An
+    /// exited pane answers with its exit at once. The caller runs it as a
+    /// task of its own, so the connection's other requests go on.
+    pub async fn close(&self, pane: &PaneId, grace: Duration) -> Result<Exit, Failure> {
+        let cell = self.cell(pane)?;
+        let mut exit = cell.exit.subscribe();
+        cell.signal_running(Signal::HUP);
+        let has_exit = |exit: &Option<Exit>| exit.is_some();
+        if let Ok(Ok(exit)) = tokio::time::timeout(grace, exit.wait_for(has_exit)).await
+            && let Some(exit) = *exit
+        {
+            return Ok(exit);
+        }
+        if cell.signal_running(Signal::KILL) {
+            tracing::info!(pane = %pane, grace_ms = grace.as_millis(), "the child outlived its close grace and was killed");
+        }
+        match tokio::time::timeout(KILL_WAIT, exit.wait_for(has_exit)).await {
+            Ok(Ok(exit)) => (*exit).ok_or_else(|| close_failure(pane)),
+            _ => Err(close_failure(pane)),
+        }
+    }
+
+    /// `forget`: drops an exited pane, its screen and its subscriptions. A
+    /// pane whose exit is not in yet is refused.
+    pub fn forget(&self, pane: &PaneId) -> Result<(), Failure> {
+        let cell = self.cell(pane)?;
+        let mut inner = cell.inner();
+        if inner.record.state != PaneState::Exited {
+            return Err(bad_request(format!("{pane} is running")));
+        }
+        {
+            let mut table = lock(&self.table);
+            let before = table.panes.len();
+            table.panes.retain(|other| !Arc::ptr_eq(other, &cell));
+            if table.panes.len() == before {
+                return Err(not_found(pane));
+            }
+        }
+        // Each stream got its `exited` already, and ends here.
+        for sub in inner.subscribers.drain(..) {
+            sub.conn.forget(sub.stream);
+        }
+        cell.forgotten.send_replace(true);
+        tracing::info!(pane = %pane, "forgotten");
+        cell.emit(&HolderMessage::Forgotten {
+            pane: pane.clone(),
+            reason: "forget".to_owned(),
+        });
+        Ok(())
+    }
+
+    /// `watch`: `watching`, then every event, on `conn`. The reply is
+    /// queued under the watchers' lock, so no event comes before it.
+    pub fn watch(&self, conn: &Arc<Conn>, id: u64) {
+        let mut watchers = lock(&self.watchers.0);
+        if !conn.send_message(&HolderMessage::Watching { id }) {
+            return;
+        }
+        if !watchers.iter().any(|other| Arc::ptr_eq(other, conn)) {
+            watchers.push(conn.clone());
+        }
+    }
+
+    /// `switch`: tells every attach client to show a running pane, and
+    /// answers with how many were told. No attach client exists before
+    /// `tiller attach` (H07), so none is.
+    pub fn switch(&self, pane: &PaneId) -> Result<usize, Failure> {
+        if self.cell(pane)?.inner().running() {
+            Ok(0)
+        } else {
+            Err(exited(pane))
+        }
     }
 
     /// A kind 2 frame from `conn`: raw bytes for the pane `num`, with no
@@ -579,6 +913,7 @@ impl Holder {
     /// A cut connection's unwritten input goes too, as the client knows
     /// it has a gap. A connection that closed or broke off keeps its input.
     pub fn drop_conn(&self, conn: &Arc<Conn>) {
+        lock(&self.watchers.0).retain(|other| !Arc::ptr_eq(other, conn));
         for (stream, cell) in conn.take_streams() {
             let mut inner = cell.inner();
             inner.subscribers.retain(|sub| sub.stream != stream);
@@ -592,9 +927,12 @@ impl Holder {
 
     /// Collects every child that has ended, without waiting. Only the
     /// holder's own panes are waited for, one pid at a time.
+    /// Each wait holds the pane's lock, so a signal sent under it never
+    /// reaches a pid that was freed and used again.
     fn reap_once(&self) {
         for cell in self.panes() {
-            if cell.inner().reaped {
+            let mut inner = cell.inner();
+            if inner.reaped {
                 continue;
             }
             let exit = match rustix::process::waitpid(Some(cell.pid), WaitOptions::NOHANG) {
@@ -616,7 +954,8 @@ impl Holder {
                     }
                 }
             };
-            cell.inner().reaped = true;
+            inner.reaped = true;
+            drop(inner);
             tracing::info!(pane = %cell.id, code = ?exit.code, signal = ?exit.signal, "the child exited");
             tokio::spawn(deliver_exit(cell, exit));
         }
@@ -634,12 +973,18 @@ impl Holder {
         }
     }
 
+    /// Makes the next update of `pane`'s model panic.
+    #[cfg(test)]
+    pub(crate) fn fail_next(&self, pane: &PaneId) {
+        if let Some(cell) = self.find(pane) {
+            cell.inner().model.fail_next();
+        }
+    }
+
     /// Hangs up every running child's group, as the holder stops.
     pub fn hang_up_all(&self) {
         for cell in self.panes() {
-            if !cell.inner().reaped {
-                cell.signal(Signal::HUP);
-            }
+            cell.signal_running(Signal::HUP);
         }
     }
 }
@@ -649,21 +994,27 @@ impl Holder {
 /// blocks on a full PTY.
 async fn read_pty(cell: Arc<PaneCell>) {
     let mut buf = vec![0; READ_CHUNK];
+    let mut forgotten = cell.forgotten.subscribe();
+    // When the pane's `quiet` is due, once it had output.
+    let mut quiet_at = None;
     loop {
-        let ready = match cell.sync_deadline() {
-            Some(deadline) => tokio::select! {
-                ready = cell.master.readable() => Some(ready),
-                () = tokio::time::sleep_until(deadline) => None,
-            },
-            None => Some(cell.master.readable().await),
-        };
-        let mut guard = match ready {
-            None => {
+        let sync_at = cell.sync_deadline();
+        let ready = tokio::select! {
+            ready = cell.master.readable() => ready,
+            () = until(sync_at) => {
                 cell.end_sync();
                 continue;
             }
-            Some(Ok(guard)) => guard,
-            Some(Err(err)) => {
+            () = until(quiet_at) => {
+                quiet_at = None;
+                cell.quiet();
+                continue;
+            }
+            _ = forgotten.wait_for(|forgotten| *forgotten) => break,
+        };
+        let mut guard = match ready {
+            Ok(guard) => guard,
+            Err(err) => {
                 tracing::warn!(pane = %cell.id, %err, "the PTY cannot be polled");
                 break;
             }
@@ -672,6 +1023,7 @@ async fn read_pty(cell: Arc<PaneCell>) {
             Ok(Ok(0)) => break,
             Ok(Ok(len)) => {
                 cell.output(&buf[..len]);
+                quiet_at = Some(tokio::time::Instant::now() + QUIET_AFTER);
                 // A flooding app keeps the PTY readable, so this loop never
                 // waits. Yield on budget, or the clients' writer tasks woken
                 // on this worker never run, and their queues fill.
@@ -685,6 +1037,14 @@ async fn read_pty(cell: Arc<PaneCell>) {
         }
     }
     cell.output_ended.send_replace(true);
+}
+
+/// Sleeps until `deadline`, or for ever when there is none.
+async fn until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Writes raw input to a pane's PTY, in order, as fast as it takes it.
@@ -741,14 +1101,14 @@ async fn deliver_exit(cell: Arc<PaneCell>, exit: Exit) {
     let mut inner = cell.inner();
     inner.record.state = PaneState::Exited;
     inner.record.exit = Some(exit);
-    let id = cell.id.clone();
-    inner.fan_out(|_| {
-        message_frame(&HolderMessage::Exited {
-            id: None,
-            pane: id.clone(),
-            exit,
-        })
-    });
+    let exited = HolderMessage::Exited {
+        id: None,
+        pane: cell.id.clone(),
+        exit,
+    };
+    inner.fan_out(|_| message_frame(&exited));
+    cell.emit(&exited);
+    cell.exit.send_replace(Some(exit));
 }
 
 /// Puts a PTY master in the runtime's poller.
@@ -789,6 +1149,17 @@ fn bad_request(message: String) -> Failure {
 
 fn not_found(pane: &PaneId) -> Failure {
     (ErrorCode::NotFound, format!("no pane {pane}"))
+}
+
+fn exited(pane: &PaneId) -> Failure {
+    (ErrorCode::Exited, format!("pane {pane} has exited"))
+}
+
+fn close_failure(pane: &PaneId) -> Failure {
+    (
+        ErrorCode::Internal,
+        format!("pane {pane}'s child was killed and not reaped within {KILL_WAIT:?}"),
+    )
 }
 
 fn internal(err: &io::Error) -> Failure {
