@@ -1027,6 +1027,43 @@ fn the_child_gets_the_spawn_env_and_only_three_vars_more() {
     );
 }
 
+// A close kills what is left of the group after the leader exits, and a
+// forget before the end of the grace kills it at once.
+#[test]
+fn a_forget_after_a_close_kills_what_is_left_of_the_group() {
+    let world = World::new();
+    let holder = Holder::start(&world);
+    let ticks = world.dir.path().join("ticks");
+    // The leader ends on the hang-up. Its background job ignores it, holds
+    // the PTY and adds a line to `ticks` every 100 ms while it lives.
+    let pane = holder.spawn(
+        &world,
+        &[
+            "/bin/sh",
+            "-c",
+            "(trap '' HUP; echo started; while :; do echo x >> ticks; sleep 0.1; done) & wait",
+        ],
+    );
+    shows(&holder, &pane, "started");
+    let exit = holder.client.close(&pane.pane, WAIT * 3).unwrap();
+    assert_eq!(exit.signal, Some(1), "{exit:?}");
+    holder.client.forget(&pane.pane).unwrap();
+    let len = || std::fs::metadata(&ticks).map_or(0, |meta| meta.len());
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let before = len();
+        std::thread::sleep(Duration::from_secs(1));
+        if len() == before {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "what was left of the group outlived the forget\n{}",
+            holder.log()
+        );
+    }
+}
+
 // Section 2.4: requests on one connection may overlap, so a close that
 // waits out its grace holds up nothing else the client asks.
 #[test]

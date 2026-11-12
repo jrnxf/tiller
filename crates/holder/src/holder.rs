@@ -1407,6 +1407,11 @@ impl Holder {
         for sub in inner.subscribers.drain(..) {
             sub.conn.end_stream(sub.stream);
         }
+        // What is left of the group still holds the PTY: with the pane gone,
+        // nothing else would kill it.
+        if inner.reaped && !*cell.output_ended.borrow() {
+            cell.signal(Signal::KILL);
+        }
         cell.forgotten.send_replace(true);
         tracing::info!(pane = %cell.id, reason, "forgotten");
         // The pane's last event: [`PaneCell::emit`] sends no more.
