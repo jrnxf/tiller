@@ -14,7 +14,9 @@
 pub enum Composer {
     /// A Claude composer holding nothing, with the agent not mid-turn.
     Empty,
-    /// A Claude composer, empty, while the footer says a turn is running.
+    /// A Claude composer, empty, while a turn is running: the footer says
+    /// "esc to interrupt" (older Claude Code), or the spinner row is drawn
+    /// above the composer (current Claude Code).
     Busy,
     /// A Claude composer holding text: the owner's draft, or an earlier
     /// wake-up line that was typed but not submitted.
@@ -62,6 +64,7 @@ pub fn classify(ansi: &str) -> Composer {
         if footer
             .iter()
             .any(|row| row.to_lowercase().contains("esc to interrupt"))
+            || spinner_above(&rows[..*top])
         {
             return Composer::Busy;
         }
@@ -74,6 +77,43 @@ pub fn classify(ansi: &str) -> Composer {
     } else {
         Composer::Unknown
     }
+}
+
+/// Glyphs Claude cycles through at the start of its spinner row.
+const SPINNER_GLYPHS: [char; 7] = ['*', '·', '✢', '✳', '✶', '✻', '✽'];
+/// Rows above the composer's top rule that may hold the spinner row: it, a
+/// tip or tool-progress row, and a blank row sit there. Blank rows count, so a
+/// spinner that scrolled away is not found.
+const SPINNER_REACH: usize = 4;
+
+/// Whether the spinner row sits just above the composer's top rule.
+fn spinner_above(rows: &[String]) -> bool {
+    rows.iter()
+        .rev()
+        .take(SPINNER_REACH)
+        .any(|row| is_spinner(row))
+}
+
+/// `<glyph> <Word>…`, optionally followed by ` (<n>s · ...)`, flush left. A
+/// finished turn's `✻ Cooked for 2s · done 6:01 PM` has no `…`, and reply text
+/// is indented, so neither matches.
+fn is_spinner(row: &str) -> bool {
+    let mut chars = row.chars();
+    let (Some(glyph), Some(' ')) = (chars.next(), chars.next()) else {
+        return false;
+    };
+    if !SPINNER_GLYPHS.contains(&glyph) {
+        return false;
+    }
+    let rest = chars.as_str();
+    let Some((word, tail)) = rest.split_once('…') else {
+        return false;
+    };
+    word.starts_with(|c: char| c.is_ascii_uppercase())
+        && word
+            .chars()
+            .all(|c| c.is_alphabetic() || c == '-' || c == '\'')
+        && (tail.is_empty() || tail.starts_with(" ("))
 }
 
 fn is_rule(row: &str) -> bool {
@@ -292,5 +332,61 @@ mod tests {
             classify(&screen),
             Composer::Holds("first part of a\nlong draft".into())
         );
+    }
+
+    #[test]
+    fn spinner_row_above_an_empty_composer_is_busy() {
+        let rule = "─".repeat(40);
+        for spinner in [
+            "✻ Examining…",
+            "· Examining… (3s · ↓ 120 tokens)",
+            "* Fiddle-faddling… (running Stop hooks… 1/2 · 2s)",
+            "✽ Examining… (4s · ↓ 9 tokens · thinking)",
+            // Verbs with an accent or an apostrophe.
+            "✶ Sautéing… (2s)",
+            "✻ Jiggin'…",
+        ] {
+            let screen = format!("{spinner}\n\n{rule}\n❯\u{a0}\n{rule}\n  ? for shortcuts\n");
+            assert_eq!(classify(&screen), Composer::Busy, "{spinner}");
+        }
+        // A tool-progress row or a tip may sit between spinner and composer.
+        let screen =
+            format!("✢ Examining… (2s)\n  ⎿  Tip: invented tip\n\n{rule}\n❯\u{a0}\n{rule}\n");
+        assert_eq!(classify(&screen), Composer::Busy);
+    }
+
+    #[test]
+    fn typed_text_beats_the_spinner() {
+        let rule = "─".repeat(40);
+        let screen = format!("✻ Examining… (2s)\n\n{rule}\n❯\u{a0}next idea\n{rule}\n");
+        assert_eq!(classify(&screen), Composer::Holds("next idea".into()));
+    }
+
+    #[test]
+    fn finished_reply_that_looks_like_a_spinner_stays_empty() {
+        let rule = "─".repeat(40);
+        for last in [
+            // The finished-turn row.
+            "✻ Cooked for 2s · done 6:01 PM",
+            // Reply text is indented, whatever it says.
+            "  * Waiting… (3s later it returned)",
+            "● Waiting… (3s later it returned)",
+            "  ✻ Examining… (2s)",
+            // No glyph, or an ordinary sentence.
+            "Examining… (2s)",
+            "✻ the file ends with a dot… (3s)",
+            "✻ Examining… and then more text",
+        ] {
+            let screen =
+                format!("● It works.\n{last}\n\n{rule}\n❯\u{a0}\n{rule}\n  ? for shortcuts\n");
+            assert_eq!(classify(&screen), Composer::Empty, "{last}");
+        }
+    }
+
+    #[test]
+    fn spinner_far_above_the_composer_is_scrollback() {
+        let rule = "─".repeat(40);
+        let screen = format!("✻ Examining… (2s)\n● a\n● b\n● c\n● d\n\n{rule}\n❯\u{a0}\n{rule}\n");
+        assert_eq!(classify(&screen), Composer::Empty);
     }
 }
