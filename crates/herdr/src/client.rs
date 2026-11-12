@@ -120,6 +120,11 @@ pub trait Herdr {
     /// longer has is already closed.
     fn close_pane(&self, pane_id: &str) -> Result<()>;
     fn notify(&self, title: &str, body: &str) -> Result<()>;
+    /// How long the pane has printed nothing, when the backend can tell.
+    /// herdr cannot, so its panes answer None.
+    fn quiet_for(&self, _pane_id: &str) -> Result<Option<Duration>> {
+        Ok(None)
+    }
 }
 
 /// The `herdr` CLI, aimed at one server: the local default session, a named

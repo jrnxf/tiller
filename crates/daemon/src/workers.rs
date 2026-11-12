@@ -26,12 +26,14 @@ use tiller_core::domain::{Host, HostKind, PipelineState, Session};
 use tiller_core::state::list;
 use tiller_core::state::memory_load::CopyMark;
 use tiller_core::{Actor, Ctx, Store, Timestamp};
-use tiller_delivery::notify::Notifier;
+use tiller_delivery::notify::{Command, Notifier, Notify, ViaHerdr};
 use tiller_delivery::outbox::Deliverer;
 use tiller_delivery::sources::{Lavish, PageAnswers};
 use tiller_herdr::client::{Cli, Herdr};
 use tiller_herdr::poller::{HerdrSource, PollError, Registry, Source};
+use tiller_herdr::routed::Routed;
 use tiller_observe::tailer::Tailer;
+use tiller_panes::Panes;
 use tiller_reconcile::git::{GitScanner, WorktreePool};
 use tiller_reconcile::sources::{
     Forge, HerdrLauncher, HerdrStatusProbe, HostReadings, NoHarness, Readings,
@@ -53,6 +55,11 @@ pub struct Settings {
     pub forge_login: Option<String>,
     /// `[learning]`, for the retro sweep (`docs/design/learning-loop.md`).
     pub learning: tiller_core::state::learning::Learning,
+    /// `[notify] command`: the owner's notification hook
+    /// (`terminal-holder.md` 7). Empty when unset.
+    pub notify_command: Vec<String>,
+    /// `[checkouts]`: each project's local checkout, by project id.
+    pub checkouts: std::collections::BTreeMap<String, PathBuf>,
 }
 
 impl Settings {
@@ -81,19 +88,38 @@ impl Settings {
                 tracing::warn!(%error, "config.toml [learning] does not parse; using the defaults");
                 tiller_core::state::learning::Learning::default()
             });
+        let notify_command = table
+            .get("notify")
+            .and_then(|notify| notify.get("command"))
+            .and_then(toml::Value::as_array)
+            .map(|argv| {
+                argv.iter()
+                    .filter_map(toml::Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let checkouts = SpawnConfig::from_table(&table)
+            .map(|config| config.checkouts)
+            .unwrap_or_default();
         Self {
             quota_providers,
             forge_login,
             learning,
+            notify_command,
+            checkouts,
         }
     }
 }
 
 /// How the workers reach the outside world.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Tools {
     /// The local herdr server.
     pub herdr: Cli,
+    /// The terminal holder, when this daemon runs with one: delivery, stop
+    /// and the notifier reach a holder pane through it.
+    pub holder: Option<Arc<dyn Panes>>,
     /// `quota-axi`, with any leading arguments.
     pub quota: Vec<OsString>,
     /// The GitHub CLI program.
@@ -108,6 +134,29 @@ pub struct Tools {
     /// and again by the host check every five minutes (P43).
     pub versions: Arc<Mutex<serde_json::Value>>,
 }
+
+impl std::fmt::Debug for Tools {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tools")
+            .field("herdr", &self.herdr)
+            .field("holder", &self.holder.is_some())
+            .field("quota", &self.quota)
+            .field("gh", &self.gh)
+            .field("lavish", &self.lavish)
+            .field("review_hosts", &self.review_hosts)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Tools {
+    /// herdr for herdr panes and the holder for holder panes.
+    pub fn routed(&self) -> PaneRouter {
+        Routed::new(self.herdr.clone(), self.holder.clone())
+    }
+}
+
+/// What delivery and stop drive panes through.
+pub type PaneRouter = Routed<Cli, Arc<dyn Panes>>;
 
 /// The host's boot id, when the OS reports one (R04).
 pub fn boot_id() -> Option<String> {
@@ -495,7 +544,7 @@ impl Source for Backups {
 /// took `/exit` without leaving is not sent another, and is left to R15.
 pub struct Finished {
     store: Store,
-    herdr: Cli,
+    herdr: PaneRouter,
 }
 
 impl Source for Finished {
@@ -818,8 +867,14 @@ pub fn start(
         stop: stop.clone(),
         runtime: tokio::runtime::Handle::current(),
     };
-    let delivery = Deliverer::new(open()?, tools.herdr.clone(), &local);
-    let notify = Notifier::new(open()?, tools.herdr.clone());
+    let delivery = Deliverer::new(open()?, tools.routed(), &local);
+    // The owner's `[notify] command` when set; herdr's notification until
+    // the cutover drops herdr otherwise.
+    let notifier: Box<dyn Notify + Send> = match Command::new(settings.notify_command.clone()) {
+        Some(command) => Box::new(command),
+        None => Box::new(ViaHerdr(tools.herdr.clone())),
+    };
+    let notify = Notifier::new(open()?, notifier).with_checkouts(settings.checkouts.clone());
     let mut config = ReconcileConfig::new(&local, home);
     config.boot_id = boot_id();
     config.forge_login = settings.forge_login.clone();
@@ -878,7 +933,7 @@ pub fn start(
     };
     let finished = Finished {
         store: open()?,
-        herdr: tools.herdr.clone(),
+        herdr: tools.routed(),
     };
     let loads = MemoryLoads {
         store: open()?,

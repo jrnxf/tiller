@@ -31,7 +31,7 @@
 
 pub mod config;
 pub mod dispatch;
-mod holder;
+pub(crate) mod holder;
 pub mod launch;
 pub mod listeners;
 pub mod memory;
@@ -67,6 +67,8 @@ use tiller_core::state::{find, get, list, resolve_card};
 use tiller_core::{Applied, Ctx, Store};
 use tiller_herdr::client::{Herdr, HerdrError};
 use tiller_herdr::layout;
+use tiller_herdr::routed::Routed;
+use tiller_panes::PaneState;
 use tiller_reconcile::sources::{Scanner, WorktreeScan};
 
 use self::config::SpawnConfig;
@@ -234,6 +236,14 @@ pub struct World<'a> {
     /// Free RAM and disk, read just before `run.start`.
     pub ram_free_mb: Option<i64>,
     pub disk_free_mb: Option<i64>,
+}
+
+impl<'a> World<'a> {
+    /// herdr for herdr panes and the terminal holder for holder panes, as
+    /// stop, resume, relaunch and interrupt reach a session's pane.
+    pub fn routed(&self) -> Routed<&'a dyn Herdr, &'a dyn tiller_panes::Panes> {
+        Routed::new(self.herdr, self.panes)
+    }
 }
 
 /// What a spawn made.
@@ -590,7 +600,7 @@ fn launch_in(
         .extend(crate::stale::record(store, ctx, &session.id, role)?.events);
 
     if let Some(panes) = world.panes {
-        let label = format!("{} {}", card.display_id, run.role.short_name());
+        let label = crate::labels::worker_label(&card.display_id, run.role);
         let role = run.role.to_string();
         let owner = holder::Owner {
             session: &session.id,
@@ -1080,7 +1090,7 @@ pub fn cleanup(
         // No worktree was ever leased: there is nothing to keep, so the
         // panes close and the session ends.
         let mut events = Vec::new();
-        let closed = close_panes(world.herdr, &open, &mut warnings);
+        let closed = close_panes(world, &open, &mut warnings);
         if let Some(session) = live_session(store.conn(), &run.id)? {
             events.extend(store.session_end(ctx, &session.id, "cleaned")?.events);
         }
@@ -1110,7 +1120,7 @@ pub fn cleanup(
     // of the run runs an agent, so the ones left are bare shells.
     let cleaned = store.run_clean(ctx, &run.id, true)?;
     events.extend(cleaned.events);
-    let closed = close_panes(world.herdr, &open, &mut warnings);
+    let closed = close_panes(world, &open, &mut warnings);
     // A pane that closed with its session still recorded live ends here, so
     // the layout and delivery stop addressing it.
     if let Some(session) = live_session(store.conn(), &run.id)? {
@@ -1209,13 +1219,16 @@ fn dead_panes(store: &Store, world: &World<'_>, run: &Run) -> Result<Vec<String>
             continue;
         };
         // A holder pane is keyed by its session, so it is the run's. One
-        // that runs is never ended here; an exited one keeps its last
-        // screen until the holder forgets it (H09).
+        // that runs is never ended here; an exited one is forgotten.
         if tiller_core::ids::is_holder_pane(pane_id) {
-            if holder::running(world.panes, pane_id)? {
-                return Err(SpawnError::Refused(format!(
-                    "pane {pane_id} still runs in the terminal holder; a live pane is never closed"
-                )));
+            match holder::state(world.panes, pane_id)? {
+                Some(PaneState::Running) => {
+                    return Err(SpawnError::Refused(format!(
+                        "pane {pane_id} still runs in the terminal holder; a live pane is never closed"
+                    )));
+                }
+                Some(_) if !open.contains(pane_id) => open.push(pane_id.clone()),
+                _ => {}
             }
             continue;
         }
@@ -1240,10 +1253,10 @@ fn dead_panes(store: &Store, world: &World<'_>, run: &Run) -> Result<Vec<String>
 
 /// Closes each pane; one that will not close is a warning, since the
 /// records already say the run no longer holds it.
-fn close_panes(herdr: &dyn Herdr, panes: &[String], warnings: &mut Vec<String>) -> Vec<String> {
+fn close_panes(world: &World<'_>, panes: &[String], warnings: &mut Vec<String>) -> Vec<String> {
     let mut closed = Vec::new();
     for pane in panes {
-        match herdr.close_pane(pane) {
+        match close_pane(world, pane) {
             Ok(()) => closed.push(pane.clone()),
             Err(e) => warnings.push(format!(
                 "closing pane {pane} failed ({e}); close it in herdr"

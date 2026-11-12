@@ -130,7 +130,7 @@ pub fn start(
     let keyed = ctx.clone();
     let ctx = &ctx.unkeyed();
     let project: Project = get(store.conn(), "project", project)?;
-    let label = layout::orchestrator_label(&project.id);
+    let label = crate::labels::orchestrator_label(&project.id);
     // A start this key made already replays while its orchestrator lives.
     // One whose launch failed has ended, so a retry starts afresh, unkeyed.
     let keyed = if store.key_recorded(&keyed)? {
@@ -188,7 +188,8 @@ pub fn start(
     // launch files, the manifest, the herdr workspace) can still fail and
     // leave the project with no orchestrator.
     if let Some((live, waits)) = restarting {
-        let stopped = control::stop_orchestrator(store, ctx, world.herdr, waits, &live, RESTARTED)?;
+        let stopped =
+            control::stop_orchestrator(store, ctx, &world.routed(), waits, &live, RESTARTED)?;
         events.extend(stopped.events);
         leftover = stopped.warning;
     }

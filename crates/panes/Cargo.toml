@@ -10,7 +10,14 @@ publish = false
 
 [features]
 # The in-memory `FakePanes` and the test fleet, for other crates' tests.
-testing = ["dep:tempfile", "dep:tiller-core", "rustix/pty"]
+testing = ["dep:tempfile", "dep:tiller-core", "rustix/pty", "rustix/termios"]
+
+# A stand-in for Claude Code, for end-to-end tests of holder panes.
+[[bin]]
+name = "fake-agent"
+path = "src/bin/fake-agent.rs"
+required-features = ["testing"]
+test = false
 
 [dependencies]
 jiff.workspace = true

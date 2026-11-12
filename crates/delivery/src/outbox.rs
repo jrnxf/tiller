@@ -26,7 +26,7 @@ use tiller_core::state::runs::live_session;
 use tiller_core::state::{find, get, list};
 use tiller_core::{Actor, Ctx, Store, Timestamp};
 use tiller_herdr::client::Herdr;
-use tiller_herdr::composer::{Composer, classify};
+use tiller_herdr::composer::{Composer, SETTLE, classify};
 use tiller_herdr::poller::{PollError, Source};
 use tiller_herdr::submit::{Submission, Submit};
 
@@ -35,6 +35,8 @@ use tiller_herdr::submit::{Submission, Submit};
 pub const BUSY_DEFER_SECS: i64 = 30;
 /// How long a pane showing a dialog waits.
 pub const DIALOG_DEFER_SECS: i64 = 60;
+/// How long a pane that printed within [`SETTLE`] waits.
+pub const PRINTING_DEFER_SECS: i64 = 5;
 /// Minutes after `delivered_at` at which an unread message rings again.
 pub const RINGS_MINUTES: [i64; 5] = [2, 5, 15, 30, 60];
 /// How long the target must have been idle before a re-ring.
@@ -171,8 +173,10 @@ struct Ready {
     pane_id: String,
     /// Every line a pass may have typed for the batch.
     lines: Vec<String>,
-    /// This pass typed the line, rather than finding it there.
-    typed: bool,
+    /// The line may be too new for Enter: this pass typed it, or it was
+    /// found there with the pane printing within the settle (another
+    /// daemon, now gone, may have typed it a moment ago).
+    fresh: bool,
 }
 
 /// A session whose wake-up line is typed and waits for Enter.
@@ -185,8 +189,10 @@ struct Flight {
     pane_id: String,
     /// Every line a pass may have typed for this batch.
     lines: Vec<String>,
-    /// This pass typed the line, rather than finding it there.
-    typed: bool,
+    /// The line may be too new for Enter: this pass typed it, or it was
+    /// found there with the pane printing within the settle (another
+    /// daemon, now gone, may have typed it a moment ago).
+    fresh: bool,
 }
 
 /// The daemon's delivery loop for the local host.
@@ -271,7 +277,7 @@ impl<H: Herdr> Deliverer<H> {
     /// Presses Enter for every flight and reads each composer back, with one
     /// pause for all of them at each step.
     fn submit_all(&mut self, ctx: &Ctx, flights: Vec<Flight>, report: &mut Report) {
-        if flights.iter().any(|f| f.typed) {
+        if flights.iter().any(|f| f.fresh) {
             std::thread::sleep(self.pacing.settle);
         }
         let mut active = Vec::with_capacity(flights.len());
@@ -482,7 +488,7 @@ impl<H: Herdr> Deliverer<H> {
         let Ready {
             pane_id,
             lines,
-            typed,
+            fresh,
         } = match ring {
             Ok(ready) => ready,
             Err(defer) => {
@@ -504,7 +510,7 @@ impl<H: Herdr> Deliverer<H> {
             oldest,
             pane_id,
             lines,
-            typed,
+            fresh,
         }))
     }
 
@@ -516,7 +522,7 @@ impl<H: Herdr> Deliverer<H> {
 
     /// Checks the pane and its composer, then types the line unless it is
     /// already there. Returns the pane, the lines the batch may have typed
-    /// and whether this call typed one, or why not; Enter is pressed by
+    /// and whether the line is fresh, or why not; Enter is pressed by
     /// [`Deliverer::submit_all`].
     fn ring(
         &mut self,
@@ -529,14 +535,6 @@ impl<H: Herdr> Deliverer<H> {
         let Some(pane_id) = session.pane_id.clone() else {
             return Ok(Err(Defer::new(BUSY_DEFER_SECS, "session has no pane yet")));
         };
-        // Delivery moves onto the terminal holder in its own slice (H09);
-        // herdr has no such pane, so the message waits.
-        if tiller_core::ids::is_holder_pane(&pane_id) {
-            return Ok(Err(Defer::new(
-                BUSY_DEFER_SECS,
-                "delivery to an agent in the terminal holder is not ready yet",
-            )));
-        }
         let pane = match self.herdr.pane(&pane_id) {
             Ok(Some(pane)) => pane,
             Ok(None) => return Ok(Err(Defer::new(BUSY_DEFER_SECS, "pane is gone"))),
@@ -586,14 +584,27 @@ impl<H: Herdr> Deliverer<H> {
                 .get(&m.id)
                 .is_some_and(|n| *n >= SUBMIT_PASSES)
         });
-        let typed = match classify(&screen) {
+        let fresh = match classify(&screen) {
             Composer::Empty => {
+                // A streaming answer can draw an empty composer between
+                // chunks: empty counts only once the pane has printed
+                // nothing for a settle time.
+                match self.herdr.quiet_for(&pane_id) {
+                    Ok(Some(quiet)) if quiet < SETTLE => {
+                        return Ok(Err(Defer::new(PRINTING_DEFER_SECS, "pane still printing")));
+                    }
+                    Ok(_) => {}
+                    Err(error) => return Ok(Err(Defer::new(BUSY_DEFER_SECS, error.to_string()))),
+                }
                 if let Err(error) = self.herdr.send_text(&pane_id, &lines[0]) {
                     return Ok(Err(Defer::new(BUSY_DEFER_SECS, error.to_string())));
                 }
                 true
             }
-            composer @ Composer::Holds(_) if !stuck && holds_line(&composer, &lines) => false,
+            composer @ Composer::Holds(_) if !stuck && holds_line(&composer, &lines) => !matches!(
+                self.herdr.quiet_for(&pane_id),
+                Ok(Some(quiet)) if quiet >= self.pacing.settle
+            ),
             Composer::Holds(_) => return Ok(Err(Defer::held(HELD))),
             Composer::Busy => return Ok(Err(Defer::new(BUSY_DEFER_SECS, "busy"))),
             Composer::Dialog => return Ok(Err(Defer::new(DIALOG_DEFER_SECS, "dialog showing"))),
@@ -604,7 +615,7 @@ impl<H: Herdr> Deliverer<H> {
         Ok(Ok(Ready {
             pane_id,
             lines,
-            typed,
+            fresh,
         }))
     }
 

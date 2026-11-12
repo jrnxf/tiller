@@ -51,6 +51,7 @@ use tiller_core::{Actor, Applied, Ctx, Error, Store, Timestamp, ids};
 use tiller_herdr::client::{Cli, Herdr, HerdrError};
 use tiller_herdr::front::{OpenError, PROBE_TIMEOUT, Terminal, Wait, open_agent};
 use tiller_herdr::poller::Registry;
+use tiller_herdr::routed::Routed;
 use tokio::sync::watch;
 
 use crate::assets::{self, Assets};
@@ -1340,19 +1341,34 @@ async fn run(
     let (mut detail, pane) = read(&state, move |store| views::run_detail(store, &id)).await?;
     if let Some(target) = pane {
         let herdr = state.0.herdr.clone();
-        if let Ok(tail) = tokio::task::spawn_blocking(move || pane_tail_of(herdr, target)).await {
+        let holder = state.0.holder.clone();
+        if let Ok(tail) =
+            tokio::task::spawn_blocking(move || pane_tail_of(herdr, holder.as_deref(), target))
+                .await
+        {
             detail.pane_tail = tail;
         }
     }
     Ok(Json(detail))
 }
 
-/// A pane's tail read through herdr, or nothing when herdr cannot read it.
-/// It blocks.
-pub(crate) fn pane_tail_of(herdr: Cli, target: PaneTarget) -> Vec<String> {
-    // herdr has no holder pane to read; the live view shows it.
+/// A pane's tail read through herdr, or the terminal holder for a holder
+/// pane (its visible screen), or nothing when neither can read it. It
+/// blocks.
+pub(crate) fn pane_tail_of(
+    herdr: Cli,
+    holder: Option<&dyn Holder>,
+    target: PaneTarget,
+) -> Vec<String> {
     if ids::is_holder_pane(&target.pane) {
-        return Vec::new();
+        let Some(holder) = holder else {
+            return Vec::new();
+        };
+        let id = tiller_panes::PaneId::from(target.pane.as_str());
+        return holder
+            .screen(&id, tiller_panes::Read::Visible, tiller_panes::Format::Text)
+            .map(|screen| pane_tail(&screen.text(), PANE_TAIL))
+            .unwrap_or_default();
     }
     let herdr = match target.machine {
         Some(machine) => herdr.on_machine(machine),
@@ -5010,8 +5026,9 @@ async fn prompt_answer(
     let herdr = state.0.herdr.clone();
     let target = pane.clone();
     tokio::task::spawn_blocking(move || {
-        let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
-        herdr.send_keys(&target, &keys)
+        let names: Vec<String> = keys.iter().map(ToString::to_string).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        herdr.send_keys(&target, &names)
     })
     .await
     .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
@@ -5181,7 +5198,26 @@ async fn terminal_tail(
     )
     .await?;
     let (session_id, pane, machine) = pane_of(&state, session).await?;
-    herdr_only(&pane, "The terminal tail")?;
+    if ids::is_holder_pane(&pane) {
+        let holder = holder_of(&state)?;
+        let id = tiller_panes::PaneId::from(pane.as_str());
+        let read = id.clone();
+        let screen = on_holder(holder, move |holder| {
+            holder.screen(
+                &read,
+                tiller_panes::Read::Visible,
+                tiller_panes::Format::Ansi,
+            )
+        })
+        .await?
+        .map_err(|error| holder_error(&pane, &error))?;
+        return Ok(Json(TerminalTail {
+            session_id,
+            cols: screen.cols,
+            rows: screen.rows,
+            text: screen.text(),
+        }));
+    }
     let read = TAIL_READS.try_acquire().map_err(|_| {
         ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -5299,7 +5335,14 @@ async fn interrupt_agent(
         )
         .hint("open it in herdr instead"));
     }
-    let herdr = state.0.herdr.clone();
+    let herdr = Routed::new(
+        state.0.herdr.clone(),
+        state
+            .0
+            .holder
+            .clone()
+            .map(|holder| -> Arc<dyn tiller_panes::Panes> { holder }),
+    );
     mutate(
         &state,
         key(&request.idempotency_key)?,
@@ -5559,6 +5602,53 @@ async fn relaunch_agent(
     .await
 }
 
+/// Open in terminal for a pane in the terminal holder (`terminal-holder.md`
+/// 5.3): the attach clients switch to it, then the terminal app comes to the
+/// front or opens `tiller attach <session>`.
+async fn focus_held(
+    state: &AppState,
+    session_id: String,
+    pane: String,
+) -> ApiResult<MutationResponse> {
+    let holder = holder_of(state)?;
+    let terminal = state.0.terminal.clone();
+    let app = terminal.as_ref().map(|terminal| terminal.name().to_owned());
+    let tiller = std::env::current_exe().map_err(|error| Error::Internal(error.to_string()))?;
+    let attach: Vec<std::ffi::OsString> =
+        vec![tiller.into(), "attach".into(), session_id.clone().into()];
+    let id = tiller_panes::PaneId::from(pane.as_str());
+    let opened = tokio::task::spawn_blocking(move || {
+        tiller_panes::open::open_pane(holder.as_ref(), terminal.as_deref(), &id, &attach)
+    })
+    .await
+    .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?;
+    let data = match opened {
+        Ok(opened) => json!({"session_id": session_id, "opened": opened, "terminal": app}),
+        Err(tiller_panes::open::OpenError::Holder(error)) => {
+            return Err(holder_error(&pane, &error));
+        }
+        Err(error) => json!({
+            "session_id": session_id,
+            "opened": "failed",
+            "terminal": app,
+            "problem": error.to_string(),
+        }),
+    };
+    Ok(Json(MutationResponse {
+        ok: true,
+        replayed: false,
+        events: Vec::new(),
+        receipt: Receipt {
+            recorded_at: Timestamp::now().to_string(),
+            outbox_id: None,
+            approval_id: None,
+        },
+        data,
+        host: None,
+        warning: None,
+    }))
+}
+
 /// An interrupt's failure as the store's errors: herdr out of reach is 503,
 /// and any other precondition a refusal naming the run.
 fn interrupt_refused(run: &str, error: tiller_agents::spawn::SpawnError) -> Error {
@@ -5592,7 +5682,9 @@ async fn focus(
     let request: FocusBody = body(&bytes)?;
     not_forwarded(&state, request.host.as_deref(), "a focus").await?;
     let (session_id, pane, machine) = pane_of(&state, session).await?;
-    herdr_only(&pane, "Open in herdr")?;
+    if ids::is_holder_pane(&pane) {
+        return focus_held(&state, session_id, pane).await;
+    }
     let herdr = match machine {
         Some(machine) => state.0.herdr.clone().on_machine(machine),
         None => state.0.herdr.clone(),
@@ -9903,9 +9995,27 @@ esac"#,
         assert_eq!(unknown.status, StatusCode::BAD_REQUEST, "{}", unknown.body);
         assert_eq!(holder.inputs().len(), 2);
 
-        // What only herdr answers yet is refused, not sent to herdr.
+        // The tail reads the holder's screen.
         let cookie = owner_cookie(home);
-        for path in ["terminal/history", "terminal/tail", "prompt"] {
+        let tail = send(
+            &app,
+            mutation(
+                "POST",
+                &format!("/api/v1/agents/{session}/terminal/tail"),
+                json!({}),
+                &[("cookie", cookie.as_str())],
+            ),
+        )
+        .await;
+        assert_eq!(tail.status, StatusCode::OK, "{}", tail.body);
+        let tail: Value = serde_json::from_str(&tail.body).unwrap();
+        assert_eq!(
+            (tail["cols"].as_u64(), tail["rows"].as_u64()),
+            (Some(120), Some(40))
+        );
+
+        // What only herdr answers yet is refused, not sent to herdr.
+        for path in ["terminal/history", "prompt"] {
             let answer = send(
                 &app,
                 mutation(

@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use common::holder::fake_agent;
 use common::{Out, Running, World};
 use tiller_holder::handover::{PaneRecord, Record};
 use tiller_panes::{
@@ -852,4 +853,133 @@ exec '{TILLER}' "$@"
     );
     let pane = client.get(&shell.pane).unwrap().unwrap();
     assert_eq!((pane.state, pane.pid), (PaneState::Running, shell.pid));
+}
+
+/// A `fake-agent` pane, which logs to `log`.
+fn agent(client: &HolderClient, world: &World, key: &str, args: &[&str], log: &Path) -> Pane {
+    let mut argv = vec![fake_agent().display().to_string()];
+    argv.extend(args.iter().map(|arg| (*arg).to_owned()));
+    client
+        .spawn(&Spawn {
+            key: key.to_owned(),
+            argv,
+            cwd: world.dir.path().display().to_string(),
+            env: BTreeMap::from([
+                ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+                ("FAKE_AGENT_LOG".to_owned(), log.display().to_string()),
+            ]),
+            size: None,
+            meta: Meta::default(),
+        })
+        .unwrap()
+}
+
+/// The events of `kind` in a `fake-agent` log.
+fn agent_events(log: &Path, kind: &str) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|event| event["event"] == kind)
+        .collect()
+}
+
+// Section 9.3 with agents: a `fake-agent` holding a half-typed draft and a
+// `fake-agent --counter` run through the upgrade. The draft is still in the
+// composer and its raw mode still holds, so one Enter submits it once; the
+// counter has no gap; neither agent starts again or exits.
+#[test]
+fn fake_agents_run_through_the_upgrade_with_their_draft_and_counter_whole() {
+    let world = World::new();
+    let holder = Holder::start(&world);
+    let client = holder.client(&world);
+    let wrapper = wrapper(&world);
+    let drafts = world.dir.path().join("drafts.jsonl");
+    let counts = world.dir.path().join("counts.jsonl");
+
+    let drafting = agent(&client, &world, "drafting", &[], &drafts);
+    let counting = agent(&client, &world, "counting", &["--counter"], &counts);
+    shows(
+        &holder,
+        &client,
+        &drafting,
+        Read::Visible,
+        "? for shortcuts",
+    );
+    client.input(&drafting.pane, "half a thought").unwrap();
+    shows(&holder, &client, &drafting, Read::Visible, "half a thought");
+    shows(&holder, &client, &counting, Read::Visible, "count 20");
+
+    let out = upgrade(&world, &wrapper, false);
+    assert_eq!(
+        out.data()["upgrade"],
+        "started",
+        "{}\n{}",
+        out.json,
+        holder.log()
+    );
+    let client = holder.client(&world);
+    assert!(
+        holder.log().contains("the holder re-executed"),
+        "{}",
+        holder.log()
+    );
+
+    // The draft is whole in the new image's screen, and the agent still
+    // reads keys raw: a carriage return submits.
+    shows(&holder, &client, &drafting, Read::Visible, "half a thought");
+    client.input(&drafting.pane, " finished").unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    client
+        .keys(&drafting.pane, &[tiller_panes::Key::ENTER])
+        .unwrap();
+    shows(
+        &holder,
+        &client,
+        &drafting,
+        Read::Visible,
+        "> half a thought finished",
+    );
+    let submits = agent_events(&drafts, "submit");
+    assert_eq!(submits.len(), 1, "{submits:#?}");
+    assert_eq!(submits[0]["text"], "half a thought finished");
+
+    // The counter's ticks before, during and after the upgrade.
+    let last = agent_events(&counts, "tick").len();
+    shows(
+        &holder,
+        &client,
+        &counting,
+        Read::Visible,
+        &format!("count {}", last + 20),
+    );
+    let ticks: Vec<u64> = agent_events(&counts, "tick")
+        .iter()
+        .map(|tick| tick["n"].as_u64().unwrap())
+        .collect();
+    assert_eq!(ticks, (0..ticks.len() as u64).collect::<Vec<_>>());
+    let text = client
+        .screen(&counting.pane, Read::Recent(10_000), Format::Text)
+        .unwrap()
+        .text();
+    let shown: Vec<u64> = text
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("count ")?.parse().ok())
+        .collect();
+    assert!(shown.len() > 40, "{text}");
+    assert_eq!(
+        shown,
+        (shown[0]..shown[0] + shown.len() as u64).collect::<Vec<_>>(),
+        "the counter's output has a gap"
+    );
+
+    for log in [&drafts, &counts] {
+        assert_eq!(agent_events(log, "start").len(), 1, "{}", log.display());
+        assert!(agent_events(log, "exit").is_empty(), "{}", log.display());
+    }
+    for pane in [&drafting, &counting] {
+        let now = client.get(&pane.pane).unwrap().unwrap();
+        assert_eq!(now.state, PaneState::Running);
+        assert_eq!(now.pid, pane.pid);
+    }
 }

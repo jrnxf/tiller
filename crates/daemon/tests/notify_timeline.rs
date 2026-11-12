@@ -7,14 +7,14 @@ use tiller_core::domain::{AttentionKind, Run};
 use tiller_core::state::attention::NewAttention;
 use tiller_core::state::get;
 use tiller_daemon::views::timeline;
-use tiller_delivery::notify::Notifier;
+use tiller_delivery::notify::{Notifier, ViaHerdr};
 use tiller_herdr::fake::FakeHerdr;
 use tiller_herdr::testing::{Fleet, at};
 
 struct World {
     fleet: Fleet,
     herdr: FakeHerdr,
-    notifier: Notifier<FakeHerdr>,
+    notifier: Notifier<ViaHerdr<FakeHerdr>>,
     card: String,
 }
 
@@ -27,7 +27,7 @@ impl World {
         let run = fleet.workers[0].1.clone();
         let card = get::<Run>(fleet.store.conn(), "run", &run).unwrap().card_id;
         Self {
-            notifier: Notifier::new(fleet.open(), herdr.clone()),
+            notifier: Notifier::new(fleet.open(), ViaHerdr(herdr.clone())),
             fleet,
             herdr,
             card,

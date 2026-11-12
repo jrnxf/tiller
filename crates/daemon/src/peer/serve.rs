@@ -459,7 +459,8 @@ impl Link<'_> {
             Query::Run(id) => {
                 let (mut detail, pane) = views::run_detail(store, &id)?;
                 if let (Some(herdr), Some(target)) = (&self.config.herdr, pane) {
-                    detail.pane_tail = pane_tail_of(herdr.clone(), target);
+                    detail.pane_tail =
+                        pane_tail_of(herdr.clone(), self.config.holder.as_deref(), target);
                 }
                 serde_json::to_value(detail)
             }

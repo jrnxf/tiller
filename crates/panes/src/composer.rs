@@ -27,6 +27,11 @@ pub enum Composer {
     Unknown,
 }
 
+/// How long a pane must print nothing before an empty composer counts as
+/// empty. A streaming answer can redraw the composer between chunks, so a
+/// single read mid-stream can look empty while the turn still runs.
+pub const SETTLE: std::time::Duration = std::time::Duration::from_secs(3);
+
 const PROMPT: char = '❯';
 const NBSP: char = '\u{a0}';
 /// Rows Claude draws below its composer: the mode line and a short hint row.

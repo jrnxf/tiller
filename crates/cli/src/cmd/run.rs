@@ -244,9 +244,9 @@ fn show(app: &App, reference: &str, tail: Option<u32>) -> Done {
     Ok(Outcome::read(data))
 }
 
-/// The last `keep` lines of the run's live pane, read through herdr the way
-/// the board reads it: the saved machine of a remote host, or the local
-/// herdr. The error is why there is no tail, for the caller to read.
+/// The last `keep` lines of the run's live pane, read the way the board
+/// reads it: the terminal holder for a holder pane, else the saved machine
+/// of a remote host, or the local herdr. The error is why there is no tail, for the caller to read.
 fn read_tail(
     app: &App,
     store: &tiller_core::Store,
@@ -260,9 +260,19 @@ fn read_tail(
     let (pane, machine) = tiller_core::state::runs::focus_target(conn, &session)
         .map_err(|_| "the session has no pane".to_owned())?;
     if tiller_core::ids::is_holder_pane(&pane) {
-        return Err(format!(
-            "the tail is not ready yet for an agent in the terminal holder (pane {pane})"
-        ));
+        use tiller_panes::Panes as _;
+        let home = super::spawn::absolute_home(&app.home).map_err(|f| f.message.clone())?;
+        if !tiller_daemon::holder::HolderLink::present(&home) {
+            return Err("no holder runs on this host".into());
+        }
+        return tiller_daemon::holder::HolderLink::new(&home)
+            .screen(
+                &tiller_panes::PaneId::from(pane.as_str()),
+                tiller_panes::Read::Visible,
+                tiller_panes::Format::Text,
+            )
+            .map(|screen| tiller_daemon::api::pane_tail(&screen.text(), keep))
+            .map_err(|error| format!("the terminal holder cannot read the pane: {error}"));
     }
     let host: tiller_core::domain::Host =
         get(conn, "host", &session.host_id).map_err(|error| error.to_string())?;

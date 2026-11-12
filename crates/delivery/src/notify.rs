@@ -7,16 +7,26 @@
 //! second pass finds the event and stays quiet, and a send that fails is
 //! logged, never repeated. The record only says the daemon tried, so the send
 //! then writes its outcome: `attention.notify_sent` (`notification.sent`) when
-//! it went out, `attention.notify_failed` (`notification.fail`) when herdr
-//! refused it. A crash between the record and the outcome leaves the record
+//! it went out, `attention.notify_failed` (`notification.fail`) when the
+//! send failed. A crash between the record and the outcome leaves the record
 //! alone, and the card timeline reads it as a try. Only items opened within
 //! [`NEW_MINUTES`] and still current count as new, so a daemon started on an
 //! old database does not announce its backlog.
+//!
+//! The send goes through [`Notify`]: the owner's `[notify] command`
+//! ([`Command`], `terminal-holder.md` 7), or herdr's notification until the
+//! cutover drops herdr ([`ViaHerdr`]).
 
-use std::time::Duration;
+use std::collections::BTreeMap;
+use std::io::{Read as _, Write as _};
+use std::path::PathBuf;
+use std::process::{Command as Process, Stdio};
+use std::time::{Duration, Instant};
 
-use tiller_core::domain::{Attention, AttentionKind, Card, Project};
+use serde_json::json;
+use tiller_core::domain::{Attention, AttentionKind, Card, Host, HostKind, Project};
 use tiller_core::state::attention::stale;
+use tiller_core::state::outbox::live_orchestrator;
 use tiller_core::state::{get, list};
 use tiller_core::{Actor, Ctx, Store, Timestamp};
 use tiller_herdr::client::Herdr;
@@ -30,19 +40,173 @@ pub const NEW_MINUTES: i64 = 60;
 pub struct Report {
     /// The attention items a notification was sent for.
     pub notified: Vec<String>,
-    /// `(item, error)` for each send herdr refused.
+    /// `(item, error)` for each send that failed.
     pub failed: Vec<(String, String)>,
 }
 
-/// The notification loop for the local host.
-pub struct Notifier<H: Herdr> {
-    store: Store,
-    herdr: H,
+/// How long the notify command has to exit 0 (`terminal-holder.md` 7).
+pub const COMMAND_SECS: u64 = 10;
+
+/// One notification for the owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Note {
+    pub title: String,
+    pub message: String,
+    /// The project's live orchestrator, which a click opens.
+    pub session_id: Option<String>,
+    /// That orchestrator's pane.
+    pub pane: Option<String>,
+    /// The project's checkout.
+    pub cwd: Option<String>,
+    /// The label of the host the notifier runs on.
+    pub host: String,
 }
 
-impl<H: Herdr> Notifier<H> {
-    pub fn new(store: Store, herdr: H) -> Self {
-        Self { store, herdr }
+/// Sends a notification to the owner. The error is what the owner's log
+/// and the card timeline show.
+pub trait Notify {
+    fn notify(&self, note: &Note) -> Result<(), String>;
+}
+
+/// herdr's own notification, the path before the cutover.
+pub struct ViaHerdr<H>(pub H);
+
+impl<H: Herdr> Notify for ViaHerdr<H> {
+    fn notify(&self, note: &Note) -> Result<(), String> {
+        self.0
+            .notify(&note.title, &note.message)
+            .map_err(|error| error.to_string())
+    }
+}
+
+/// The owner's `[notify] command`: the note goes to its stdin as a Claude
+/// Code `Notification` hook event, and exit 0 within [`COMMAND_SECS`] is a
+/// send.
+#[derive(Clone, Debug)]
+pub struct Command {
+    argv: Vec<String>,
+    limit: Duration,
+}
+
+impl Command {
+    /// None when `argv` names no program.
+    pub fn new(argv: Vec<String>) -> Option<Self> {
+        (!argv.is_empty() && !argv[0].is_empty()).then_some(Self {
+            argv,
+            limit: Duration::from_secs(COMMAND_SECS),
+        })
+    }
+
+    /// A shorter limit, for tests.
+    #[must_use]
+    pub fn with_limit(mut self, limit: Duration) -> Self {
+        self.limit = limit;
+        self
+    }
+}
+
+impl Notify for Command {
+    fn notify(&self, note: &Note) -> Result<(), String> {
+        let payload = json!({
+            "hook_event_name": "Notification",
+            "notification_type": "tiller",
+            "title": note.title,
+            "message": note.message,
+            "session_id": note.session_id,
+            "cwd": note.cwd,
+        });
+        let mut command = Process::new(&self.argv[0]);
+        command
+            .args(&self.argv[1..])
+            .env(
+                "TILLER_SESSION_ID",
+                note.session_id.as_deref().unwrap_or(""),
+            )
+            .env("TILLER_PANE", note.pane.as_deref().unwrap_or(""))
+            .env("TILLER_HOST", &note.host)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        if let Some(cwd) = note
+            .cwd
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|p| p.is_dir())
+        {
+            command.current_dir(cwd);
+        }
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("{} did not start: {error}", self.argv[0]))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            // A command that exits without reading its stdin is its own
+            // business: its exit status decides.
+            let _ = stdin.write_all(payload.to_string().as_bytes());
+        }
+        let mut stderr = child.stderr.take();
+        let reader = std::thread::spawn(move || {
+            let mut text = String::new();
+            if let Some(stderr) = stderr.as_mut() {
+                let _ = stderr.take(64 * 1024).read_to_string(&mut text);
+            }
+            text
+        });
+        let deadline = Instant::now() + self.limit;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Ok(None) | Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+            }
+        };
+        let stderr = reader.join().unwrap_or_default();
+        let stderr = stderr.trim();
+        match status {
+            Some(status) if status.success() => Ok(()),
+            Some(status) if stderr.is_empty() => Err(format!("{} {status}", self.argv[0])),
+            Some(status) => Err(format!("{} {status}: {stderr}", self.argv[0])),
+            None => Err(format!(
+                "{} did not exit within {} s",
+                self.argv[0],
+                self.limit.as_secs()
+            )),
+        }
+    }
+}
+
+impl<N: Notify + ?Sized> Notify for Box<N> {
+    fn notify(&self, note: &Note) -> Result<(), String> {
+        (**self).notify(note)
+    }
+}
+
+/// The notification loop for the local host.
+pub struct Notifier<N: Notify> {
+    store: Store,
+    notify: N,
+    checkouts: BTreeMap<String, PathBuf>,
+}
+
+impl<N: Notify> Notifier<N> {
+    pub fn new(store: Store, notify: N) -> Self {
+        Self {
+            store,
+            notify,
+            checkouts: BTreeMap::new(),
+        }
+    }
+
+    /// Each project's local checkout, by project id: a note's `cwd`.
+    #[must_use]
+    pub fn with_checkouts(mut self, checkouts: BTreeMap<String, PathBuf>) -> Self {
+        self.checkouts = checkouts;
+        self
     }
 
     /// One pass: a notification for every new open item not yet notified.
@@ -63,14 +227,14 @@ impl<H: Herdr> Notifier<H> {
             if stale(self.store.conn(), &item)?.is_some() {
                 continue;
             }
-            let (title, body) = text(&self.store, &item)?;
+            let note = note(&self.store, &self.checkouts, &item)?;
             if self.store.notification_record(&ctx, &item.id)?.replayed {
                 continue;
             }
             // The send happened (or was refused) either way: an outcome
             // that cannot be written is logged, and the pass goes on to the
             // other items, which it would otherwise never notify.
-            match self.herdr.notify(&title, &body) {
+            match self.notify.notify(&note) {
                 Ok(()) => {
                     if let Err(error) = self.store.notification_sent(&ctx, &item.id) {
                         tracing::warn!(item = %item.id, %error, "recording a sent notification failed");
@@ -78,14 +242,11 @@ impl<H: Herdr> Notifier<H> {
                     report.notified.push(item.id);
                 }
                 Err(error) => {
-                    tracing::warn!(item = %item.id, %error, "herdr notification failed");
-                    if let Err(write) =
-                        self.store
-                            .notification_fail(&ctx, &item.id, &error.to_string())
-                    {
+                    tracing::warn!(item = %item.id, %error, "owner notification failed");
+                    if let Err(write) = self.store.notification_fail(&ctx, &item.id, &error) {
                         tracing::warn!(item = %item.id, error = %write, "recording a failed notification failed");
                     }
-                    report.failed.push((item.id, error.to_string()));
+                    report.failed.push((item.id, error));
                 }
             }
         }
@@ -93,10 +254,23 @@ impl<H: Herdr> Notifier<H> {
     }
 }
 
-/// The notification for `item`: the project and the card it names.
-fn text(store: &Store, item: &Attention) -> tiller_core::Result<(String, String)> {
-    let card: Card = get(store.conn(), "card", &item.card_id)?;
-    let project: Project = get(store.conn(), "project", &card.project_id)?;
+/// The notification for `item`: the project and the card it names, and the
+/// project's orchestrator for a click to open.
+fn note(
+    store: &Store,
+    checkouts: &BTreeMap<String, PathBuf>,
+    item: &Attention,
+) -> tiller_core::Result<Note> {
+    let conn = store.conn();
+    let card: Card = get(conn, "card", &item.card_id)?;
+    let project: Project = get(conn, "project", &card.project_id)?;
+    let orchestrator = live_orchestrator(conn, &project.id)?;
+    let hosts: Vec<Host> = list(conn, "1 = 1 ORDER BY id", &[])?;
+    let host = hosts
+        .into_iter()
+        .find(|host| host.kind == HostKind::Local)
+        .map(|host| host.label)
+        .unwrap_or_default();
     let what = match item.kind {
         AttentionKind::Merge => "ready for your merge",
         AttentionKind::Decision => "needs a decision",
@@ -105,13 +279,19 @@ fn text(store: &Store, item: &Attention) -> tiller_core::Result<(String, String)
         AttentionKind::Recovery => "needs recovery",
         AttentionKind::Report => "has a report",
     };
-    Ok((
-        format!("{}: {what}", project.name),
-        format!("[{}] {}", card.display_id, item.question),
-    ))
+    Ok(Note {
+        title: format!("{}: {what}", project.name),
+        message: format!("[{}] {}", card.display_id, item.question),
+        session_id: orchestrator.as_ref().map(|session| session.id.clone()),
+        pane: orchestrator.and_then(|session| session.pane_id),
+        cwd: checkouts
+            .get(&project.id)
+            .map(|path| path.display().to_string()),
+        host,
+    })
 }
 
-impl<H: Herdr + Send + 'static> Source for Notifier<H> {
+impl<N: Notify + Send + 'static> Source for Notifier<N> {
     fn name(&self) -> String {
         "notify".to_owned()
     }

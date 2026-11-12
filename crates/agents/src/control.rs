@@ -1,7 +1,7 @@
 //! `tiller agent interrupt`, `resume`, `relaunch` and `stop` (T2.5, T4.5;
-//! `protocol.md` 6.4), and the daemon's stop loop for finished runs: the
-//! herdr half of agent control, over the same herdr adapter and launch
-//! files spawn uses.
+//! `protocol.md` 6.4), and the daemon's stop loop for finished runs, over
+//! the same launch files spawn uses. A pane in the terminal holder is
+//! reached through [`World::routed`], which speaks herdr's calls to it.
 //!
 //! Each command says what it saw, never what it hoped: an interrupt is
 //! `confirmed` only when the transcript shows the interrupt marker or a hook
@@ -165,19 +165,6 @@ fn require_controller(ctx: &Ctx, run: &Run, what: &str, daemon: bool) -> Result<
     }
 }
 
-/// Refuses `what` for a session whose pane is in the terminal holder: stop,
-/// resume and interrupt reach a pane through herdr, which knows nothing of
-/// the holder's panes, and would take a live agent for a gone one. They
-/// move onto the holder in their own slice (H09).
-fn herdr_only(pane: &str, what: &str) -> Result<()> {
-    if tiller_core::ids::is_holder_pane(pane) {
-        return Err(SpawnError::Refused(format!(
-            "{what} is not ready yet for an agent in the terminal holder (pane {pane}); nothing was sent"
-        )));
-    }
-    Ok(())
-}
-
 fn require_active(run: &Run) -> Result<()> {
     match run.ended_at {
         None => Ok(()),
@@ -233,7 +220,6 @@ pub fn interrupt(
         .pane_id
         .clone()
         .ok_or_else(|| SpawnError::Refused(format!("session {} has no pane bound", session.id)))?;
-    herdr_only(&pane_id, "An interrupt")?;
     let pane = herdr
         .pane(&pane_id)?
         .ok_or_else(|| SpawnError::Refused(format!("pane {pane_id} is gone; nothing was sent")))?;
@@ -323,40 +309,31 @@ pub fn resume(
     run: &Run,
 ) -> Result<Applied<Resumed>> {
     require_controller(ctx, run, "resume", true)?;
+    let routed = world.routed();
+    let world = &World {
+        herdr: &routed,
+        ..*world
+    };
     require_local(store, run)?;
     require_active(run)?;
     let worktree = worktree_of(run)?;
     let Some(session) = live_session(store.conn(), &run.id)? else {
-        let next = relaunch_advice(store, world, None, run);
+        let next = relaunch_advice(run);
         return Err(SpawnError::Refused(format!(
             "run {} has no live session to resume: the last one ended, and {next}",
             run.id
         )));
     };
     let Some(claude_id) = session.claude_session_id.clone() else {
-        let next = relaunch_advice(store, world, Some(&session), run);
+        let next = relaunch_advice(run);
         return Err(SpawnError::Refused(format!(
             "session {} never bound a Claude session, so there is nothing to resume, and {next}",
             session.id
         )));
     };
-    // With the terminal holder up, the resume goes on only in a herdr pane
-    // that is still the session's own: a new pane belongs in the holder,
-    // which takes a resume only once its stop and forget land (H09).
-    let pane = if world.panes.is_some() {
-        Some(
-            own_herdr_pane(store, world.herdr, Some(&session), "A resume")?
-                .ok_or_else(|| holder_not_ready("A resume", run))?,
-        )
-    } else {
-        match &session.pane_id {
-            Some(id) => {
-                herdr_only(id, "A resume")?;
-                world.herdr.pane(id)?
-            }
-            None => None,
-        }
-    };
+    // Only a pane still the session's own takes the resume; any other
+    // leaves it to a new pane.
+    let pane = own_pane(store, world.herdr, &session)?;
     // A manual resume clears the run's pause (`run.unpause`). The key is
     // `session.resume`'s alone, so the unpause goes unkeyed.
     let unkeyed = ctx.unkeyed();
@@ -383,7 +360,7 @@ pub fn resume(
     {
         return Err(SpawnError::Refused(format!("{why}; nothing was launched")));
     }
-    let line = launch::write_again(
+    let launched = launch::write_again(
         &AgainSpec {
             role: role_of(run.role)?,
             session_id: &session.id,
@@ -417,30 +394,42 @@ pub fn resume(
         .events;
 
     let card: Card = get(store.conn(), "card", &run.card_id)?;
-    let pane_id = match pane {
-        Some(pane) => pane.pane_id,
-        None => {
-            let created = open_pane(world, &card, run, &worktree)?;
-            // The key was `session.resume`'s alone, not the bind's.
-            events.extend(
-                store
-                    .run_bind_session(
-                        &unkeyed,
-                        Bind {
-                            session_id: session.id.clone(),
-                            claude_session_id: claude_id.clone(),
-                            pane_id: Some(created.clone()),
-                            transcript_path: None,
-                            source: LAUNCH_BIND_SOURCE.to_owned(),
-                        },
-                    )?
-                    .events,
-            );
-            created
-        }
-    };
     let since = Timestamp::now();
-    let warning = type_line(store, world.herdr, run, &session.id, &pane_id, &line)?;
+    let target = open_target(
+        world,
+        &card,
+        run,
+        &session.id,
+        &worktree,
+        pane.map(|p| p.pane_id),
+        &launched.script,
+    )?;
+    if session.pane_id.as_deref() != Some(target.pane()) {
+        // The key was `session.resume`'s alone, not the bind's.
+        events.extend(
+            store
+                .run_bind_session(
+                    &unkeyed,
+                    Bind {
+                        session_id: session.id.clone(),
+                        claude_session_id: claude_id.clone(),
+                        pane_id: Some(target.pane().to_owned()),
+                        transcript_path: None,
+                        source: LAUNCH_BIND_SOURCE.to_owned(),
+                    },
+                )?
+                .events,
+        );
+    }
+    let pane_id = target.pane().to_owned();
+    let warning = start_in(
+        store,
+        world.herdr,
+        run,
+        &session.id,
+        &target,
+        &launched.line,
+    )?;
     let (started, evidence) =
         wait_started(store, world.herdr, waits, &session.id, &pane_id, since)?;
     // The pause clears once the launch line is typed: a resume whose pane or
@@ -484,6 +473,11 @@ pub fn relaunch(
     };
     let ctx = &ctx.unkeyed();
     require_controller(ctx, run, "relaunch", false)?;
+    let routed = world.routed();
+    let world = &World {
+        herdr: &routed,
+        ..*world
+    };
     if store.key_recorded(&keyed)? {
         let applied =
             store.run_relaunch(&keyed, &run.id, relaunch_of(&request, None, None, None))?;
@@ -571,17 +565,6 @@ pub fn relaunch(
     )?;
 
     let old = live_session(store.conn(), &run.id)?;
-    // With no herdr pane to go on in, the relaunch would open a new one, and
-    // a new pane belongs in the terminal holder, which takes a relaunch only
-    // once its stop and forget land (H09). An agent whose herdr pane is still
-    // its own goes on there. An agent in a holder pane is refused naming
-    // its pane, holder up or down.
-    if let Some(pane) = old.as_ref().and_then(|s| s.pane_id.as_deref()) {
-        herdr_only(pane, "A relaunch")?;
-    }
-    if relaunch_held(store, world, old.as_ref())? {
-        return Err(holder_not_ready("A relaunch", run));
-    }
     let (stop_proof, old_pane) = match &old {
         Some(session) => {
             let (proof, pane) = stop(store, world.herdr, waits, session)?;
@@ -620,22 +603,10 @@ pub fn relaunch(
             "the relaunch is recorded (run {}, session {}) and nothing was deleted",
             relaunched.run.id, relaunched.session.id
         );
-        // A retry passes the same gate as this relaunch (`held_now`).
-        let held = held_now(
-            live_session(store.conn(), &relaunched.run.id)
-                .map_err(SpawnError::from)
-                .and_then(|now| relaunch_held(store, world, now.as_ref())),
+        let notes = format!(
+            "{recorded}; start its session with tiller agent relaunch {} --note <progress> --key <a new key>, since this key replays",
+            relaunched.run.id
         );
-        let notes = if held {
-            format!(
-                "{recorded}; the old agent was stopped and the new session has no agent, and {HELD}"
-            )
-        } else {
-            format!(
-                "{recorded}; start its session with tiller agent relaunch {} --note <progress> --key <a new key>, since this key replays",
-                relaunched.run.id
-            )
-        };
         SpawnError::Undone {
             error: Box::new(error),
             notes,
@@ -724,7 +695,6 @@ fn ready_to_stop(
             None,
         )));
     };
-    herdr_only(&pane_id, "A stop")?;
     let Some(pane) = herdr.pane(&pane_id)? else {
         return Ok(Ready::Gone((
             format!("herdr shows pane {pane_id} gone"),
@@ -797,79 +767,21 @@ fn ready_to_stop(
     Ok(Ready::Exit(pane_id))
 }
 
-/// Refuses `what` for a run that `relaunch_held` holds: one that would
-/// need a new pane while the terminal holder is up (herdr opens no new pane
-/// then), or whose agent is in a holder pane. The holder takes either only
-/// in its own slice (H09).
-fn holder_not_ready(what: &str, run: &Run) -> SpawnError {
-    SpawnError::Refused(format!(
-        "{what} is not ready yet with the terminal holder (run {}); no agent was stopped and no pane was opened",
+/// What a refused resume tells the owner to do next.
+fn relaunch_advice(run: &Run) -> String {
+    format!(
+        "tiller agent relaunch {} --note <progress> starts a new session",
         run.id
-    ))
+    )
 }
 
-/// Whether a relaunch of a run whose live session is `session` is refused
-/// for now. An agent in a holder pane is never stopped for a relaunch, up
-/// or not. With the terminal holder up, a relaunch goes on only in a herdr
-/// pane that is still the session's own. The holder takes a relaunch only
-/// once its stop and forget land (H09).
-fn relaunch_held(store: &Store, world: &World<'_>, session: Option<&Session>) -> Result<bool> {
-    let in_holder = session
-        .and_then(|s| s.pane_id.as_deref())
-        .is_some_and(tiller_core::ids::is_holder_pane);
-    Ok(in_holder
-        || (world.panes.is_some()
-            && own_herdr_pane(store, world.herdr, session, "A relaunch")?.is_none()))
-}
-
-/// Why a relaunch is refused for now (`relaunch_held`), as the refusals
-/// and notes that point past it say.
-const HELD: &str = "until H09 a relaunch goes on only in a herdr pane the session still owns while the terminal holder is up, and never for an agent in a holder pane, so the run waits for that or for a new start of its card";
-
-/// Whether the gate `relaunch_held` read refuses a relaunch, for the
-/// advice a refusal or a note gives. When the gate cannot be read now
-/// (herdr or the store failing), the relaunch advice stands, and the
-/// relaunch itself says why it stops, so the caller's own reason is never
-/// lost. `relaunch_held` gives its answer as a value: a refusal it returned
-/// would read as not held here, so a new hold goes in as `Ok(true)`.
-fn held_now(gate: Result<bool>) -> bool {
-    gate.unwrap_or(false)
-}
-
-/// What a refused resume tells the owner to do next: a relaunch, unless
-/// the terminal holder refuses that too.
-fn relaunch_advice(
-    store: &Store,
-    world: &World<'_>,
-    session: Option<&Session>,
-    run: &Run,
-) -> String {
-    if held_now(relaunch_held(store, world, session)) {
-        HELD.to_owned()
-    } else {
-        format!(
-            "tiller agent relaunch {} --note <progress> starts a new session",
-            run.id
-        )
-    }
-}
-
-/// `session`'s herdr pane when it is still open and its own: its tokens
-/// name the session (as a stop needs to hand it back) and no other live
-/// session is bound to it. Only such a pane takes the next session.
-fn own_herdr_pane(
-    store: &Store,
-    herdr: &dyn Herdr,
-    session: Option<&Session>,
-    what: &str,
-) -> Result<Option<PaneInfo>> {
-    let Some(session) = session else {
-        return Ok(None);
-    };
+/// `session`'s pane when it is still open and its own: its tokens name the
+/// session (as a stop needs to hand it back) and no other live session is
+/// bound to it.
+fn own_pane(store: &Store, herdr: &dyn Herdr, session: &Session) -> Result<Option<PaneInfo>> {
     let Some(pane_id) = session.pane_id.as_deref() else {
         return Ok(None);
     };
-    herdr_only(pane_id, what)?;
     let Some(pane) = herdr.pane(pane_id)? else {
         return Ok(None);
     };
@@ -1058,6 +970,11 @@ pub fn stop_agent(
     waits: &Waits,
     session: &Session,
 ) -> Result<Applied<Stopped>> {
+    let routed = world.routed();
+    let world = &World {
+        herdr: &routed,
+        ..*world
+    };
     // Judged as the session is now, not as the caller last read it.
     let session: Session = get(store.conn(), "session", &session.id)?;
     let run = match &session.run_id {
@@ -1360,7 +1277,7 @@ fn start_again(
         memory,
         note: Some(note),
     };
-    let line = if attempt {
+    let launched = if attempt {
         // A new attempt is a new run: its own launch files and hash.
         let launched = launch::write(&spec)?;
         events.extend(
@@ -1380,7 +1297,7 @@ fn start_again(
                 )?
                 .events,
         );
-        launched.line
+        launched
     } else {
         // The same run keeps its brief, branch and worktree, but its launch
         // files are rendered again, so a tiller or role prompt upgraded
@@ -1398,14 +1315,21 @@ fn start_again(
                 .run_reconfigure(ctx, &run.id, &launched.config_hash)?
                 .events,
         );
-        launched.line
+        launched
     };
     // What the new session was launched with, for the stale-session check.
     events.extend(crate::stale::record(store, ctx, &session.id, role)?.events);
-    let pane_id = match old_pane {
-        Some(pane) => pane,
-        None => open_pane(world, card, run, worktree)?,
-    };
+    let since = Timestamp::now();
+    let target = open_target(
+        world,
+        card,
+        run,
+        &session.id,
+        worktree,
+        old_pane,
+        &launched.script,
+    )?;
+    let pane_id = target.pane().to_owned();
     events.extend(
         store
             .run_place(
@@ -1418,8 +1342,14 @@ fn start_again(
             )?
             .events,
     );
-    let since = Timestamp::now();
-    let warning = type_line(store, world.herdr, run, &session.id, &pane_id, &line)?;
+    let warning = start_in(
+        store,
+        world.herdr,
+        run,
+        &session.id,
+        &target,
+        &launched.line,
+    )?;
     let (loads, loaded) = memory::record_load(store, ctx, &session.id, memory);
     events.extend(loads);
     let warning = [warning, loaded]
@@ -1429,19 +1359,77 @@ fn start_again(
     Ok((since, pane_id, warning))
 }
 
-/// Opens a worker workspace for the run in its worktree; returns its pane.
-fn open_pane(world: &World<'_>, card: &Card, run: &Run, worktree: &Path) -> Result<String> {
-    if world.panes.is_some() {
-        return Err(SpawnError::Refused(format!(
-            "no new pane was opened for run {}: herdr opens none while the terminal holder is up, and the holder takes a new pane for a relaunch or a resume only from H09",
-            run.id
-        )));
+/// The pane a later session of a run starts in.
+enum Target {
+    /// A herdr pane, which takes the launch line typed.
+    Typed(String),
+    /// A terminal holder pane, which runs the launch script itself.
+    Held(String),
+}
+
+impl Target {
+    fn pane(&self) -> &str {
+        match self {
+            Self::Typed(pane) | Self::Held(pane) => pane,
+        }
+    }
+}
+
+/// Where a later session of `run` starts: in `old`, the stopped session's
+/// herdr pane, while it is open; otherwise in a new pane, in the terminal
+/// holder when the host runs one and else in a new herdr workspace. A
+/// holder pane runs one program and ends with it, so an old holder pane is
+/// closed and forgotten, and the new one runs `script` (4.4).
+fn open_target(
+    world: &World<'_>,
+    card: &Card,
+    run: &Run,
+    session: &str,
+    worktree: &Path,
+    old: Option<String>,
+    script: &Path,
+) -> Result<Target> {
+    match old {
+        Some(pane) if !tiller_core::ids::is_holder_pane(&pane) => return Ok(Target::Typed(pane)),
+        Some(pane) => world.herdr.close_pane(&pane)?,
+        None => {}
+    }
+    if let Some(panes) = world.panes {
+        let label = crate::labels::worker_label(&card.display_id, run.role);
+        let role = run.role.to_string();
+        let owner = crate::spawn::holder::Owner {
+            session,
+            run: Some(&run.id),
+            project: &card.project_id,
+            role: &role,
+            label: &label,
+        };
+        let pane = crate::spawn::holder::open(panes, &owner, script, worktree)?;
+        return Ok(Target::Held(pane.pane.to_string()));
     }
     let label = layout::worker_label(&card.display_id, run.role, true);
-    Ok(world
-        .herdr
-        .create_workspace(&label, Some(worktree))?
-        .pane_id)
+    Ok(Target::Typed(
+        world
+            .herdr
+            .create_workspace(&label, Some(worktree))?
+            .pane_id,
+    ))
+}
+
+/// Starts the session in `target`: types `line` into a herdr pane, which
+/// a holder pane needs not. Returns a layout repair that failed.
+fn start_in(
+    store: &Store,
+    herdr: &dyn Herdr,
+    run: &Run,
+    session: &str,
+    target: &Target,
+    line: &str,
+) -> Result<Option<String>> {
+    match target {
+        Target::Typed(pane) => type_line(store, herdr, run, session, pane, line),
+        Target::Held(_) => Ok(None),
+    }
 }
 
 /// Reports the session's row tokens on its pane, runs the layout pass and

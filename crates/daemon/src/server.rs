@@ -359,6 +359,10 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
     let tool_versions = Arc::new(Mutex::new(Value::Null));
     let tools = Tools {
         herdr: config.herdr.clone(),
+        holder: config
+            .holder
+            .clone()
+            .map(|holder| -> Arc<dyn tiller_panes::Panes> { holder }),
         quota: config.quota.clone(),
         gh: config.gh.clone(),
         lavish: config.lavish.clone(),

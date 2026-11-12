@@ -325,6 +325,33 @@ fn merge_app(home: &Path) -> Check {
     }
 }
 
+/// `[notify] command`, the owner's notification hook (`terminal-holder.md`
+/// 7). Optional: with none set, notifications are off once herdr is gone,
+/// and herdr shows them until then.
+fn notify(table: Option<&toml::Table>) -> Check {
+    const NAME: &str = "notify";
+    let argv: Vec<&str> = table
+        .and_then(|table| table.get("notify"))
+        .and_then(|notify| notify.get("command"))
+        .and_then(toml::Value::as_array)
+        .map(|argv| argv.iter().filter_map(toml::Value::as_str).collect())
+        .unwrap_or_default();
+    match argv.first() {
+        Some(program) if !program.is_empty() => Check::new(
+            NAME,
+            false,
+            Status::Ok,
+            format!("owner notifications run {}", argv.join(" ")),
+        ),
+        _ => Check::new(
+            NAME,
+            false,
+            Status::Warn,
+            "owner notifications are off: no [notify] command is set (herdr shows them until the cutover)",
+        ),
+    }
+}
+
 /// Every packaged fleet fragment registers `tiller hook <event>` for each
 /// handled event and the guard for `PreToolUse` (`protocol.md` 4.1 and 4.2),
 /// and no Tiller hook sits in the user's own Claude settings, because
@@ -846,6 +873,7 @@ pub fn report(app: &App) -> Report {
         firstmate(process_list(deadline), marker.as_deref(), daemon)
     });
     probes.ready(merge_app(&app.home));
+    probes.ready(notify(table.as_ref().ok()));
     checks.extend(probes.finish());
     let merge_gates = stored(app, &mut checks);
 

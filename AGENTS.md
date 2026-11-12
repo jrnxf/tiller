@@ -71,4 +71,5 @@ The terminal holder soak (counter panes under daemon restarts, live upgrades and
 
 - bun 1.4 writes `lockfileVersion` 2, which the released `bun2nix` rejects. The dev shell and the `bunNixFresh` check use `bun2nix` with `nix/patches/bun2nix-lockfile-v2.patch` (upstream PR 110). Drop the patch once a release accepts lockfile v2.
 - `tiller daemon` binds localhost only.
+- `fake-agent`, the Claude Code stand-in of the holder agent tests, is a test-only binary of `tiller-panes` (its `testing` feature). A workspace test run builds it. Before a run of one package, such as `cargo nextest run -p tiller-cli`, build it with `cargo build -p tiller-panes --features testing --bin fake-agent`.
 - `alacritty_terminal`, the terminal holder's screen model, is pinned with `=0.26.0` in `Cargo.toml` once `tiller-holder` adds it. A bump is its own task, and it must pass the fixture gate (`docs/design/terminal-holder.md` section 9.1).
