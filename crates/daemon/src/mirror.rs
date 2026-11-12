@@ -277,7 +277,7 @@ impl Fits {
     }
 
     /// Starts following the board's size for the Fit on `pane`, at `fit`.
-    pub(crate) fn board(&self, pane: &str, fit: (u16, u16)) -> watch::Receiver<(u16, u16)> {
+    fn board(&self, pane: &str, fit: (u16, u16)) -> watch::Receiver<(u16, u16)> {
         let (sender, receiver) = watch::channel(fit);
         let mut boards = self.boards.lock().unwrap_or_else(PoisonError::into_inner);
         boards.retain(|_, sender| !sender.is_closed());

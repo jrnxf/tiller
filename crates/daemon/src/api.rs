@@ -4631,8 +4631,7 @@ async fn holder_terminal(
         Ok(_) => crate::holder_mirror::stream(
             holder,
             id,
-            fit,
-            state.0.mirrors.fits(),
+            fit.is_some(),
             stop_or_signed_out(state, headers),
             viewer,
         ),
@@ -4666,6 +4665,9 @@ async fn holder_input(
             crate::holder_mirror::key_bytes(&keys).map_err(ApiError::usage)?,
             json!({"keys": keys.len()}),
         ),
+        // A paste goes as its bytes, as herdr's `send_text` types it. A
+        // bracketed paste needs the pane's mode 2004, which only the
+        // holder's screen knows.
         Err(text) => {
             let sent = json!({"text": text.len()});
             (text.into_bytes(), sent)
@@ -9862,7 +9864,7 @@ esac"#,
     }
 
     #[tokio::test]
-    async fn a_fit_on_a_holder_pane_holds_its_size_while_the_view_lives() {
+    async fn a_fit_on_a_holder_pane_is_unfit_and_a_new_size_repaints_the_view() {
         let mut fleet = Fleet::new();
         let holder = crate::holder::fake::FakeHolder::default();
         let pane = holder_pane(&holder, "s-1");
@@ -9871,6 +9873,7 @@ esac"#,
         let home = fleet.dir.path();
         let app = holder_app(home, &holder);
 
+        // Fit waits for H11: the view says so and shows the pane's own size.
         let response = open_stream(
             &app,
             home,
@@ -9881,25 +9884,16 @@ esac"#,
         assert_eq!(response.status(), StatusCode::OK);
         let mut body = response.into_body().into_data_stream();
         let mut pending = String::new();
+        assert_eq!(next_line(&mut body, &mut pending).await["type"], "unfit");
         assert_eq!(
             next_line(&mut body, &mut pending).await,
-            json!({"type": "size", "cols": 100, "rows": 30})
+            json!({"type": "size", "cols": 120, "rows": 40})
         );
         assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
 
-        // The board changes size: the pane follows, and the view repaints.
-        let cookie = owner_cookie(home);
-        let refit = send(
-            &app,
-            mutation(
-                "POST",
-                &format!("/api/v1/agents/{session}/terminal/fit"),
-                json!({"cols": 90, "rows": 25}),
-                &[("cookie", cookie.as_str())],
-            ),
-        )
-        .await;
-        assert_eq!(refit.status, StatusCode::OK, "{}", refit.body);
+        // Another client resizes the PTY: the view sends the new size and a
+        // fresh full screen.
+        holder.resize(&pane, 90, 25);
         assert_eq!(
             next_line(&mut body, &mut pending).await,
             json!({"type": "size", "cols": 90, "rows": 25})
@@ -9908,22 +9902,10 @@ esac"#,
             next_line(&mut body, &mut pending).await,
             json!({"type": "frame", "seq": 2, "full": true, "bytes": b64(b"hi")})
         );
-        assert_eq!(
-            holder.resizes(),
-            [(pane.clone(), 100, 30), (pane.clone(), 90, 25)]
-        );
 
-        // The view ends: both its subscriptions end, and the pane has its
-        // own size back.
+        // The view ends: its subscription ends with it.
         drop(body);
         assert!(eventually(|| holder.subscribers(&pane) == 0).await);
-        let response = open_stream(&app, home, &session, json!({})).await;
-        let mut body = response.into_body().into_data_stream();
-        let mut pending = String::new();
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "size", "cols": 120, "rows": 40})
-        );
     }
 
     #[tokio::test]

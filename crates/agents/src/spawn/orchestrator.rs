@@ -244,7 +244,12 @@ pub fn start(
         };
     events.extend(recorded.events);
 
-    // The pane id, and herdr's workspace when herdr holds it.
+    // The pane id, and herdr's workspace when herdr holds it. The holder
+    // runs the launch as it spawns, so the session row below is written
+    // while `claude` starts; its `SessionStart` hook finds the row by
+    // `TILLER_SESSION_ID` only once that write is in. There is no write
+    // that puts a pane on an orchestrator's session after its start, so
+    // the order stays until one is added.
     let opened_pane = match world.panes {
         Some(panes) => {
             let owner = holder::Owner {

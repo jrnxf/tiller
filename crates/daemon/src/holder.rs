@@ -32,15 +32,13 @@ pub trait Holder: Panes {
 pub trait Live: Send {
     /// The next update; `None` once the stream has ended.
     fn recv(&mut self) -> Result<Option<Update>>;
-    /// Resizes or ends this subscription from another thread.
+    /// Ends this subscription from another thread.
     fn control(&self) -> Arc<dyn LiveControl>;
 }
 
-/// Resizes or ends a [`Live`] while another thread waits in its `recv`.
+/// Ends a [`Live`] while another thread waits in its `recv`. The view never
+/// resizes the pane until Fit has its own slice (H11).
 pub trait LiveControl: Send + Sync {
-    /// Sets the PTY to this size while the subscription lives; the answer
-    /// comes through `recv` as [`Update::Resized`].
-    fn resize(&self, cols: u16, rows: u16) -> Result<()>;
     /// Ends the subscription: a `recv` waiting now returns `None`.
     fn end(&self);
 }
@@ -56,10 +54,6 @@ impl Live for Subscription {
 }
 
 impl LiveControl for StreamHandle {
-    fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        StreamHandle::resize(self, cols, rows)
-    }
-
     fn end(&self) {
         StreamHandle::end(self);
     }
@@ -279,9 +273,7 @@ pub(crate) mod fake {
     use std::sync::mpsc::{Receiver, Sender, channel};
     use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-    use tiller_panes::{
-        FakePanes, Listing, Pane, PaneId, Panes, PanesError, Result, Spawn, Update,
-    };
+    use tiller_panes::{FakePanes, Listing, Pane, PaneId, Panes, Result, Spawn, Update};
 
     use super::{Holder, Live, LiveControl, running};
 
@@ -294,10 +286,8 @@ pub(crate) mod fake {
         next: u64,
         /// Each raw input, with its pane.
         inputs: Vec<(PaneId, Vec<u8>)>,
-        /// Each resize a subscription asked for.
-        resizes: Vec<(PaneId, u16, u16)>,
-        /// The size a subscription holds each pane at, by its number.
-        held: HashMap<PaneId, (u64, u16, u16)>,
+        /// The size each resized pane has now.
+        sizes: HashMap<PaneId, (u16, u16)>,
     }
 
     #[derive(Clone, Default)]
@@ -346,8 +336,13 @@ pub(crate) mod fake {
             self.screens().inputs.clone()
         }
 
-        pub(crate) fn resizes(&self) -> Vec<(PaneId, u16, u16)> {
-            self.screens().resizes.clone()
+        /// Another client resizes the pane's PTY; each subscription sees it.
+        pub(crate) fn resize(&self, pane: &PaneId, cols: u16, rows: u16) {
+            let mut screens = self.screens();
+            screens.sizes.insert(pane.clone(), (cols, rows));
+            if let Some(live) = screens.live.get_mut(pane) {
+                live.retain(|(_, tx)| tx.send(Update::Resized { cols, rows }).is_ok());
+            }
         }
 
         /// How many subscriptions to the pane are open.
@@ -374,9 +369,10 @@ pub(crate) mod fake {
             let mut screens = self.screens();
             let bytes = screens.written.get(pane).cloned().unwrap_or_default();
             let (cols, rows) = screens
-                .held
+                .sizes
                 .get(pane)
-                .map_or((found.cols, found.rows), |(_, cols, rows)| (*cols, *rows));
+                .copied()
+                .unwrap_or((found.cols, found.rows));
             let _ = tx.send(Update::Repaint { cols, rows, bytes });
             let id = screens.next;
             screens.next += 1;
@@ -428,45 +424,11 @@ pub(crate) mod fake {
         id: u64,
     }
 
-    impl FakeControl {
-        fn sender(&self) -> Option<Sender<Update>> {
-            let screens = self.holder.screens();
-            screens
-                .live
-                .get(&self.pane)?
-                .iter()
-                .find(|(id, _)| *id == self.id)
-                .map(|(_, tx)| tx.clone())
-        }
-    }
-
     impl LiveControl for FakeControl {
-        fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-            let Some(tx) = self.sender() else {
-                return Err(PanesError::Unreachable("the subscription has ended".into()));
-            };
-            let mut screens = self.holder.screens();
-            screens.resizes.push((self.pane.clone(), cols, rows));
-            screens
-                .held
-                .insert(self.pane.clone(), (self.id, cols, rows));
-            drop(screens);
-            let _ = tx.send(Update::Resized { cols, rows });
-            Ok(())
-        }
-
         fn end(&self) {
             let mut screens = self.holder.screens();
             if let Some(live) = screens.live.get_mut(&self.pane) {
                 live.retain(|(id, _)| *id != self.id);
-            }
-            // The pane gets its own size back with the subscription that set it.
-            if screens
-                .held
-                .get(&self.pane)
-                .is_some_and(|(id, _, _)| *id == self.id)
-            {
-                screens.held.remove(&self.pane);
             }
         }
     }

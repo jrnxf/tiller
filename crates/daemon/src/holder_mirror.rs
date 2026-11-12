@@ -3,14 +3,14 @@
 //!
 //! The view subscribes to the pane: a `size` line and a full frame with the
 //! holder's repaint, then each of the PTY's writes as a frame of its own.
-//! The child's exit is `closed`, with how it ended, and a holder that stops
-//! answering is `unavailable`, after which the board opens the view again.
+//! When the PTY's size changes, the view subscribes again, so its new
+//! repaint is the board's next `size` line and full screen. The child's
+//! exit is `closed`, with how it ended, and a holder that stops answering
+//! is `unavailable`, after which the board opens the view again.
 //!
-//! A Fit holds a second subscription that only sets the size: the holder
-//! gives the pane its size back when that subscription ends, so a view that
-//! ends, a browser that leaves and a daemon that dies all give it back. Each
-//! size the Fit sets is answered with a new view subscription, whose
-//! repaint is the board's new full screen.
+//! Fit waits for its own slice (H11, a Fit as a lease): a view asked for
+//! one says `unfit` and goes on at the pane's own size, as it does when
+//! herdr refuses a Fit.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -22,7 +22,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::dto::TerminalLine;
 use crate::holder::{Holder, Live, LiveControl, exit_reason};
-use crate::mirror::{Fits, Viewer, queue, stopping, unavailable};
+use crate::mirror::{Viewer, queue, stopping, unavailable};
 
 /// Updates a subscription's thread can hand on before it waits for the
 /// view to take them.
@@ -35,10 +35,8 @@ struct Pumped {
 }
 
 impl Pumped {
-    /// Reads `live` until it ends, fails or nobody takes its updates. With
-    /// `sizes_only`, the PTY's output is dropped on the thread: a Fit's
-    /// subscription reads only to keep up.
-    fn start(mut live: Box<dyn Live>, sizes_only: bool) -> std::io::Result<Self> {
+    /// Reads `live` until it ends, fails or nobody takes its updates.
+    fn start(mut live: Box<dyn Live>) -> std::io::Result<Self> {
         let control = live.control();
         let (tx, updates) = mpsc::channel(UPDATES);
         std::thread::Builder::new()
@@ -47,9 +45,6 @@ impl Pumped {
                 loop {
                     let update = live.recv();
                     let last = !matches!(update, Ok(Some(_)));
-                    if sizes_only && matches!(update, Ok(Some(Update::Output(_)))) {
-                        continue;
-                    }
                     if tx.blocking_send(update).is_err() || last {
                         return;
                     }
@@ -66,31 +61,30 @@ impl Drop for Pumped {
 }
 
 /// Subscribes to `pane` off the async threads, and starts reading it.
-async fn open(holder: &Arc<dyn Holder>, pane: &PaneId, sizes_only: bool) -> Result<Pumped, String> {
+async fn open(holder: &Arc<dyn Holder>, pane: &PaneId) -> Result<Pumped, String> {
     let holder = Arc::clone(holder);
     let pane = pane.clone();
     tokio::task::spawn_blocking(move || {
         let live = holder.subscribe(&pane).map_err(|error| error.to_string())?;
-        Pumped::start(live, sizes_only).map_err(|error| error.to_string())
+        Pumped::start(live).map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string())?
 }
 
-/// The NDJSON body that streams the holder's `pane` to one viewer, at the
-/// board's `fit` when it asks for one.
+/// The NDJSON body that streams the holder's `pane` to one viewer. A view
+/// the board `fitted` says `unfit` first.
 pub fn stream(
     holder: Arc<dyn Holder>,
     pane: PaneId,
-    fit: Option<(u16, u16)>,
-    fits: Arc<Fits>,
+    fitted: bool,
     stop: watch::Receiver<bool>,
     viewer: Viewer,
 ) -> Body {
     let (tx, mut rx) = mpsc::channel::<Bytes>(crate::mirror::QUEUE);
     tokio::spawn(async move {
         let _viewer = viewer;
-        mirror(&holder, &pane, fit, &fits, stop, &tx).await;
+        mirror(&holder, &pane, fitted, stop, &tx).await;
     });
     let lines = futures_util::stream::poll_fn(move |cx| {
         rx.poll_recv(cx).map(|line| line.map(Ok::<_, Infallible>))
@@ -124,133 +118,61 @@ fn frame(seq: &mut u64, full: bool, bytes: &[u8]) -> TerminalLine {
     }
 }
 
-/// What a view's wait woke on.
-enum Woke {
-    View(Option<Result<Option<Update>, PanesError>>),
-    Fit(Option<Result<Option<Update>, PanesError>>),
-    Refit((u16, u16)),
-    Over,
-}
-
-/// The board's next size for a Fit; never without one.
-async fn refitted(board: &mut Option<watch::Receiver<(u16, u16)>>) -> (u16, u16) {
-    if let Some(board) = board
-        && board.changed().await.is_ok()
-    {
-        return *board.borrow_and_update();
-    }
-    std::future::pending().await
-}
-
-/// The next update of a Fit's subscription; never without one.
-async fn fit_update(lease: &mut Option<Pumped>) -> Option<Result<Option<Update>, PanesError>> {
-    match lease {
-        Some(lease) => lease.updates.recv().await,
-        None => std::future::pending().await,
-    }
-}
-
-/// Waits for the Fit's subscription to say the holder took its size.
-async fn sized(lease: &mut Pumped) -> Result<(), String> {
-    loop {
-        match lease.updates.recv().await {
-            Some(Ok(Some(Update::Resized { .. }))) => return Ok(()),
-            Some(Ok(Some(Update::Repaint { .. } | Update::Output(_)))) => {}
-            Some(Err(error)) => return Err(error.to_string()),
-            _ => return Err("the terminal holder ended the Fit".to_owned()),
-        }
-    }
-}
-
-/// Asks the Fit's subscription for a size, off the async threads since it
-/// writes to the holder's socket.
-async fn resize(lease: &Pumped, (cols, rows): (u16, u16)) -> Result<(), String> {
-    let control = Arc::clone(&lease.control);
-    tokio::task::spawn_blocking(move || control.resize(cols, rows))
-        .await
-        .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())
-}
+/// What a Fit on a holder pane gets until H11.
+const UNFIT: &str = "Fit is not ready yet for an agent in the terminal holder; the view shows the pane at its own size";
 
 /// Streams `pane` to `tx` until the browser leaves, the child exits, the
 /// holder stops answering or the daemon stops.
 async fn mirror(
     holder: &Arc<dyn Holder>,
     pane: &PaneId,
-    fit: Option<(u16, u16)>,
-    fits: &Arc<Fits>,
+    fitted: bool,
     mut stop: watch::Receiver<bool>,
     tx: &mpsc::Sender<Bytes>,
 ) {
-    let mut lease = None;
-    let mut board = None;
-    if let Some(fit) = fit {
-        let opened = async {
-            let mut opened = open(holder, pane, true).await?;
-            resize(&opened, fit).await?;
-            sized(&mut opened).await?;
-            Ok::<_, String>(opened)
-        };
-        match opened.await {
-            Ok(opened) => lease = Some(opened),
-            Err(error) => return unavailable(tx, &error),
-        }
-        board = Some(fits.board(pane.as_str(), fit));
+    if fitted
+        && !queue(
+            tx,
+            &TerminalLine::Unfit {
+                message: UNFIT.to_owned(),
+            },
+        )
+    {
+        return;
     }
     let mut seq = 0;
     'views: loop {
-        let mut view = match open(holder, pane, false).await {
+        let mut view = match open(holder, pane).await {
             Ok(view) => view,
             Err(error) => return unavailable(tx, &error),
         };
         loop {
-            let woke = tokio::select! {
-                update = view.updates.recv() => Woke::View(update),
-                update = fit_update(&mut lease) => Woke::Fit(update),
-                size = refitted(&mut board) => Woke::Refit(size),
-                () = stopping(&mut stop) => Woke::Over,
-                () = tx.closed() => Woke::Over,
+            let update = tokio::select! {
+                update = view.updates.recv() => update,
+                () = stopping(&mut stop) => return,
+                () = tx.closed() => return,
             };
-            let line = match woke {
-                Woke::View(Some(Ok(Some(Update::Repaint { cols, rows, bytes })))) => {
+            let line = match update {
+                Some(Ok(Some(Update::Repaint { cols, rows, bytes }))) => {
                     if !queue(tx, &TerminalLine::Size { cols, rows }) {
                         return;
                     }
                     frame(&mut seq, true, &bytes)
                 }
-                Woke::View(Some(Ok(Some(Update::Output(bytes))))) => frame(&mut seq, false, &bytes),
-                Woke::View(Some(Ok(Some(Update::Resized { .. })))) => continue,
-                Woke::View(Some(Ok(Some(Update::Exited(exit))))) => TerminalLine::Closed {
+                Some(Ok(Some(Update::Output(bytes)))) => frame(&mut seq, false, &bytes),
+                // The PTY took a new size: a new subscription's repaint is
+                // the board's new size and full screen.
+                Some(Ok(Some(Update::Resized { .. }))) => continue 'views,
+                Some(Ok(Some(Update::Exited(exit)))) => TerminalLine::Closed {
                     reason: Some(exit_reason(Some(&exit))),
                 },
-                Woke::View(Some(Ok(Some(Update::Lagged)))) => {
+                Some(Ok(Some(Update::Lagged))) => {
                     return unavailable(tx, "the view fell behind the terminal holder");
                 }
-                Woke::View(Some(Err(error))) => return unavailable(tx, &error.to_string()),
+                Some(Err(error)) => return unavailable(tx, &error.to_string()),
                 // The holder ended the stream without an exit: the board
                 // opens it again.
-                Woke::View(Some(Ok(None)) | None) => return,
-                Woke::Fit(Some(Ok(Some(Update::Resized { .. })))) => continue 'views,
-                // The view says how the child ended; the Fit has nothing
-                // left to hold.
-                Woke::Fit(Some(Ok(Some(Update::Exited(_))))) => {
-                    lease = None;
-                    continue;
-                }
-                Woke::Fit(Some(Ok(Some(_)))) => continue,
-                Woke::Fit(Some(Err(error))) => return unavailable(tx, &error.to_string()),
-                Woke::Fit(Some(Ok(None)) | None) => {
-                    return unavailable(tx, "the terminal holder ended the Fit");
-                }
-                Woke::Refit(size) => {
-                    if let Some(lease) = &lease
-                        && let Err(error) = resize(lease, size).await
-                    {
-                        return unavailable(tx, &error);
-                    }
-                    continue;
-                }
-                Woke::Over => return,
+                Some(Ok(None)) | None => return,
             };
             let closed = matches!(line, TerminalLine::Closed { .. });
             if !queue(tx, &line) || closed {

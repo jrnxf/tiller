@@ -629,7 +629,7 @@ export function LiveTerminal({
             size: () => (fittingRef.current ? fitTarget.current : null),
             onUnfit: (detail) => {
               setUnfit(true);
-              showToast("bad", "herdr kept the pane's size", detail);
+              showToast("bad", "The pane kept its own size", detail);
             },
           },
           tail,
@@ -983,7 +983,7 @@ export function LiveTerminal({
             : "Size the pane in herdr to fill the stage, until you leave it"
         }
         onClick={() => {
-          // After herdr kept the pane's size, a press asks again.
+          // After the pane kept its size, a press asks again.
           setUnfit(false);
           if (!unfit || !fitWanted) toggleFit();
         }}

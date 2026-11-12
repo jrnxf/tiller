@@ -165,6 +165,19 @@ fn require_controller(ctx: &Ctx, run: &Run, what: &str, daemon: bool) -> Result<
     }
 }
 
+/// Refuses `what` for a session whose pane is in the terminal holder: stop,
+/// resume and interrupt reach a pane through herdr, which knows nothing of
+/// the holder's panes, and would take a live agent for a gone one. They
+/// move onto the holder in their own slice (H09).
+fn herdr_only(pane: &str, what: &str) -> Result<()> {
+    if tiller_core::ids::is_holder_pane(pane) {
+        return Err(SpawnError::Refused(format!(
+            "{what} is not ready yet for an agent in the terminal holder (pane {pane}); nothing was sent"
+        )));
+    }
+    Ok(())
+}
+
 fn require_active(run: &Run) -> Result<()> {
     match run.ended_at {
         None => Ok(()),
@@ -220,6 +233,7 @@ pub fn interrupt(
         .pane_id
         .clone()
         .ok_or_else(|| SpawnError::Refused(format!("session {} has no pane bound", session.id)))?;
+    herdr_only(&pane_id, "An interrupt")?;
     let pane = herdr
         .pane(&pane_id)?
         .ok_or_else(|| SpawnError::Refused(format!("pane {pane_id} is gone; nothing was sent")))?;
@@ -325,7 +339,10 @@ pub fn resume(
         ))
     })?;
     let pane = match &session.pane_id {
-        Some(id) => world.herdr.pane(id)?,
+        Some(id) => {
+            herdr_only(id, "A resume")?;
+            world.herdr.pane(id)?
+        }
         None => None,
     };
     // A manual resume clears the run's pause (`run.unpause`). The key is
@@ -665,6 +682,7 @@ fn ready_to_stop(
             None,
         )));
     };
+    herdr_only(&pane_id, "A stop")?;
     let Some(pane) = herdr.pane(&pane_id)? else {
         return Ok(Ready::Gone((
             format!("herdr shows pane {pane_id} gone"),

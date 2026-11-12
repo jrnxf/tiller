@@ -4143,3 +4143,40 @@ fn an_orchestrator_starts_in_the_terminal_holder_with_no_workspace() {
     assert_eq!(listing.panes[0].meta["role"], "orchestrator");
     assert_eq!(listing.panes[0].cwd, rig.repo.checkout.to_string_lossy());
 }
+
+#[test]
+fn a_stop_never_takes_a_holder_pane_for_a_gone_one() {
+    let (mut rig, _panes) = holder_rig(Rig::new());
+    let card = rig.card(CardKind::Ship, None);
+    let spawned = rig.spawn(&card, RunRole::Builder);
+    rig.done(&spawned.run.id, RunOutcome::Abandoned).unwrap();
+    let waits = crate::control::Waits {
+        interrupt: std::time::Duration::from_millis(50),
+        exit: std::time::Duration::from_millis(50),
+        bind: std::time::Duration::from_millis(50),
+        poll: std::time::Duration::from_millis(10),
+        pacing: tiller_herdr::submit::Pacing::INSTANT,
+    };
+
+    // herdr has no such pane, which a stop would read as proof the agent
+    // is gone: the stop refuses instead, and the session stays live.
+    let world = world!(rig);
+    let error = crate::control::stop_agent(
+        &mut rig.fleet.store,
+        &owner(),
+        &world,
+        &waits,
+        &spawned.session,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("not ready yet for an agent in the terminal holder"),
+        "{error}"
+    );
+    let session: tiller_core::domain::Session =
+        get(rig.fleet.store.conn(), "session", &spawned.session.id).unwrap();
+    assert!(session.ended_at.is_none());
+    assert!(herdr_launches(&rig).is_empty(), "{:?}", rig.herdr.calls());
+}
