@@ -40,6 +40,25 @@ export function useHostLabel(entity: Owned): string | null {
   return machines.find((machine) => machine.kind === "local")?.label ?? null;
 }
 
+// A peer answers a forwarded single-entity read (`cards/{id}?host=`) from its
+// own state.db, so the row it sends names no host and no link: stamp them from
+// the peer's cached board row, else from its machine row.
+export function useOwnedBy<T extends Owned & { id: string }>(entity: T, owner?: string): T {
+  const machines = useMachineRows();
+  const rows = useQuery({ ...boardQuery(), enabled: false }).data?.rows;
+  return useMemo(() => {
+    if (!owner || entity.host) return entity;
+    const row = rows?.find((candidate) => candidate.id === entity.id && candidate.host === owner);
+    const machine = machines.find((candidate) => candidate.label === owner);
+    return {
+      ...entity,
+      host: owner,
+      as_of: row?.as_of ?? null,
+      link: row?.link ?? machine?.link ?? null,
+    };
+  }, [entity, owner, rows, machines]);
+}
+
 // Where a row stands: live like local, or dimmed with a reason its controls
 // are off (protocol.md section 10.5).
 export function useStanding(entity: Owned): Standing {

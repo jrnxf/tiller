@@ -300,6 +300,34 @@ test("the card page of a peer's card names its host and, when it is down, says a
   expect(within(page).getAllByText(/as of \w{3} \d{2}:\d{2}/).length).toBeGreaterThan(0);
 });
 
+// The peer answers a forwarded card read from its own state.db, so the column
+// it sends names no host and no link (protocol.md, Federated reads).
+test("a peer's card page keeps its host and standing when the read names no host", async () => {
+  const stub = vi.fn(async (input: RequestInfo | URL) => {
+    const path = String(input);
+    const body = fixtureResource(path, "federated") as Record<string, unknown> | undefined;
+    if (body === undefined) return new Response("{}", { status: 404 });
+    if (path.startsWith(`/api/v1/cards/${LEDGER_5_E}?`)) {
+      const {
+        host: _host,
+        as_of: _asOf,
+        link: _link,
+        ...column
+      } = body.column as Record<string, unknown>;
+      return new Response(JSON.stringify({ ...body, column }), { status: 200 });
+    }
+    return new Response(JSON.stringify(body), { status: 200 });
+  });
+  vi.stubGlobal("fetch", stub);
+  await renderApp("federated", `/cards/${LEDGER_5_E}?owner=host-e`);
+  const page = await screen.findByTestId("card-page");
+  expect(stub.mock.calls.some(([input]) => String(input).includes("host=host-e"))).toBe(true);
+  expect(within(page).getAllByTestId("host-chip")[0]?.textContent).toBe("host-e");
+  expect(within(page).getAllByTestId("peer-note")[0]?.textContent).toContain(
+    "host-e is unreachable",
+  );
+});
+
 test("a card of a down peer shows the reason and every control is off", async () => {
   const posted = stubApi("federated");
   await renderApp("federated", `/inbox?item=${ASK_E}`);

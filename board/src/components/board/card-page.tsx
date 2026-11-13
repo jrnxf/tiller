@@ -48,6 +48,7 @@ import {
   useHostLabel,
   useMachineRows,
   useNamedProjects,
+  useOwnedBy,
   useStanding,
 } from "./peer-state";
 import { approvalFor, approvalStanding, mergeTimeline, reviewFor, sameSha } from "./card-model";
@@ -553,7 +554,8 @@ export function CardPage({
 }) {
   const { data: detail } = useSuspenseQuery(cardQuery(cardId, owner));
   const projects = useNamedProjects(useSuspenseQuery(projectsQuery()).data);
-  const { card, column } = detail;
+  const { card } = detail;
+  const column = useOwnedBy(detail.column, owner);
   const standing = useStanding(column);
   const id = shownId(column.host ? { ...card, host: column.host } : card, useAmbiguousIds());
   // A peer's project is the one that host owns, whatever slug this host uses.

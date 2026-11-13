@@ -591,7 +591,11 @@ function StopDialog({
 // After Resume it says where the "go on" line is.
 export function PausedNote({ pause, receiptKey }: { pause: PauseInfo; receiptKey: string | null }) {
   const until = formatLisbonMoment(pause.until) ?? pause.until;
-  const by = pause.by === "board" || pause.by === "owner" ? "you" : pause.by;
+  // A pause forwarded from a paired board host is by "board@<host>": the owner too.
+  const by =
+    pause.by === "board" || pause.by === "owner" || pause.by.startsWith("board@")
+      ? "you"
+      : pause.by;
   return (
     <div className="run-paused">
       <div className="ch-note" role="status">

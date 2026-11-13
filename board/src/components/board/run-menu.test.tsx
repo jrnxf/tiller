@@ -13,7 +13,7 @@ import { receiptsStore, recordProgress, saveReceipt } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
 import { ActionError } from "../attention/api";
 import { resetBoardLook } from "./board-prefs";
-import { ResumedNote, stopRefusal } from "./run-menu";
+import { PausedNote, ResumedNote, stopRefusal } from "./run-menu";
 import { createTestQueryClient, loadRouteChunks } from "../../test-app";
 
 await loadRouteChunks();
@@ -342,4 +342,19 @@ test("Resume's go on line shows queued, then typed, or not typed when delivery f
   expect(screen.getByRole("alert").textContent).toBe(
     "Not typed.go onDelivery failed, so the daemon opened a recovery item for it.",
   );
+});
+
+test("a pause forwarded from a paired board host says it was paused by you", () => {
+  render(
+    <PausedNote
+      pause={{
+        until: "2099-01-01T09:00:00Z",
+        at: "2026-11-11T10:00:00Z",
+        by: "board@host-a",
+        reason: "Wait.",
+      }}
+      receiptKey={null}
+    />,
+  );
+  expect(screen.getByRole("status").textContent).toContain("Paused by you,");
 });
