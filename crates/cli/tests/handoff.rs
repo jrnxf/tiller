@@ -6,7 +6,7 @@
 mod common;
 
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use common::World;
 use tiller_core::domain::{OutboxKind, OutboxMessage};
@@ -78,7 +78,7 @@ fn a_compaction_hook_leaves_one_note_asking_for_the_handoff() {
     let world = World::initialized();
     let orchestrator = world.orchestrator();
     let hook = |input: &str| {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_tiller"))
+        let mut child = common::tiller(world.dir.path())
             .args(["hook", "PreCompact"])
             .env("TILLER_HOME", world.home())
             .env("TILLER_SESSION_ID", &orchestrator)
