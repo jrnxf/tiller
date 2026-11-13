@@ -5,6 +5,7 @@ import { holdInert } from "../../lib/inert";
 import { applyAppearance, prefsStore } from "../../lib/prefs";
 import { blockShortcuts, dialogOpen, shortcutsBlocked } from "../../lib/shortcuts";
 import { useStore } from "../../lib/store";
+import { useDropEndedAnswers } from "../board/answer-strip";
 import { ToastHost } from "../board/toast";
 import { AskDialog } from "./ask-dialog";
 import { askPrefillStore } from "./ask-prefill";
@@ -43,6 +44,7 @@ export function Shell({
   const menuWasOpen = useRef(false);
   const mainRef = useRef<HTMLDivElement>(null);
   useAppearance();
+  useDropEndedAnswers();
 
   const closePalette = useCallback(() => setPaletteOpen(false), []);
   // "Ask again" on a reply opens the box with its question in it.

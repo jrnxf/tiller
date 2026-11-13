@@ -4,7 +4,8 @@ import type { ReactNode } from "react";
 
 import type { PromptDialog, PromptRead } from "../../lib/api-types";
 import { formatLisbon } from "../../lib/clock";
-import { runQuery } from "../../lib/queries";
+import { ownerOf } from "../../lib/peers";
+import { agentsQuery, runQuery } from "../../lib/queries";
 import { CheckIcon } from "../shell/icons";
 import { Modal } from "../ui/modal";
 import { Ago } from "./ago";
@@ -84,6 +85,23 @@ function setOpen(id: string, answer: OpenAnswer | null) {
   if (answer) openAnswers.set(id, answer);
   else openAnswers.delete(id);
   for (const listener of listeners) listener();
+}
+
+// Drops every open answer whose agent the roster shows out of its wait, or
+// no longer lists, so a later wait never replays an old key. Mounted once in
+// the shell, it holds with no strip on screen.
+export function useDropEndedAnswers() {
+  const agents = useQuery(agentsQuery()).data;
+  useEffect(() => {
+    if (!agents || openAnswers.size === 0) return;
+    const waits = new Set<string>();
+    for (const agent of agents.orchestrators.flatMap((row) => [row, ...row.workers])) {
+      const host = ownerOf(agent);
+      const waiting = agent.activity === "waiting_permission" || agent.activity === "waiting_input";
+      if (host && waiting) waits.add(openKey(host, agent.session_id));
+    }
+    for (const id of openAnswers.keys()) if (!waits.has(id)) setOpen(id, null);
+  }, [agents]);
 }
 
 // True while a peer's agent has an answer the peer has not confirmed.

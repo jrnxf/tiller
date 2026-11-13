@@ -982,6 +982,48 @@ test("a peer answer the peer did not confirm says so, and a retry carries the sa
   expect(calls[1]?.body.idempotency_key).toBe(calls[0]?.body.idempotency_key);
 });
 
+// Lists the peer agent under host-d's first orchestrator with an activity, as
+// its row moves on.
+async function peerActivity(queryClient: QueryClient, activity: string) {
+  await act(async () => {
+    queryClient.setQueryData<AgentsResponse>(agentsQuery().queryKey, (agents) => {
+      const owner = agents?.orchestrators.find((agent) => agent.host === "host-d");
+      if (!agents || !owner) throw new Error("no host-d orchestrator in the roster");
+      const peer: AgentRow = { ...owner, session_id: PEER_SESSION, activity, workers: [] };
+      const workers = [...owner.workers.filter((row) => row.session_id !== PEER_SESSION), peer];
+      return {
+        ...agents,
+        orchestrators: agents.orchestrators.map((row) =>
+          row === owner ? { ...row, workers } : row,
+        ),
+      };
+    });
+    // Query notifies its observers on a timer, so stay inside act through it.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+test("a peer answer left unconfirmed is dropped once the roster shows the wait ended, so the next wait sends a fresh key", async () => {
+  stubDaemon("federated");
+  replies.push({
+    status: 504,
+    body: {
+      ok: false,
+      error: { code: "forward_uncertain", message: "host-d did not answer within 60 seconds" },
+    },
+  });
+  const { queryClient } = await renderInbox("federated", PEER_PROMPT);
+  fireEvent.click(await screen.findByRole("button", { name: "Answer 1: Yes" }));
+  expect(await screen.findByText(/Sent, not confirmed\./)).toBeTruthy();
+  await peerActivity(queryClient, "working");
+  await peerActivity(queryClient, "waiting_permission");
+  fireEvent.click(await screen.findByRole("button", { name: "Answer 1: Yes" }));
+  await flush();
+  expect(calls).toHaveLength(2);
+  expect(typeof calls[1]?.body.idempotency_key).toBe("string");
+  expect(calls[1]?.body.idempotency_key).not.toBe(calls[0]?.body.idempotency_key);
+});
+
 // Sets host-d's link, as a peer that stops answering goes lagging.
 function peerLink(queryClient: QueryClient, link: "live" | "lagging") {
   queryClient.setQueryData<MachinesResponse>(machinesQuery().queryKey, (machines) =>
