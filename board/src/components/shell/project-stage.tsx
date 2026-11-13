@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import type { Project } from "../../lib/api-types";
-import { ownerOf } from "../../lib/peers";
+import { VIEW_ONLY_REASON, ownerOf } from "../../lib/peers";
 import { useStanding } from "../board/peer-state";
 import {
   projectGrantsQuery,
@@ -332,6 +332,12 @@ export function ProjectDetail({ project, id }: { project: Project; id: string })
   return (
     <div className="pdetail" id={id} role="group" aria-label={`${project.name} stage`}>
       <Facts project={project} />
+      {/* A tooltip does not show on a touch screen, so the reason is in view. */}
+      {editOff ? (
+        <p className="pdetail-off">
+          {editOff === VIEW_ONLY_REASON ? `${owner}: ${editOff}` : editOff}
+        </p>
+      ) : null}
       <button
         type="button"
         className="btn stage-switch"

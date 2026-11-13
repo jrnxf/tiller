@@ -269,12 +269,18 @@ test("a peer's refusal of an edit names the peer", async () => {
 
 test("a peer the board cannot act on shows Edit, Archive and Delete off, with the reason", async () => {
   serve();
-  const cases: [Machine, string][] = [
-    [peerB({ peer_scope: "read" }), "view only pairing"],
-    [peerB({ link: "down" }), "host-b is unreachable since Fri 10:00"],
+  const cases: [Machine, string, string][] = [
+    [peerB({ peer_scope: "read" }), "view only pairing", "host-b: view only pairing"],
+    [
+      peerB({ link: "down" }),
+      "host-b is unreachable since Fri 10:00",
+      "host-b is unreachable since Fri 10:00",
+    ],
   ];
-  for (const [machine, reason] of cases) {
+  for (const [machine, reason, shown] of cases) {
     renderDetail({ ...onB, link: machine.link ?? null }, [machine]);
+    // A tooltip does not show on a touch screen, so the panel says it too.
+    expect(await screen.findByText(shown, { selector: ".pdetail-off" })).toBeTruthy();
     for (const name of ["Edit", "Archive", "Delete"]) {
       const button = (await screen.findByRole("button", { name })) as HTMLButtonElement;
       expect(button.disabled).toBe(true);
