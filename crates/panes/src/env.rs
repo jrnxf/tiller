@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::path::Path;
 
 /// The shell that runs a launch line or script: `argv[0]` must be absolute,
 /// since the holder does no `PATH` search.
@@ -44,9 +45,65 @@ pub fn passed(vars: impl Iterator<Item = (OsString, OsString)>) -> BTreeMap<Stri
         .collect()
 }
 
+/// Whose agent a pane runs, for [`agent`].
+#[derive(Clone, Copy, Debug)]
+pub struct Agent<'a> {
+    /// The effective Tiller home.
+    pub tiller_home: &'a Path,
+    pub session: &'a str,
+    /// The run, or empty for the orchestrator, which has none.
+    pub run: &'a str,
+    pub role: &'a str,
+    /// Tiller's `CLAUDE_CONFIG_DIR`, when it has one.
+    pub claude_config: Option<&'a Path>,
+}
+
+/// The Tiller environment of an agent's pane (`authority.md` section 7):
+/// what a first launch's script exports and what every resume of the
+/// session gives its pane, so the agent's `tiller` and hooks find the same
+/// home and session whichever path started it. A pane gets none of it
+/// from [`current`].
+pub fn agent(agent: &Agent<'_>) -> Vec<(&'static str, String)> {
+    let mut env = vec![
+        ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1".to_owned()),
+        ("TILLER_SESSION_ID", agent.session.to_owned()),
+        ("TILLER_RUN_ID", agent.run.to_owned()),
+        ("TILLER_ROLE", agent.role.to_owned()),
+        // The session's `tiller` and its guard hook find the Tiller home by
+        // this; without it they fall back to `$HOME/.tiller`.
+        (
+            "TILLER_HOME",
+            agent.tiller_home.to_string_lossy().into_owned(),
+        ),
+    ];
+    if let Some(dir) = agent.claude_config {
+        env.push(("CLAUDE_CONFIG_DIR", dir.to_string_lossy().into_owned()));
+    }
+    env
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_agent_pane_names_its_home_session_run_and_role() {
+        let env: BTreeMap<_, _> = agent(&Agent {
+            tiller_home: Path::new("/home/user/.tiller-b"),
+            session: "S1",
+            run: "",
+            role: "orchestrator",
+            claude_config: None,
+        })
+        .into_iter()
+        .collect();
+        assert_eq!(env["TILLER_HOME"], "/home/user/.tiller-b");
+        assert_eq!(env["TILLER_SESSION_ID"], "S1");
+        assert_eq!(env["TILLER_RUN_ID"], "");
+        assert_eq!(env["TILLER_ROLE"], "orchestrator");
+        assert_eq!(env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"], "1");
+        assert!(!env.contains_key("CLAUDE_CONFIG_DIR"));
+    }
 
     #[test]
     fn a_pane_gets_the_users_basics_but_not_the_launchers_sandbox_or_session() {

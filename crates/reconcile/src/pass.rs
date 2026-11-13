@@ -179,6 +179,12 @@ impl Reconciler {
         &self.config
     }
 
+    /// Replaces each project's checkout path ([`Config::project_paths`]),
+    /// as the config file names it now.
+    pub fn set_project_paths(&mut self, paths: HashMap<String, PathBuf>) {
+        self.config.project_paths = paths;
+    }
+
     pub(crate) fn ctx(&self, now: Timestamp) -> Ctx {
         Ctx::at(Actor::Daemon, now)
     }

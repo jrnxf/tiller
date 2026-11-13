@@ -32,8 +32,8 @@ use tiller_panes::{
 use tiller_reconcile::holder::Link;
 use tiller_reconcile::pass::{Config, Reconciler, Sources};
 use tiller_reconcile::sources::{
-    AgentProbe, Cut, Forge, Harness, HolderLauncher, HostReadings, Launched, Launcher, PrRead,
-    Probe, Readings, Scanner, WorktreeScan,
+    AgentProbe, Cut, Forge, Harness, HolderLauncher, HostReadings, Launched, Launcher, PaneEnv,
+    PrRead, Probe, Readings, Scanner, WorktreeScan,
 };
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -497,6 +497,14 @@ impl Forge for FakeForge {
     }
 }
 
+/// The daemon's side of a fake launch's pane environment.
+pub fn pane_env() -> PaneEnv {
+    PaneEnv {
+        tiller_home: PathBuf::from("/home/user/.tiller"),
+        claude_config: None,
+    }
+}
+
 /// One launch the fake made.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaunchCall {
@@ -578,7 +586,7 @@ impl Launcher for FakeLauncher {
         let holder = lock(&self.world).holder.clone();
         if let Some(holder) = holder {
             let pane_id = holder
-                .spawn(&HolderLauncher::request(session, cwd, resume))
+                .spawn(&HolderLauncher::request(&pane_env(), session, cwd, resume))
                 .map_err(|e| e.to_string())?
                 .pane
                 .as_str()
@@ -775,6 +783,7 @@ impl World {
         let record = self.session(&session);
         let pane = holder
             .spawn(&HolderLauncher::request(
+                &pane_env(),
                 &record,
                 Path::new("/home/user/worktrees"),
                 None,

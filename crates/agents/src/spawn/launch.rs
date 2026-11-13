@@ -380,21 +380,14 @@ fn argv(command: &Command<'_>, launch: &Launch) -> Vec<String> {
 /// the config its trust was recorded in. Without one, the script unsets any
 /// the pane inherited, for the same reason.
 fn env(command: &Command<'_>) -> Vec<(&'static str, String)> {
-    let mut env = vec![
-        ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1".into()),
-        ("TILLER_SESSION_ID", command.session_id.into()),
-        ("TILLER_RUN_ID", command.run_id.into()),
-        ("TILLER_ROLE", command.role.name().into()),
-        // The session's `tiller` and its guard hook find the Tiller home by
-        // this, and a herdr pane does not inherit the daemon's environment.
-        (
-            "TILLER_HOME",
-            command.tiller_home.to_string_lossy().into_owned(),
-        ),
-    ];
-    if let Some(dir) = command.claude_config.forwarded() {
-        env.push(("CLAUDE_CONFIG_DIR", dir.to_string_lossy().into_owned()));
-    }
+    // A resume after a holder loss or a reboot builds the same names.
+    let mut env = tiller_panes::env::agent(&tiller_panes::env::Agent {
+        tiller_home: command.tiller_home,
+        session: command.session_id,
+        run: command.run_id,
+        role: command.role.name(),
+        claude_config: command.claude_config.forwarded(),
+    });
     // The review server a session starts is shared and keeps the environment
     // of whoever started it first, so every launch carries the names the
     // developer reaches it by (P49).
