@@ -665,7 +665,7 @@ mod tests {
     }
 
     // Section 9.1: each Claude Code fixture, at the 119 columns and the
-    // rows herdr read it at, repaints to the same screen.
+    // rows it was read at, repaints to the same screen.
     #[test]
     fn every_claude_code_fixture_round_trips() {
         let dir = concat!(

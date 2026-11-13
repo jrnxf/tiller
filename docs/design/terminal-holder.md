@@ -596,8 +596,8 @@ The doc rows land in H01, before the code, so that each builder builds against a
 | `roles/*.settings.json` | `Bash(herdr *)` becomes `Bash(tiller holder*)` and `Bash(tiller attach*)`, each with its `Bash(<tiller> ...)` twin, with no space before the `*` so the bare commands match too |
 | `probe/` | History, left as is (`probe/reports` record what was measured then) |
 | `scripts/firstmate-export` and its fixtures | Left as is. It reads the predecessor's herdr ids, which is part of the import contract |
-| `scripts/two-host-demo.sh` | `TILLER_HERDR=/nonexistent/herdr` becomes a test holder socket in the demo's home |
-| `demo/` | Its herdr copy becomes holder copy |
+| `scripts/two-host-demo.sh` | `TILLER_HERDR=/nonexistent/herdr` goes. It only pointed the demo's daemons away from herdr, and with no holder in the demo's home they reach no pane, as before |
+| `demo/` | Deleted. It was the throwaway board demo over Firstmate and herdr, which `build-plan.md` deletes at cutover |
 
 ### 10.1 Board files
 
@@ -621,7 +621,7 @@ The migration follows R11: a pre-migration copy, one transaction, and no hook ev
 ### 11.2 Nix module
 
 - A new `tiller-holder` user service on Linux and launchd agent on macOS, as in section 2.2.
-- `services.tiller.holder.enable` defaults to `false` when H06 lands, so a dotfiles bump before cutover starts no holder on the live host. H13 changes the default to the daemon's `enable`.
+- `programs.tiller.holder.enable` defaulted to `false` when H06 landed, so a dotfiles bump before cutover started no holder on the live host. H13 changes the default to the daemon's `enable`, and the daemon's unit then wants and starts after the holder's.
 - `herdr` leaves the daemon's PATH comment and every option that named it. The module no longer needs herdr at all.
 
 ### 11.3 Steps on the live tiller

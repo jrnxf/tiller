@@ -10,13 +10,15 @@
 # daemon running. `checks.moduleRestartsDaemon` in the flake guards this, and
 # the service PATH (Homebrew on macOS only).
 #
-# The holder (`programs.tiller.holder.enable`, off by default until the
-# cutover) is a second, separate service: a sibling of the daemon, never its
+# The holder (`programs.tiller.holder.enable`, on with the daemon by
+# default) is a second, separate service: a sibling of the daemon, never its
 # child, because the daemon's restarts must not take the agents' terminals
 # with them (`terminal-holder.md` 2.2, 11.2). Its definition holds no store
 # path, so a rebuild leaves it as it was and it keeps running; the new binary
 # reaches it through `tiller holder upgrade`. `checks.moduleHolderService` in
-# the flake guards this.
+# the flake guards this. On Linux the daemon's unit wants the holder's and
+# starts after it, so the daemon starts with the holder; on macOS both agents
+# start at load.
 #
 # Both service managers restart the daemon when it dies (a crash, a kill, or
 # exit 3 for a database newer than the binary, `recovery.md` R11) and leave it
@@ -42,7 +44,7 @@ let
     "--allow-host"
     host
   ]) cfg.daemon.allowHosts;
-  # herdr, git, gh and quota-axi come from the profile, extraPath, the
+  # git, gh and quota-axi come from the profile, extraPath, the
   # nix-darwin and NixOS system profiles, Homebrew (macOS) or the system.
   servicePath =
     extraPath:
@@ -137,7 +139,7 @@ in
         example = [ "/home/user/.local/bin" ];
         description = ''
           Directories on the daemon's PATH after the home-manager profile, for
-          herdr, git, gh or quota-axi installed elsewhere. The PATH also has
+          git, gh or quota-axi installed elsewhere. The PATH also has
           `/etc/profiles/per-user/<user>/bin` and `/run/current-system/sw/bin`
           after these, and `/opt/homebrew/bin` on macOS, so tools from
           nix-darwin, NixOS and Homebrew resolve without this option.
@@ -155,13 +157,14 @@ in
     holder = {
       enable = lib.mkOption {
         type = lib.types.bool;
-        default = false;
+        default = cfg.daemon.enable;
+        defaultText = lib.literalExpression "config.programs.tiller.daemon.enable";
         description = ''
           Run `tiller holder` as a user service of its own: a launchd agent
           on macOS, a systemd user unit on Linux. The holder keeps the
-          agents' terminals. Off until the cutover to the holder
-          (`terminal-holder.md` 11.2), so a rebuild before it starts none on
-          a live host.
+          agents' terminals, and the daemon reaches every pane through it
+          (`terminal-holder.md` 11.2). On Linux the daemon's unit wants the
+          holder's and starts after it.
 
           A rebuild never restarts or stops it, whatever changes in the
           package: its definition names the profile's `tiller` and no store
@@ -229,6 +232,16 @@ in
             RestartSec = 2;
           };
           Install.WantedBy = [ "default.target" ];
+        };
+      })
+
+      # The daemon starts with the holder: a start of the daemon's unit
+      # starts the holder's first. `Wants` alone, so a stop or a restart of
+      # the daemon leaves the holder running.
+      (lib.mkIf (cfg.daemon.enable && cfg.holder.enable && pkgs.stdenv.hostPlatform.isLinux) {
+        systemd.user.services.tiller.Unit = {
+          Wants = [ "tiller-holder.service" ];
+          After = [ "tiller-holder.service" ];
         };
       })
 

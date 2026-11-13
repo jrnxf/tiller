@@ -1,9 +1,8 @@
-//! The `screen` read (`terminal-holder.md` 3.3): what `herdr pane read` gave
-//! the parsers, read from the model.
+//! The `screen` read (`terminal-holder.md` 3.3): the rows the parsers read,
+//! taken from the model.
 //!
 //! A `text` row is the row's characters with trailing spaces trimmed. An
-//! `ansi` row is in the shape herdr wrote, which `composer::classify` and
-//! `prompt.rs` read: at each pen change `SGR 0` and then one escape per
+//! `ansi` row is in the shape `composer::classify` and `prompt.rs` read: at each pen change `SGR 0` and then one escape per
 //! attribute and color, in the semicolon form, and `SGR 0` at the row's end
 //! when the pen is not the default.
 
@@ -53,7 +52,7 @@ const ATTRIBUTES: &[(Flags, &str)] = &[
 ];
 
 /// What an `ansi` row writes for a cell: its colors and attributes. The
-/// underline color is left out, as herdr left it out.
+/// underline color is left out, as the fixtures leave it out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Pen {
     fg: Color,

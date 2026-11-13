@@ -864,10 +864,9 @@ fn a_forwarded_relaunch_starts_the_agent_on_the_owning_host() {
         let new = claude.join().unwrap().unwrap();
         assert_eq!(done.started, Proof::Confirmed, "{}", done.evidence);
         assert_eq!(done.session.id, new);
-        assert_eq!(
-            done.session.pane_id.as_deref(),
-            Some(spawned.pane_id.as_str())
-        );
+        // A relaunch starts in a new holder pane, as the owner's does.
+        assert_eq!(done.session.pane_id.as_deref(), Some(done.pane_id.as_str()));
+        assert_ne!(done.pane_id, spawned.pane_id);
         assert_eq!(done.run.id == spawned.run.id, !new_attempt);
         assert!(done.run.ended_at.is_none());
         assert!(done.run.config_hash.is_some());

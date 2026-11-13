@@ -315,7 +315,7 @@
               assert lib.assertMsg (follows false)
                 "nix/module.nix: the systemd unit does not change with the package, so a rebuild leaves the old daemon running";
               assert lib.assertMsg (hasDir true "/opt/homebrew/bin")
-                "nix/module.nix: the launchd agent's PATH lacks /opt/homebrew/bin, so Homebrew tools such as herdr are not found";
+                "nix/module.nix: the launchd agent's PATH lacks /opt/homebrew/bin, so Homebrew tools such as gh are not found";
               assert lib.assertMsg (
                 !hasDir false "/opt/homebrew/bin"
               ) "nix/module.nix: the systemd unit's PATH has /opt/homebrew/bin, which only macOS has";
@@ -335,10 +335,11 @@
                 && allowHostArgs false == allowHostArgs true
               ) "nix/module.nix: daemon.allowHosts does not reach the daemon as --allow-host arguments";
               pkgs.runCommand "tiller-module-restarts-daemon" { } "touch $out";
-            # The holder service (`terminal-holder.md` 2.2, 11.2) is off by
-            # default; on, its launchd agent and systemd unit name the
-            # profile's `tiller` and no store path, so they stay the same
-            # across packages and a switch never restarts the holder.
+            # The holder service (`terminal-holder.md` 2.2, 11.2) is on with
+            # the daemon by default, and the daemon's systemd unit wants it.
+            # Its launchd agent and systemd unit name the profile's `tiller`
+            # and no store path, so they stay the same across packages and a
+            # switch never restarts the holder.
             moduleHolderService =
               let
                 stubPackage = name: pkgs.writeText name name;
@@ -388,11 +389,27 @@
                 unit = isDarwin: package: (configFor isDarwin (on package)).systemd.user.services.tiller-holder;
                 a = stubPackage "tiller-a";
                 b = stubPackage "tiller-b";
+                # The defaults: the holder runs with the daemon.
+                defaults =
+                  isDarwin:
+                  configFor isDarwin {
+                    enable = true;
+                    package = a;
+                  };
                 off =
                   isDarwin:
                   configFor isDarwin {
                     enable = true;
                     package = a;
+                    holder.enable = false;
+                  };
+                # No daemon: no holder either, unless it is asked for.
+                noDaemon =
+                  isDarwin:
+                  configFor isDarwin {
+                    enable = true;
+                    package = a;
+                    daemon.enable = false;
                   };
                 # The Linux environment as an attrset.
                 envOf =
@@ -419,6 +436,22 @@
               assert lib.assertMsg (
                 !(off false).systemd.user.services ? tiller-holder
               ) "nix/module.nix: the systemd holder unit exists with holder.enable off";
+              assert lib.assertMsg (
+                (defaults true).launchd.agents ? tiller-holder && (defaults false).systemd.user.services ? tiller-holder
+              ) "nix/module.nix: holder.enable does not default to the daemon's enable";
+              assert lib.assertMsg (
+                !(noDaemon true).launchd.agents ? tiller-holder
+                && !(noDaemon false).systemd.user.services ? tiller-holder
+              ) "nix/module.nix: a holder service exists with the daemon off and holder.enable unset";
+              assert lib.assertMsg (
+                let
+                  daemonUnit = (defaults false).systemd.user.services.tiller.Unit;
+                in
+                daemonUnit.Wants == [ "tiller-holder.service" ] && daemonUnit.After == [ "tiller-holder.service" ]
+              ) "nix/module.nix: the daemon's systemd unit does not start with the holder's";
+              assert lib.assertMsg (
+                !(off false).systemd.user.services.tiller.Unit ? Wants
+              ) "nix/module.nix: the daemon's systemd unit wants a holder unit that holder.enable leaves out";
               assert lib.assertMsg (
                 (agent true a).config.ProgramArguments == [
                   "/home/user/.nix-profile/bin/tiller"
