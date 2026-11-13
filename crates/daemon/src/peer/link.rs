@@ -499,7 +499,8 @@ impl Peers {
     }
 
     /// Forwards a mutation over a live link (`protocol.md` 10.3) and waits
-    /// up to `timing.query` for the peer's `result`. Nothing is queued: a
+    /// up to `timing.query` for the peer's `result`, or `timing.proof` for
+    /// an agent verb that waits for its proof. Nothing is queued: a
     /// link that is not live, or does not take the frame in time, is
     /// [`Forwarded::Unreachable`].
     pub async fn forward(&self, host_id: &str, order: Order) -> Forwarded {
@@ -508,12 +509,17 @@ impl Peers {
         };
         let sent = Arc::new(AtomicU8::new(PENDING));
         let (reply, answer) = oneshot::channel();
+        let wait = if order.op.waits_for_proof() {
+            self.timing.proof
+        } else {
+            self.timing.query
+        };
         let request = Request::Mutate {
             order,
             sent: Arc::clone(&sent),
             reply,
         };
-        let answered = timeout(self.timing.query, async {
+        let answered = timeout(wait, async {
             sender.send(request).await.ok()?;
             answer.await.ok()
         })

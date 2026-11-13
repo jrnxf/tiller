@@ -234,7 +234,7 @@
             }
           },
           "502": {
-            "description": "`peer_refused`: not forwarded",
+            "description": "`peer_refused`: a read-scope pairing, or the peer refused it",
             "content": {
               "application/json": {
                 "schema": {
@@ -244,7 +244,17 @@
             }
           },
           "503": {
-            "description": "herdr is unreachable",
+            "description": "herdr or the peer is unreachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`forward_uncertain`: the peer link dropped before the peer answered",
             "content": {
               "application/json": {
                 "schema": {
@@ -333,7 +343,27 @@
             }
           },
           "502": {
-            "description": "`peer_refused`: not forwarded",
+            "description": "`peer_refused`: a read-scope pairing, or the peer refused it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "the peer is unreachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`forward_uncertain`: the peer link dropped before the peer answered",
             "content": {
               "application/json": {
                 "schema": {
@@ -412,7 +442,7 @@
             }
           },
           "502": {
-            "description": "`peer_refused`: not forwarded",
+            "description": "`peer_refused`: a read-scope pairing, or the peer refused the read",
             "content": {
               "application/json": {
                 "schema": {
@@ -422,7 +452,7 @@
             }
           },
           "503": {
-            "description": "herdr is unreachable, or reads and input came faster than 20 a second",
+            "description": "herdr or the peer is unreachable, or reads and input came faster than 20 a second",
             "content": {
               "application/json": {
                 "schema": {
@@ -521,7 +551,7 @@
             }
           },
           "502": {
-            "description": "`peer_refused`: not forwarded",
+            "description": "`peer_refused`: a read-scope pairing, or the peer refused the answer",
             "content": {
               "application/json": {
                 "schema": {
@@ -531,7 +561,17 @@
             }
           },
           "503": {
-            "description": "herdr is unreachable, or input came faster than 20 a second; nothing was sent",
+            "description": "herdr or the peer is unreachable, or input came faster than 20 a second; nothing was sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`forward_uncertain`: the peer link dropped before the peer answered; retry with the same key",
             "content": {
               "application/json": {
                 "schema": {
@@ -620,7 +660,7 @@
             }
           },
           "502": {
-            "description": "`peer_refused`: not forwarded",
+            "description": "`peer_refused`: a read-scope pairing, or the peer refused it",
             "content": {
               "application/json": {
                 "schema": {
@@ -630,7 +670,17 @@
             }
           },
           "503": {
-            "description": "herdr is unreachable",
+            "description": "herdr or the peer is unreachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`forward_uncertain`: the peer link dropped before the peer answered",
             "content": {
               "application/json": {
                 "schema": {
@@ -718,7 +768,7 @@
             }
           },
           "502": {
-            "description": "`peer_refused`: not forwarded",
+            "description": "`peer_refused`: a read-scope pairing, or the peer refused it",
             "content": {
               "application/json": {
                 "schema": {
@@ -728,7 +778,17 @@
             }
           },
           "503": {
-            "description": "herdr is unreachable",
+            "description": "herdr or the peer is unreachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`forward_uncertain`: the peer link dropped before the peer answered",
             "content": {
               "application/json": {
                 "schema": {
@@ -817,7 +877,27 @@
             }
           },
           "502": {
-            "description": "`peer_refused`: not forwarded",
+            "description": "`peer_refused`: a read-scope pairing, or the peer refused it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "the peer is unreachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`forward_uncertain`: the peer link dropped before the peer answered",
             "content": {
               "application/json": {
                 "schema": {
@@ -905,7 +985,7 @@
             }
           },
           "502": {
-            "description": "`peer_refused`: not forwarded",
+            "description": "`peer_refused`: a read-scope pairing, or the peer refused it",
             "content": {
               "application/json": {
                 "schema": {
@@ -915,7 +995,17 @@
             }
           },
           "503": {
-            "description": "herdr is unreachable",
+            "description": "herdr or the peer is unreachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`forward_uncertain`: the peer link dropped before the peer answered",
             "content": {
               "application/json": {
                 "schema": {
@@ -1398,7 +1488,7 @@
             }
           },
           "502": {
-            "description": "`peer_refused`: not forwarded",
+            "description": "`peer_refused`: the peer refused the read",
             "content": {
               "application/json": {
                 "schema": {
@@ -1408,7 +1498,7 @@
             }
           },
           "503": {
-            "description": "herdr or the terminal holder is unreachable, or 4 tail reads are in flight",
+            "description": "herdr, the terminal holder or the peer is unreachable, or 4 tail reads are in flight",
             "content": {
               "application/json": {
                 "schema": {
@@ -1496,7 +1586,27 @@
             }
           },
           "502": {
-            "description": "`peer_refused`: not forwarded",
+            "description": "`peer_refused`: a read-scope pairing, or the peer refused it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "the peer is unreachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`forward_uncertain`: the peer link dropped before the peer answered",
             "content": {
               "application/json": {
                 "schema": {
@@ -1769,7 +1879,27 @@
             }
           },
           "502": {
-            "description": "`peer_refused`: not forwarded",
+            "description": "`peer_refused`: a read-scope pairing, or the peer refused it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "the peer is unreachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`forward_uncertain`: the peer link dropped before the peer answered",
             "content": {
               "application/json": {
                 "schema": {
@@ -6045,7 +6175,7 @@
               "string",
               "null"
             ],
-            "description": "A paired peer's label; a stop or a resume is not forwarded."
+            "description": "A paired peer's label: the stop, unpause or resume is forwarded to\nit."
           },
           "idempotency_key": {
             "type": "string"
@@ -8567,7 +8697,7 @@
               "string",
               "null"
             ],
-            "description": "A paired peer's label; an interrupt is not forwarded."
+            "description": "A paired peer's label: the interrupt is forwarded to it, and the\nboard waits up to 60 s for its proof."
           },
           "idempotency_key": {
             "type": "string"
@@ -10022,7 +10152,7 @@
               "string",
               "null"
             ],
-            "description": "A paired peer's label; a pause is not forwarded."
+            "description": "A paired peer's label: the pause is forwarded to it."
           },
           "idempotency_key": {
             "type": "string"
@@ -10769,7 +10899,14 @@
               "string",
               "null"
             ],
-            "description": "A paired peer's label; an answer is not forwarded."
+            "description": "A paired peer's label: the answer is forwarded to it, and the peer\nreads and checks its own screen just before it types."
+          },
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required when `host` names a peer: a retry with it types nothing\ntwice."
           },
           "option": {
             "type": "integer",
@@ -10792,7 +10929,7 @@
               "string",
               "null"
             ],
-            "description": "A paired peer's label; a prompt read is not forwarded."
+            "description": "A paired peer's label: the peer reads its own screen. It needs an\n`act` pairing."
           }
         },
         "additionalProperties": false
@@ -11122,7 +11259,7 @@
               "string",
               "null"
             ],
-            "description": "A paired peer's label; a relaunch is not forwarded."
+            "description": "A paired peer's label: the relaunch is forwarded to it, and the new\nsession starts on that host."
           },
           "idempotency_key": {
             "type": "string"
@@ -12248,7 +12385,7 @@
               "string",
               "null"
             ],
-            "description": "A paired peer's label; a steer is not forwarded."
+            "description": "A paired peer's label: the steer is forwarded to it."
           },
           "idempotency_key": {
             "type": "string"
@@ -12585,7 +12722,7 @@
               "string",
               "null"
             ],
-            "description": "A paired peer's label; a tail read is not forwarded."
+            "description": "A paired peer's label: the peer reads its own pane."
           }
         },
         "additionalProperties": false
@@ -12697,7 +12834,7 @@
               "string",
               "null"
             ],
-            "description": "A paired peer's label: the withdraw is not forwarded, so a peer's\nitem is refused (`protocol.md` 7.4)."
+            "description": "A paired peer's label: the withdraw is forwarded to it\n(`protocol.md` 7.4)."
           },
           "idempotency_key": {
             "type": "string"

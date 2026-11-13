@@ -206,6 +206,14 @@ impl Ctx {
         self
     }
 
+    /// The sha256 of the keyed arguments, when they are bound to `key`.
+    fn key_args(&self, key: &str) -> Option<&str> {
+        self.args
+            .as_ref()
+            .filter(|args| args.key == key)
+            .map(|args| args.sha256.as_str())
+    }
+
     pub fn with_via_peer(mut self, via_peer: Value) -> Self {
         self.via_peer = Some(via_peer);
         self
@@ -562,6 +570,64 @@ impl Store {
             events,
             replayed: false,
         })
+    }
+
+    /// The stored answer of a keyed command that writes no record, such as
+    /// a forwarded prompt answer: what [`Store::key_record`] kept under the
+    /// context's key, or `None` when the key is new or expired. A key used
+    /// for another command, by another actor or with other arguments is
+    /// refused, as [`Store::write_as`] refuses it.
+    pub fn key_replay<T: DeserializeOwned>(&self, ctx: &Ctx, command: &str) -> Result<Option<T>> {
+        let Some(key) = ctx.key.as_deref() else {
+            return Ok(None);
+        };
+        let Lookup::Live(stored) = lookup_key(&self.conn, key, ctx.now)? else {
+            return Ok(None);
+        };
+        stored.matches(key, command, &ctx.actor.to_string(), ctx.key_args(key))?;
+        let response: StoredResponse<T> = serde_json::from_value(stored.response)?;
+        Ok(Some(response.value))
+    }
+
+    /// Keeps `value` under the context's key for a command that writes no
+    /// record, so a retry with the key gets it back from
+    /// [`Store::key_replay`] and does nothing twice. The row is rebuildable
+    /// bookkeeping (`state.md` section 10): it writes no event.
+    pub fn key_record<T: Serialize>(
+        &mut self,
+        ctx: &Ctx,
+        command: &'static str,
+        (entity, entity_id): (&str, &str),
+        value: &T,
+    ) -> Result<()> {
+        self.check_owner()?;
+        let Some(key) = ctx.key.as_deref() else {
+            return Ok(());
+        };
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Lookup::Expired = lookup_key(&tx, key, ctx.now)? {
+            tx.execute("DELETE FROM idempotency_keys WHERE key = ?1", [key])?;
+        }
+        let response = serde_json::json!({ "value": value, "events": [] }).to_string();
+        tx.execute(
+            "INSERT INTO idempotency_keys
+               (key, command, entity, entity_id, response, created_at, actor, args_sha256)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                key,
+                command,
+                entity,
+                entity_id,
+                response,
+                ctx.now,
+                ctx.actor.to_string(),
+                ctx.key_args(key)
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 }
 
