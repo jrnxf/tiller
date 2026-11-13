@@ -13,19 +13,21 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tiller_core::domain::{Approval, Attention, Card, PeerKey, PeerScope, Project};
+use tiller_core::domain::{Approval, Attention, Card, PeerKey, PeerScope, Project, Session};
 use tiller_core::state::peers::parse_public_key;
 use tiller_core::state::{get, resolve_card, resolve_id};
 use tiller_core::{Actor, Ctx, Error, Store, Timestamp, ids};
 
 use super::HelloKey;
 use super::serve::{Denied, ServeConfig, current_key, refused, skew_ms};
-use crate::api::{ApiError, Mutation};
+use crate::api::{ApiError, Hands, Mutation};
+use crate::mirror::Mirrors;
 
 // -- the allowlist ----------------------------------------------------------------
 
-/// A mutation the board may forward to a peer: exactly the 7.4 list.
-/// `stage`, `focus` and memory decisions are not on it.
+/// A mutation the board may forward to a peer: exactly the 7.4 list, with
+/// the agent verbs of `authority.md` G46. `stage`, `focus` and memory
+/// decisions are not on it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
     CreateCard,
@@ -43,10 +45,19 @@ pub enum Op {
     AskNote,
     StartOrchestrator,
     RestartStale,
+    Withdraw,
+    PromptAnswer,
+    Interrupt,
+    Steer,
+    Stop,
+    Pause,
+    Unpause,
+    Resume,
+    Relaunch,
 }
 
 impl Op {
-    pub const ALL: [Op; 15] = [
+    pub const ALL: [Op; 24] = [
         Op::CreateCard,
         Op::EditCard,
         Op::Comment,
@@ -62,6 +73,15 @@ impl Op {
         Op::AskNote,
         Op::StartOrchestrator,
         Op::RestartStale,
+        Op::Withdraw,
+        Op::PromptAnswer,
+        Op::Interrupt,
+        Op::Steer,
+        Op::Stop,
+        Op::Pause,
+        Op::Unpause,
+        Op::Resume,
+        Op::Relaunch,
     ];
 
     /// The 7.4 endpoint, as a `mutate` frame's `op` names it.
@@ -82,7 +102,26 @@ impl Op {
             Op::AskNote => "POST /api/v1/projects/{id}/asks",
             Op::StartOrchestrator => "POST /api/v1/projects/{id}/orchestrator",
             Op::RestartStale => "POST /api/v1/agents/restart-stale",
+            Op::Withdraw => "POST /api/v1/attention/{id}/withdraw",
+            Op::PromptAnswer => "POST /api/v1/agents/{session}/prompt/answer",
+            Op::Interrupt => "POST /api/v1/agents/{session}/interrupt",
+            Op::Steer => "POST /api/v1/agents/{session}/steer",
+            Op::Stop => "POST /api/v1/agents/{session}/stop",
+            Op::Pause => "POST /api/v1/agents/{session}/pause",
+            Op::Unpause => "POST /api/v1/agents/{session}/unpause",
+            Op::Resume => "POST /api/v1/agents/{session}/resume",
+            Op::Relaunch => "POST /api/v1/agents/{session}/relaunch",
         }
+    }
+
+    /// True for a verb that waits for its proof on the peer, so the board
+    /// host waits [`super::PROOF_WAIT`] for its `result`, not the query
+    /// wait (`protocol.md` 7.4).
+    pub fn waits_for_proof(self) -> bool {
+        matches!(
+            self,
+            Op::Interrupt | Op::Stop | Op::Resume | Op::Relaunch | Op::PromptAnswer
+        )
     }
 
     /// The op an endpoint names; `None` for one off the allowlist.
@@ -101,8 +140,9 @@ pub struct Mutate {
     /// The 7.4 endpoint, as [`Op::as_str`] writes it. A string, so an op
     /// this build does not know is refused rather than unreadable.
     pub op: String,
-    /// The card, attention item, approval or project the path names; null for
-    /// `POST /api/v1/cards`, whose project is in the body.
+    /// The card, attention item, approval, project or agent session the
+    /// path names; null for `POST /api/v1/cards`, whose project is in the
+    /// body.
     pub target: Option<String>,
     /// The request body, without `host`.
     pub body: Value,
@@ -275,7 +315,7 @@ fn target_project(store: &Store, op: Op, frame: &Mutate) -> tiller_core::Result<
             .get("project")
             .and_then(Value::as_str)
             .map(str::to_owned),
-        Op::Answer => match found(resolve_id(conn, "attention", "attention", target))? {
+        Op::Answer | Op::Withdraw => match found(resolve_id(conn, "attention", "attention", target))? {
             Some(id) => {
                 let item: Attention = get(conn, "attention", &id)?;
                 let card: Card = get(conn, "card", &item.card_id)?;
@@ -303,11 +343,29 @@ fn target_project(store: &Store, op: Op, frame: &Mutate) -> tiller_core::Result<
         | Op::Reopen
         | Op::AddDep
         | Op::RemoveDep => found(resolve_card(conn, target))?.map(|card| card.project_id),
+        Op::PromptAnswer
+        | Op::Interrupt
+        | Op::Steer
+        | Op::Stop
+        | Op::Pause
+        | Op::Unpause
+        | Op::Resume
+        | Op::Relaunch => session_project(conn, target)?,
     };
     match project_id {
         Some(id) => found(get(conn, "project", &id)),
         None => Ok(None),
     }
+}
+
+/// The project an agent session works for. `None` when the session does
+/// not exist.
+fn session_project(conn: &rusqlite::Connection, target: &str) -> tiller_core::Result<Option<String>> {
+    let Some(id) = found(resolve_id(conn, "sessions", "session", target))? else {
+        return Ok(None);
+    };
+    let session: Session = get(conn, "session", &id)?;
+    Ok(Some(session.project_id))
 }
 
 /// A lookup with "not found" as `None`.
@@ -332,8 +390,9 @@ pub(super) fn apply(
     key: &PeerKey,
     frame: &Mutate,
     op: Op,
+    mirrors: &Mirrors,
 ) -> (u16, Value) {
-    match applied(store, config, key, frame, op) {
+    match applied(store, config, key, frame, op, mirrors) {
         Ok(response) => match serde_json::to_value(response) {
             Ok(body) => (200, body),
             Err(error) => ApiError::from(Error::Internal(format!(
@@ -351,6 +410,7 @@ fn applied(
     key: &PeerKey,
     frame: &Mutate,
     op: Op,
+    mirrors: &Mirrors,
 ) -> Result<crate::dto::MutationResponse, ApiError> {
     let bytes = serde_json::to_vec(&frame.body).map_err(Error::from)?;
     let mutation = Mutation::parse(op, frame.target.clone(), &bytes)?;
@@ -374,7 +434,13 @@ fn applied(
             "viewer_label": key.viewer_label,
             "frame_id": frame.id,
         }));
-    mutation.apply_here(store, &ctx, config.orchestrators.as_deref())
+    let hands = Hands {
+        starter: config.orchestrators.as_deref(),
+        herdr: config.herdr.as_ref(),
+        holder: config.holder.as_ref(),
+        mirrors: Some(mirrors),
+    };
+    mutation.apply_here(store, &ctx, &hands)
 }
 
 /// The arguments a forwarded key is bound to (`protocol.md` 6.3 and 10.3),
@@ -406,6 +472,11 @@ mod tests {
         for refused in [
             "POST /api/v1/projects/{id}/stage",
             "POST /api/v1/agents/{session}/focus",
+            // Reads go as queries, and keys and the Fit on the pane link.
+            "POST /api/v1/agents/{session}/prompt",
+            "POST /api/v1/agents/{session}/terminal/tail",
+            "POST /api/v1/agents/{session}/terminal/input",
+            "POST /api/v1/agents/{session}/terminal/fit",
             "POST /api/v1/memory/proposals/{id}/decide",
             "POST /api/v1/runs",
             "post /api/v1/cards",

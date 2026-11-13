@@ -60,8 +60,9 @@ pub enum Frame {
     },
     Query {
         id: String,
-        /// `cards/{id}`, `cards/{id}/timeline` (with `?before=`) or
-        /// `runs/{id}`.
+        /// `cards/{id}`, `cards/{id}/timeline` (with `?before=`),
+        /// `runs/{id}`, `doctor`, or an agent's `agents/{session}/terminal/tail`
+        /// or `agents/{session}/prompt` (7.4).
         path: String,
     },
     /// A forwarded mutation, signed by the board host (10.3).
@@ -230,6 +231,12 @@ impl Hello {
 
 // -- timing -------------------------------------------------------------------
 
+/// How long the board host waits for the `result` of a forwarded
+/// interrupt, stop, resume, relaunch or prompt answer, which wait for their
+/// proof on the peer (`protocol.md` 7.4, 10.3 step 6). The spec's value is
+/// proposed, so it is this one constant.
+pub const PROOF_WAIT: Duration = Duration::from_secs(60);
+
 /// Every interval a link keeps (`protocol.md` 10.2). Tests shrink them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Timing {
@@ -246,6 +253,9 @@ pub struct Timing {
     pub refresh: Duration,
     /// How long a `query` waits for its `result`.
     pub query: Duration,
+    /// How long a forwarded agent verb that waits for its proof waits for
+    /// its `result` ([`PROOF_WAIT`]).
+    pub proof: Duration,
     /// How far a `hello`'s `ts` may be from the peer's clock.
     pub skew: Duration,
     /// Reconnect delays; the last repeats.
@@ -273,6 +283,7 @@ impl Default for Timing {
             poll: Duration::from_millis(200),
             refresh: s(2),
             query: s(10),
+            proof: PROOF_WAIT,
             skew: s(120),
             backoff: [s(5), s(15), s(30), s(60)],
             refused_retry: s(60),
