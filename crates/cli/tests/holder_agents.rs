@@ -494,8 +494,11 @@ fn a_lost_holder_resumes_its_worker_and_notifies_the_owner_once() {
         .args(["-c", "command -v env"])
         .output()
         .unwrap();
-    std::os::unix::fs::symlink(String::from_utf8(found.stdout).unwrap().trim(), bin.join("env"))
-        .unwrap();
+    std::os::unix::fs::symlink(
+        String::from_utf8(found.stdout).unwrap().trim(),
+        bin.join("env"),
+    )
+    .unwrap();
     std::os::unix::fs::symlink(root.join("claude-stub"), bin.join("claude")).unwrap();
     let (daemon, port) = git_only_daemon(&agents.world);
     let cookie = cookie(&agents.world);
@@ -582,7 +585,10 @@ fn a_lost_holder_resumes_its_worker_and_notifies_the_owner_once() {
         assert!(Instant::now() < deadline, "R21 never wrote holder.lost");
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert_eq!(count("SELECT count(*) FROM events WHERE kind = 'holder.lost'"), 1);
+    assert_eq!(
+        count("SELECT count(*) FROM events WHERE kind = 'holder.lost'"),
+        1
+    );
     let machines = get(port, &cookie, "/api/v1/machines");
     assert!(
         machines["machines"][0]["holder_restarted_at"].is_string(),
@@ -596,7 +602,10 @@ fn a_lost_holder_resumes_its_worker_and_notifies_the_owner_once() {
     let (_daemon, _port) = git_only_daemon(&agents.world);
     std::thread::sleep(Duration::from_secs(8));
     assert_eq!(notes(&out).len(), 1, "{:?}", notes(&out));
-    assert_eq!(count("SELECT count(*) FROM events WHERE kind = 'holder.lost'"), 1);
+    assert_eq!(
+        count("SELECT count(*) FROM events WHERE kind = 'holder.lost'"),
+        1
+    );
 }
 
 /// Where a 9.2 kill lands.
