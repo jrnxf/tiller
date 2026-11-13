@@ -33,7 +33,7 @@ use tiller_reconcile::holder::Link;
 use tiller_reconcile::pass::{Config, Reconciler, Sources};
 use tiller_reconcile::sources::{
     AgentProbe, Cut, Forge, Harness, HolderLauncher, HostReadings, Launched, Launcher, PrRead,
-    Probe, Readings, Scanner, WorktreeScan,
+    Prepare, Probe, Readings, Scanner, WorktreeScan,
 };
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -517,7 +517,7 @@ struct LauncherWorld {
     closed: Vec<String>,
     notifications: Vec<(String, String)>,
     fail_next: Option<String>,
-    refuse_next: Option<String>,
+    script_next: Option<Prepare>,
     /// The `--resume` id of each script written and not yet run, by session.
     prepared: BTreeMap<String, Option<String>>,
     /// The screen a launched pane shows.
@@ -564,7 +564,13 @@ impl FakeLauncher {
     /// The next script is refused with `why`, as for a session whose launch
     /// files are gone.
     pub fn refuse_next(&self, why: &str) {
-        lock(&self.world).refuse_next = Some(why.to_owned());
+        lock(&self.world).script_next = Some(Prepare::Refused(why.to_owned()));
+    }
+
+    /// The next script fails with `error`, as for a `config.toml` that
+    /// does not parse, which a later pass may find fixed.
+    pub fn fail_script_next(&self, error: &str) {
+        lock(&self.world).script_next = Some(Prepare::Failed(error.to_owned()));
     }
 
     /// What a launched pane shows (default idle Claude; `Permission` for a
@@ -585,10 +591,10 @@ impl Launcher for FakeLauncher {
         session: &Session,
         _cwd: &Path,
         resume: Option<&str>,
-    ) -> Result<PathBuf, String> {
+    ) -> Result<PathBuf, Prepare> {
         let mut world = lock(&self.world);
-        if let Some(why) = world.refuse_next.take() {
-            return Err(why);
+        if let Some(error) = world.script_next.take() {
+            return Err(error);
         }
         world
             .prepared

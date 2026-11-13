@@ -191,24 +191,34 @@ pub struct Launched {
 /// Writes the script that resumes a session, with every flag of its first
 /// launch: the daemon wires the builder `tiller agent resume` writes its
 /// script with, so the two never differ. `resume` names the Claude session
-/// to `--resume`; `None` writes a plain start. `Err` is a refusal, such as
-/// a session whose launch files are gone, and nothing was started.
+/// to `--resume`; `None` writes a plain start. On `Err` nothing was
+/// started ([`Prepare`]).
 pub type ScriptWriter =
-    Box<dyn FnMut(&Session, &Path, Option<&str>) -> Result<PathBuf, String> + Send>;
+    Box<dyn FnMut(&Session, &Path, Option<&str>) -> Result<PathBuf, Prepare> + Send>;
+
+/// Why a resume script was not written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Prepare {
+    /// The launch cannot be repeated, such as for a session whose launch
+    /// files are gone: a later try would fail the same way.
+    Refused(String),
+    /// Something that may pass by itself failed, such as a `config.toml`
+    /// that does not parse or a store error: a later pass tries again.
+    Failed(String),
+}
 
 /// Starts and stops Claude Code sessions in panes (`session.resume`, R02,
 /// R04 and R21) and closes dead panes (R15).
 pub trait Launcher: Send {
     /// Writes the script that starts `claude` for `session` in `cwd`:
     /// `--resume <id>` when `resume` names the Claude session, a fresh
-    /// session otherwise ([`ScriptWriter`]). `Err` is a refusal: nothing
-    /// was started.
+    /// session otherwise ([`ScriptWriter`]). On `Err` nothing was started.
     fn prepare(
         &mut self,
         session: &Session,
         cwd: &Path,
         resume: Option<&str>,
-    ) -> Result<PathBuf, String>;
+    ) -> Result<PathBuf, Prepare>;
     /// Runs `script`, which [`Launcher::prepare`] wrote, in a new pane for
     /// `session` in `cwd`.
     fn launch(&mut self, session: &Session, cwd: &Path, script: &Path) -> Result<Launched, String>;
@@ -251,7 +261,7 @@ impl<H: Herdr + Send> Launcher for HerdrLauncher<H> {
         session: &Session,
         cwd: &Path,
         resume: Option<&str>,
-    ) -> Result<PathBuf, String> {
+    ) -> Result<PathBuf, Prepare> {
         (self.scripts)(session, cwd, resume)
     }
 
@@ -366,7 +376,7 @@ impl Launcher for HolderLauncher {
         session: &Session,
         cwd: &Path,
         resume: Option<&str>,
-    ) -> Result<PathBuf, String> {
+    ) -> Result<PathBuf, Prepare> {
         (self.scripts)(session, cwd, resume)
     }
 

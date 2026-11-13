@@ -17,6 +17,7 @@ use tiller_observe::liveness::Probe;
 
 use crate::ladder::{self, Death, Verdict};
 use crate::pass::{Reconciler, Report, minutes_since, ts};
+use crate::sources::Prepare;
 
 /// The `source` a resume launch binds the new pane under, so the proof of
 /// life is a hook's bind, never the launcher's own.
@@ -680,9 +681,13 @@ impl Reconciler {
                 .prepare(session, cwd, resume_id.as_deref())
             {
                 Ok(script) => Some(script),
-                Err(why) => {
+                Err(Prepare::Refused(why)) => {
                     report.repair(format!("session {} resume refused: {why}", session.id));
                     return Ok(Launch::Refused(why));
+                }
+                Err(Prepare::Failed(error)) => {
+                    report.error(&format!("resume script of session {}", session.id), &error);
+                    return Ok(Launch::RateLimited);
                 }
             },
         };
@@ -1609,7 +1614,8 @@ fn refused_key(session: &Session) -> String {
 pub enum Launch {
     /// A launch was made (the bind window judges it).
     Launched,
-    /// Another launch happened within the launch gap: next pass.
+    /// Not tried this pass: another launch happened within the launch gap,
+    /// or its script could not be written for now ([`Prepare::Failed`]).
     RateLimited,
     /// A floor refused it; the attempt event carries the reason.
     Skipped,

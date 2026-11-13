@@ -805,6 +805,49 @@ fn orchestrator_crash_with_lost_launch_files_asks_the_owner() {
     assert_eq!(w.items().len(), 1, "asked once");
 }
 
+/// R02, a crashed orchestrator whose script fails for a reason that may
+/// pass, such as a `config.toml` that does not parse: nothing is recorded,
+/// the session stays open with no item, and a later pass resumes it.
+#[test]
+fn orchestrator_crash_with_a_failed_script_tries_again_later() {
+    let mut w = World::new();
+    w.worker("w2:p1");
+    w.place();
+    let orchestrator = w.fleet.orchestrator_session.clone();
+    let t0 = now();
+    w.pass(t0);
+
+    w.launcher
+        .fail_script_next("config.toml does not parse: expected a value");
+    w.herdr.remove_pane("w1:p1");
+    let report = w.pass(t0.plus_minutes(1));
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("config.toml does not parse")),
+        "{report:?}"
+    );
+    assert!(w.launcher.launches().is_empty(), "nothing was launched");
+    assert!(
+        !w.event_kinds()
+            .iter()
+            .any(|k| k == "session.resume_attempted"),
+        "a failed script records no attempt"
+    );
+    assert!(w.session(&orchestrator).ended_at.is_none());
+    assert!(w.items().is_empty(), "{:?}", w.items());
+
+    let report = w.pass(t0.plus_minutes(2));
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert!(report.did("launched"), "{report:?}");
+    let launches = w.launcher.launches();
+    assert_eq!(launches.len(), 1);
+    assert_eq!(launches[0].session_id, orchestrator);
+    assert_eq!(launches[0].resume.as_deref(), Some("claude-orchestrator"));
+    assert!(w.items().is_empty(), "{:?}", w.items());
+}
+
 /// R04: a daemon that dies in the middle of the restore repeats it safely:
 /// a session already alive is not launched again, and the boot id is still
 /// written only at the end.

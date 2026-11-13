@@ -18,6 +18,7 @@ use tiller_agents::land::publish::Published;
 use tiller_agents::land::reconcile::{Local, ReconcileForge};
 use tiller_agents::land::scrub::ScrubList;
 use tiller_agents::land::{DaemonLock, Landed, Lander};
+use tiller_agents::spawn::SpawnError;
 use tiller_agents::spawn::config::SpawnConfig;
 use tiller_agents::spawn::launch::Start;
 use tiller_agents::spawn::pool::{Pool as _, Treehouse};
@@ -40,7 +41,7 @@ use tiller_reconcile::git::{GitScanner, WorktreePool};
 use tiller_reconcile::holder::{HolderSource, Link};
 use tiller_reconcile::sources::{
     Forge, HerdrLauncher, HerdrStatusProbe, HolderLauncher, HostReadings, Launcher, NoHarness,
-    Readings, ScriptWriter,
+    Prepare, Readings, ScriptWriter,
 };
 use tiller_reconcile::tools;
 use tiller_reconcile::{Config as ReconcileConfig, Reconciler, Sources};
@@ -288,8 +289,10 @@ fn resume_scripts(home: &Path, store: Store) -> ScriptWriter {
     let config = home.join("config.toml");
     let claude_config = ClaudeConfig::from_env();
     Box::new(move |session: &Session, cwd: &Path, resume: Option<&str>| {
-        let spawn = spawn_config(&config)?.spawn;
-        let scratch_root = spawn.scratch_dir().map_err(|error| error.to_string())?;
+        let spawn = spawn_config(&config).map_err(Prepare::Failed)?.spawn;
+        let scratch_root = spawn
+            .scratch_dir()
+            .map_err(|error| Prepare::Failed(error.to_string()))?;
         let host = tiller_agents::spawn::resume::Host {
             scratch_root: &scratch_root,
             tiller_home: &tiller_home,
@@ -303,7 +306,10 @@ fn resume_scripts(home: &Path, store: Store) -> ScriptWriter {
         };
         tiller_agents::spawn::resume::write(store.conn(), &host, session, cwd, start)
             .map(|launch| launch.script)
-            .map_err(|error| error.to_string())
+            .map_err(|error| match error {
+                SpawnError::Refused(why) => Prepare::Refused(why),
+                error => Prepare::Failed(error.to_string()),
+            })
     })
 }
 
