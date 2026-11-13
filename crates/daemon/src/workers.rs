@@ -18,9 +18,12 @@ use tiller_agents::land::publish::Published;
 use tiller_agents::land::reconcile::{Local, ReconcileForge};
 use tiller_agents::land::scrub::ScrubList;
 use tiller_agents::land::{DaemonLock, Landed, Lander};
+use tiller_agents::spawn::SpawnError;
 use tiller_agents::spawn::config::SpawnConfig;
+use tiller_agents::spawn::launch::Start;
 use tiller_agents::spawn::pool::{Pool as _, Treehouse};
 use tiller_agents::spawn::readings;
+use tiller_agents::spawn::trust::ClaudeConfig;
 use tiller_core::backup::{self, Nightly};
 use tiller_core::domain::{Host, HostKind, PipelineState, Session};
 use tiller_core::state::list;
@@ -38,7 +41,7 @@ use tiller_reconcile::git::{GitScanner, WorktreePool};
 use tiller_reconcile::holder::{HolderSource, Link};
 use tiller_reconcile::sources::{
     Forge, HerdrLauncher, HerdrStatusProbe, HolderLauncher, HostReadings, Launcher, NoHarness,
-    PaneEnv, Readings,
+    Prepare, Readings, ScriptWriter,
 };
 use tiller_reconcile::tools;
 use tiller_reconcile::{Config as ReconcileConfig, Reconciler, Sources};
@@ -260,15 +263,54 @@ struct ConfiguredPool {
 
 impl ConfiguredPool {
     fn read(&self) -> Result<SpawnConfig, String> {
-        let table = match std::fs::read_to_string(&self.config) {
-            Ok(text) => text
-                .parse::<toml::Table>()
-                .map_err(|error| format!("config.toml does not parse: {error}"))?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
-            Err(error) => return Err(format!("read config.toml: {error}")),
-        };
-        SpawnConfig::from_table(&table).map_err(|error| format!("config.toml: {error}"))
+        spawn_config(&self.config)
     }
+}
+
+/// The spawn tables of `config.toml` as they stand now; a missing file is
+/// the defaults.
+fn spawn_config(path: &Path) -> Result<SpawnConfig, String> {
+    let table = match std::fs::read_to_string(path) {
+        Ok(text) => text
+            .parse::<toml::Table>()
+            .map_err(|error| format!("config.toml does not parse: {error}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+        Err(error) => return Err(format!("read config.toml: {error}")),
+    };
+    SpawnConfig::from_table(&table).map_err(|error| format!("config.toml: {error}"))
+}
+
+/// The script a reconcile resume runs (`recovery.md` R02, R04, R21),
+/// written by the builder of `tiller agent resume`, so a resumed agent gets
+/// every flag of its first launch. `config.toml` is read on each call, so
+/// an edit needs no restart.
+fn resume_scripts(home: &Path, store: Store) -> ScriptWriter {
+    let tiller_home = std::path::absolute(home).unwrap_or_else(|_| home.to_owned());
+    let config = home.join("config.toml");
+    let claude_config = ClaudeConfig::from_env();
+    Box::new(move |session: &Session, cwd: &Path, resume: Option<&str>| {
+        let spawn = spawn_config(&config).map_err(Prepare::Failed)?.spawn;
+        let scratch_root = spawn
+            .scratch_dir()
+            .map_err(|error| Prepare::Failed(error.to_string()))?;
+        let host = tiller_agents::spawn::resume::Host {
+            scratch_root: &scratch_root,
+            tiller_home: &tiller_home,
+            claude: &spawn.claude,
+            claude_config: &claude_config,
+            review_hosts: &spawn.review_allowed_hosts,
+        };
+        let start = match resume {
+            Some(claude_session_id) => Start::Resume { claude_session_id },
+            None => Start::Plain,
+        };
+        tiller_agents::spawn::resume::write(store.conn(), &host, session, cwd, start)
+            .map(|launch| launch.script)
+            .map_err(|error| match error {
+                SpawnError::Refused(why) => Prepare::Refused(why),
+                error => Prepare::Failed(error.to_string()),
+            })
+    })
 }
 
 impl WorktreePool for ConfiguredPool {
@@ -884,7 +926,7 @@ pub fn start(
             let link: Arc<dyn Panes> = Arc::clone(&watch.link) as Arc<dyn Panes>;
             Box::new(HolderLauncher::new(
                 link,
-                PaneEnv::from_env(home),
+                resume_scripts(home, open()?),
                 close_herdr,
                 move |title: &str, body: &str| {
                     let note = Note {
@@ -903,7 +945,7 @@ pub fn start(
         }
         None => Box::new(HerdrLauncher::new(
             tools.herdr.clone(),
-            PaneEnv::from_env(home),
+            resume_scripts(home, open()?),
             close_herdr,
         )),
     };
@@ -1182,7 +1224,7 @@ esac
                 forge: Box::new(tiller_reconcile::sources::NoForge),
                 launcher: Box::new(HerdrLauncher::new(
                     herdr.clone(),
-                    PaneEnv::from_env(&home),
+                    resume_scripts(&home, fleet.open()),
                     {
                         let herdr = herdr.clone();
                         move |pane: &str| herdr.close_pane(pane).map_err(|error| error.to_string())

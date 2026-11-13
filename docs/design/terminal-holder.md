@@ -44,7 +44,7 @@ The blast radius is the only point for one holder per session. The design answer
 
 - The holder is small. It has no network listener, no SQLite, no HTTP and no model calls. Its work is PTYs, the screen model and one socket.
 - Each pane's model update runs inside `catch_unwind`. A panic in the model resets that pane's model only (section 3.5). The PTY, the child and every other pane keep running. The holder's release profile keeps `panic = "unwind"` for this reason.
-- A lost holder is recovery row R21 (section 6.4). It reuses the reboot restore, which resumes every session with `claude --resume`.
+- A lost holder is recovery row R21 (section 6.4). It reuses the reboot restore, which resumes every session with `claude --resume` and the flags of its first launch (`recovery.md` section 2, step 2).
 
 ### 2.2 Process and service
 
@@ -306,7 +306,7 @@ The holder encodes each name for the app's current mode: legacy, application cur
 |---|---|---|
 | Worker spawn: `create_workspace(label, worktree)`, `report_tokens`, `relayout`, `send_text(launch line)`, `send_enter` | `agents/spawn/mod.rs:576-598` | One `spawn { key: session, argv: [claude, ...], cwd: worktree, env, meta }`. The launch line is gone: the holder runs `claude` directly, not a shell that types it. `relayout` goes away |
 | Orchestrator spawn | `agents/spawn/orchestrator.rs:237,305-309` | The same `spawn` |
-| Resume after a crash or a reboot | `agents/control.rs:1269-1298`, `reconcile/sources.rs:203-262` (`HerdrLauncher`) | `spawn` with `claude --resume <id>`. `HerdrLauncher` becomes `PaneLauncher` |
+| Resume after a crash or a reboot | `agents/control.rs:1269-1298`, `reconcile/sources.rs:203-262` (`HerdrLauncher`) | `spawn` of the session's `resume-<session>.sh`, which `spawn::resume` writes as `tiller agent resume` does: the first launch's flags plus `--resume <id>`. A session whose launch files are gone or damaged is refused with a recovery item, never rebuilt (`recovery.md` section 2, step 2). `HerdrLauncher` becomes `PaneLauncher` |
 | Workspace label, block order, glyphs | `herdr/layout.rs`, `relayout`, `layout::repair` | The label moves to `meta.label`, and `agents::labels` makes it (from `worker_label` and `orchestrator_label`). Order is not stored: the switcher and the board sort by project, then role, then start time. `rename_workspace`, `move_workspace` and `repair` go away |
 | Row tokens re-reported after a herdr restart (R18) | `reconcile/pass.rs:271-273` | Goes away. `meta` lives in the holder and survives a daemon restart and a live upgrade |
 | Snapshot for reconcile | `reconcile/pass.rs:161`, `recovery/evidence.rs:30-48`, `ladder.rs` | `list`. The pane's `key` replaces `tokens["session"]`, and `state`/`exit` replace `agent` and `agent_status` |
@@ -468,7 +468,7 @@ What the handover loses: nothing in the PTYs, the children or the metadata. The 
 
 ### 6.3 A machine reboot
 
-Every pane, every child and the holder are gone. The holder starts at boot (systemd user with lingering) or at login (launchd), with a new `instance` and no panes. R04 runs as it does today, with one change: step (1) "recreate the herdr layout" goes away, because there is no layout. The orchestrators come back first, then each worker in its own worktree, with `claude --resume`.
+Every pane, every child and the holder are gone. The holder starts at boot (systemd user with lingering) or at login (launchd), with a new `instance` and no panes. R04 runs as it does today, with one change: step (1) "recreate the herdr layout" goes away, because there is no layout. The orchestrators come back first, then each worker in its own worktree, with `claude --resume` and the flags of its first launch.
 
 ### 6.4 The holder is lost (new row R21)
 

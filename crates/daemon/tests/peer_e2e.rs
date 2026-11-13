@@ -949,7 +949,8 @@ const WORKING: &str = include_str!("../../panes/tests/fixtures/claude/working.an
 /// ([`WORKING`] to start), the
 /// `after-keys` screen a typed digit leaves (marked by `typed`), and
 /// `orchestrator-gone`, which
-/// makes the orchestrator's pane gone. Returns the builder's session and
+/// makes the orchestrator's pane gone, and `no-agent`, which leaves the
+/// builder's pane with no Claude in it. Returns the builder's session and
 /// the log.
 fn peer_builder(world: &mut World) -> (String, PathBuf) {
     let session = world.peer.worker("w2:p1");
@@ -968,6 +969,10 @@ show() {{ while IFS= read -r line || [ -n "$line" ]; do printf '%s\n' "$line"; d
 echo "$*" >> '{lab}/herdr.log'
 case "$*" in
 "pane get w2:p1"*)
+  if [ -e '{lab}/no-agent' ]; then
+    echo '{{"result":{{"pane":{{"pane_id":"w2:p1","workspace_id":"w2","agent_status":"unknown","tokens":{{"session":"{session}"}}}}}}}}'
+    exit 0
+  fi
   read -r status < '{lab}/status'
   printf '{{"result":{{"pane":{{"pane_id":"w2:p1","workspace_id":"w2","agent":"claude","agent_status":"%s","tokens":{{"session":"{session}"}}}}}}}}\n' "$status" ;;
 "pane get w1:p1"*)
@@ -1172,6 +1177,166 @@ fn board_interrupts_answers_steers_and_stops_a_peer_agent() {
     let written = written_since(&world.board, host_seq);
     assert!(written.is_empty(), "the board host wrote {written:?}");
     assert_eq!(count(&world.board, "SELECT count(*) FROM outbox"), 0);
+}
+
+/// The words of a launch script's command line up to the value of its last
+/// flag, `--effort`, and what follows it.
+fn launch_words(script: &str) -> (&str, &str) {
+    let argv = script.rsplit_once("\\\n  ").unwrap().1.trim_end();
+    let at = argv.find(" '--effort' '").unwrap() + " '--effort' '".len();
+    let end = at + argv[at..].find('\'').unwrap() + 1;
+    argv.split_at(end)
+}
+
+/// A resume the board host forwards to the peer is the peer's own `tiller
+/// agent resume`, through the one launch builder (`recovery.md` section 2,
+/// step 2): with the run's launch files gone it is refused and nothing is
+/// typed; with them it types the peer's `resume-<session>.sh`, whose command
+/// line repeats every flag of the first launch with `--resume <id>`.
+#[test]
+fn board_resumes_a_peer_agent_with_its_first_launch_flags() {
+    use tiller_agents::spawn::{launch, memory::Memory, trust::ClaudeConfig};
+
+    let mut world = World::start();
+    let (session, log) = peer_builder(&mut world);
+    let lab = log.parent().unwrap().to_owned();
+    let worktree = lab.join("worktree");
+    let scratch_root = lab.join("scratch");
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::create_dir_all(&scratch_root).unwrap();
+    std::fs::write(
+        world.peer.dir.path().join("config.toml"),
+        format!(
+            "[spawn]\nscratch_root = {:?}\n",
+            scratch_root.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    let peer = world.peer.open();
+    peer.conn()
+        .execute(
+            "UPDATE runs SET worktree_path = ?1",
+            [worktree.to_str().unwrap()],
+        )
+        .unwrap();
+    let (run, claude_id): (String, String) = peer
+        .conn()
+        .query_row(
+            "SELECT run_id, claude_session_id FROM sessions WHERE id = ?1",
+            [&session],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    // Claude is gone from the builder's own pane.
+    std::fs::write(lab.join("no-agent"), "").unwrap();
+    world.live();
+    let resume = |key: &str| {
+        world.post(
+            &format!("/api/v1/agents/{session}/resume"),
+            &json!({"idempotency_key": key, "host": LABEL}),
+        )
+    };
+    let typed = || {
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|call| call.starts_with("pane send-text w2:p1"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+
+    // No launch files: the peer's builder refuses, and nothing is rebuilt.
+    let (status, body) = resume("resume-1");
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"]["host"], LABEL, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("is missing, so the run's launch cannot be repeated"),
+        "{body}"
+    );
+    assert!(typed().is_empty(), "{:?}", typed());
+    assert!(!scratch_root.join(&run).exists());
+
+    // The run's first launch, as its spawn wrote it on the peer.
+    let scratch = scratch_root.join(&run);
+    let first = launch::write(&launch::LaunchSpec {
+        role: tiller_agents::roles::Role::Builder,
+        session_id: &session,
+        run_id: &run,
+        worktree: &worktree,
+        scratch: &scratch,
+        tiller_home: world.peer.dir.path(),
+        model: "test-model",
+        effort: tiller_core::domain::Effort::Medium,
+        brief: Some("make the tests pass"),
+        roots: None,
+        tiller: &tiller(),
+        default_branch: "main",
+        network_allow: &[],
+        review_hosts: &[],
+        no_mistakes_socket: None,
+        gh_login_readable: false,
+        claude: "claude",
+        claude_config: &ClaudeConfig::at(lab.join("claude")),
+        claude_version: None,
+        memory: &Memory::default(),
+        note: None,
+    })
+    .unwrap();
+    let first = std::fs::read_to_string(&first.script).unwrap();
+
+    // The bind the resumed Claude's SessionStart hook writes.
+    let started = {
+        let store = world.peer.open();
+        let (log, session) = (log.clone(), session.clone());
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + WAIT;
+            while Instant::now() < deadline {
+                let calls = std::fs::read_to_string(&log).unwrap_or_default();
+                if calls
+                    .lines()
+                    .any(|call| call.starts_with("pane send-text w2:p1"))
+                {
+                    store
+                        .conn()
+                        .execute(
+                            "INSERT INTO observations (id, session_id, source, event, observed_at, recorded_at, payload)
+                             VALUES ('01M7AEQD3P56M1JB0XWF6BRSS0', ?1, 'hook', 'SessionStart:resume', ?2, ?2, '{}')",
+                            rusqlite::params![session, Timestamp::now().to_string()],
+                        )
+                        .unwrap();
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        })
+    };
+    let (status, body) = resume("resume-2");
+    started.join().unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["host"], LABEL);
+    let script = scratch.join(format!("resume-{session}.sh"));
+    assert_eq!(
+        typed(),
+        [format!("pane send-text w2:p1 sh '{}'", script.display())],
+        "the peer typed its resume script"
+    );
+    let resumed = std::fs::read_to_string(&script).unwrap();
+    let (flags, rest) = launch_words(&resumed);
+    assert_eq!(flags, launch_words(&first).0, "{resumed}");
+    assert_eq!(rest, format!(" '--resume' '{claude_id}'"), "{resumed}");
+    for flag in [
+        "--append-system-prompt-file",
+        "--settings",
+        "--permission-mode",
+        "--strict-mcp-config",
+        "--mcp-config",
+        "--model",
+    ] {
+        assert!(flags.contains(&format!(" '{flag}' ")), "{flag}: {resumed}");
+    }
 }
 
 /// The owner pauses, unpauses, resumes and relaunches a run on the peer

@@ -114,8 +114,9 @@ impl Drop for Held {
 /// their `recv` blocks.
 struct Pumped {
     updates: mpsc::Receiver<Result<Option<Update>, PanesError>>,
-    /// The pane's size from the watch's `resized` events.
-    sizes: watch::Receiver<Option<(u16, u16)>>,
+    /// The pane's size from the watch's `resized` events, and why the
+    /// watch ended.
+    sizes: watch::Receiver<Sizes>,
     handle: StreamHandle,
     events: EventsEnd,
 }
@@ -127,21 +128,29 @@ impl Pumped {
     /// is an error: the view opens `unavailable` and the board opens it
     /// again.
     fn open(holder: &dyn Holder, pane: &PaneId) -> Result<Self, String> {
-        let (sized, sizes) = watch::channel(None);
+        let (sized, sizes) = watch::channel(Sizes::default());
         let mut watching = holder.watch().map_err(|error| error.to_string())?;
         let events = watching.ender();
         let ours = pane.clone();
         let watcher = std::thread::Builder::new()
             .name("tiller-holder-watch".into())
             .spawn(move || {
-                while let Ok(Some(event)) = watching.recv() {
-                    if let Event::Resized { pane, cols, rows } = event
-                        && pane == ours
-                        && sized.send(Some((cols, rows))).is_err()
-                    {
-                        return;
+                // The watch and the subscription fail together when the
+                // holder goes down: each keeps the holder's reason, so the
+                // view says the same whichever it reads first.
+                let ended = loop {
+                    match watching.recv() {
+                        Ok(Some(Event::Resized { pane, cols, rows })) if pane == ours => {
+                            if sized.send(Sizes::of(cols, rows)).is_err() {
+                                return;
+                            }
+                        }
+                        Ok(Some(_)) => {}
+                        Ok(None) => break WATCH_ENDED.to_owned(),
+                        Err(error) => break error.to_string(),
                     }
-                }
+                };
+                sized.send_modify(|sizes| sizes.ended = Some(ended));
             });
         if let Err(error) = watcher {
             events.end();
@@ -273,15 +282,40 @@ async fn refitted(held: &mut Option<Held>) -> (u16, u16) {
     std::future::pending().await
 }
 
-/// The next size a `resized` event gave; `None` once the watch has ended,
-/// after which no size would reach the board again.
-async fn watched(sizes: &mut watch::Receiver<Option<(u16, u16)>>) -> Option<(u16, u16)> {
+/// Why a view's watch ended, when the holder gave no error.
+const WATCH_ENDED: &str = "the terminal holder ended the view's watch";
+
+/// What a view's watch has seen.
+#[derive(Clone, Debug, Default)]
+struct Sizes {
+    /// The size the last `resized` event gave.
+    size: Option<(u16, u16)>,
+    /// Why the watch ended, once it has.
+    ended: Option<String>,
+}
+
+impl Sizes {
+    fn of(cols: u16, rows: u16) -> Self {
+        Self {
+            size: Some((cols, rows)),
+            ended: None,
+        }
+    }
+}
+
+/// The next size a `resized` event gave, or why the watch ended, after
+/// which no size would reach the board again.
+async fn watched(sizes: &mut watch::Receiver<Sizes>) -> Result<(u16, u16), String> {
     loop {
         if sizes.changed().await.is_err() {
-            return None;
+            return Err(WATCH_ENDED.to_owned());
         }
-        if let Some(size) = *sizes.borrow_and_update() {
-            return Some(size);
+        let seen = sizes.borrow_and_update();
+        if let Some(why) = &seen.ended {
+            return Err(why.clone());
+        }
+        if let Some(size) = seen.size {
+            return Ok(size);
         }
     }
 }
@@ -291,9 +325,8 @@ enum Woke {
     Update(Option<Result<Option<Update>, PanesError>>),
     /// The board asked the Fit for a new size.
     Refit((u16, u16)),
-    /// Another client's lease set the PTY's size, or `None` when the
-    /// watch ended.
-    Watched(Option<(u16, u16)>),
+    /// Another client's lease set the PTY's size, or why the watch ended.
+    Watched(Result<(u16, u16), String>),
 }
 
 /// Streams `pane` to `tx` until the browser leaves, the child exits, the
@@ -343,10 +376,8 @@ async fn view(
                     fit_to(&view.handle, pane, size).await;
                     continue;
                 }
-                Woke::Watched(None) => {
-                    return unavailable(tx, "the terminal holder ended the view's watch");
-                }
-                Woke::Watched(Some(size)) => {
+                Woke::Watched(Err(why)) => return unavailable(tx, &why),
+                Woke::Watched(Ok(size)) => {
                     if !resize(tx, &mut stop, &mut shown, size).await {
                         return;
                     }

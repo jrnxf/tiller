@@ -105,8 +105,8 @@ pub struct Tools {
     claude: ClaudeConfig,
 }
 
-/// `~/.local/state/tiller`, where the scratch and orchestrator roots
-/// default to; `key` is the setting that would make it unnecessary.
+/// `~/.local/state/tiller`, where the orchestrator root defaults to; `key`
+/// is the setting that would make it unnecessary.
 fn state_dir(key: &str) -> Result<PathBuf, Failure> {
     std::env::var_os("HOME")
         .map(|home| PathBuf::from(home).join(".local/state/tiller"))
@@ -181,10 +181,7 @@ impl Tools {
     pub fn load(app: &App) -> Result<Self, Failure> {
         let config = SpawnConfig::from_table(&load_config(app)?).map_err(failure)?;
         let herdr = resolve_herdr(&config.spawn);
-        let scratch = match &config.spawn.scratch_root {
-            Some(root) => root.clone(),
-            None => state_dir("spawn.scratch_root")?.join("runs"),
-        };
+        let scratch = config.spawn.scratch_dir().map_err(failure)?;
         let tiller_home = absolute_home(&app.home)?;
         // A home whose holder has made its socket launches new agents
         // there; agents already in herdr stay in herdr.

@@ -47,8 +47,9 @@ use tiller_herdr::submit::{self, Pacing, Submit};
 use tiller_observe::tailer;
 use tiller_reconcile::recovery::sessions::{LAUNCH_BIND_SOURCE, MANUAL_RESUME_REASON};
 
-use crate::spawn::launch::{self, AgainSpec, LaunchSpec, Start};
+use crate::spawn::launch::{self, LaunchSpec, Start};
 use crate::spawn::memory;
+use crate::spawn::resume;
 use crate::spawn::{
     Cleaned, Result, SpawnError, World, cleanup, delivery_line, dispatch, local_host, project_of,
     quota_floor, relayout, require_local, role_of, scan_and_record,
@@ -360,20 +361,12 @@ pub fn resume(
     {
         return Err(SpawnError::Refused(format!("{why}; nothing was launched")));
     }
-    let launched = launch::write_again(
-        &AgainSpec {
-            role: role_of(run.role)?,
-            session_id: &session.id,
-            run_id: &run.id,
-            worktree: &worktree,
-            scratch: &world.scratch_root.join(&run.id),
-            tiller_home: world.tiller_home,
-            model: &run.model,
-            effort: run.effort,
-            claude: &world.config.spawn.claude,
-            claude_config: world.claude_config,
-            review_hosts: &world.config.spawn.review_allowed_hosts,
-        },
+    // The daemon's resumes write their script the same way.
+    let launched = resume::write(
+        store.conn(),
+        &world.resume_host(),
+        &session,
+        &worktree,
         Start::Resume {
             claude_session_id: &claude_id,
         },
