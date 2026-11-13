@@ -253,12 +253,7 @@ fn serve_start_check(
 
 // -- add, on the board host ------------------------------------------------
 
-fn add(
-    app: &App,
-    label: &str,
-    alias: &str,
-    scope: PeerScope,
-) -> Done {
+fn add(app: &App, label: &str, alias: &str, scope: PeerScope) -> Done {
     check_label(label)?;
     check_alias(alias)?;
     let mut store = app.write()?;

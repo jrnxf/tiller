@@ -11,8 +11,8 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use serde_json::json;
-use tiller_core::domain::{Activity, ObservationSource, Session};
 use tiller_core::domain::PaneState;
+use tiller_core::domain::{Activity, ObservationSource, Session};
 use tiller_core::state::caches::{PaneHolder, PaneReading};
 use tiller_core::state::get;
 use tiller_core::state::runs::NewObservation;

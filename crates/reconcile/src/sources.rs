@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use tiller_core::domain::{Project, Run, Session};
 use tiller_core::state::approvals::PrFetch;
 use tiller_herdr::client::{Herdr, PaneInfo};
-use tiller_panes::{Meta, PaneId, Panes, PanesError, Spawn};
 pub use tiller_observe::liveness::Probe;
+use tiller_panes::{Meta, PaneId, Panes, PanesError, Spawn};
 
 /// Step 3 of the liveness ladder: is the agent process in a pane alive?
 pub trait AgentProbe: Send {
@@ -311,7 +311,10 @@ impl HolderLauncher {
             ("session".to_owned(), session.id.clone()),
             ("project".to_owned(), session.project_id.clone()),
             ("role".to_owned(), session.role.as_str().to_owned()),
-            ("label".to_owned(), format!("{} resuming", session.project_id)),
+            (
+                "label".to_owned(),
+                format!("{} resuming", session.project_id),
+            ),
         ]);
         if let Some(run) = &session.run_id {
             meta.insert("run".to_owned(), run.clone());

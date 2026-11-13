@@ -22,6 +22,7 @@ use tiller_herdr::layout;
 use tiller_panes::message::Listing;
 
 use crate::holder::Link;
+use crate::recovery::sessions::Restore;
 use crate::sources::{AgentProbe, Forge, Harness, Launcher, Readings, Scanner, WorktreeScan};
 use crate::thresholds::Thresholds;
 
@@ -680,14 +681,33 @@ impl Reconciler {
         )
     }
 
-    /// Whether the reboot restore is still open: a known boot id that
-    /// `meta.boot_id` does not match yet (R04).
-    pub(crate) fn restore_pending(&self) -> Result<bool> {
-        let Some(current) = &self.config.boot_id else {
-            return Ok(false);
+    /// The restore still open, if any: a known boot id that
+    /// `meta.boot_id` does not match yet (R04), else a holder `list` of
+    /// another instance than `meta.holder_instance` (R21). A reboot covers
+    /// a lost holder too and writes the new instance with the boot id.
+    pub(crate) fn open_restore(&self) -> Result<Option<Restore>> {
+        if let Some(current) = &self.config.boot_id {
+            let recorded = tiller_core::state::projects::meta(self.conn(), "boot_id")?;
+            if recorded.is_some_and(|recorded| recorded != *current) {
+                return Ok(Some(Restore::Reboot {
+                    boot_id: current.clone(),
+                }));
+            }
+        }
+        let Some(listing) = &self.listing else {
+            return Ok(None);
         };
-        let recorded = tiller_core::state::projects::meta(self.conn(), "boot_id")?;
-        Ok(recorded.is_some_and(|recorded| recorded != *current))
+        let known = tiller_core::state::projects::meta(self.conn(), "holder_instance")?;
+        Ok(known
+            .filter(|known| *known != listing.instance)
+            .map(|_| Restore::HolderLost {
+                instance: listing.instance.clone(),
+            }))
+    }
+
+    /// Whether a restore (R04 or R21) owns the live sessions this pass.
+    pub(crate) fn restore_pending(&self) -> Result<bool> {
+        Ok(self.open_restore()?.is_some())
     }
 
     /// The bounded pane tail a note carries (P22): the last 40 visible lines.

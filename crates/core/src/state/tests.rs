@@ -1068,11 +1068,17 @@ fn holder_record_tells_a_lost_holder_from_an_upgrade_and_a_reboot() {
     let count = |store: &Store, kind: &str| -> i64 {
         store
             .conn()
-            .query_row("SELECT count(*) FROM events WHERE kind = ?1", [kind], |row| row.get(0))
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind = ?1",
+                [kind],
+                |row| row.get(0),
+            )
             .unwrap()
     };
 
-    let first = store.holder_record(&daemon(), &seen("i-1", "0.1.0", "boot-1", None)).unwrap();
+    let first = store
+        .holder_record(&daemon(), &seen("i-1", "0.1.0", "boot-1", None))
+        .unwrap();
     assert_eq!(first.value, HolderRecord::First);
     assert_eq!(recorded(&store).as_deref(), Some("i-1"));
 
@@ -1085,35 +1091,74 @@ fn holder_record_tells_a_lost_holder_from_an_upgrade_and_a_reboot() {
     let upgraded = store
         .holder_record(&daemon(), &seen("i-1", "0.2.0", "boot-1", Some("0.1.0")))
         .unwrap();
-    assert_eq!(upgraded.value, HolderRecord::Upgraded { from: "0.1.0".into() });
+    assert_eq!(
+        upgraded.value,
+        HolderRecord::Upgraded {
+            from: "0.1.0".into()
+        }
+    );
     let payload: String = store
         .conn()
-        .query_row("SELECT payload FROM events WHERE kind = 'holder.upgraded'", [], |row| row.get(0))
+        .query_row(
+            "SELECT payload FROM events WHERE kind = 'holder.upgraded'",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
     assert_eq!(payload["from"], "0.1.0");
     assert_eq!(payload["to"], "0.2.0");
 
-    let lost = store.holder_record(&daemon(), &seen("i-2", "0.2.0", "boot-1", None)).unwrap();
-    assert_eq!(lost.value, HolderRecord::Lost { previous: "i-1".into() });
+    let lost = store
+        .holder_record(&daemon(), &seen("i-2", "0.2.0", "boot-1", None))
+        .unwrap();
+    assert_eq!(
+        lost.value,
+        HolderRecord::Lost {
+            previous: "i-1".into()
+        }
+    );
     assert!(lost.events.is_empty());
-    assert_eq!(recorded(&store).as_deref(), Some("i-1"), "the restore writes it last");
+    assert_eq!(
+        recorded(&store).as_deref(),
+        Some("i-1"),
+        "the restore writes it last"
+    );
     store.holder_restored(&daemon(), "i-2").unwrap();
     store.holder_restored(&daemon(), "i-2").unwrap();
     assert_eq!(recorded(&store).as_deref(), Some("i-2"));
-    assert_eq!(count(&store, "holder.lost"), 1, "one event per lost instance");
+    assert_eq!(
+        count(&store, "holder.lost"),
+        1,
+        "one event per lost instance"
+    );
     let payload: String = store
         .conn()
-        .query_row("SELECT payload FROM events WHERE kind = 'holder.lost'", [], |row| row.get(0))
+        .query_row(
+            "SELECT payload FROM events WHERE kind = 'holder.lost'",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
     assert_eq!(payload["previous"], "i-1");
     assert_eq!(payload["instance"], "i-2");
 
-    let rebooted = store.holder_record(&daemon(), &seen("i-3", "0.2.0", "boot-2", None)).unwrap();
-    assert_eq!(rebooted.value, HolderRecord::Rebooted { previous: "i-2".into() });
+    let rebooted = store
+        .holder_record(&daemon(), &seen("i-3", "0.2.0", "boot-2", None))
+        .unwrap();
+    assert_eq!(
+        rebooted.value,
+        HolderRecord::Rebooted {
+            previous: "i-2".into()
+        }
+    );
     assert_eq!(recorded(&store).as_deref(), Some("i-3"));
-    assert_eq!(count(&store, "holder.lost"), 1, "a reboot is not a lost holder");
+    assert_eq!(
+        count(&store, "holder.lost"),
+        1,
+        "a reboot is not a lost holder"
+    );
 }
 
 /// The reboot restore writes the boot id and the holder instance in one
@@ -1121,7 +1166,9 @@ fn holder_record_tells_a_lost_holder_from_an_upgrade_and_a_reboot() {
 #[test]
 fn the_reboot_restore_writes_the_boot_id_with_the_holder_instance() {
     let (mut store, _) = memory_store();
-    store.daemon_boot_id(&daemon(), "boot-2", Some("i-9")).unwrap();
+    store
+        .daemon_boot_id(&daemon(), "boot-2", Some("i-9"))
+        .unwrap();
     let meta = |key: &str| super::projects::meta(store.conn(), key).unwrap();
     assert_eq!(meta("boot_id").as_deref(), Some("boot-2"));
     assert_eq!(meta("holder_instance").as_deref(), Some("i-9"));

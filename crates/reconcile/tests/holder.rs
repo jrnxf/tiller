@@ -16,8 +16,8 @@ use tiller_core::state::get;
 use tiller_core::state::runs::NewObservation;
 use tiller_core::{Actor, Ctx};
 use tiller_herdr::testing::at;
-use tiller_panes::message::{Event, PaneId};
 use tiller_panes::Panes as _;
+use tiller_panes::message::{Event, PaneId};
 use tiller_poll::{Poller, Registry};
 use tiller_reconcile::holder::{HOLDER_DOWN, HolderSource, Memory, UPGRADE_CHECK};
 
@@ -53,7 +53,11 @@ fn poller(w: &World, link: &FakeLink, stable: Option<PathBuf>) -> Poller<HolderS
 fn received(poller: &Poller<HolderSource>, n: u64) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while poller.source().received() < n {
-        assert!(Instant::now() < deadline, "the watch passed on {} of {n} events", poller.source().received());
+        assert!(
+            Instant::now() < deadline,
+            "the watch passed on {} of {n} events",
+            poller.source().received()
+        );
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -159,7 +163,10 @@ fn unreachable_holder_marks_panes_unknown_not_gone() {
     link.set_down(true);
     for n in 1..=3 {
         poller.poll_once(at(n * 40));
-        assert_eq!(poller.health().consecutive_failures, u32::try_from(n).unwrap());
+        assert_eq!(
+            poller.health().consecutive_failures,
+            u32::try_from(n).unwrap()
+        );
     }
     assert!(!poller.source().connected());
     assert_eq!(stale_reason(&w).as_deref(), Some(HOLDER_DOWN));
@@ -223,7 +230,10 @@ fn a_refused_upgrade_is_a_health_warning() {
         poller.poll_once(at(n));
     }
     assert_eq!(link.upgrades().len(), 1, "asked once per start");
-    assert!(w.store().host_degraded(UPGRADE_CHECK).unwrap().is_some(), "the warning stays");
+    assert!(
+        w.store().host_degraded(UPGRADE_CHECK).unwrap().is_some(),
+        "the warning stays"
+    );
 
     link.refuse_upgrades(None);
     w.store_mut()
@@ -287,7 +297,10 @@ fn a_list_fills_the_panes_cache_and_runs_every_thirty_seconds() {
         .unwrap();
     assert_eq!(instance, link.instance());
     assert_eq!(bound, session);
-    assert_eq!(pid, i64::from(link.panes().get(&pane).unwrap().unwrap().pid));
+    assert_eq!(
+        pid,
+        i64::from(link.panes().get(&pane).unwrap().unwrap().pid)
+    );
     assert_eq!(label, "alpha resuming");
     assert_eq!(state, "running");
 
@@ -317,7 +330,10 @@ fn an_exit_is_recorded_once_with_its_code() {
     received(&poller, before + 1);
     poller.poll_once(at(2));
     poller.poll_once(at(4));
-    assert_eq!(holder_events(&w, &session), ["holder:working", "holder:exited"]);
+    assert_eq!(
+        holder_events(&w, &session),
+        ["holder:working", "holder:exited"]
+    );
     assert_eq!(activity(&w, &session), Activity::Ended);
     let payload: String = w
         .store()
@@ -409,7 +425,12 @@ fn a_quiet_screen_is_classified() {
     }
     assert_eq!(
         holder_events(&w, &session),
-        ["holder:working", "holder:blocked", "holder:idle", "holder:working"],
+        [
+            "holder:working",
+            "holder:blocked",
+            "holder:idle",
+            "holder:working"
+        ],
         "a draft says nothing, and an unchanged idle is not sent again"
     );
     assert_eq!(activity(&w, &session), Activity::Working);
@@ -465,7 +486,11 @@ fn a_held_holder_idle_lands_once_the_hold_ends() {
         assert_eq!(activity(&w, &worker), Activity::Working, "held at {n} s");
     }
     poller.poll_once(at(32));
-    assert_eq!(activity(&w, &worker), Activity::Idle, "the hold ended at 31 s");
+    assert_eq!(
+        activity(&w, &worker),
+        Activity::Idle,
+        "the hold ended at 31 s"
+    );
     for n in [40, 120, 600] {
         poller.poll_once(at(n));
     }

@@ -379,7 +379,13 @@ impl HolderSource {
                     if self.gone.contains(&key) {
                         continue;
                     }
-                    self.record(ctx, binding, "pane_gone".into(), Some(Activity::Ended), json!({}))?;
+                    self.record(
+                        ctx,
+                        binding,
+                        "pane_gone".into(),
+                        Some(Activity::Ended),
+                        json!({}),
+                    )?;
                     self.forget(key);
                 }
                 Some(pane) if pane.state == tiller_panes::message::PaneState::Exited => {
@@ -542,7 +548,9 @@ impl Source for HolderSource {
                         }
                         relist = true;
                     }
-                    Event::ModelReset { pane } => marks.push((pane, "holder:model_reset", json!({}))),
+                    Event::ModelReset { pane } => {
+                        marks.push((pane, "holder:model_reset", json!({})))
+                    }
                     Event::Notify { pane, title, body } => {
                         marks.push((pane, "holder:notify", json!({"title": title, "body": body})));
                     }

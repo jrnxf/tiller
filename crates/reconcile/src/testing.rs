@@ -22,8 +22,12 @@ use tiller_herdr::client::PaneInfo;
 use tiller_herdr::fake::{FakeHerdr, Screen};
 pub use tiller_herdr::testing::{Fleet, owner};
 use tiller_panes::handshake::Welcome;
-use tiller_panes::message::{Exit, Format, Listing, Meta, Pane, PaneId, Read, Screen as PaneScreen, Signal, Spawn};
-use tiller_panes::{Events, FakePanes, Key, Live, Panes, PanesError, Subscribe, Subscription, Upgrade};
+use tiller_panes::message::{
+    Exit, Format, Listing, Meta, Pane, PaneId, Read, Screen as PaneScreen, Signal, Spawn,
+};
+use tiller_panes::{
+    Events, FakePanes, Key, Live, Panes, PanesError, Subscribe, Subscription, Upgrade,
+};
 
 use tiller_reconcile::holder::Link;
 use tiller_reconcile::pass::{Config, Reconciler, Sources};
@@ -99,6 +103,7 @@ struct LinkWorld {
     refuse: Option<String>,
     upgrades: Vec<PathBuf>,
     welcomes: usize,
+    started_at: Option<Timestamp>,
 }
 
 /// The daemon's link to a fake terminal holder: a [`FakePanes`] that can go
@@ -123,6 +128,7 @@ impl FakeLink {
                 next_version: "0.2.0".into(),
                 boot_id: "boot-1".into(),
                 binary: Some(PathBuf::from("/home/user/old/tiller")),
+                started_at: Some(now().plus_minutes(-24 * 60)),
                 ..LinkWorld::default()
             })),
         }
@@ -156,6 +162,7 @@ impl FakeLink {
         world.panes.set_unreachable(true);
         world.panes = FakePanes::new();
         world.down = false;
+        world.started_at = Some(now());
         world.panes.clone()
     }
 
@@ -193,7 +200,12 @@ impl Panes for FakeLink {
         self.panes().get(pane)
     }
 
-    fn screen(&self, pane: &PaneId, read: Read, format: Format) -> tiller_panes::Result<PaneScreen> {
+    fn screen(
+        &self,
+        pane: &PaneId,
+        read: Read,
+        format: Format,
+    ) -> tiller_panes::Result<PaneScreen> {
         self.panes().screen(pane, read, format)
     }
 
@@ -252,7 +264,7 @@ impl Link for FakeLink {
             holder: world.version.clone(),
             instance: world.panes.instance(),
             boot_id: world.boot_id.clone(),
-            started_at: "2026-01-01T00:00:00Z".parse().unwrap(),
+            started_at: world.started_at.unwrap_or_else(now).as_jiff(),
             features: Vec::new(),
         })
     }

@@ -279,7 +279,14 @@ mod tests {
         let s = session(Some("p1"));
         let snap = snapshot(&[("p2", None)]);
         assert_eq!(
-            climb(&s, "working", false, Some(&snap), None, &Fixed(Probe::Alive)),
+            climb(
+                &s,
+                "working",
+                false,
+                Some(&snap),
+                None,
+                &Fixed(Probe::Alive)
+            ),
             Verdict::Dead(Death::PaneGone)
         );
     }
@@ -289,7 +296,14 @@ mod tests {
         let s = session(Some("p1"));
         let snap = snapshot(&[("p1", Some("S9"))]);
         assert_eq!(
-            climb(&s, "working", false, Some(&snap), None, &Fixed(Probe::Alive)),
+            climb(
+                &s,
+                "working",
+                false,
+                Some(&snap),
+                None,
+                &Fixed(Probe::Alive)
+            ),
             Verdict::Dead(Death::PaneGone)
         );
     }
@@ -307,7 +321,14 @@ mod tests {
             Verdict::Dead(Death::AgentDead)
         );
         assert_eq!(
-            climb(&s, "stale", false, Some(&snap), None, &Fixed(Probe::Unknown)),
+            climb(
+                &s,
+                "stale",
+                false,
+                Some(&snap),
+                None,
+                &Fixed(Probe::Unknown)
+            ),
             Verdict::Unknown
         );
         assert_eq!(
@@ -385,7 +406,14 @@ mod tests {
         let s = session(Some(&pane));
         let list = listing(&[(&pane, "S1", HolderPaneState::Running)]);
         assert_eq!(
-            climb(&s, "working", false, None, reading(&list, None), &Fixed(Probe::Dead)),
+            climb(
+                &s,
+                "working",
+                false,
+                None,
+                reading(&list, None),
+                &Fixed(Probe::Dead)
+            ),
             Verdict::Alive,
             "no probe when not stale"
         );
@@ -395,7 +423,14 @@ mod tests {
             (Probe::Unknown, Verdict::Unknown),
         ] {
             assert_eq!(
-                climb(&s, "stale", false, None, reading(&list, None), &Fixed(probe)),
+                climb(
+                    &s,
+                    "stale",
+                    false,
+                    None,
+                    reading(&list, None),
+                    &Fixed(probe)
+                ),
                 verdict,
                 "{probe:?}"
             );
@@ -410,7 +445,14 @@ mod tests {
         let list = listing(&[(&pane, "S1", HolderPaneState::Exited)]);
         for effective in ["working", "stale"] {
             assert_eq!(
-                climb(&s, effective, false, None, reading(&list, Some(1)), &Fixed(Probe::Alive)),
+                climb(
+                    &s,
+                    effective,
+                    false,
+                    None,
+                    reading(&list, Some(1)),
+                    &Fixed(Probe::Alive)
+                ),
                 Verdict::Dead(Death::AgentDead)
             );
         }
@@ -426,23 +468,58 @@ mod tests {
         let empty = listing(&[]);
         for list in [&other, &empty] {
             assert_eq!(
-                climb(&s, "working", false, None, reading(list, Some(7)), &Fixed(Probe::Dead)),
+                climb(
+                    &s,
+                    "working",
+                    false,
+                    None,
+                    reading(list, Some(7)),
+                    &Fixed(Probe::Dead)
+                ),
                 Verdict::Dead(Death::PaneGone)
             );
             assert_eq!(
-                climb(&s, "working", false, None, reading(list, Some(7)), &Fixed(Probe::Alive)),
+                climb(
+                    &s,
+                    "working",
+                    false,
+                    None,
+                    reading(list, Some(7)),
+                    &Fixed(Probe::Alive)
+                ),
                 Verdict::Alive
             );
             assert_eq!(
-                climb(&s, "stale", false, None, reading(list, Some(7)), &Fixed(Probe::Alive)),
+                climb(
+                    &s,
+                    "stale",
+                    false,
+                    None,
+                    reading(list, Some(7)),
+                    &Fixed(Probe::Alive)
+                ),
                 Verdict::Silent
             );
             assert_eq!(
-                climb(&s, "working", false, None, reading(list, Some(7)), &Fixed(Probe::Unknown)),
+                climb(
+                    &s,
+                    "working",
+                    false,
+                    None,
+                    reading(list, Some(7)),
+                    &Fixed(Probe::Unknown)
+                ),
                 Verdict::Unknown
             );
             assert_eq!(
-                climb(&s, "working", false, None, reading(list, None), &Fixed(Probe::Alive)),
+                climb(
+                    &s,
+                    "working",
+                    false,
+                    None,
+                    reading(list, None),
+                    &Fixed(Probe::Alive)
+                ),
                 Verdict::Dead(Death::PaneGone),
                 "no recorded pid"
             );

@@ -251,7 +251,9 @@ fn session_row(store: &Store, session: &Session) -> Result<Value, Failure> {
     };
     let name = match (&run, &card) {
         (Some(run), Some(card)) => Some(herdr_name(&card.display_id, run)),
-        _ => pane.as_ref().and_then(|pane| pane.herdr_agent().map(str::to_owned)),
+        _ => pane
+            .as_ref()
+            .and_then(|pane| pane.herdr_agent().map(str::to_owned)),
     };
     Ok(json!({
         "session_id": session.id,

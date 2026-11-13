@@ -4413,7 +4413,10 @@ pub(crate) fn pane_target(
 async fn local_pane(state: &AppState, session: String) -> Result<(String, String), ApiError> {
     let (session_id, pane, remote) = pane_of(state, session).await?;
     if let Some(label) = remote {
-        return Err(remote_pane(&label, "the terminal mirror shows panes on this machine only"));
+        return Err(remote_pane(
+            &label,
+            "the terminal mirror shows panes on this machine only",
+        ));
     }
     Ok((session_id, pane))
 }
@@ -5195,7 +5198,10 @@ async fn terminal_tail(
     .await?;
     let (session_id, pane, remote) = pane_of(&state, session).await?;
     if let Some(label) = remote {
-        return Err(remote_pane(&label, "the terminal tail reads panes on this machine only"));
+        return Err(remote_pane(
+            &label,
+            "the terminal tail reads panes on this machine only",
+        ));
     }
     if ids::is_holder_pane(&pane) {
         let holder = holder_of(&state)?;
@@ -5677,7 +5683,10 @@ async fn focus(
     not_forwarded(&state, request.host.as_deref(), "a focus").await?;
     let (session_id, pane, remote) = pane_of(&state, session).await?;
     if let Some(label) = remote {
-        return Err(remote_pane(&label, "a focus reaches panes on this machine only"));
+        return Err(remote_pane(
+            &label,
+            "a focus reaches panes on this machine only",
+        ));
     }
     if ids::is_holder_pane(&pane) {
         return focus_held(&state, session_id, pane).await;
@@ -9607,8 +9616,17 @@ esac"#,
             ),
         )
         .await;
-        assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", answer.body);
-        assert!(answer.body.contains("the remote host remote-a"), "{}", answer.body);
+        assert_eq!(
+            answer.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            answer.body
+        );
+        assert!(
+            answer.body.contains("the remote host remote-a"),
+            "{}",
+            answer.body
+        );
         assert_eq!(calls(), "", "no herdr call for a remote pane");
     }
 
@@ -12018,8 +12036,17 @@ esac"#,
             mutation("POST", &tail, json!({}), &[("cookie", &cookie)]),
         )
         .await;
-        assert_eq!(read.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", read.body);
-        assert!(read.body.contains("the remote host remote-a"), "{}", read.body);
+        assert_eq!(
+            read.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            read.body
+        );
+        assert!(
+            read.body.contains("the remote host remote-a"),
+            "{}",
+            read.body
+        );
         assert!(!scratch.path().join("calls").exists());
     }
 

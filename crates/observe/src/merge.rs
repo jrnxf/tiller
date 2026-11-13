@@ -131,7 +131,10 @@ mod tests {
     fn holder_status_maps_to_one_verdict() {
         assert_eq!(holder_verdict("working", None), Some(Activity::Working));
         assert_eq!(holder_verdict("idle", None), Some(Activity::Idle));
-        assert_eq!(holder_verdict("blocked", None), Some(Activity::WaitingInput));
+        assert_eq!(
+            holder_verdict("blocked", None),
+            Some(Activity::WaitingInput)
+        );
         assert_eq!(
             holder_verdict("blocked", Some(Activity::WaitingPermission)),
             Some(Activity::WaitingPermission)

@@ -599,7 +599,6 @@ fn open_current_refuses_an_unmigrated_database() {
     crate::Store::open_current(&path).unwrap();
 }
 
-
 /// Migration 20 on the newest schema before it, with every table's fixture
 /// rows and the saved herdr machine paired: the herdr panes go, the saved
 /// machine column goes, every host and observation stays, the holder's
@@ -609,8 +608,10 @@ fn open_current_refuses_an_unmigrated_database() {
 fn holder_panes_replace_herdr_panes_at_0020() {
     let mut conn = connection();
     to_version(&mut conn, 19).unwrap();
-    conn.execute_batch(&format!("BEGIN; {FIXTURE_V1} {FIXTURE_V4} {PAIR_HOST_B} COMMIT;"))
-        .unwrap();
+    conn.execute_batch(&format!(
+        "BEGIN; {FIXTURE_V1} {FIXTURE_V4} {PAIR_HOST_B} COMMIT;"
+    ))
+    .unwrap();
     conn.execute(
         "INSERT INTO observations (id, session_id, source, event, verdict, observed_at, recorded_at)
          VALUES ('01JC0000000000000000000OB8', '01JC0000000000000000000SW1', 'herdr', 'herdr:idle',
@@ -618,24 +619,49 @@ fn holder_panes_replace_herdr_panes_at_0020() {
         [],
     )
     .unwrap();
-    let count = |conn: &Connection, sql: &str| -> i64 { conn.query_row(sql, [], |row| row.get(0)).unwrap() };
+    let count = |conn: &Connection, sql: &str| -> i64 {
+        conn.query_row(sql, [], |row| row.get(0)).unwrap()
+    };
     let hosts = count(&conn, "SELECT count(*) FROM hosts");
     let observations = count(&conn, "SELECT count(*) FROM observations");
-    let herdr = count(&conn, "SELECT count(*) FROM observations WHERE source = 'herdr'");
+    let herdr = count(
+        &conn,
+        "SELECT count(*) FROM observations WHERE source = 'herdr'",
+    );
     assert!(count(&conn, "SELECT count(*) FROM panes") > 0);
     assert_eq!(herdr, 1);
 
     to_version(&mut conn, 20).unwrap();
-    assert_eq!(count(&conn, "SELECT count(*) FROM panes"), 0, "no herdr pane outlives 20");
+    assert_eq!(
+        count(&conn, "SELECT count(*) FROM panes"),
+        0,
+        "no herdr pane outlives 20"
+    );
     assert_eq!(count(&conn, "SELECT count(*) FROM hosts"), hosts);
     assert_eq!(
-        count(&conn, "SELECT count(*) FROM pragma_table_info('hosts') WHERE name = 'herdr_machine'"),
+        count(
+            &conn,
+            "SELECT count(*) FROM pragma_table_info('hosts') WHERE name = 'herdr_machine'"
+        ),
         0
     );
-    assert_eq!(count(&conn, "SELECT count(*) FROM observations"), observations);
-    assert_eq!(count(&conn, "SELECT count(*) FROM observations WHERE source = 'herdr'"), herdr);
+    assert_eq!(
+        count(&conn, "SELECT count(*) FROM observations"),
+        observations
+    );
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT count(*) FROM observations WHERE source = 'herdr'"
+        ),
+        herdr
+    );
     let schema_version: String = conn
-        .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |row| row.get(0))
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     assert_eq!(schema_version, "20");
 
@@ -674,14 +700,23 @@ fn holder_panes_replace_herdr_panes_at_0020() {
     .unwrap();
 
     let error = to_version(&mut conn, 19).unwrap_err().to_string();
-    assert!(error.contains("1 observations came from the terminal holder"), "{error}");
+    assert!(
+        error.contains("1 observations came from the terminal holder"),
+        "{error}"
+    );
     assert_eq!(current_version(&conn).unwrap(), 20);
 
     conn.execute("DELETE FROM observations WHERE source = 'holder'", [])
         .unwrap();
     to_version(&mut conn, 19).unwrap();
     assert_eq!(count(&conn, "SELECT count(*) FROM hosts"), hosts);
-    assert_eq!(count(&conn, "SELECT count(*) FROM hosts WHERE herdr_machine IS NOT NULL"), 0);
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT count(*) FROM hosts WHERE herdr_machine IS NOT NULL"
+        ),
+        0
+    );
     assert_eq!(count(&conn, "SELECT count(*) FROM panes"), 0);
     assert_eq!(foreign_key_violations(&conn), 0);
 }
@@ -707,7 +742,11 @@ fn an_unpaired_saved_machine_refuses_0020() {
     assert_eq!(current_version(&conn).unwrap(), 19);
     assert_eq!((schema(&conn), row_counts(&conn)), before);
     let machine: Option<String> = conn
-        .query_row("SELECT herdr_machine FROM hosts WHERE label = 'host-b'", [], |row| row.get(0))
+        .query_row(
+            "SELECT herdr_machine FROM hosts WHERE label = 'host-b'",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     assert_eq!(machine.as_deref(), Some("machine-b"));
 }

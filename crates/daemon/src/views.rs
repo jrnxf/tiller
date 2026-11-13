@@ -491,7 +491,9 @@ fn agent_row(store: &Store, session: &Session) -> Result<AgentRow> {
     };
     let herdr_name = match (&run, &card) {
         (Some(run), Some(card)) => Some(herdr_name(&card.display_id, run)),
-        _ => pane.as_ref().and_then(|pane| pane.herdr_agent().map(str::to_owned)),
+        _ => pane
+            .as_ref()
+            .and_then(|pane| pane.herdr_agent().map(str::to_owned)),
     };
     // The model: the run's, else the newest one a hook reported.
     let reported: Option<String> = one(

@@ -1,6 +1,7 @@
 //! Step 4: the ladder for every live session, and what each verdict
 //! triggers: R02 (orchestrator crash), R03 (worker crash), R04 (the reboot
-//! restore) and R12 (worker silent).
+//! restore), R12 (worker silent) and R21 (the restore after a lost
+//! terminal holder).
 
 use std::path::{Path, PathBuf};
 
@@ -8,6 +9,7 @@ use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use tiller_core::domain::{Activity, Card, ObservationSource, Role, Run, Session};
 use tiller_core::state::attention::NewAttention;
+use tiller_core::state::outbox::live_orchestrator;
 use tiller_core::state::runs::{Bind, NewObservation, live_session};
 use tiller_core::state::{find, get, list, projects};
 use tiller_core::{Actor, Result, Timestamp};
@@ -54,10 +56,11 @@ impl Reconciler {
         // Live panes the records lost track of (a restore, an owner flip)
         // are rebound first, so the ladder never reads them as gone.
         self.adopt_panes(now, report)?;
-        if self.restore_pending()? {
-            // The restore owns every live session until the boot id is
-            // written; the ladder would call its dead sessions crashes.
-            self.reboot_restore(now, report)?;
+        if let Some(restore) = self.open_restore()? {
+            // The restore owns every live session until the boot id or the
+            // holder instance is written; the ladder would call its dead
+            // sessions crashes.
+            self.restore(&restore, now, report)?;
             if self.restore_pending()? {
                 return Ok(());
             }
@@ -135,12 +138,14 @@ impl Reconciler {
             return Ok(None);
         };
         let known = projects::meta(self.conn(), "holder_instance")?;
-        Ok((known.as_deref() == Some(listing.instance.as_str())).then_some(
-            ladder::HolderReading {
-                listing,
-                recorded_pid,
-            },
-        ))
+        Ok(
+            (known.as_deref() == Some(listing.instance.as_str())).then_some(
+                ladder::HolderReading {
+                    listing,
+                    recorded_pid,
+                },
+            ),
+        )
     }
 
     /// The ladder's dead verdict as a `liveness` observation (verdict
@@ -794,7 +799,9 @@ impl Reconciler {
             None => format!("reconcile:R02:failed:{}", session.id),
             Some(_) => format!("reconcile:R04:failed:{}", session.id),
         };
-        if self.key_used(&failed_key)? {
+        if self.key_used(&failed_key)?
+            || self.key_used(&format!("reconcile:R21:failed:{}", session.id))?
+        {
             // Left for the owner: the pane stays, the row stays `unknown`.
             return Ok(true);
         }
@@ -938,49 +945,75 @@ impl Reconciler {
         Ok(())
     }
 
-    // ----- R04 -----
+    // ----- R04 and R21 -----
 
-    /// The reboot restore: orchestrators of projects with work in flight,
-    /// then each active run in its own worktree, one launch per ten seconds,
-    /// each step checking that the session is not already alive. The boot
-    /// id is written last, when every session is alive, settled or
-    /// reported, so a daemon that dies mid-restore repeats it safely.
-    pub(crate) fn reboot_restore(&mut self, now: Timestamp, report: &mut Report) -> Result<()> {
-        let Some(snapshot) = self.snapshot.clone() else {
-            return Ok(());
-        };
-        let Some(boot_id) = self.config.boot_id.clone() else {
-            return Ok(());
-        };
+    /// The restore after a reboot (R04) or a lost terminal holder (R21):
+    /// orchestrators of projects with work in flight, then each active run
+    /// in its own worktree, one launch per ten seconds, each step checking
+    /// that the session is not already alive. The boot id, or the holder
+    /// instance, is written last, when every session is alive, settled or
+    /// reported, so a daemon that dies mid-restore repeats it safely. R21
+    /// restores only the sessions of holder panes: the herdr panes did not
+    /// go with the holder.
+    pub(crate) fn restore(
+        &mut self,
+        restore: &Restore,
+        now: Timestamp,
+        report: &mut Report,
+    ) -> Result<()> {
+        let row = restore.row();
+        let reason = restore.reason();
         let started = self.started_at.unwrap_or(now);
+        // What the restore counts from: the daemon's start after a reboot,
+        // the new holder's start after a lost holder, so a daemon that
+        // restarts mid-restore still sees the attempts it made.
+        let since = match restore {
+            Restore::Reboot { .. } => started,
+            Restore::HolderLost { instance } => match self.holder_started(instance) {
+                Some(at) => at,
+                None => return Ok(()),
+            },
+        };
         let mut pending = false;
-        // `(project, line)` for the summary: what was not simply resumed.
+        // `(project, session, line)` for the summary: what was not simply
+        // resumed.
         let mut summary: Vec<(String, String, String)> = Vec::new();
         for session in self.live_sessions()? {
-            // A pane in the terminal holder is restored by the holder's own
-            // path (H10), never relaunched in herdr.
-            if session
+            let probe = if session
                 .pane_id
                 .as_deref()
                 .is_some_and(tiller_core::ids::is_holder_pane)
             {
-                continue;
-            }
-            let probe =
-                ladder::bound_pane(&snapshot, &session).map(|p| self.sources.probe.agent(p));
-            if probe == Some(Probe::Unknown) && !self.hook_seen_after(&session.id, started)? {
+                match self.restore_probe(restore, &session)? {
+                    Some(probe) => probe,
+                    None => {
+                        // No holder list this pass: unknown, never gone.
+                        pending = true;
+                        continue;
+                    }
+                }
+            } else {
+                if matches!(restore, Restore::HolderLost { .. }) {
+                    continue;
+                }
+                let Some(snapshot) = &self.snapshot else {
+                    pending = true;
+                    continue;
+                };
+                ladder::bound_pane(snapshot, &session).map(|p| self.sources.probe.agent(p))
+            };
+            if probe == Some(Probe::Unknown) && !self.hook_seen_after(&session.id, since)? {
                 // Present, unproven: never a second agent on one run.
                 pending = true;
                 continue;
             }
-            let alive =
-                probe == Some(Probe::Alive) || self.hook_seen_after(&session.id, started)?;
+            let alive = probe == Some(Probe::Alive) || self.hook_seen_after(&session.id, since)?;
             if alive {
                 // A session this restore launched that sits at a trust or
                 // permission prompt: nothing is typed, the summary names it.
                 if self.at_prompt(&session)
-                    && !self.hook_seen_after(&session.id, started)?
-                    && !self.attempts(&session.id, started)?.is_empty()
+                    && !self.hook_seen_after(&session.id, since)?
+                    && !self.attempts(&session.id, since)?.is_empty()
                 {
                     summary.push((
                         session.project_id.clone(),
@@ -1001,17 +1034,17 @@ impl Reconciler {
             }
             if run.is_none() && !self.work_in_flight(&session)?.any() {
                 self.store
-                    .session_end(&self.ctx(now), &session.id, "reboot")?;
+                    .session_end(&self.ctx(now), &session.id, reason)?;
                 report.repair(format!(
-                    "R04 {} orchestrator had nothing in flight: session ended",
+                    "{row} {} orchestrator had nothing in flight: session ended",
                     session.project_id
                 ));
                 continue;
             }
             let project = session.project_id.clone();
-            let skipped_key = format!("reconcile:R04:skipped:{}", session.id);
+            let skipped_key = format!("reconcile:{row}:skipped:{}", session.id);
             let floor_key = format!("reconcile:resume:skipped:{}", session.id);
-            let failed_key = format!("reconcile:R04:failed:{}", session.id);
+            let failed_key = format!("reconcile:{row}:failed:{}", session.id);
             if self.key_used(&skipped_key)? {
                 summary.push((project, session.id.clone(), "skipped".into()));
                 continue;
@@ -1028,11 +1061,11 @@ impl Reconciler {
                 ));
                 continue;
             }
-            let attempts = self.attempts(&session.id, started)?;
+            let attempts = self.attempts(&session.id, since)?;
             match attempts.last() {
                 None => match self.restore_target(&session, run.as_ref())? {
                     Ok(cwd) => {
-                        match self.attempt_resume(&session, &cwd, true, "reboot", now, report)? {
+                        match self.attempt_resume(&session, &cwd, true, reason, now, report)? {
                             Launch::Launched | Launch::RateLimited => pending = true,
                             Launch::Skipped => summary.push((
                                 project,
@@ -1042,7 +1075,7 @@ impl Reconciler {
                         }
                     }
                     Err(why) => {
-                        self.restore_skipped(&session, run.as_ref(), &why, now, report)?;
+                        self.restore_skipped(restore, &session, run.as_ref(), &why, now, report)?;
                         summary.push((project, session.id.clone(), format!("skipped: {why}")));
                     }
                 },
@@ -1064,12 +1097,12 @@ impl Reconciler {
                     }
                     if automatic(&attempts) < 2 {
                         if let Ok(cwd) = self.restore_target(&session, run.as_ref())? {
-                            self.attempt_resume(&session, &cwd, false, "reboot", now, report)?;
+                            self.attempt_resume(&session, &cwd, false, reason, now, report)?;
                         }
                         pending = true;
                         continue;
                     }
-                    self.restore_failed(&session, run.as_ref(), now, report)?;
+                    self.restore_failed(restore, &session, run.as_ref(), now, report)?;
                     summary.push((
                         project,
                         session.id.clone(),
@@ -1078,16 +1111,31 @@ impl Reconciler {
                 }
             }
         }
+        // The new instance goes with the boot id (R04 step 5), so a holder
+        // wired here must have listed this pass.
+        let instance = match (&self.sources.holder, &self.listing) {
+            (None, _) => None,
+            (Some(_), Some(listing)) => Some(listing.instance.clone()),
+            (Some(_), None) => {
+                pending = true;
+                None
+            }
+        };
         if pending {
             return Ok(());
         }
-        // Complete: the summary per project, one notification, boot id last.
+        // Complete: the summary per project, one notification, the boot id
+        // or the holder instance last.
         let projects: Vec<String> = {
             let mut stmt = self
                 .conn()
                 .prepare("SELECT id FROM projects WHERE retired_at IS NULL ORDER BY id")?;
             let rows = stmt.query_map([], |row| row.get(0))?;
             rows.collect::<rusqlite::Result<_>>()?
+        };
+        let lost = match restore {
+            Restore::Reboot { .. } => None,
+            Restore::HolderLost { .. } => Some(self.lost_agents(since)?),
         };
         let mut resumed_total = 0;
         let mut workers_total = 0;
@@ -1097,54 +1145,175 @@ impl Reconciler {
                 "ended_at IS NULL AND card_id IN (SELECT id FROM cards WHERE project_id = ?1) ORDER BY started_at",
                 &[&project],
             )?;
-            if runs.is_empty() {
+            let mut lines = Vec::new();
+            if let Some(lost) = &lost {
+                // R21 names only the agents the holder took down.
+                for agent in lost.iter().filter(|a| a.project_id == project) {
+                    let state = match self.restored_as(agent)? {
+                        Some(live) => match summary.iter().find(|(_, id, _)| *id == live) {
+                            Some((_, _, line)) => line.clone(),
+                            None => "resumed".to_owned(),
+                        },
+                        None => "no live session".to_owned(),
+                    };
+                    lines.push(match &agent.run_id {
+                        Some(run) => format!("run {run} ({}): {state}", agent.role.as_str()),
+                        None => format!("orchestrator: {state}"),
+                    });
+                }
+            } else {
+                for run in &runs {
+                    workers_total += 1;
+                    let live = live_session(self.conn(), &run.id)?;
+                    let state = match &live {
+                        Some(s) => match summary
+                            .iter()
+                            .find(|(p, id, _)| *p == project && *id == s.id)
+                        {
+                            Some((_, _, line)) => line.clone(),
+                            None => {
+                                resumed_total += 1;
+                                let resumed =
+                                    self.attempts(&s.id, started)?.last().is_some_and(|a| {
+                                        self.hook_seen_after(&s.id, a.at).unwrap_or(false)
+                                    });
+                                if resumed {
+                                    "resumed".to_owned()
+                                } else {
+                                    "alive through the reboot check".to_owned()
+                                }
+                            }
+                        },
+                        None => "no live session".to_owned(),
+                    };
+                    lines.push(format!(
+                        "run {} ({}): {state}",
+                        run.id,
+                        run.role.short_name()
+                    ));
+                }
+            }
+            if lines.is_empty() {
                 continue;
             }
-            let mut lines = Vec::new();
-            for run in &runs {
-                workers_total += 1;
-                let live = live_session(self.conn(), &run.id)?;
-                let state = match &live {
-                    Some(s) => match summary
-                        .iter()
-                        .find(|(p, id, _)| *p == project && *id == s.id)
-                    {
-                        Some((_, _, line)) => line.clone(),
-                        None => {
-                            let resumed = self.attempts(&s.id, started)?.last().is_some_and(|a| {
-                                self.hook_seen_after(&s.id, a.at).unwrap_or(false)
-                            });
-                            if resumed {
-                                resumed_total += 1;
-                                "resumed".to_owned()
-                            } else {
-                                resumed_total += 1;
-                                "alive through the reboot check".to_owned()
-                            }
-                        }
-                    },
-                    None => "no live session".to_owned(),
-                };
-                lines.push(format!(
-                    "run {} ({}): {state}",
-                    run.id,
-                    run.role.short_name()
-                ));
-            }
-            let key = format!("reconcile:R04:summary:{boot_id}:{project}");
-            let body = format!("host rebooted; restore of {project}:\n{}", lines.join("\n"));
+            let (key, body) = match restore {
+                Restore::Reboot { boot_id } => (
+                    format!("reconcile:R04:summary:{boot_id}:{project}"),
+                    format!("host rebooted; restore of {project}:\n{}", lines.join("\n")),
+                ),
+                Restore::HolderLost { instance } => (
+                    format!("reconcile:R21:summary:{instance}:{project}"),
+                    format!(
+                        "the terminal holder restarted; restore of {project}:\n{}",
+                        lines.join("\n")
+                    ),
+                ),
+            };
             if self.note(now, &project, &key, body, None)? {
-                report.repair(format!("R04 {project}: reboot summary note"));
+                report.repair(format!("{row} {project}: restore summary note"));
             }
         }
         let host: tiller_core::domain::Host = get(self.conn(), "host", &self.config.host_id)?;
-        self.sources.launcher.notify(
-            &format!("{} rebooted", host.label),
-            &format!("{resumed_total} of {workers_total} workers resumed"),
-        );
-        self.store.daemon_boot_id(&self.ctx(now), &boot_id, None)?;
-        report.repair(format!("R04 restore complete: boot id {boot_id} written"));
+        match restore {
+            Restore::Reboot { boot_id } => {
+                self.sources.launcher.notify(
+                    &format!("{} rebooted", host.label),
+                    &format!("{resumed_total} of {workers_total} workers resumed"),
+                );
+                self.store
+                    .daemon_boot_id(&self.ctx(now), boot_id, instance.as_deref())?;
+                report.repair(format!("R04 restore complete: boot id {boot_id} written"));
+            }
+            Restore::HolderLost { instance } => {
+                let lost = lost.unwrap_or_default();
+                let mut resumed = 0;
+                for agent in &lost {
+                    if self
+                        .restored_as(agent)?
+                        .is_some_and(|live| !summary.iter().any(|(_, id, _)| *id == live))
+                    {
+                        resumed += 1;
+                    }
+                }
+                self.sources.launcher.notify(
+                    &format!("the terminal holder on {} restarted", host.label),
+                    &format!("{resumed} of {} agents resumed", lost.len()),
+                );
+                self.store.holder_restored(&self.ctx(now), instance)?;
+                report.repair(format!(
+                    "R21 restore complete: holder instance {instance} written"
+                ));
+            }
+        }
         Ok(())
+    }
+
+    /// Step 2 of the ladder for a holder pane during a restore: `None`
+    /// when this pass has no holder list. A pane of the list whose key
+    /// names the session is alive until it exits. A pane the list lacks is
+    /// dead after a reboot, which killed every process; after a lost
+    /// holder (R21) the recorded pid decides (`kill(pid, 0)`), since a
+    /// child that ignored `SIGHUP` may still run.
+    fn restore_probe(&self, restore: &Restore, session: &Session) -> Result<Option<Option<Probe>>> {
+        let Some(listing) = &self.listing else {
+            return Ok(None);
+        };
+        let listed = listing
+            .panes
+            .iter()
+            .find(|p| session.pane_id.as_deref() == Some(p.pane.as_str()) && p.key == session.id);
+        if let Some(pane) = listed {
+            return Ok(Some(Some(
+                if pane.state == tiller_panes::message::PaneState::Exited {
+                    Probe::Dead
+                } else {
+                    Probe::Alive
+                },
+            )));
+        }
+        Ok(Some(match restore {
+            Restore::Reboot { .. } => None,
+            Restore::HolderLost { .. } => self
+                .recorded_pid(session)?
+                .map(|pid| self.sources.probe.process(pid))
+                .filter(|probe| *probe != Probe::Dead),
+        }))
+    }
+
+    /// When the holder of `instance` started, from its `welcome`: `None`
+    /// when it does not answer or another instance does.
+    fn holder_started(&self, instance: &str) -> Option<Timestamp> {
+        let welcome = self.sources.holder.as_ref()?.welcome().ok()?;
+        (welcome.instance == instance).then(|| Timestamp::from_jiff(welcome.started_at))
+    }
+
+    /// The agents the lost holder ran (R21): the sessions bound to a pane
+    /// of the instance on record, live when the restore began.
+    fn lost_agents(&self, since: Timestamp) -> Result<Vec<Session>> {
+        let previous = projects::meta(self.conn(), "holder_instance")?;
+        list(
+            self.conn(),
+            "id IN (SELECT session_id FROM panes WHERE host_id = ?1 AND holder_instance = ?2)
+               AND (ended_at IS NULL OR ended_at >= ?3)
+             ORDER BY CASE role WHEN 'orchestrator' THEN 0 ELSE 1 END, started_at, id",
+            &[&self.config.host_id, &previous, &since],
+        )
+    }
+
+    /// The live session that carries `agent` on after a restore: the row
+    /// itself, resumed with `--resume`, or the fresh row of its run or of
+    /// its project's orchestrator.
+    fn restored_as(&self, agent: &Session) -> Result<Option<String>> {
+        if agent.ended_at.is_none() {
+            let row: Session = get(self.conn(), "session", &agent.id)?;
+            if row.ended_at.is_none() {
+                return Ok(Some(row.id));
+            }
+        }
+        Ok(match &agent.run_id {
+            Some(run) => live_session(self.conn(), run)?.map(|s| s.id),
+            None => live_orchestrator(self.conn(), &agent.project_id)?.map(|s| s.id),
+        })
     }
 
     /// Where a restored session launches, or why it cannot: a worker needs
@@ -1184,6 +1353,7 @@ impl Reconciler {
 
     fn restore_skipped(
         &mut self,
+        restore: &Restore,
         session: &Session,
         run: Option<&Run>,
         why: &str,
@@ -1210,34 +1380,36 @@ impl Reconciler {
                 format!("the {} orchestrator", session.project_id),
             ),
         };
+        let (row, after) = (restore.row(), restore.after());
         let project = session.project_id.clone();
         self.note(
             now,
             &project,
-            &format!("reconcile:R04:skipped-note:{}", session.id),
-            format!("after the reboot, {label} was not resumed: {why}"),
+            &format!("reconcile:{row}:skipped-note:{}", session.id),
+            format!("after {after}, {label} was not resumed: {why}"),
             run.map(|r| r.card_id.clone()),
         )?;
         if self.recovery(
             now,
-            &format!("reconcile:R04:skipped:{}", session.id),
+            &format!("reconcile:{row}:skipped:{}", session.id),
             NewAttention {
                 card,
                 run_id,
-                question: format!("After the reboot, {label} was not resumed: {why}. Relaunch it by hand, abandon it, or wait?"),
+                question: format!("After {after}, {label} was not resumed: {why}. Relaunch it by hand, abandon it, or wait?"),
                 evidence: Self::json_text(json!({"session_id": session.id})),
                 subject_project_id: Some(session.project_id.clone()),
                 options: Some(json!(["Relaunch", "Abandon", "Wait"])),
                 ..NewAttention::default()
             },
         )? {
-            report.repair(format!("R04 {label} skipped ({why}): recovery item"));
+            report.repair(format!("{row} {label} skipped ({why}): recovery item"));
         }
         Ok(())
     }
 
     fn restore_failed(
         &mut self,
+        restore: &Restore,
         session: &Session,
         run: Option<&Run>,
         now: Timestamp,
@@ -1263,22 +1435,60 @@ impl Reconciler {
                 format!("the {} orchestrator", session.project_id),
             ),
         };
+        let (row, after) = (restore.row(), restore.after());
         if self.recovery(
             now,
-            &format!("reconcile:R04:failed:{}", session.id),
+            &format!("reconcile:{row}:failed:{}", session.id),
             NewAttention {
                 card,
                 run_id,
-                question: format!("After the reboot, {label} was resumed twice and bound no session; its pane is left for you. Relaunch, abandon, or wait?"),
+                question: format!("After {after}, {label} was resumed twice and bound no session; its pane is left for you. Relaunch, abandon, or wait?"),
                 evidence: Self::json_text(json!({"session_id": session.id})),
                 subject_project_id: Some(session.project_id.clone()),
                 options: Some(json!(["Relaunch", "Abandon", "Wait"])),
                 ..NewAttention::default()
             },
         )? {
-            report.repair(format!("R04 {label} resume failed twice: recovery item"));
+            report.repair(format!("{row} {label} resume failed twice: recovery item"));
         }
         Ok(())
+    }
+}
+
+/// The restore that owns the live sessions until its id is written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Restore {
+    /// R04: `meta.boot_id` differs from this boot's id.
+    Reboot { boot_id: String },
+    /// R21: the holder lists another instance than `meta.holder_instance`
+    /// on the same boot.
+    HolderLost { instance: String },
+}
+
+impl Restore {
+    /// The `recovery.md` row: the prefix of every idempotency key.
+    pub fn row(&self) -> &'static str {
+        match self {
+            Self::Reboot { .. } => "R04",
+            Self::HolderLost { .. } => "R21",
+        }
+    }
+
+    /// The resume attempts' `checks.reason`, and the end reason of a
+    /// session with nothing to restore.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::Reboot { .. } => "reboot",
+            Self::HolderLost { .. } => "holder restart",
+        }
+    }
+
+    /// The event in the owner's words: "after the reboot".
+    pub fn after(&self) -> &'static str {
+        match self {
+            Self::Reboot { .. } => "the reboot",
+            Self::HolderLost { .. } => "the holder restart",
+        }
     }
 }
 

@@ -647,11 +647,13 @@ impl Store {
             if recorded == seen.instance {
                 return Ok(match &seen.previous_version {
                     Some(from) if *from != seen.version => {
-                        tx.event(NewEvent::new("host", &host, "holder.upgraded").payload(json!({
-                            "instance": seen.instance,
-                            "from": from,
-                            "to": seen.version,
-                        })))?;
+                        tx.event(
+                            NewEvent::new("host", &host, "holder.upgraded").payload(json!({
+                                "instance": seen.instance,
+                                "from": from,
+                                "to": seen.version,
+                            })),
+                        )?;
                         HolderRecord::Upgraded { from: from.clone() }
                     }
                     _ => HolderRecord::Same,

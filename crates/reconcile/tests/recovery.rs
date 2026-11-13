@@ -17,6 +17,7 @@ use tiller_core::state::outbox::NewMessage;
 use tiller_core::state::projects::{HostEdit, NewProject};
 use tiller_core::state::runs::{NewRun, Relaunch, SpawnChecks};
 use tiller_herdr::fake::Screen;
+use tiller_panes::Panes as _;
 use tiller_reconcile::recovery::approvals::{LANDED_BY_ME, LANDED_NOT_ME, SUPERSEDED};
 use tiller_reconcile::sources::HostReadings;
 
@@ -554,6 +555,161 @@ fn reboot_resumes_workers_in_own_worktrees() {
     // The next pass finds everyone alive and does nothing.
     let quiet = w.pass(t4.plus_minutes(2));
     assert!(quiet.repairs.is_empty(), "{quiet:?}");
+}
+
+/// R21: the terminal holder died and came back as a new instance on the
+/// same boot. Each session whose pane went with it goes through the agent
+/// probe on its recorded pid: the dead ones are resumed in their own
+/// worktrees, one launch per ten seconds, and a child that outlived the
+/// holder is left alone. The new instance is written last, with
+/// `holder.lost`, and the owner hears once.
+#[test]
+fn lost_holder_resumes_sessions_and_notifies_once() {
+    let mut w = World::new();
+    w.place();
+    let link = w.use_holder();
+    let (a, _) = w.holder_worker();
+    let (b, _) = w.holder_worker();
+    let (c, pane_c) = w.holder_worker();
+    w.holder_seen();
+    let t0 = now();
+    w.pass(t0);
+    let old = link.instance();
+    let pid_c = link.panes().get(&pane_c).unwrap().unwrap().pid;
+    assert_eq!(
+        w.count("SELECT count(*) FROM panes WHERE holder_instance IS NOT NULL AND pid IS NOT NULL"),
+        3,
+        "the cache records each pane's pid"
+    );
+
+    // The holder is killed. c's child ignored SIGHUP and still runs.
+    link.restart();
+    w.probe
+        .set_pid(pid_c, tiller_reconcile::sources::Probe::Alive);
+    let new = link.instance();
+    assert_ne!(new, old);
+    let t1 = t0.plus_minutes(10);
+    let report = w.pass(t1);
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(w.launcher.launches().len(), 1, "one launch per ten seconds");
+    assert_eq!(
+        tiller_core::state::projects::meta(w.store().conn(), "holder_instance")
+            .unwrap()
+            .as_deref(),
+        Some(old.as_str()),
+        "the instance is written last"
+    );
+    let t2 = Timestamp::from_millis(t1.as_millis() + 11_000).unwrap();
+    w.pass(t2);
+    let t3 = Timestamp::from_millis(t2.as_millis() + 11_000).unwrap();
+    let report = w.pass(t3);
+    assert!(report.did("R21 restore complete"), "{report:?}");
+
+    let launches = w.launcher.launches();
+    assert_eq!(launches.len(), 2, "{launches:?}");
+    for worker in [&a, &b] {
+        let run = w.run_of(worker);
+        let launch = launches
+            .iter()
+            .find(|l| l.session_id == *worker)
+            .expect("worker launched");
+        assert_eq!(
+            launch.cwd.to_str(),
+            run.worktree_path.as_deref(),
+            "its own worktree"
+        );
+        assert_eq!(
+            launch.resume.as_deref(),
+            Some(format!("claude-{worker}").as_str())
+        );
+        assert!(
+            w.session(worker).pane_id.is_some_and(|pane| link
+                .panes()
+                .get(&pane.into())
+                .unwrap()
+                .is_some()),
+            "bound to a pane of the new holder"
+        );
+    }
+    assert!(
+        launches.iter().all(|l| l.session_id != c),
+        "c outlived the holder"
+    );
+    assert!(
+        launches
+            .iter()
+            .all(|l| l.session_id != w.fleet.orchestrator_session),
+        "a herdr pane did not go with the holder"
+    );
+    for session in [&a, &b, &c] {
+        assert!(w.session(session).ended_at.is_none(), "rows survive");
+        assert!(w.run_of(session).ended_at.is_none());
+    }
+    assert_eq!(
+        tiller_core::state::projects::meta(w.store().conn(), "holder_instance")
+            .unwrap()
+            .as_deref(),
+        Some(new.as_str())
+    );
+    let lost: Vec<serde_json::Value> = w
+        .store()
+        .conn()
+        .prepare("SELECT payload FROM events WHERE kind = 'holder.lost'")
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .map(|p| serde_json::from_str(&p.unwrap()).unwrap())
+        .collect();
+    assert_eq!(lost.len(), 1, "{lost:?}");
+    assert_eq!(lost[0]["previous"], old.as_str());
+    assert_eq!(lost[0]["instance"], new.as_str());
+    let host: tiller_core::domain::Host = get(w.store().conn(), "host", &w.fleet.host).unwrap();
+    assert_eq!(
+        w.launcher.notifications(),
+        [(
+            format!("the terminal holder on {} restarted", host.label),
+            "3 of 3 agents resumed".to_owned()
+        )]
+    );
+    let notes = w.notes();
+    let summary: Vec<_> = notes
+        .iter()
+        .filter(|n| {
+            n.body
+                .contains("the terminal holder restarted; restore of alpha")
+        })
+        .collect();
+    assert_eq!(summary.len(), 1, "{notes:?}");
+    for session in [&a, &b, &c] {
+        assert!(
+            summary[0].body.contains(&w.run_of(session).id),
+            "{}",
+            summary[0].body
+        );
+    }
+    assert!(w.items().is_empty(), "nothing to ask: {:?}", w.items());
+
+    // The resumed sessions bind; each is woken once. The owner hears
+    // nothing more.
+    let t4 = t3.plus_minutes(1);
+    for session in [&a, &b] {
+        w.observe(session, Activity::Idle, t4);
+    }
+    w.pass(t4.plus_minutes(1));
+    let wakes: Vec<_> = w
+        .messages_to(&a)
+        .into_iter()
+        .filter(|m| m.kind == OutboxKind::Wake)
+        .collect();
+    assert_eq!(wakes.len(), 1);
+    assert!(
+        wakes[0].body.contains("resumed after a holder restart"),
+        "{}",
+        wakes[0].body
+    );
+    w.pass(t4.plus_minutes(2));
+    assert_eq!(w.launcher.notifications().len(), 1, "notified once");
+    assert_eq!(w.launcher.launches().len(), 2);
 }
 
 /// R04: a daemon that dies in the middle of the restore repeats it safely:

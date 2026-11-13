@@ -518,9 +518,11 @@ impl Store {
                 "INSERT INTO hosts (id, label, kind) VALUES (?1, ?2, 'remote')",
                 params![id, new.label],
             )?;
-            tx.event(NewEvent::new("host", &id, "host.added").rev(1).payload(
-                json!({"label": new.label, "kind": "remote"}),
-            ))?;
+            tx.event(
+                NewEvent::new("host", &id, "host.added")
+                    .rev(1)
+                    .payload(json!({"label": new.label, "kind": "remote"})),
+            )?;
             get(tx.conn(), "host", &id)
         })
     }
