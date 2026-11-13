@@ -57,12 +57,13 @@ function unconfirmed(host: string): string {
 }
 
 // A read is tried again only when a later one could find what this one did
-// not: no dialog drawn yet, no answer, or a server fault. A refusal (a
-// read-scope peer, a session that waits on nothing) stays one.
+// not: no dialog drawn yet, no answer, or a server fault such as an
+// unreachable peer (503) or a late one (504). A refusal (a 502 from a
+// read-scope peer, a 4xx for a session that waits on nothing) stays one.
 function tryAgain(failures: number, error: Error): boolean {
   if (failures >= 2) return false;
   const status = error instanceof PromptReadError ? error.status : null;
-  return status === null || status >= 500;
+  return status === null || (status >= 500 && status !== 502);
 }
 
 // The waiting agent, for the question "No, exit" asks first: its name, and

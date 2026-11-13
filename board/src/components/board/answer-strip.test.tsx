@@ -112,6 +112,35 @@ test("the same wait observed again keeps its buttons, and the next wait reads ag
   expect(calls.map(({ path }) => path)).toEqual([PATH, `${PATH}/answer`, PATH]);
 });
 
+test("a peer's read_scope refusal is read once and shows the fallback", async () => {
+  const calls: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) => {
+      calls.push(String(input));
+      const error = {
+        code: "peer_refused",
+        message: "bravo refused the call: read_scope",
+        detail: { host: "bravo", code: "read_scope" },
+      };
+      return new Response(JSON.stringify({ ok: false, error }), { status: 502 });
+    }),
+  );
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <AnswerStrip
+        sessionId="s1"
+        waiting
+        observedAt="2026-11-06T10:00:00Z"
+        host="bravo"
+        fallback={<p>No buttons</p>}
+      />
+    </QueryClientProvider>,
+  );
+  expect(await screen.findByText("No buttons")).toBeTruthy();
+  expect(calls).toEqual([PATH]);
+});
+
 const TRUST: PromptDialog = {
   layout: "trust",
   tool: "",
