@@ -956,7 +956,7 @@
         },
         "responses": {
           "200": {
-            "description": "One `TerminalLine` per line: `size`, then `frame`s, and a `size` again for each new PTY size, until `closed` or `unavailable` or the end of the body; `unfit` when herdr would not resize the pane for the Fit (never for a pane in the terminal holder, whose Fit is a size lease)",
+            "description": "One `TerminalLine` per line: `size`, then `frame`s, and a `size` again for each new PTY size, until `closed` or `unavailable` or the end of the body; `unfit` when the Fit does not reach the pane: herdr would not resize it, a peer is paired with a `read` scope, or a peer's rows hold no pane for the agent yet. A Fit on a pane in this host's own terminal holder is a size lease, and is never `unfit`",
             "content": {
               "application/x-ndjson": {
                 "schema": {

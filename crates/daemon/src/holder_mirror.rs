@@ -5,8 +5,8 @@
 //! holder's repaint, then each burst of the PTY's writes as a partial
 //! frame. Each new PTY size after the repaint is a `size` line, from the
 //! holder's `resized` events on a watch of the view's own: the view's own
-//! Fit and another client's lease alike. Without a watch, only the answers
-//! to the view's own Fit give it a size. The view never subscribes again
+//! Fit and another client's lease alike. A view that cannot open a watch,
+//! or whose watch ends, is `unavailable`. The view never subscribes again
 //! for a size, since its lease would end with the subscription. The
 //! child's exit is `closed`, with how it ended, and a holder that stops
 //! answering is `unavailable`, after which the board opens the view again.
@@ -117,46 +117,40 @@ struct Pumped {
     /// The pane's size from the watch's `resized` events.
     sizes: watch::Receiver<Option<(u16, u16)>>,
     handle: StreamHandle,
-    events: Option<EventsEnd>,
+    events: EventsEnd,
 }
 
 impl Pumped {
     /// Watches the holder's events, then subscribes to `pane`, so no
-    /// resize between the repaint and the watch goes unseen. A watch the
-    /// holder refuses leaves the view without other clients' sizes, which
-    /// it logs.
+    /// resize between the repaint and the watch goes unseen. Every size
+    /// the view sends comes from the watch, so a watch the holder refuses
+    /// is an error: the view opens `unavailable` and the board opens it
+    /// again.
     fn open(holder: &dyn Holder, pane: &PaneId) -> Result<Self, String> {
         let (sized, sizes) = watch::channel(None);
-        let events = match holder.watch() {
-            Ok(mut events) => {
-                let ender = events.ender();
-                let ours = pane.clone();
-                std::thread::Builder::new()
-                    .name("tiller-holder-watch".into())
-                    .spawn(move || {
-                        while let Ok(Some(event)) = events.recv() {
-                            if let Event::Resized { pane, cols, rows } = event
-                                && pane == ours
-                                && sized.send(Some((cols, rows))).is_err()
-                            {
-                                return;
-                            }
-                        }
-                    })
-                    .map_err(|error| error.to_string())?;
-                Some(ender)
-            }
-            Err(error) => {
-                tracing::warn!(pane = %pane, %error, "the terminal view cannot watch the holder; another client's resize is not shown");
-                None
-            }
-        };
+        let mut watching = holder.watch().map_err(|error| error.to_string())?;
+        let events = watching.ender();
+        let ours = pane.clone();
+        let watcher = std::thread::Builder::new()
+            .name("tiller-holder-watch".into())
+            .spawn(move || {
+                while let Ok(Some(event)) = watching.recv() {
+                    if let Event::Resized { pane, cols, rows } = event
+                        && pane == ours
+                        && sized.send(Some((cols, rows))).is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+        if let Err(error) = watcher {
+            events.end();
+            return Err(error.to_string());
+        }
         let mut subscription = match holder.subscribe(pane, Subscribe::default()) {
             Ok(subscription) => subscription,
             Err(error) => {
-                if let Some(events) = &events {
-                    events.end();
-                }
+                events.end();
                 return Err(error.to_string());
             }
         };
@@ -192,9 +186,7 @@ impl Drop for Pumped {
     /// Ends the subscription, and with it the view's lease, and the watch.
     fn drop(&mut self) {
         self.handle.end();
-        if let Some(events) = &self.events {
-            events.end();
-        }
+        self.events.end();
     }
 }
 
@@ -281,14 +273,15 @@ async fn refitted(held: &mut Option<Held>) -> (u16, u16) {
     std::future::pending().await
 }
 
-/// The next size a `resized` event gave; never once the watch is gone.
-async fn watched(sizes: &mut watch::Receiver<Option<(u16, u16)>>) -> (u16, u16) {
+/// The next size a `resized` event gave; `None` once the watch has ended,
+/// after which no size would reach the board again.
+async fn watched(sizes: &mut watch::Receiver<Option<(u16, u16)>>) -> Option<(u16, u16)> {
     loop {
         if sizes.changed().await.is_err() {
-            return std::future::pending().await;
+            return None;
         }
         if let Some(size) = *sizes.borrow_and_update() {
-            return size;
+            return Some(size);
         }
     }
 }
@@ -298,8 +291,9 @@ enum Woke {
     Update(Option<Result<Option<Update>, PanesError>>),
     /// The board asked the Fit for a new size.
     Refit((u16, u16)),
-    /// Another client's lease set the PTY's size.
-    Watched((u16, u16)),
+    /// Another client's lease set the PTY's size, or `None` when the
+    /// watch ended.
+    Watched(Option<(u16, u16)>),
 }
 
 /// Streams `pane` to `tx` until the browser leaves, the child exits, the
@@ -323,10 +317,8 @@ async fn view(
         () = tx.closed() => return,
     };
     let Some(first) = first else { return };
-    // With a watch, every new size comes from its `resized` events, the
-    // Fit's own too, in the holder's order. Without one, the answers to
-    // the Fit's resizes are all the view hears of a size.
-    let watching = view.events.is_some();
+    // Every new size comes from the watch's `resized` events, the Fit's
+    // own too, in the holder's order.
     if let Some(fit) = held.as_mut() {
         let size = *fit.board.borrow_and_update();
         fit_to(&view.handle, pane, size).await;
@@ -351,7 +343,10 @@ async fn view(
                     fit_to(&view.handle, pane, size).await;
                     continue;
                 }
-                Woke::Watched(size) => {
+                Woke::Watched(None) => {
+                    return unavailable(tx, "the terminal holder ended the view's watch");
+                }
+                Woke::Watched(Some(size)) => {
                     if !resize(tx, &mut stop, &mut shown, size).await {
                         return;
                     }
@@ -386,13 +381,9 @@ async fn view(
                 frame(&mut seq, true, &bytes)
             }
             Some(Ok(Some(Update::Output(bytes)))) => frame(&mut seq, false, &bytes),
-            // The holder's answer to the Fit: the size the top lease set.
-            Some(Ok(Some(Update::Resized { cols, rows }))) => {
-                if !watching && !resize(tx, &mut stop, &mut shown, (cols, rows)).await {
-                    return;
-                }
-                continue;
-            }
+            // The holder's answer to the Fit: the watch's `resized` event
+            // is what tells the board the size.
+            Some(Ok(Some(Update::Resized { .. }))) => continue,
             Some(Ok(Some(Update::Exited(exit)))) => TerminalLine::Closed {
                 reason: Some(exit_reason(Some(&exit))),
             },

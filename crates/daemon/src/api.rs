@@ -4476,9 +4476,21 @@ pub(crate) fn pane_gone(pane: &str) -> ApiError {
     error
 }
 
-/// Whether the peer's rows put `session` in a pane of the peer's terminal
-/// holder.
-fn peer_holder_pane(view: &PeerView, session: &str) -> bool {
+/// Where the peer's rows put an agent's pane, which says what a Fit on it
+/// is: a lease in the peer's terminal holder, or a turn on a herdr pane.
+#[derive(Debug, PartialEq, Eq)]
+enum PeerPane {
+    Holder,
+    Herdr,
+    /// The peer's rows hold no pane for the session yet, so neither
+    /// answer is safe: a turn on a holder pane refuses a second view its
+    /// lease, and a lease on a herdr pane lets two views give one pane
+    /// back.
+    Unknown,
+}
+
+/// Reads [`PeerPane`] for `session` from the peer's rows.
+fn peer_pane_kind(view: &PeerView, session: &str) -> PeerPane {
     fn find<'a>(rows: &'a [AgentRow], session: &str) -> Option<&'a AgentRow> {
         rows.iter().find_map(|row| {
             (row.session_id == session)
@@ -4486,11 +4498,16 @@ fn peer_holder_pane(view: &PeerView, session: &str) -> bool {
                 .or_else(|| find(&row.workers, session))
         })
     }
-    view.queries
+    let pane = view
+        .queries
         .as_ref()
         .and_then(|queries| find(&queries.agents.orchestrators, session))
-        .and_then(|row| row.pane_id.as_deref())
-        .is_some_and(ids::is_holder_pane)
+        .and_then(|row| row.pane_id.as_deref());
+    match pane {
+        Some(pane) if ids::is_holder_pane(pane) => PeerPane::Holder,
+        Some(_) => PeerPane::Herdr,
+        None => PeerPane::Unknown,
+    }
 }
 
 /// The terminal mirror: the agent's live pane as NDJSON (`protocol.md`
@@ -4499,7 +4516,7 @@ fn peer_holder_pane(view: &PeerView, session: &str) -> bool {
 #[utoipa::path(post, path = "/api/v1/agents/{session}/terminal", tag = "mutations", request_body = TerminalOpen,
     params(("session" = String, Path)),
     responses((status = 200, content_type = "application/x-ndjson", body = TerminalLine,
-               description = "One `TerminalLine` per line: `size`, then `frame`s, and a `size` again for each new PTY size, until `closed` or `unavailable` or the end of the body; `unfit` when herdr would not resize the pane for the Fit (never for a pane in the terminal holder, whose Fit is a size lease)"),
+               description = "One `TerminalLine` per line: `size`, then `frame`s, and a `size` again for each new PTY size, until `closed` or `unavailable` or the end of the body; `unfit` when the Fit does not reach the pane: herdr would not resize it, a peer is paired with a `read` scope, or a peer's rows hold no pane for the agent yet. A Fit on a pane in this host's own terminal holder is a size lease, and is never `unfit`"),
               (status = 400, body = ErrorBody, description = "a `fit` outside 20 to 500 cols by 5 to 200 rows"),
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such agent, or its pane closed"),
               (status = 422, body = ErrorBody, description = "`refused`: the agent runs on a remote host"),
@@ -4532,7 +4549,9 @@ async fn terminal(
     // A peer's Fit sizes the pane on the peer only with an `act` pairing.
     // On a pane in the peer's terminal holder each view's Fit is a lease of
     // its own; on a herdr pane it takes its turn here, one per pane as on
-    // this host's own panes.
+    // this host's own panes. The peer's rows say which it is, and a view
+    // opened before they hold the agent's pane opens with no Fit rather
+    // than take the other kind's answer.
     let (mut peer_fit, mut turn, mut unfit) = (None, None, None);
     if let (Addressed::Peer(view), Some((cols, rows))) = (&to, fit) {
         if view.scope != PeerScope::Act {
@@ -4540,21 +4559,33 @@ async fn terminal(
                 "{} is paired with a read scope; the view shows the pane at its own size",
                 view.label
             ));
-        } else if peer_holder_pane(view, &session) {
-            peer_fit = Some(TerminalFit { cols, rows });
-        } else if let Some(held) = state
-            .0
-            .mirrors
-            .fits()
-            .turn(&format!("peer:{}/{session}", view.host_id))
-            .await
-        {
-            turn = Some(held);
-            peer_fit = Some(TerminalFit { cols, rows });
         } else {
-            unfit = Some(
-                "another view holds a Fit on this pane, or is still giving it back".to_owned(),
-            );
+            match peer_pane_kind(view, &session) {
+                PeerPane::Holder => peer_fit = Some(TerminalFit { cols, rows }),
+                PeerPane::Herdr => {
+                    if let Some(held) = state
+                        .0
+                        .mirrors
+                        .fits()
+                        .turn(&format!("peer:{}/{session}", view.host_id))
+                        .await
+                    {
+                        turn = Some(held);
+                        peer_fit = Some(TerminalFit { cols, rows });
+                    } else {
+                        unfit = Some(
+                            "another view holds a Fit on this pane, or is still giving it back"
+                                .to_owned(),
+                        );
+                    }
+                }
+                PeerPane::Unknown => {
+                    unfit = Some(format!(
+                        "{} has not said which pane this agent is in; the view shows the pane at its own size",
+                        view.label
+                    ));
+                }
+            }
         }
     }
     if let Some(opened) = peer_pane(
@@ -13937,6 +13968,78 @@ esac"#,
                 "start board alpha restart=true"
             ]
         );
+    }
+
+    /// A Fit on a peer's pane needs the pane's kind, and the peer's rows
+    /// are where this host has it: a holder pane's Fit is a lease, a herdr
+    /// pane's takes a turn, and rows without the agent's pane say neither.
+    #[test]
+    fn a_peer_fit_reads_the_pane_kind_from_the_peer_rows() {
+        use crate::peer::PeerQueries;
+        fn row(session: &str, pane: Option<&str>, workers: Vec<AgentRow>) -> AgentRow {
+            AgentRow {
+                session_id: session.to_owned(),
+                role: "worker".to_owned(),
+                model: "sonnet".to_owned(),
+                activity: "working".to_owned(),
+                activity_observed_at: None,
+                last_status_line: None,
+                herdr_name: None,
+                card_id: None,
+                host_id: "h-peer".to_owned(),
+                workers,
+                project_id: "pr-1".to_owned(),
+                run_id: None,
+                pane_id: pane.map(str::to_owned),
+                workspace_label: None,
+                state_since: None,
+                last_output_at: None,
+                host: Some("peer".to_owned()),
+                as_of: None,
+                link: None,
+                stale: None,
+                pause: None,
+            }
+        }
+        let view = |orchestrators: Vec<AgentRow>| {
+            let mut queries: PeerQueries = serde_json::from_value(json!({
+                "/api/v1/board?filter=all": {"rows": [], "asked": []},
+                "/api/v1/attention?state=open": {"items": [], "permission_prompts": []},
+                "/api/v1/agents": {"orchestrators": []},
+                "/api/v1/machines": {"machines": []},
+                "/api/v1/projects": {"projects": []},
+            }))
+            .unwrap();
+            queries.agents.orchestrators = orchestrators;
+            let mut view = PeerView::new("peer", "h-peer", "peer-host", PeerScope::Act);
+            view.queries = Some(Arc::new(queries));
+            view
+        };
+        let lead = format!("p{}", ids::new_ulid());
+        let work = format!("p{}", ids::new_ulid());
+        let rows = |pane: Option<&str>| {
+            vec![row(
+                "s-lead",
+                Some(lead.as_str()),
+                vec![row("s-work", pane, Vec::new())],
+            )]
+        };
+        // A worker deep in the rows, and the orchestrator holding it.
+        let holder = view(rows(Some(work.as_str())));
+        assert_eq!(peer_pane_kind(&holder, "s-work"), PeerPane::Holder);
+        assert_eq!(peer_pane_kind(&holder, "s-lead"), PeerPane::Holder);
+        // A herdr pane id is herdr's own `window:pane`.
+        let herdr = view(rows(Some("w2:p1")));
+        assert_eq!(peer_pane_kind(&herdr, "s-work"), PeerPane::Herdr);
+        // The agent's row holds no pane, the rows hold no such agent, and
+        // no snapshot has arrived: none of the three may be guessed.
+        assert_eq!(
+            peer_pane_kind(&view(rows(None)), "s-work"),
+            PeerPane::Unknown
+        );
+        assert_eq!(peer_pane_kind(&holder, "s-gone"), PeerPane::Unknown);
+        let fresh = PeerView::new("peer", "h-peer", "peer-host", PeerScope::Act);
+        assert_eq!(peer_pane_kind(&fresh, "s-work"), PeerPane::Unknown);
     }
 
     /// CI fails when `contract/openapi.json` is stale. Regenerate it with
