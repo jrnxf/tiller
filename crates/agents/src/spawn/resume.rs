@@ -7,8 +7,8 @@
 //! files from `<scratch_root>/<run id>`. An orchestrator's model and effort
 //! come from the manifest its start recorded (`config_hash`), and its
 //! launch files from `<scratch_root>/<session id>`. A session whose launch
-//! files are gone is refused ([`launch::write_again`]): nothing rebuilds
-//! them, since a rebuild would give the agent a prompt and settings it did
+//! files or records are gone or do not parse is refused
+//! ([`launch::write_again`]): nothing rebuilds them, since a rebuild would give the agent a prompt and settings it did
 //! not start with.
 
 use std::path::Path;
@@ -44,10 +44,23 @@ pub fn write(
     cwd: &Path,
     start: Start<'_>,
 ) -> Result<Launch> {
+    let refused = |what: &str| {
+        SpawnError::Refused(format!(
+            "session {} {what}, so its launch cannot be repeated",
+            session.id
+        ))
+    };
+    launch::absolute("the worktree", cwd)
+        .map_err(|e| refused(&format!("has an invalid worktree ({e})")))?;
     let (role, run_id, model, effort, scratch) = match &session.run_id {
         Some(run_id) => {
-            let run: Run = get(conn, "run", run_id)?;
-            let role = role_of(run.role)?;
+            let run: Run = get(conn, "run", run_id).map_err(|e| match e {
+                tiller_core::Error::NotFound { .. } => {
+                    refused(&format!("names run {run_id}, which is not recorded"))
+                }
+                e => e.into(),
+            })?;
+            let role = role_of(run.role).map_err(|e| refused(&format!("has {e}")))?;
             let scratch = host.scratch_root.join(&run.id);
             (role, run.id, run.model, run.effort, scratch)
         }

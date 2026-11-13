@@ -314,7 +314,7 @@ pub fn sh_quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', r"'\''"))
 }
 
-fn absolute(name: &str, path: &Path) -> Result<String, SpawnError> {
+pub(super) fn absolute(name: &str, path: &Path) -> Result<String, SpawnError> {
     let text = path.to_string_lossy();
     if !path.is_absolute() || text.len() < 2 || text.ends_with('/') {
         return Err(SpawnError::Usage(format!(
@@ -707,21 +707,35 @@ pub fn write_again(spec: &AgainSpec<'_>, start: Start<'_>) -> Result<Launch, Spa
         line: String::new(),
         mode_note: None,
     };
-    for file in [&launch.prompt, &launch.settings, &launch.mcp] {
-        if !file.is_file() {
-            return Err(SpawnError::Refused(format!(
-                "{} is missing, so the run's launch cannot be repeated",
-                file.display()
-            )));
-        }
-    }
+    let refused = |file: &Path, what: &str| {
+        SpawnError::Refused(format!(
+            "{} {what}, so the run's launch cannot be repeated",
+            file.display()
+        ))
+    };
+    let read = |file: &Path| match fs::read(file) {
+        Ok(bytes) => Ok(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(refused(file, "is missing")),
+        Err(e) => Err(SpawnError::from(e)),
+    };
+    let json = |file: &Path| {
+        serde_json::from_slice::<Value>(&read(file)?)
+            .map_err(|e| refused(file, &format!("does not parse ({e})")))
+    };
+    String::from_utf8(read(&launch.prompt)?)
+        .map_err(|_| refused(&launch.prompt, "is not UTF-8"))?;
+    let mut fragment = json(&launch.settings)?;
+    json(&launch.mcp)?;
     let front = spec.role.frontmatter()?;
     let (mode, _) = effective_mode(spec.claude, &front.permission_mode);
     // The fragment must name the mode the flag does.
-    let mut fragment: Value = serde_json::from_slice(&fs::read(&launch.settings)?)?;
     if fragment["permissions"]["defaultMode"] != mode.as_str() {
         fragment["permissions"]["defaultMode"] = Value::String(mode.clone());
-        fs::write(&launch.settings, serde_json::to_vec_pretty(&fragment)?)?;
+        replace(
+            &launch.settings,
+            &serde_json::to_vec_pretty(&fragment)?,
+            0o600,
+        )?;
     }
     let start = match start {
         Start::Fresh { note } => vec![relaunch_prompt(note)],

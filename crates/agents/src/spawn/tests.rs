@@ -4377,3 +4377,71 @@ fn a_resume_of_a_session_whose_launch_files_are_gone_is_refused() {
         "a refused resume wrote a script"
     );
 }
+
+/// A session whose own launch records are damaged is refused like one whose
+/// files are gone: a launch file that does not parse, a worktree that is not
+/// an absolute path, or a run that is not recorded. Nothing is rebuilt.
+#[test]
+fn a_resume_of_a_session_with_damaged_launch_records_is_refused() {
+    let mut rig = Rig::new();
+    let card = rig.card(CardKind::Ship, None);
+    let spawned = rig.spawn(&card, RunRole::Builder);
+    let dir = rig.scratch.join(&spawned.run.id);
+    let world = world!(rig);
+    let worktree = PathBuf::from(&spawned.worktree);
+    let script = dir.join(format!("resume-{}.sh", spawned.session.id));
+    let resume = |session: &Session, cwd: &Path| {
+        resume::write(
+            rig.fleet.store.conn(),
+            &world.resume_host(),
+            session,
+            cwd,
+            launch::Start::Resume {
+                claude_session_id: "claude-1",
+            },
+        )
+        .unwrap_err()
+    };
+    let refused = |error: &SpawnError, what: &str| {
+        assert!(
+            matches!(error, SpawnError::Refused(why) if why.contains(what)),
+            "{error}"
+        );
+    };
+
+    for file in ["settings.json", "mcp.json"] {
+        let good = std::fs::read(dir.join(file)).unwrap();
+        std::fs::write(dir.join(file), b"{\"permissions\": ").unwrap();
+        refused(
+            &resume(&spawned.session, &worktree),
+            &format!("{file} does not parse"),
+        );
+        assert_eq!(
+            std::fs::read(dir.join(file)).unwrap(),
+            b"{\"permissions\": ",
+            "{file} was rebuilt"
+        );
+        std::fs::write(dir.join(file), good).unwrap();
+    }
+    let good = std::fs::read(dir.join("prompt.md")).unwrap();
+    std::fs::write(dir.join("prompt.md"), [0xff, 0xfe]).unwrap();
+    refused(
+        &resume(&spawned.session, &worktree),
+        "prompt.md is not UTF-8",
+    );
+    std::fs::write(dir.join("prompt.md"), good).unwrap();
+
+    refused(
+        &resume(&spawned.session, Path::new("relative/worktree")),
+        "has an invalid worktree",
+    );
+    let unrecorded = Session {
+        run_id: Some("r-unrecorded".to_owned()),
+        ..spawned.session.clone()
+    };
+    refused(
+        &resume(&unrecorded, &worktree),
+        "names run r-unrecorded, which is not recorded",
+    );
+    assert!(!script.exists(), "a refused resume wrote a script");
+}
