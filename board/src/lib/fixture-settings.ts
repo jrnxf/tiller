@@ -95,7 +95,7 @@ const refuse = (message: string): ConfigRefusal => ({
 // The other host keys, as this host's config.toml holds them
 // (crates/core/src/host_config.rs checks each one).
 const hostKeys: HostConfig = {
-  herdr_terminal: "ghostty",
+  attach_terminal: "ghostty",
   stop_hook_mode: "observe",
   accept_peers: true,
   memory_remote: "git@example.com:team/memory.git",
@@ -155,10 +155,10 @@ function setHostKey(key: string, value: string, now: number): Saved | ConfigRefu
   const keys = hostKeys;
   const done = (changed: boolean): Saved => ({ ok: true, data: { key, value, changed } });
   switch (key) {
-    case "herdr.terminal": {
-      if (value === "") return refuse(`${key} names the terminal app herdr opens`);
-      const changed = keys.herdr_terminal !== value;
-      keys.herdr_terminal = value;
+    case "attach.terminal": {
+      if (value === "") return refuse(`${key} names the terminal app Open in terminal starts`);
+      const changed = keys.attach_terminal !== value;
+      keys.attach_terminal = value;
       return done(changed);
     }
     case "stop_hook_mode": {
@@ -236,7 +236,7 @@ function setHostKey(key: string, value: string, now: number): Saved | ConfigRefu
 }
 
 const HOST_KEYS = new Set([
-  "herdr.terminal",
+  "attach.terminal",
   "stop_hook_mode",
   "federation.accept",
   "memory.remote",

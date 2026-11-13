@@ -26,7 +26,7 @@ type StartResult =
 // orchestrator start`, forwarded to `host` for a peer's project. A live
 // orchestrator comes back replayed, never a second one, so each click is a
 // fresh key. A refusal is shown with the daemon's own words (a missing checkout
-// names the setting, an unreachable herdr says so), except where the board can
+// names the setting, an unreachable terminal holder says so), except where the board can
 // say more about what to do.
 async function startOrchestrator(projectId: string, host?: string): Promise<StartResult> {
   try {
@@ -82,7 +82,7 @@ export function RestartOrchestratorDialog({
       showToast(
         warning ? "bad" : "ok",
         `Restarted the ${projectName} orchestrator`,
-        warning ?? "It shows in the lane header once herdr reports it.",
+        warning ?? "It shows in the lane header once its pane starts.",
       );
       onClose();
     },
@@ -198,7 +198,7 @@ export function StartOrchestratorButton({
           result.warning ??
             (host
               ? `It shows in the lane header once ${host} reports it.`
-              : "It shows in the lane header once herdr reports it."),
+              : "It shows in the lane header once its pane starts."),
         );
         void queryClient.invalidateQueries({ queryKey: queryKeyFor(agentsPath()) });
       })
@@ -209,7 +209,7 @@ export function StartOrchestratorButton({
       type="button"
       className="btn sm primary start-orch"
       disabled={starting || off !== null}
-      title={off ?? `Start the ${projectName} orchestrator in herdr${host ? ` on ${host}` : ""}`}
+      title={off ?? `Start the ${projectName} orchestrator${host ? ` on ${host}` : ""}`}
       onClick={start}
     >
       {starting ? "Starting..." : "Start orchestrator"}

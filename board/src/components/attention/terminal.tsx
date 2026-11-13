@@ -33,11 +33,12 @@ function CopyChip({ sessionId }: { sessionId: string }) {
 export function Terminal({
   tail,
   sessionId,
-  herdr,
+  actions,
 }: {
   tail: string;
   sessionId: string | null;
-  herdr: React.ReactNode;
+  // The pane's controls: Open in terminal and View live.
+  actions: React.ReactNode;
 }) {
   const text = tidy(tail);
   const lines = lineCount(text);
@@ -68,7 +69,7 @@ export function Terminal({
         <span className="chip">Pane tail</span>
         {sessionId ? <CopyChip sessionId={sessionId} /> : null}
         <span className="sp" />
-        {herdr}
+        {actions}
       </div>
       <div className="term-wrap">
         <pre className="term" ref={body} tabIndex={0} aria-label="Pane tail">

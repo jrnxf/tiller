@@ -45,7 +45,7 @@ import {
 } from "./peer-state";
 import { approvalFor, approvalStanding, mergeTimeline, reviewFor, sameSha } from "./card-model";
 import { durationSeconds, formatAge, formatLisbonMoment, secondsSince, shortSha } from "./format";
-import { focusTooltip, useHerdrFocus, useOpenKey } from "./herdr";
+import { FOCUS_TOOLTIP, useOpenInTerminal, useOpenKey } from "./terminal-open";
 import { LiveTerminal, TerminalToggle, useTerminalOpen } from "./live-terminal";
 import {
   BoltIcon,
@@ -169,9 +169,20 @@ function Timeline({
   );
 }
 
-function RunCard({ run, owner, name }: { run: CardRun; owner: string | undefined; name: string }) {
+function RunCard({
+  run,
+  owner,
+  canAct,
+  name,
+}: {
+  run: CardRun;
+  owner: string | undefined;
+  // False for a peer whose link is not live or whose pairing is read-only.
+  canAct: boolean;
+  name: string;
+}) {
   const off = focusReason(owner);
-  const focus = useHerdrFocus();
+  const focus = useOpenInTerminal();
   const { data: machines } = useSuspenseQuery(machinesQuery());
   // The run's pause is on its session's agents row. The page does not wait
   // on it: without it the run reads as not paused.
@@ -193,37 +204,36 @@ function RunCard({ run, owner, name }: { run: CardRun; owner: string | undefined
   const machine = machines.machines.find((candidate) => candidate.id === run.host_id);
   const sessionId = run.session_id;
   const hostId = run.host_id;
-  const remote = machine?.kind === "remote";
   const terminalOpen = useTerminalOpen();
-  // Only the owner sees an agent's terminal: live for this machine's agents,
-  // a read-only tail for a saved machine's.
-  const mirror = active && sessionId && hostId && off === null;
+  // Only the owner sees an agent's terminal; a peer's streams over its link.
+  const mirror = active && sessionId && hostId;
   const onOpen = () => {
-    if (sessionId && hostId) focus({ session_id: sessionId, host_id: hostId });
+    if (sessionId) focus({ session_id: sessionId });
   };
-  // The run's controls reach a pane on this machine only, as on the agents
-  // view: not a peer's, and not a saved machine's.
-  const local = active && sessionId !== null && hostId !== null && off === null && !remote;
+  // The run's controls, as on the agents view: a peer's are forwarded to it
+  // (protocol.md 7.4, D20).
+  const local = active && sessionId !== null && hostId !== null && canAct;
   const target: RunTarget = {
     sessionId: sessionId ?? "",
     name,
+    ...(owner ? { host: owner } : {}),
     orchestrator: false,
     state: activity ? runStateOf({ activity: run.activity ?? "" }, activity) : "running",
     runOpen: active,
   };
   const [dialog, setDialog] = useState<RunDialog | null>(null);
   const resumeSession = useResumeSession(target);
-  const goOn = useGoOn(target.sessionId, pause);
+  const goOn = useGoOn(target.sessionId, pause, owner);
   const openPane = (
     <button
       type="button"
       className="btn sm"
       disabled={off !== null}
-      title={off ?? focusTooltip(machine)}
+      title={off ?? FOCUS_TOOLTIP}
       onClick={onOpen}
     >
       <PaneIcon />
-      Open in herdr
+      Open in terminal
     </button>
   );
   return (
@@ -278,7 +288,7 @@ function RunCard({ run, owner, name }: { run: CardRun; owner: string | undefined
           target={target}
           dialog={dialog}
           onClose={() => setDialog(null)}
-          onOpen={onOpen}
+          onOpen={off === null ? onOpen : undefined}
         />
       ) : null}
       {mirror && terminalOpen ? (
@@ -293,7 +303,7 @@ function RunCard({ run, owner, name }: { run: CardRun; owner: string | undefined
             </span>
           }
           actions={openPane}
-          machine={remote ? machine.label : undefined}
+          peer={owner}
         />
       ) : null}
     </div>
@@ -542,14 +552,12 @@ export function CardPage({
   const project =
     projects.projects.find(owned) ?? projects.projects.find((p) => p.id === card.project_id);
   const color = projectColor(project ? projects.projects.indexOf(project) : -1);
-  const focus = useHerdrFocus();
+  const focus = useOpenInTerminal();
   const activeRun = detail.runs.find((run) => run.ended_at === null);
   const sessionId = activeRun?.session_id;
   const hostId = activeRun?.host_id;
   useOpenKey(
-    sessionId && hostId && !ownerOf(column)
-      ? () => focus({ session_id: sessionId, host_id: hostId })
-      : null,
+    sessionId && hostId && !ownerOf(column) ? () => focus({ session_id: sessionId }) : null,
   );
 
   // Per PR, from the approval that binds it: an old approval that was replaced
@@ -776,7 +784,13 @@ export function CardPage({
             </div>
             {detail.runs.length > 0 ? (
               detail.runs.map((run) => (
-                <RunCard key={run.id} run={run} owner={ownerOf(column)} name={id} />
+                <RunCard
+                  key={run.id}
+                  run={run}
+                  owner={ownerOf(column)}
+                  canAct={standing.canAct}
+                  name={id}
+                />
               ))
             ) : (
               <div className="run">

@@ -268,7 +268,7 @@
   margin-left: 18px;
 }
 
-/* herdr's tree, drawn: a stem down from the orchestrator and an elbow into each worker. */
+/* The agent tree, drawn: a stem down from the orchestrator and an elbow into each worker. */
 .av-row.wk::before {
   content: "";
   position: absolute;

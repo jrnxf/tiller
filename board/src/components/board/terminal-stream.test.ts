@@ -4,7 +4,6 @@ import type { MirrorStatus, Screen } from "./terminal-stream";
 import {
   TerminalInput,
   TerminalStream,
-  TerminalTail,
   pasteChunks,
   readHistory,
   terminalPath,
@@ -56,6 +55,7 @@ function recorder() {
   const statuses: MirrorStatus["kind"][] = [];
   const screen: Screen = {
     reset: (cols, rows) => events.push(`reset ${cols}x${rows}`),
+    resize: (cols, rows) => events.push(`resize ${cols}x${rows}`),
     write: (bytes) => events.push(new TextDecoder().decode(bytes)),
   };
   return {
@@ -87,6 +87,80 @@ test("a full screen and the diffs after it are drawn at the pane's size", async 
   expect(sizes).toEqual(["120x36"]);
   expect(statuses).toEqual(["connecting", "live"]);
   stream.stop();
+});
+
+test("a Fit's view starts at the pane's size, then resizes in place and keeps its frames", async () => {
+  const { request } = opens(
+    ndjson([
+      { type: "size", cols: 80, rows: 24 },
+      frame(0, true, "repaint"),
+      { type: "size", cols: 120, rows: 40 },
+      frame(1, false, "redraw"),
+      frame(2, false, "d2"),
+    ]),
+  );
+  const { events, statuses, screen, onStatus } = recorder();
+  const sizes: string[] = [];
+  const stream = new TerminalStream(
+    "s1",
+    screen,
+    onStatus,
+    (size) => sizes.push(`${size.cols}x${size.rows}`),
+    { size: () => ({ cols: 120, rows: 40 }), onUnfit: () => {} },
+  );
+  stream.start();
+  await settle();
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  // One open: the Fit's size is not a new run of frames.
+  expect(request).toHaveBeenCalledTimes(1);
+  expect(events).toEqual(["reset 80x24", "repaint", "resize 120x40", "redraw", "d2"]);
+  expect(sizes).toEqual(["80x24", "120x40"]);
+  expect(statuses).toEqual(["connecting", "live"]);
+  stream.stop();
+});
+
+test("a stream cut for lagging comes back with a size and a repaint, drawn fresh", async () => {
+  const { request } = opens(
+    ndjson([
+      { type: "size", cols: 80, rows: 24 },
+      frame(0, true, "one"),
+      frame(1, false, "d1"),
+      { type: "size", cols: 80, rows: 24 },
+      frame(0, true, "two"),
+      frame(1, false, "d1 again"),
+    ]),
+  );
+  const { events, screen, onStatus } = recorder();
+  const stream = new TerminalStream("s1", screen, onStatus, () => {});
+  stream.start();
+  await settle();
+  expect(request).toHaveBeenCalledTimes(1);
+  expect(events).toEqual(["reset 80x24", "one", "d1", "reset 80x24", "two", "d1 again"]);
+  stream.stop();
+});
+
+test("a closed pane with an exit code ends the stream on its last screen", async () => {
+  const { request } = opens(
+    ndjson([
+      { type: "size", cols: 80, rows: 24 },
+      frame(0, true, "last"),
+      { type: "closed", reason: "exited 0" },
+    ]),
+  );
+  const seen: MirrorStatus[] = [];
+  const { events, screen } = recorder();
+  const stream = new TerminalStream(
+    "s1",
+    screen,
+    (status) => seen.push(status),
+    () => {},
+  );
+  stream.start();
+  await settle();
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  expect(request).toHaveBeenCalledTimes(1);
+  expect(events).toEqual(["reset 80x24", "last"]);
+  expect(seen.at(-1)?.kind).toBe("ended");
 });
 
 test.each([
@@ -162,9 +236,9 @@ test.each([
   expect(statuses.at(-1)).toBe(kind);
 });
 
-test("herdr out of reach is shown and tried again", async () => {
+test("a terminal the daemon cannot serve says why, and is tried again", async () => {
   const { request } = opens(
-    refusal(503, "unavailable", "herdr is unreachable: no socket"),
+    refusal(503, "unavailable", "the pane is past its input rate"),
     ndjson([{ type: "size", cols: 80, rows: 24 }, frame(1, true, "back")]),
   );
   const { statuses, screen, onStatus } = recorder();
@@ -179,7 +253,7 @@ test("herdr out of reach is shown and tried again", async () => {
   stream.stop();
 });
 
-test("a terminal holder out of reach is named, not taken for herdr, and tried again", async () => {
+test("a terminal holder out of reach is named and tried again", async () => {
   const { request } = opens(
     refusal(503, "unavailable", "the terminal holder is unreachable: no socket"),
     ndjson([{ type: "size", cols: 80, rows: 24 }, frame(1, true, "back")]),
@@ -208,7 +282,7 @@ test("a terminal holder out of reach is named, not taken for herdr, and tried ag
   stream.stop();
 });
 
-test("leaving the mirror drops the request, which ends the observe process", async () => {
+test("leaving the mirror drops the request, which ends the stream and its Fit", async () => {
   const { signals } = opens(ndjson([{ type: "size", cols: 80, rows: 24 }]));
   const { screen, onStatus } = recorder();
   const stream = new TerminalStream("s1", screen, onStatus, () => {});
@@ -280,7 +354,7 @@ test("a live Fit takes a new size in place, and opens again when it cannot", asy
   expect(refits).toHaveLength(2);
   expect(signals[0]?.aborted).toBe(true);
   expect(opened.at(-1)).toBe('{"fit":{"cols":130,"rows":44}}');
-  // The Fit turned off: open again without it, so herdr gets its size back.
+  // The Fit turned off: open again without it, so the lease ends.
   fit = null;
   stream.refit();
   await settle();
@@ -334,7 +408,7 @@ test("a peer pane's keys and Fit name the peer, so the board host signs them to 
 test("a new Fit waits for a pending retry, and an ended stream stays ended", async () => {
   vi.useFakeTimers();
   const { request } = opens(
-    ndjson([{ type: "unavailable", message: "herdr went away" }], true),
+    ndjson([{ type: "unavailable", message: "the terminal holder stopped answering" }], true),
     ndjson([{ type: "closed", reason: "pane_closed" }], true),
   );
   const { statuses, screen, onStatus } = recorder();
@@ -362,11 +436,11 @@ test("a new Fit waits for a pending retry, and an ended stream stays ended", asy
   stream.stop();
 });
 
-test("a Fit herdr refuses is reported and the stream goes on at the pane's size", async () => {
+test("a Fit a read-scope peer cannot take is reported, and the stream goes on at the pane's size", async () => {
+  const UNFIT = "host-f is paired with a read scope; the view shows the pane at its own size";
   const { request } = opens(
     ndjson([
-      { type: "size", cols: 100, rows: 30 },
-      { type: "unfit", message: "terminal w1:p1 already has an attached client" },
+      { type: "unfit", message: UNFIT },
       { type: "size", cols: 80, rows: 24 },
       frame(1, true, "own size"),
     ]),
@@ -383,7 +457,7 @@ test("a Fit herdr refuses is reported and the stream goes on at the pane's size"
   });
   stream.start();
   await settle();
-  expect(unfit).toEqual(["terminal w1:p1 already has an attached client"]);
+  expect(unfit).toEqual([UNFIT]);
   expect(events).toEqual(["reset 80x24", "own size"]);
   expect(statuses.at(-1)).toBe("live");
   // Turning the Fit off after a refusal keeps the stream it has.
@@ -423,7 +497,7 @@ test("keys sent too fast are sent again after a pause, in order", async () => {
 });
 
 test("a refused key is dropped and reported, and the keys after it still go", async () => {
-  const { bodies, release } = inputs(refusal(400, "usage", "herdr refused a key"));
+  const { bodies, release } = inputs(refusal(400, "usage", "the pane refused a key"));
   const refused = vi.fn();
   const input = new TerminalInput("s1", refused);
   input.keys(["bad"]);
@@ -446,7 +520,7 @@ test("a history read takes the daemon's plain body, and a refusal its reason", a
   const answers = [
     new Response(JSON.stringify({ session_id: "s1", text: "one\ntwo\n" }), { status: 200 }),
     refusal(403, "forbidden", "owner only"),
-    refusal(404, "not_found", "pane w2:p1 is gone"),
+    refusal(404, "not_found", "pane p01JPANE0000000000000000AB is gone"),
   ];
   const paths: string[] = [];
   vi.stubGlobal(
@@ -458,140 +532,11 @@ test("a history read takes the daemon's plain body, and a refusal its reason", a
   );
   expect(await readHistory("s1")).toEqual({ ok: true, text: "one\ntwo\n" });
   expect(await readHistory("s1")).toEqual({ ok: false, detail: expect.stringContaining("owner") });
-  expect(await readHistory("s1")).toEqual({ ok: false, detail: "pane w2:p1 is gone" });
+  expect(await readHistory("s1")).toEqual({
+    ok: false,
+    detail: "pane p01JPANE0000000000000000AB is gone",
+  });
   expect(paths).toEqual(Array(3).fill("/api/v1/agents/s1/terminal/history"));
-});
-
-function tail(cols: number, rows: number, text: string): Response {
-  return new Response(JSON.stringify({ session_id: "s1", cols, rows, text }), { status: 200 });
-}
-
-const TAIL_HEAD = "\x1b[0m\x1b[H\x1b[2J\x1b[?25l";
-
-test("a tail draws herdr's rows from the top, and resets only when the size changes", async () => {
-  vi.useFakeTimers();
-  const { request } = opens(
-    tail(80, 24, "one\n\x1b[34mtwo\x1b[0m\n"),
-    tail(80, 24, "one\nthree\n"),
-    tail(100, 30, "wide\n"),
-    tail(100, 2, "a\nb\nc\n"),
-  );
-  const { events, statuses, screen, onStatus } = recorder();
-  const sizes: string[] = [];
-  const reader = new TerminalTail("s1", screen, onStatus, (size) =>
-    sizes.push(`${size.cols}x${size.rows}`),
-  );
-  reader.start();
-  await vi.advanceTimersByTimeAsync(0);
-  expect(request.mock.calls[0]?.[0]).toBe(`${terminalPath("s1")}/tail`);
-  expect(request.mock.calls[0]?.[1].body).toBe("{}");
-  await vi.advanceTimersByTimeAsync(15_000);
-  expect(events).toEqual([
-    "reset 80x24",
-    `${TAIL_HEAD}one\r\n\x1b[34mtwo\x1b[0m`,
-    `${TAIL_HEAD}one\r\nthree`,
-    "reset 100x30",
-    `${TAIL_HEAD}wide`,
-    // Resized between herdr's two reads: the bottom rows fit, nothing scrolls.
-    "reset 100x2",
-    `${TAIL_HEAD}b\r\nc`,
-  ]);
-  expect(sizes).toEqual(["80x24", "100x30", "100x2"]);
-  expect(statuses).toEqual(["connecting", "tail", "tail", "tail", "tail"]);
-  reader.stop();
-});
-
-test("a tail stays up when herdr or the daemon fails, and a closed pane ends it", async () => {
-  vi.useFakeTimers();
-  const { request } = opens(
-    tail(80, 24, "one\n"),
-    refusal(503, "unavailable", "herdr is unreachable"),
-    refusal(500, "internal", "the read panicked"),
-    refusal(404, "not_found", "no pane for s1"),
-  );
-  const { statuses, screen, onStatus } = recorder();
-  const reader = new TerminalTail("s1", screen, onStatus, () => {});
-  reader.start();
-  await vi.advanceTimersByTimeAsync(10_000);
-  expect(statuses).toEqual(["connecting", "tail"]);
-  await vi.advanceTimersByTimeAsync(5_000);
-  expect(statuses).toEqual(["connecting", "tail", "ended"]);
-  // An ended tail reads no more.
-  await vi.advanceTimersByTimeAsync(20_000);
-  expect(request).toHaveBeenCalledTimes(4);
-  reader.stop();
-});
-
-test("a tail that never drew says herdr is unreachable, and keeps trying", async () => {
-  vi.useFakeTimers();
-  const { request } = opens(refusal(503, "unavailable", "herdr is unreachable"), tail(80, 24, "x"));
-  const { statuses, screen, onStatus } = recorder();
-  const reader = new TerminalTail("s1", screen, onStatus, () => {});
-  reader.start();
-  await vi.advanceTimersByTimeAsync(0);
-  expect(statuses).toEqual(["connecting", "unreachable"]);
-  await vi.advanceTimersByTimeAsync(5_000);
-  expect(request).toHaveBeenCalledTimes(2);
-  expect(statuses.at(-1)).toBe("tail");
-  reader.stop();
-});
-
-test("a tail whose daemon never answers says so, and keeps trying", async () => {
-  vi.useFakeTimers();
-  const request = vi.fn(async () => {
-    throw new TypeError("Failed to fetch");
-  });
-  vi.stubGlobal("fetch", request);
-  const statuses: MirrorStatus[] = [];
-  const reader = new TerminalTail(
-    "s1",
-    recorder().screen,
-    (status) => statuses.push(status),
-    () => {},
-  );
-  reader.start();
-  await vi.advanceTimersByTimeAsync(5_000);
-  expect(statuses.at(-1)).toMatchObject({
-    kind: "unreachable",
-    detail: "The daemon did not answer.",
-  });
-  expect(request).toHaveBeenCalledTimes(2);
-  reader.stop();
-});
-
-test("a retry during a failed read leaves one reader, not two", async () => {
-  vi.useFakeTimers();
-  const answers: ((response: Response) => void)[] = [];
-  const answer = (response: Response) => answers.at(-1)?.(response);
-  const request = vi.fn(
-    (_path: string, init: RequestInit) =>
-      new Promise<Response>((resolve, reject) => {
-        answers.push(resolve);
-        init.signal?.addEventListener("abort", () => reject(new DOMException("aborted")));
-      }),
-  );
-  vi.stubGlobal("fetch", request);
-  const reader = new TerminalTail(
-    "s1",
-    recorder().screen,
-    () => {},
-    () => {},
-  );
-  reader.start();
-  await vi.advanceTimersByTimeAsync(0);
-  const first = answers[0];
-  reader.retry();
-  await vi.advanceTimersByTimeAsync(0);
-  // The read from before the retry answers late; only the new one goes on.
-  first?.(refusal(503, "unavailable", "herdr is unreachable"));
-  answer(tail(80, 24, "x"));
-  await vi.advanceTimersByTimeAsync(5_000);
-  expect(request).toHaveBeenCalledTimes(3);
-  await vi.advanceTimersByTimeAsync(0);
-  answer(tail(80, 24, "y"));
-  await vi.advanceTimersByTimeAsync(5_000);
-  expect(request).toHaveBeenCalledTimes(4);
-  reader.stop();
 });
 
 test("a peer's pane is asked for by its host, with no Fit", async () => {
@@ -627,7 +572,11 @@ test("a peer that cannot be reached says so and keeps trying", async () => {
   );
   stream.start();
   await settle();
-  expect(last).toMatchObject({ kind: "unreachable", title: "Can't reach mac" });
+  expect(last).toMatchObject({
+    kind: "unreachable",
+    title: "Can't reach mac",
+    mark: "mac unreachable",
+  });
   expect(request).toHaveBeenCalledTimes(1);
   stream.stop();
 });

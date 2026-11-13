@@ -193,7 +193,7 @@ test("checks that cannot be run from the board say so and point to the shell", a
   expect(within(card).getByTestId("check-poller:reconcile")).toBeTruthy();
 });
 
-test("a peer's card shows the checks it sends, read-only, and a herdr machine's points to this host", async () => {
+test("a peer's card shows the checks it sends, read-only", async () => {
   const fetch = serve("federated");
   renderSettings();
   const peer = (await openHost("host-d")).card;
@@ -222,10 +222,6 @@ test("a peer's card shows the checks it sends, read-only, and a herdr machine's 
     "Checkshost-e did not send them: host-e is unreachable; its link is not live. They show again once its link is live.",
   );
 
-  const herdr = (await openHost("host-b")).card;
-  expect(within(herdr).getByTestId("check-elsewhere").textContent).toBe(
-    "No daemon to checkhost-b runs agents through herdr only. Its herdr poller is in the checks of host-a.",
-  );
   // A peer's own checks are not this board's to count.
   expect(within(screen.getByTestId("host-host-d")).queryByTestId("host-needs-you")).toBeNull();
 });

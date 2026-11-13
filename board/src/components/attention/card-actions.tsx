@@ -1,15 +1,16 @@
 import { Menu } from "@base-ui/react/menu";
-import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
+import { useSuspenseQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import type { BoardRow, MutationResponse } from "../../lib/api-types";
 import { LIMITS, isTooLong } from "../../lib/limits";
 import { focusReason, hostField, ownerKey, ownerOf, projectGroups } from "../../lib/peers";
-import { agentsQuery, machinesQuery, projectsQuery } from "../../lib/queries";
+import { projectsQuery } from "../../lib/queries";
 import { shortcutsBlocked } from "../../lib/shortcuts";
-import { focusOutcome, focusPath, remoteLabel } from "../board/herdr";
-import type { FocusData } from "../board/herdr";
+import { FOCUS_TOOLTIP, focusOutcome, focusPath } from "../board/terminal-open";
+import type { FocusData } from "../board/terminal-open";
+import { CopyCommand } from "../board/toast";
 import { PeerNote } from "../board/host-chip";
 import { useHostLabel, useMachineRows, useStanding, useNamedProjects } from "../board/peer-state";
 import { ActionFailure } from "./action-failure";
@@ -296,23 +297,14 @@ function isShown(element: Element): boolean {
   return true;
 }
 
-// Focuses the agent's pane in herdr, with the saved machine for a remote one.
+// Shows the agent's pane in a terminal on this host (Open in terminal).
 // `O` presses it while the element `shown` holds is on screen.
-function useHerdrFocus(sessionId: string, off: string | null | undefined) {
+function useTerminalFocus(sessionId: string, off: string | null | undefined) {
   const send = useCallback(
     (idempotency_key: string) =>
       sendMutation<FocusData>("POST", focusPath(sessionId), { idempotency_key }),
     [sessionId],
   );
-  // A remote agent's pane shows once its machine is selected in herdr. The
-  // Inbox does not wait on these reads: without them the agent is local.
-  const agents = useQuery(agentsQuery()).data?.orchestrators ?? [];
-  const machines = useQuery(machinesQuery()).data?.machines ?? [];
-  const hostId =
-    agents
-      .flatMap((orchestrator) => [orchestrator, ...orchestrator.workers])
-      .find((agent) => agent.session_id === sessionId)?.host_id ?? null;
-  const remote = remoteLabel(machines, hostId);
   // Focusing again later is a new click; only a double click is folded.
   const [round, setRound] = useState(0);
   const [last, setLast] = useState<{ receipt: string; data: FocusData } | null>(null);
@@ -320,7 +312,7 @@ function useHerdrFocus(sessionId: string, off: string | null | undefined) {
     setLast({ receipt: key, data: response.data });
     setRound((n) => n + 1);
   }, []);
-  const outcome = last ? focusOutcome(last.data, remote) : null;
+  const outcome = last ? focusOutcome(last.data, sessionId) : null;
   const action = useAction({ binding: `${sessionId}:${round}`, send, onRecorded });
   const { trigger } = action;
   const shown = useRef<HTMLButtonElement>(null);
@@ -344,13 +336,16 @@ function useHerdrFocus(sessionId: string, off: string | null | undefined) {
     <>
       {last && outcome && !action.pending ? (
         outcome.tone === "ok" ? (
-          <InlineReceipt
-            receiptKey={last.receipt}
-            text={remote ? `${outcome.title} - select ${remote} in herdr's sidebar` : outcome.title}
-          />
+          <InlineReceipt receiptKey={last.receipt} text={outcome.title} />
         ) : (
           <p className="refusal" role="alert">
             {outcome.detail}
+            {outcome.command ? (
+              <>
+                {" "}
+                <CopyCommand command={outcome.command} />
+              </>
+            ) : null}
           </p>
         )
       ) : null}
@@ -360,7 +355,7 @@ function useHerdrFocus(sessionId: string, off: string | null | undefined) {
   return { action, shown, feedback };
 }
 
-function OpenInHerdr({
+function OpenInTerminal({
   sessionId,
   off,
 }: {
@@ -368,19 +363,19 @@ function OpenInHerdr({
   // Why the button is off: pane focus is not forwarded to a peer.
   off?: string | null;
 }) {
-  const { action, shown, feedback } = useHerdrFocus(sessionId, off);
+  const { action, shown, feedback } = useTerminalFocus(sessionId, off);
   return (
-    <span className="ca-herdr">
+    <span className="ca-term">
       <button
         type="button"
         ref={shown}
         className="btn"
         disabled={action.pending || Boolean(off)}
-        title={off ?? "Focus this agent's pane in herdr"}
+        title={off ?? FOCUS_TOOLTIP}
         onClick={action.trigger}
       >
         <PaneIcon />
-        Open in herdr
+        Open in terminal
         <kbd>O</kbd>
       </button>
       {feedback}
@@ -388,21 +383,21 @@ function OpenInHerdr({
   );
 }
 
-// Open in herdr as an item of a ··· menu, for a detail whose primary action
+// Open in terminal as an item of a ··· menu, for a detail whose primary action
 // is on the board. Its receipt or refusal shows to the menu's left.
-export function HerdrMenu({
+export function TerminalMenu({
   sessionId,
   off,
   children,
 }: {
   sessionId: string;
   off?: string | null;
-  // More items, above Open in herdr.
+  // More items, above Open in terminal.
   children?: ReactNode;
 }) {
-  const { action, shown, feedback } = useHerdrFocus(sessionId, off);
+  const { action, shown, feedback } = useTerminalFocus(sessionId, off);
   return (
-    <span className="ca-herdr">
+    <span className="ca-term">
       {feedback}
       <Menu.Root>
         <Menu.Trigger ref={shown} className="btn sm cm-dots" aria-label="More actions">
@@ -415,11 +410,11 @@ export function HerdrMenu({
               <Menu.Item
                 className="cm-item"
                 disabled={action.pending || Boolean(off)}
-                title={off ?? "Focus this agent's pane in herdr"}
+                title={off ?? FOCUS_TOOLTIP}
                 onClick={action.trigger}
               >
                 <PaneIcon />
-                Open in herdr
+                Open in terminal
                 <kbd>O</kbd>
               </Menu.Item>
             </Menu.Popup>
@@ -439,8 +434,8 @@ export function CardActions({
 }) {
   const standing = useStanding(card ?? {});
   const off = standing.canAct ? null : standing.reason;
-  const herdr = sessionId ? (
-    <OpenInHerdr sessionId={sessionId} off={card ? focusReason(ownerOf(card)) : null} />
+  const open = sessionId ? (
+    <OpenInTerminal sessionId={sessionId} off={card ? focusReason(ownerOf(card)) : null} />
   ) : null;
   return (
     <div className="blk card-acts" data-testid="card-actions">
@@ -458,9 +453,9 @@ export function CardActions({
         <p className="ca-none">This card is not on the board any more.</p>
       )}
       {card ? (
-        <AddCardControl card={card} extra={herdr} off={off} />
-      ) : herdr ? (
-        <div className="acts">{herdr}</div>
+        <AddCardControl card={card} extra={open} off={off} />
+      ) : open ? (
+        <div className="acts">{open}</div>
       ) : null}
     </div>
   );

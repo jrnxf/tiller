@@ -28,9 +28,9 @@ import type { AgentGroup, AgentLine } from "./agents-model";
 import { AnswerStrip } from "./answer-strip";
 import { EmptyScope } from "./board-view";
 import { formatAge, formatLisbonMoment } from "./format";
-import { focusCommand, focusTooltip, useHerdrFocus, useOpenKey } from "./herdr";
+import { FOCUS_TOOLTIP, attachCommand, useOpenInTerminal, useOpenKey } from "./terminal-open";
 import { ChevronLeftIcon, InfoIcon, PaneIcon } from "./icons";
-import { LiveTerminal, isHolderPane, usePhone } from "./live-terminal";
+import { LiveTerminal, usePhone } from "./live-terminal";
 import type { SwitchKey, TerminalControl } from "./live-terminal";
 import { AsOf, HostChip, PeerNote } from "./host-chip";
 import { useAmbiguousIds, useStanding, useNamedProjects } from "./peer-state";
@@ -439,7 +439,7 @@ function Details({
         <dt>Workspace</dt>
         <dd>
           <span className="mono">{agent.workspace_label ?? line.label}</span>
-          <span className="meta">herdr label</span>
+          <span className="meta">pane label</span>
         </dd>
         <dt>Freshness</dt>
         <dd>
@@ -470,9 +470,9 @@ function Details({
       </dl>
       <p className="av-hint">
         {remote
-          ? "Open in herdr opens herdr on the remote machine first, then focuses this agent's terminal."
-          : "Open in herdr focuses this agent's terminal in herdr."}{" "}
-        <code>{focusCommand(agent, project.id, card?.display_id ?? null)}</code>
+          ? `${host.label} owns this pane. To see it in a terminal, run this on ${host.label}:`
+          : "Open in terminal shows this agent's pane in a terminal on this host. To open it by hand, run:"}{" "}
+        <code>{attachCommand(agent)}</code>
       </p>
       <div className="sect">
         <div className="sect-h">
@@ -584,9 +584,9 @@ function Stage({
   const peerHost = ownerOf(agent);
   const activity = hostAwareActivity(agent, host);
   const needs = activity.dot === "waiting";
-  const remote = host?.kind === "remote";
-  // The run's controls act on a pane on this machine only.
-  const local = !remote && !peerHost;
+  // A peer's agent takes the same controls, forwarded to the peer, while the
+  // link is live and the pairing has the act scope (protocol.md 7.4, D20).
+  const act = standing.canAct;
   const state = runStateOf(agent, activity);
   const orchestrator = agent.role === "orchestrator";
   // The loader reads every listed agent's run, so this is already cached.
@@ -597,6 +597,7 @@ function Stage({
   const target: RunTarget = {
     sessionId: agent.session_id,
     name: line.name,
+    ...(peerHost ? { host: peerHost } : {}),
     orchestrator,
     state,
     runOpen: run?.ended_at === null,
@@ -611,17 +612,20 @@ function Stage({
     setAsked({ session: agent.session_id, dialog: next });
   const closeAsk = () => setAsked(null);
   const resumeSession = useResumeSession(target);
-  const goOn = useGoOn(agent.session_id, agent.pause);
+  const goOn = useGoOn(agent.session_id, agent.pause, peerHost);
   const paused = state === "paused" && agent.pause ? agent.pause : null;
   // The primary follows the run: Resume a pause, bring back a dead pane,
-  // otherwise open the pane. Open in herdr moves into the Run menu then.
-  const primary = !local
+  // otherwise open the pane. Open in terminal moves into the Run menu then.
+  // A peer's orchestrator is restarted from its own host.
+  const primary = !act
     ? "open"
     : paused
       ? "resume"
       : state === "dead"
         ? orchestrator
-          ? "restart"
+          ? peerHost
+            ? "open"
+            : "restart"
           : "relaunch"
         : "open";
   const detail = needs
@@ -648,17 +652,14 @@ function Stage({
       autoType={carry}
       onTyping={onTyping}
       onSwitch={onSwitch}
-      // A paired peer is a remote host too, but its pane streams through the
-      // peer link; only a saved machine's is read as a tail.
-      machine={remote && !peerHost ? host.label : undefined}
       peer={peerHost}
-      holder={(!remote || !!peerHost) && isHolderPane(agent.pane_id)}
       full={full}
       strip={
-        remote || peerHost ? null : (
+        act ? (
           <AnswerStrip
             key={agent.session_id}
             sessionId={agent.session_id}
+            host={peerHost}
             waiting={agent.activity === "waiting_permission" || agent.activity === "waiting_input"}
             observedAt={agent.activity_observed_at}
             agent={{
@@ -667,12 +668,18 @@ function Stage({
               runId: agent.run_id ?? null,
             }}
           />
-        )
+        ) : null
       }
       actions={
-        <button type="button" className="btn sm" title={focusTooltip(host)} onClick={onOpen}>
+        <button
+          type="button"
+          className="btn sm"
+          disabled={off !== null}
+          title={off ?? FOCUS_TOOLTIP}
+          onClick={onOpen}
+        >
           <PaneIcon />
-          Open in herdr
+          Open in terminal
         </button>
       }
     />
@@ -717,13 +724,17 @@ function Stage({
           </div>
         </div>
         <div className="av-acts">
-          {local ? (
+          {act ? (
             <RunMenu
               target={target}
               onDialog={ask}
               onResumeSession={resumeSession}
-              onRestart={orchestrator && primary !== "restart" ? () => ask("restart") : undefined}
-              onOpen={primary === "open" ? undefined : onOpen}
+              onRestart={
+                orchestrator && !peerHost && primary !== "restart"
+                  ? () => ask("restart")
+                  : undefined
+              }
+              onOpen={primary === "open" || off !== null ? undefined : onOpen}
             />
           ) : null}
           <button
@@ -779,11 +790,11 @@ function Stage({
               type="button"
               className="btn primary"
               disabled={off !== null}
-              title={off ?? focusTooltip(host)}
+              title={off ?? FOCUS_TOOLTIP}
               onClick={onOpen}
             >
               <PaneIcon />
-              Open in herdr
+              Open in terminal
               <kbd>O</kbd>
             </button>
           )}
@@ -795,15 +806,15 @@ function Stage({
       ) : goOn.sent ? (
         <ResumedNote receiptKey={goOn.sent} />
       ) : null}
-      {local ? (
+      {act ? (
         <RunDialogs
           target={target}
           dialog={asking === "restart" ? null : asking}
           onClose={closeAsk}
-          onOpen={onOpen}
+          onOpen={off === null ? onOpen : undefined}
         />
       ) : null}
-      {local && orchestrator && asking === "restart" ? (
+      {act && !peerHost && orchestrator && asking === "restart" ? (
         <RestartOrchestratorDialog
           projectId={project.id}
           projectName={project.name}
@@ -843,7 +854,7 @@ export function AgentsView({
   // not wait for it.
   const permissionPrompts = useQuery(attentionQuery()).data?.permission_prompts ?? NO_PROMPTS;
   const prefs = useStore(prefsStore);
-  const focus = useHerdrFocus();
+  const focus = useOpenInTerminal();
   const navigate = useNavigate();
   const phone = usePhone();
   const [details, setDetails] = useState(false);

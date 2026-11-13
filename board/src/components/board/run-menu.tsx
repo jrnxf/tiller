@@ -41,6 +41,11 @@ function agentPath(sessionId: string, verb: string): string {
   return `/api/v1/agents/${encodeURIComponent(sessionId)}/${verb}`;
 }
 
+// The `host` a forwarded control names, or nothing for this host's agent.
+function hostOf(host: string | undefined): { host?: string } {
+  return host ? { host } : {};
+}
+
 // Where an agent's run is, as the header's primary follows it: paused, a
 // pane that is gone, or at work (protocol.md 7.4, P11).
 export type RunState = "paused" | "dead" | "running";
@@ -50,10 +55,13 @@ export function runStateOf(agent: Pick<AgentRow, "activity">, activity: Activity
   return activity.label === "Paused" ? "paused" : "running";
 }
 
-// What the Run menu acts on: one local agent.
+// What the Run menu acts on: one agent, this host's or a peer's.
 export interface RunTarget {
   sessionId: string;
   name: string;
+  // The peer that owns the agent; each control is forwarded to it (protocol.md
+  // 7.4, Agent verbs on a peer). Absent for this host's own agents.
+  host?: string;
   // An orchestrator has no run: no pause, relaunch or resume.
   orchestrator: boolean;
   state: RunState;
@@ -80,6 +88,7 @@ export function useResumeSession(target: RunTarget): () => void {
   return useCallback(() => {
     void sendMutation<Resumed>("POST", agentPath(target.sessionId, "resume"), {
       idempotency_key: ulid(),
+      ...hostOf(target.host),
     } satisfies AgentControlBody)
       .then((response) => {
         refresh();
@@ -101,11 +110,11 @@ export function useResumeSession(target: RunTarget): () => void {
           error instanceof ActionError ? error.message : "Something went wrong.",
         );
       });
-  }, [refresh, target.name, target.sessionId]);
+  }, [refresh, target.host, target.name, target.sessionId]);
 }
 
 // The Run menu left of Details: the run's rare controls, one click further
-// than the primary. `onOpen` adds Open in herdr when the primary is not it,
+// than the primary. `onOpen` adds Open in terminal when the primary is not it,
 // and `onGoOn` adds a paused run's Resume where no primary holds it.
 export function RunMenu({
   target,
@@ -161,7 +170,7 @@ export function RunMenu({
             )}
             {onOpen ? (
               <Item icon={<PaneIcon />} onSelect={onOpen}>
-                Open in herdr
+                Open in terminal
               </Item>
             ) : null}
             <Menu.Separator className="cm-sep" />
@@ -205,7 +214,7 @@ export function RunDialogs({
   target: RunTarget;
   dialog: RunDialog | null;
   onClose: () => void;
-  // Opens the agent's pane in herdr; without it the dialogs offer no Open.
+  // Opens the agent's pane in a terminal; without it the dialogs offer no Open.
   onOpen?: () => void;
   // Called once a stop is recorded, before the dialog closes.
   onStopped?: (warning: string | null) => void;
@@ -257,8 +266,9 @@ function PauseDialog({ target, onClose }: { target: RunTarget; onClose: () => vo
         idempotency_key,
         until: until ?? "",
         reason: why,
+        ...hostOf(target.host),
       } satisfies PauseBody),
-    [target.sessionId, until, why],
+    [target.host, target.sessionId, until, why],
   );
   const onRecorded = useCallback(() => {
     refresh();
@@ -319,7 +329,7 @@ function PauseDialog({ target, onClose }: { target: RunTarget; onClose: () => vo
         />
       </Field>
       <LimitNote what="reason" text={why} limit={LIMITS.comment} />
-      <ActionFailure error={action.error} host={undefined} />
+      <ActionFailure error={action.error} host={target.host} />
       <div className="dialog-actions">
         <button
           ref={keep}
@@ -357,8 +367,9 @@ function RelaunchDialog({ target, onClose }: { target: RunTarget; onClose: () =>
         idempotency_key,
         note: text,
         new_attempt: attempt,
+        ...hostOf(target.host),
       } satisfies RelaunchBody),
-    [target.sessionId, text, attempt],
+    [target.host, target.sessionId, text, attempt],
   );
   const onRecorded = useCallback(
     (response: MutationResponse<unknown>) => {
@@ -415,7 +426,7 @@ function RelaunchDialog({ target, onClose }: { target: RunTarget; onClose: () =>
         </span>
       </label>
       <LimitNote what="note" text={text} limit={LIMITS.comment} />
-      <ActionFailure error={action.error} host={undefined} />
+      <ActionFailure error={action.error} host={target.host} proof />
       <div className="dialog-actions">
         <button
           ref={keep}
@@ -445,7 +456,7 @@ function RelaunchDialog({ target, onClose }: { target: RunTarget; onClose: () =>
 export function stopRefusal(error: ActionError): string {
   const message = error.message;
   if (/holds a draft/.test(message)) {
-    return "Not stopped: the pane has an unsent draft. Open it in herdr and send or clear the draft, then stop again.";
+    return "Not stopped: the pane has an unsent draft. Type into its pane to send or clear the draft, then stop again.";
   }
   if (/shows a dialog/.test(message)) {
     return "Not stopped: the agent is waiting on a dialog. Answer it first.";
@@ -474,8 +485,9 @@ function StopDialog({
     (idempotency_key: string) =>
       sendMutation("POST", agentPath(target.sessionId, "stop"), {
         idempotency_key,
+        ...hostOf(target.host),
       } satisfies AgentControlBody),
-    [target.sessionId],
+    [target.host, target.sessionId],
   );
   const onRecorded = useCallback(
     (response: MutationResponse<unknown>) => {
@@ -513,7 +525,7 @@ function StopDialog({
           {onOpen ? (
             <button type="button" className="btn" onClick={onOpen}>
               <PaneIcon />
-              Open in herdr
+              Open in terminal
             </button>
           ) : null}
           <button ref={keep} type="button" className="btn" onClick={onClose}>
@@ -543,7 +555,7 @@ function StopDialog({
           {stopRefusal(refused)}
         </p>
       ) : (
-        <ActionFailure error={action.error} host={undefined} />
+        <ActionFailure error={action.error} host={target.host} proof />
       )}
       <div className="dialog-actions">
         <button
@@ -558,7 +570,7 @@ function StopDialog({
         {onOpen ? (
           <button type="button" className="btn" disabled={action.pending} onClick={onOpen}>
             <PaneIcon />
-            Open in herdr
+            Open in terminal
           </button>
         ) : null}
         <button
@@ -668,7 +680,7 @@ export function ResumedNote({ receiptKey }: { receiptKey: string }) {
 
 // The paused agent's primary: clear the pause (`run.unpause`), then one
 // "go on" line through the steer path.
-export function useGoOn(sessionId: string, pause: PauseInfo | null | undefined) {
+export function useGoOn(sessionId: string, pause: PauseInfo | null | undefined, host?: string) {
   // The receipt is the session's: the Stage stays mounted when the owner
   // picks another agent, and one agent's go on must not hold the next one's.
   const [receipt, setReceipt] = useState<{ sessionId: string; key: string } | null>(null);
@@ -678,13 +690,15 @@ export function useGoOn(sessionId: string, pause: PauseInfo | null | undefined) 
       // Each mutation keeps its own key, so a retry replays both.
       await sendMutation("POST", agentPath(sessionId, "unpause"), {
         idempotency_key: `${idempotency_key}-unpause`,
+        ...hostOf(host),
       } satisfies AgentControlBody);
       return sendMutation<SteerQueued>("POST", agentPath(sessionId, "steer"), {
         idempotency_key,
         text: GO_ON,
+        ...hostOf(host),
       } satisfies SteerBody);
     },
-    [sessionId],
+    [host, sessionId],
   );
   const onRecorded = useCallback(
     (_: MutationResponse<SteerQueued>, key: string) => {

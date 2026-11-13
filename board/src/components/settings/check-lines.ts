@@ -72,7 +72,7 @@ const OK: LineEnd = { kind: "note", text: "OK" };
 const TOOLS = new Set([
   "git",
   "treehouse",
-  "herdr",
+  "holder",
   "claude",
   "gh",
   "gh-axi",
@@ -102,8 +102,8 @@ function toolLines(tools: DoctorCheck[]): CheckLine[] {
   const lines: CheckLine[] = problems.map((check) => {
     const missing = !check.version;
     const fix: Words =
-      check.name === "herdr"
-        ? [" Start herdr, or add it to the host's Nix config, then check again."]
+      check.name === "holder"
+        ? [" Start the terminal holder with ", { code: "tiller holder" }, ", then check again."]
         : missing && check.name !== "no-mistakes daemon"
           ? NIX
           : [];
@@ -128,10 +128,9 @@ function toolLines(tools: DoctorCheck[]): CheckLine[] {
   return lines;
 }
 
-// "herdr:local" is this host's herdr; "herdr:host-b" reads another machine's.
+// "deploy" reads as "Deploy poller"; "holder" is the terminal holder's.
 export function pollerTitle(source: string): string {
-  if (source === "herdr:local") return "herdr poller";
-  if (source.startsWith("herdr:")) return `herdr poller for ${source.slice("herdr:".length)}`;
+  if (source === "holder") return "Terminal holder poller";
   const words = source.replace(/[-_]/g, " ");
   return `${words.charAt(0).toUpperCase()}${words.slice(1)} poller`;
 }

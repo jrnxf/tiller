@@ -52,7 +52,7 @@ export function resetLifecycleFixture(): void {
 
 const minutes = (now: number, delta: number) => new Date(now + delta * 60_000).toISOString();
 
-// The `lifecycle` scenario's starting point, by herdr pane name: beta-7's run
+// The `lifecycle` scenario's starting point, by agent name: beta-7's run
 // is paused until tomorrow morning, alpha-44's pane is gone, and gamma's
 // orchestrator has been silent long enough for its lane to read stale.
 function seedFor(name: string | null, now: number): SessionChange & { quiet?: number } {
@@ -93,7 +93,7 @@ function seedOf(
 export function withLifecycle(agent: AgentRow, scenario: string, now: number): AgentRow | null {
   const change = changes.get(agent.session_id) ?? {};
   if (change.stopped) return null;
-  const seed = change.fresh ? {} : seedOf(scenario, agent.herdr_name, now);
+  const seed = change.fresh ? {} : seedOf(scenario, agent.name, now);
   const { quiet, ...seeded } = seed;
   const state = { ...seeded, ...change };
   const at = quiet === undefined ? state.at : minutes(now, -quiet);

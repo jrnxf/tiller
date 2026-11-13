@@ -49,7 +49,7 @@ test.each([
   ["\x1b[5~", "Page Up"],
   ["\x1b[6~", "Page Down"],
   ["\x1b[2~", "Insert"],
-])("%j is a key herdr cannot send, so it is reported as %s", (data, name) => {
+])("%j is a key with no name in the list, so it is reported as %s", (data, name) => {
   expect(typedKeys(data)).toEqual({ keys: [], unsent: [name] });
 });
 
@@ -70,15 +70,14 @@ test("Meta+Up between two keys sends the two keys and not Up", () => {
   expect(typedKeys("a\x1b[1;9Ab")).toEqual({ keys: ["a", "b"], unsent: ["Meta+Up"] });
 });
 
-test("a holder pane's unsent keys point at tiller attach, a herdr pane's at herdr", () => {
-  expect(unsentNote(["Meta+Up"], true)).toEqual({
+test("unsent keys point at tiller attach", () => {
+  expect(unsentNote(["Meta+Up"])).toEqual({
     title: "The board can't send Meta+Up",
     detail: "Nothing was sent for that key. Use tiller attach for it.",
   });
-  expect(unsentNote(["Meta+Up", "F13", "Meta+F1"], false)).toEqual({
-    title: "herdr can't send Meta+Up, F13 and Meta+F1",
-    detail: "Nothing was sent for that key. Use herdr itself for it.",
-  });
+  expect(unsentNote(["Meta+Up", "F13", "Meta+F1"]).title).toBe(
+    "The board can't send Meta+Up, F13 and Meta+F1",
+  );
 });
 
 test.each([

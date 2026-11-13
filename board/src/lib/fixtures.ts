@@ -305,46 +305,23 @@ function machinesFor(scenario: Scenario, now: number): MachinesResponse {
     running_agents: 3,
     capacity: 5,
     free_slots: 2,
-    last_seen_at: minutes(now, 0),
-    stale_reason: null,
+    ...(scenario === "stale-machine"
+      ? {
+          health: "stale" as const,
+          last_seen_at: minutes(now, -17),
+          stale_reason: "holder_down" as const,
+        }
+      : { last_seen_at: minutes(now, 0), stale_reason: null }),
     version: FIXTURE_VERSION,
     // In the federated scenario this host's `tiller` project takes Tiller bugs.
     ...(hasPeers(scenario) ? { bug_project: "tiller" } : {}),
     rev: 4,
   };
-  const hostB: Machine = {
-    id: "01JHOSTB00000000000000000B",
-    label: "host-b",
-    kind: "remote",
-    view_only: true,
-    health: "ok",
-    running_agents: 2,
-    capacity: null,
-    free_slots: null,
-    last_seen_at: minutes(now, -1),
-    stale_reason: null,
-    rev: 7,
-  };
-  const hostC: Machine = {
-    id: "01JHOSTC00000000000000000C",
-    label: "host-c",
-    kind: "remote",
-    view_only: true,
-    health: scenario === "stale-machine" || scenario === "degraded" ? "stale" : "ok",
-    running_agents: scenario === "stale-machine" || scenario === "degraded" ? null : 1,
-    capacity: null,
-    free_slots: null,
-    last_seen_at: minutes(now, scenario === "stale-machine" || scenario === "degraded" ? -17 : -1),
-    stale_reason:
-      scenario === "stale-machine" || scenario === "degraded" ? "herdr_link_down" : null,
-    rev: 2,
-  };
-  const machines = [hostA, hostB, hostC];
+  const machines = [hostA];
   return { machines: hasPeers(scenario) ? [...machines, ...peerMachines(now)] : machines };
 }
 
 const HOST_A = "01JHOSTA00000000000000000A";
-const HOST_B = "01JHOSTB00000000000000000B";
 
 // A launched project with no review open; each fixture project overrides what
 // makes it different.
@@ -403,9 +380,10 @@ const BUSY_PROJECTS: ProjectsResponse = {
   projects: [...DEFAULT_PROJECTS.projects, DELTA],
 };
 
-// `degraded`: delta runs on the stale host (a disconnected lane), beta's
-// orchestrator has gone quiet (a stale lane), gamma has a card whose state is
-// unknown, and kiln was registered and has no cards.
+// `degraded`: delta is new this week, beta's orchestrator has gone quiet (a
+// stale lane), gamma has a card whose state is unknown, and kiln was
+// registered and has no cards. In `stale-machine` this host's terminal holder
+// does not answer, so every lane is disconnected.
 const DEGRADED_PROJECTS: ProjectsResponse = {
   projects: [...DEFAULT_PROJECTS.projects, DELTA, launched("kiln", "direct-push", 1, 1)],
 };
@@ -427,8 +405,6 @@ function projectsFor(scenario: Scenario, now: number = Date.now()): ProjectsResp
   }
   return scenario === "busy" ? BUSY_PROJECTS : DEFAULT_PROJECTS;
 }
-
-const HOST_C = "01JHOSTC00000000000000000C";
 
 function degradedRows(now: number): BoardRow[] {
   return [
@@ -452,7 +428,6 @@ function degradedRows(now: number): BoardRow[] {
       "working",
       "Port the exporter to the new schema",
       {
-        host: HOST_C,
         model: "sonnet",
         observedMinutes: 13,
       },
@@ -465,7 +440,6 @@ function degradedRows(now: number): BoardRow[] {
       "decision",
       "Choose the retention window",
       {
-        host: HOST_C,
         model: "opus",
         observedMinutes: 14,
       },
@@ -478,7 +452,6 @@ function degradedRows(now: number): BoardRow[] {
       "filed",
       "Document the exporter flags",
       {
-        host: HOST_C,
         kind: "scout",
       },
       now,
@@ -575,7 +548,6 @@ function defaultRows(now: number): BoardRow[] {
       "checks",
       "Move the poller behind a trait",
       {
-        host: HOST_B,
         model: "opus",
         pr: 52,
         observedMinutes: 0.7,
@@ -679,7 +651,7 @@ function busyRows(now: number): BoardRow[] {
           badge,
           title,
           {
-            host: projectIndex === 3 ? HOST_B : HOST_A,
+            host: HOST_A,
             kind: index % 4 === 1 ? "scout" : "ship",
             model: index % 3 === 0 ? "opus" : index % 3 === 1 ? "sonnet" : "haiku",
             pr: column === "landing" || column === "done" ? 200 + n : null,
@@ -1089,7 +1061,7 @@ function workerFor(row: BoardRow, now: number, index: number): AgentRow {
     last_status_line: stale
       ? "Reading src/import/dry_run.rs"
       : `Running tests for ${row.display_id}`,
-    herdr_name: `${row.display_id}-${role}`,
+    name: `${row.display_id}-${role}`,
     card_id: row.id,
     host_id: row.host_id ?? HOST_A,
     workers: [],
@@ -1175,7 +1147,7 @@ function agentsFor(
         activity: staleTiller && projectIndex === 0 ? "idle" : "working",
         activity_observed_at: minutes(now, quiet ? -41 : -(0.2 + projectIndex)),
         last_status_line: `Waiting on ${live[0]?.display_id ?? "the next ask"}`,
-        herdr_name: `${project.id}-orch`,
+        name: `${project.id}-orch`,
         card_id: null,
         host_id: host,
         workers: live.map((row, index) => workerFor(row, now, index)),
@@ -1203,8 +1175,10 @@ function agentsFor(
     orchestrators: [
       ...(scenario === "holder"
         ? justStarted(localOrchestrators.map(inHolder), now)
-        : localOrchestrators),
-      ...peerAgents(now, board.rows, peerProjectRows, staleTiller ? staleOf : undefined),
+        : localOrchestrators.map(inHolder)),
+      ...peerAgents(now, board.rows, peerProjectRows, staleTiller ? staleOf : undefined).map(
+        inHolder,
+      ),
     ],
     tiller_version: FIXTURE_TILLER_VERSION,
   };
@@ -1216,7 +1190,8 @@ function holderPaneOf(session: string): string {
   return `p01JPANE${crockford.slice(-19).padStart(19, "0")}`;
 }
 
-// An agent and its workers with their panes in the terminal holder.
+// An agent and its workers with their panes in the terminal holder, as every
+// pane is.
 function inHolder(agent: AgentRow): AgentRow {
   return {
     ...agent,
@@ -1274,7 +1249,7 @@ function eventsFor(row: BoardRow, now: number): EventLine[] {
   const events: EventLine[] = [
     {
       at: minutes(now, -1),
-      source: "herdr",
+      source: "holder",
       text: `pane.state ${row.badge === "idle" ? "idle" : "working"} (${row.display_id})`,
     },
     {
@@ -1477,7 +1452,7 @@ function cardDetailFor(
     events: eventsFor(row, now),
     freshness: [
       {
-        source: "Pane (herdr)",
+        source: "Pane (holder)",
         detail: active ? "working" : done ? "pane closed" : "no pane yet",
         observed_at: active ? minutes(now, -0.05) : null,
       },
@@ -1583,7 +1558,7 @@ function runDetailFor(runId: string, now: number = Date.now()): RunDetail {
     started_at: minutes(now, -9),
     ended_at: null,
     events: [
-      { at: minutes(now, -1), source: "herdr", text: "pane.state working" },
+      { at: minutes(now, -1), source: "holder", text: "pane.state working" },
       { at: minutes(now, -2), source: "hook", text: "turn.start" },
       { at: minutes(now, -9), source: "tiller", text: "run.start" },
     ],
@@ -1876,7 +1851,7 @@ export class FixtureRefusal {
 
 // `GET /api/v1/doctor?host=`: this host's checks, a live peer's as it sends
 // them, 503 `peer_unreachable` for a peer whose link is not live, and 404
-// for a label that names no daemon (a herdr machine has none).
+// for a label that names no daemon.
 function doctorRead(
   scenario: Scenario,
   url: URL,

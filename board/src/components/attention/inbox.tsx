@@ -46,7 +46,7 @@ import {
 import type { Withdrawn } from "./answered";
 import { AnswerForm } from "./answer";
 import { ApproveBlock } from "./approve";
-import { CardActions, HerdrMenu } from "./card-actions";
+import { CardActions, TerminalMenu } from "./card-actions";
 import { CardOverflow } from "./card-lifecycle";
 import { tidy } from "./ansi";
 import { RecapCard } from "./recap";
@@ -73,7 +73,7 @@ import {
 } from "./icons";
 import { Terminal } from "./terminal";
 import { ViewLive } from "./view-live";
-import { agentName, useSavedMachine, useSessionAgent } from "./agent-name";
+import { agentName, useSessionAgent } from "./agent-name";
 import { WithdrawButton } from "./withdraw";
 import "./inbox.css";
 
@@ -245,14 +245,14 @@ function Evidence({
 }) {
   const sessionId = item.subject_session_id ?? evidence.sessionId;
   const card = ctx.cards.get(item.card_id);
-  // The pane is only there to open while the session is live. A peer's
-  // pane opens from its own host, so it has no live view here.
+  // The pane is only there to open while the session is live. A peer's pane
+  // opens in a terminal from its own host; its live view streams here.
   const off = focusReason(ownerOf(card ?? item));
-  const herdr =
+  const actions =
     sessionId && item.still_current ? (
       <span className="ev-acts">
-        <HerdrMenu sessionId={sessionId} off={off} />
-        {off === null ? <ViewLive sessionId={sessionId} /> : null}
+        <TerminalMenu sessionId={sessionId} off={off} />
+        <ViewLive sessionId={sessionId} />
       </span>
     ) : null;
   if (!evidence.paneTail && evidence.lines.length === 0) return null;
@@ -267,7 +267,7 @@ function Evidence({
         ) : null}
       </div>
       {evidence.paneTail ? (
-        <Terminal tail={evidence.paneTail} sessionId={sessionId} herdr={herdr} />
+        <Terminal tail={evidence.paneTail} sessionId={sessionId} actions={actions} />
       ) : null}
       {evidence.lines.length ? (
         <div className="evi">
@@ -414,16 +414,18 @@ function DecisionDetail({
   );
 }
 
-// What the detail says for an agent on a saved machine: the board cannot
-// type into its pane, and its live view is a read-only tail.
-function onSaved(name: string, what: string, machine: string): string {
-  return `${name} is stopped on ${what}. It runs on the saved machine ${machine}. Answer it in herdr on ${machine}.`;
+// What the detail says when the board cannot answer a peer's agent: the
+// link is down, or the pairing is read-only (protocol.md 7.4, D20).
+function offPeer(name: string, what: string, peer: string, reason: string | null): string {
+  const why = reason ? ` (${reason})` : "";
+  return `${name} is stopped on ${what} on ${peer}. The board cannot answer it here${why}, so answer it from that host.`;
 }
 
 function PermissionDetail({ prompt, ctx }: { prompt: PermissionPrompt; ctx: Context }) {
-  const { agent, saved, known } = useSessionAgent(prompt.session_id);
+  const { agent, known } = useSessionAgent(prompt.session_id);
   const owner = ctx.cards.get(prompt.card_id) ?? prompt;
   const peer = ownerOf(owner);
+  const standing = useStanding(owner);
   const name = agentName(agent);
   const chip = (
     <span className="lab sm warn">
@@ -432,7 +434,7 @@ function PermissionDetail({ prompt, ctx }: { prompt: PermissionPrompt; ctx: Cont
     </span>
   );
   // The hook's record of the dialog: what shows when the screen gives no
-  // buttons to press (a peer's pane, a saved machine's, or no dialog read).
+  // buttons to press (a peer the board cannot act on, or no dialog read).
   const asking = (
     <div className="blk">
       <div className="blk-h">What the pane is asking</div>
@@ -458,34 +460,26 @@ function PermissionDetail({ prompt, ctx }: { prompt: PermissionPrompt; ctx: Cont
           chip={chip}
           when={`waiting since ${formatWhen(prompt.since)}, ${formatAge(prompt.since)}`}
         />
-        <HerdrMenu sessionId={prompt.session_id} off={focusReason(peer)} />
+        <TerminalMenu sessionId={prompt.session_id} off={focusReason(peer)} />
       </div>
       <h2 className="d-q">Allow {prompt.tool}?</h2>
-      {peer ? (
+      {peer && !standing.canAct ? (
         <>
-          <p className="d-ctx">
-            {name} is stopped on a permission dialog. {peer} owns its pane, so answer it from that
-            host.
-          </p>
-          {asking}
-        </>
-      ) : saved ? (
-        <>
-          <p className="d-ctx">{onSaved(name, "a permission dialog", saved)}</p>
+          <p className="d-ctx">{offPeer(name, "a permission dialog", peer, standing.reason)}</p>
           {asking}
         </>
       ) : (
         <>
           <p className="d-ctx">
             {name} is stopped on a permission dialog. Press an answer, and the board types it in the
-            pane.
+            pane{peer ? ` on ${peer}` : ""}.
           </p>
-          {/* Until the agents list says which machine runs it, a read could go
-              to a saved machine's pane, which the daemon refuses. */}
+          {/* The strip waits for the agents list, so its name is known. */}
           {known ? (
             <AnswerStrip
               key={prompt.session_id}
               sessionId={prompt.session_id}
+              host={peer}
               waiting
               observedAt={prompt.since}
               fallback={asking}
@@ -502,11 +496,23 @@ function PermissionDetail({ prompt, ctx }: { prompt: PermissionPrompt; ctx: Cont
 }
 
 // The pane's visible rows, read once, for a dialog the board cannot read.
-function PaneShows({ sessionId, herdr }: { sessionId: string; herdr: ReactNode }) {
+function PaneShows({
+  sessionId,
+  host,
+  actions,
+}: {
+  sessionId: string;
+  host: string | undefined;
+  actions: ReactNode;
+}) {
   const tail = useQuery({
-    queryKey: ["dialog-pane", sessionId],
+    queryKey: ["dialog-pane", host ?? null, sessionId],
     queryFn: async ({ signal }) => {
-      const result = await readPane<Tail>(terminalTailPath(sessionId), signal);
+      const result = await readPane<Tail>(
+        terminalTailPath(sessionId),
+        signal,
+        host ? { host } : {},
+      );
       if (!result.ok) throw new Error(result.detail);
       return { text: result.body.text, at: new Date().toISOString() };
     },
@@ -527,14 +533,14 @@ function PaneShows({ sessionId, herdr }: { sessionId: string; herdr: ReactNode }
         ) : null}
       </div>
       {tail.data && tail.data.text.trim() !== "" ? (
-        <Terminal tail={tail.data.text} sessionId={sessionId} herdr={herdr} />
+        <Terminal tail={tail.data.text} sessionId={sessionId} actions={actions} />
       ) : null}
       {/* With nothing to show, the way to the live terminal stays. */}
       {tail.isError || tail.data?.text.trim() === "" ? (
         <div className="pane-box">
           <div className="pb-h">
             <span>Pane tail</span>
-            {herdr}
+            {actions}
           </div>
           <pre>
             {tail.isError
@@ -555,8 +561,8 @@ function DialogDetail({ agent, ctx }: { agent: AgentRow; ctx: Context }) {
   const owner = card ?? agent;
   const peer = ownerOf(owner);
   const off = focusReason(peer);
+  const standing = useStanding(owner);
   const ambiguous = useAmbiguousIds();
-  const saved = useSavedMachine(agent.host_id);
   const name = agentName(agent);
   const since = agent.state_since ?? agent.activity_observed_at;
   const chip = (
@@ -574,7 +580,7 @@ function DialogDetail({ agent, ctx }: { agent: AgentRow; ctx: Context }) {
         chip={chip}
         when={`waiting since ${formatWhen(since)}, ${formatAge(since)}`}
       />
-      {menu ? <HerdrMenu sessionId={agent.session_id} off={off} /> : null}
+      {menu ? <TerminalMenu sessionId={agent.session_id} off={off} /> : null}
     </div>
   );
   const waits = <h2 className="d-q">{name} waits for an answer</h2>;
@@ -582,22 +588,20 @@ function DialogDetail({ agent, ctx }: { agent: AgentRow; ctx: Context }) {
     <>
       {top(false)}
       {waits}
-      {peer ? (
-        <p className="d-ctx">
-          {name} is stopped on a dialog. {peer} owns its pane, so answer it from that host.
-        </p>
+      {peer && !standing.canAct ? (
+        <p className="d-ctx">{offPeer(name, "a dialog", peer, standing.reason)}</p>
       ) : (
         <>
           <p className="d-ctx">
-            {saved
-              ? onSaved(name, "a dialog", saved)
-              : "The board cannot read this dialog, so it shows no buttons. Look at the live terminal and answer there."}
+            The board cannot read this dialog, so it shows no buttons. Look at the live terminal and
+            answer there.
           </p>
           <PaneShows
             sessionId={agent.session_id}
-            herdr={
+            host={peer}
+            actions={
               <span className="ev-acts">
-                <HerdrMenu sessionId={agent.session_id} off={off} />
+                <TerminalMenu sessionId={agent.session_id} off={off} />
                 <ViewLive sessionId={agent.session_id} />
               </span>
             }
@@ -625,12 +629,13 @@ function DialogDetail({ agent, ctx }: { agent: AgentRow; ctx: Context }) {
   return (
     <>
       <BackLink />
-      {peer || saved ? (
+      {peer && !standing.canAct ? (
         unknown
       ) : (
         <AnswerStrip
           key={agent.session_id}
           sessionId={agent.session_id}
+          host={peer}
           waiting
           observedAt={agent.activity_observed_at}
           agent={{

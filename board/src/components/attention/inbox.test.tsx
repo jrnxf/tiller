@@ -12,6 +12,7 @@ import type {
   AgentsResponse,
   AttentionResponse,
   BoardResponse,
+  MachinesResponse,
   PromptDialog,
 } from "../../lib/api-types";
 import { hydrateFromSnapshot } from "../../lib/boot";
@@ -24,7 +25,13 @@ import {
 } from "../../lib/fixtures";
 import type { Scenario } from "../../lib/fixtures";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
-import { agentsQuery, attentionQuery, boardPath, queryKeyFor } from "../../lib/queries";
+import {
+  agentsQuery,
+  attentionQuery,
+  boardPath,
+  machinesQuery,
+  queryKeyFor,
+} from "../../lib/queries";
 import { receiptsStore } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
 import { applyChange } from "../../lib/sse";
@@ -40,7 +47,7 @@ const MERGE = "01JATTN0000000000000000001";
 const QUIET = "01JATTN0000000000000000002";
 const CAPACITY = "01JATTN0000000000000000003";
 const SESSION_C = "01JSESSWGAMMA1200000000000";
-const HOST_B = "01JHOSTB00000000000000000B";
+const PEER_SESSION = "01JSESSPEERD000000000000G";
 
 interface Call {
   method: string;
@@ -57,10 +64,12 @@ let release: (() => void) | null = null;
 // mutations, and answered from `screens` in turn, the last one repeating.
 let reads: string[] = [];
 let screens: PromptDialog[] = [];
-// A tail read finds herdr down.
+// A tail read finds the terminal holder down.
 let tailFails = false;
-// A prompt read is refused: the agent runs on a saved machine.
+// A prompt read is refused: the pane is gone.
 let promptRefused = false;
+// The `host` each prompt read carried, in order.
+let readHosts: (string | null)[] = [];
 // The agents list never answers, so the board does not know who runs where.
 let agentsHang = false;
 // The agents list fails.
@@ -117,7 +126,10 @@ function stubDaemon(scenario: Scenario, hold = false) {
     // A tail read: the screen of a menu the board has no layout for.
     if (path.endsWith("/terminal/tail")) {
       if (tailFails) {
-        const error = { code: "unavailable", message: "herdr is unreachable: no socket" };
+        const error = {
+          code: "unavailable",
+          message: "the terminal holder is unreachable: no socket",
+        };
         return new Response(JSON.stringify({ ok: false, error }), { status: 503 });
       }
       const text = " Select a model for this session:\n ❯ 1. Default (recommended)\n";
@@ -128,10 +140,12 @@ function stubDaemon(scenario: Scenario, hold = false) {
     const read = /^\/api\/v1\/agents\/([^/]+)\/prompt$/.exec(path);
     if (read?.[1]) {
       reads.push(read[1]);
+      const sent = init?.body ? (JSON.parse(String(init.body)) as { host?: string }) : {};
+      readHosts.push(sent.host ?? null);
       if (promptRefused) {
         const error = {
           code: "refused",
-          message: "the agent runs on the saved machine host-b; nothing was read",
+          message: "the pane is gone; nothing was read",
         };
         return new Response(JSON.stringify({ ok: false, error }), { status: 422 });
       }
@@ -183,6 +197,7 @@ beforeEach(() => {
   replies = [];
   release = null;
   reads = [];
+  readHosts = [];
   screens = [DIALOG];
   tailFails = false;
   promptRefused = false;
@@ -524,7 +539,7 @@ test("reprioritize sends the card's rev, and a conflict is shown as the server w
   expect(screen.getByRole("alert").textContent).toContain("is at rev 4, you sent 3");
 });
 
-test("comment, add card and open in herdr each reach their endpoint with a receipt", async () => {
+test("comment, add card and open in terminal each reach their endpoint with a receipt", async () => {
   stubDaemon("default");
   replies = [
     ok({ outbox_id: "01JOUTB0000000000000000002" }),
@@ -547,7 +562,7 @@ test("comment, add card and open in herdr each reach their endpoint with a recei
   fireEvent.click(within(actions).getByRole("button", { name: "Add card" }));
   await flush();
 
-  fireEvent.click(within(actions).getByRole("button", { name: /Open in herdr/ }));
+  fireEvent.click(within(actions).getByRole("button", { name: /Open in terminal/ }));
   await flush();
 
   expect(calls.map((call) => `${call.method} ${call.path}`)).toEqual([
@@ -564,16 +579,16 @@ test("comment, add card and open in herdr each reach their endpoint with a recei
   const keys = new Set(calls.map((call) => call.body.idempotency_key));
   expect(keys.size).toBe(3);
   expect(within(actions).getAllByRole("status")).toHaveLength(3);
-  expect(within(actions).getByText(/Focused in herdr/)).toBeTruthy();
+  expect(within(actions).getByText(/Switched the terminal to the agent/)).toBeTruthy();
 });
 
-// Opens the detail's ··· menu and picks Open in herdr.
-async function openHerdr() {
+// Opens the detail's ··· menu and picks Open in terminal.
+async function openTerminal() {
   const detail = document.querySelector<HTMLElement>(".in-detail");
   if (!detail) throw new Error("no detail pane");
   fireEvent.click(within(detail).getByRole("button", { name: "More actions" }));
   const menu = await screen.findByRole("menu", { name: "More actions" });
-  fireEvent.click(within(menu).getByRole("menuitem", { name: /Open in herdr/ }));
+  fireEvent.click(within(menu).getByRole("menuitem", { name: /Open in terminal/ }));
 }
 
 test("a permission prompt shows the pane's own options, in pane order, as answer buttons", async () => {
@@ -815,7 +830,7 @@ test("a later dialog with no other verdict between never shows the earlier recei
           : agents,
       );
     });
-  // herdr sees the next dialog before it ever sees the agent work, so the
+  // The holder sees the next dialog before it ever sees the agent work, so the
   // run of waits keeps its start, but the observation is a later one.
   worker({ activity_observed_at: "2026-11-02T12:01:00.000Z" });
   await settled();
@@ -857,20 +872,22 @@ test("a pane that cannot be read still offers View live", async () => {
   screens = [];
   tailFails = true;
   await renderInbox("dialog", `dialog-${SESSION_MENU}`);
-  expect(await screen.findByText(/The pane could not be read: herdr is unreachable/)).toBeTruthy();
+  expect(
+    await screen.findByText(/The pane could not be read: the terminal holder is unreachable/),
+  ).toBeTruthy();
   expect(screen.getByRole("button", { name: /View live/ })).toBeTruthy();
 });
 
-test("Open in herdr moves into the detail's ··· menu", async () => {
+test("Open in terminal moves into the detail's ··· menu", async () => {
   stubDaemon("default");
   await renderInbox("default", "perm-01JSESSWGAMMA1200000000000");
-  expect(screen.queryByRole("button", { name: /Open the pane in herdr/ })).toBeNull();
-  await openHerdr();
+  expect(screen.queryByRole("button", { name: /Open in terminal/ })).toBeNull();
+  await openTerminal();
   await flush();
   expect(calls[0]?.path).toBe(`/api/v1/agents/${SESSION_C}/focus`);
 });
 
-test("the pane button says what herdr did, and when no herdr window here shows it", async () => {
+test("the pane button says what the daemon did, and gives the attach command when no terminal here shows the agent", async () => {
   stubDaemon("default");
   const launched = ok();
   launched.body.data = { opened: "launched", terminal: "Ghostty" };
@@ -879,75 +896,79 @@ test("the pane button says what herdr did, and when no herdr window here shows i
   replies.push(launched, unseen);
   await renderInbox("default", "perm-01JSESSWGAMMA1200000000000");
 
-  await openHerdr();
+  await openTerminal();
   await flush();
-  expect(screen.getByText(/Opened herdr in Ghostty/)).toBeTruthy();
+  expect(screen.getByText(/Opened the agent in Ghostty/)).toBeTruthy();
 
-  await openHerdr();
+  await openTerminal();
   await flush();
-  expect(screen.getByRole("alert").textContent).toMatch(
-    /no herdr window is open on the daemon's machine\. Start herdr there, or open the board on the machine you are at\./,
-  );
-  expect(screen.queryByText(/Opened herdr in Ghostty/)).toBeNull();
+  const alert = screen.getByRole("alert");
+  expect(alert.textContent).toContain("Run this in a terminal on the daemon's host:");
+  expect(alert.textContent).toContain(`tiller attach ${SESSION_C}`);
+  expect(screen.queryByText(/Opened the agent in Ghostty/)).toBeNull();
 });
 
-test("the pane button says where to find a remote agent's pane", async () => {
-  stubDaemon("default");
-  const { queryClient } = await renderInbox("default", "perm-01JSESSWGAMMA1200000000000");
-  // The prompt's agent runs on host-b, a saved remote machine.
-  act(() => {
-    queryClient.setQueryData<AgentsResponse>(agentsQuery().queryKey, (agents) => {
-      const [first, ...rest] = agents?.orchestrators ?? [];
-      if (!first) throw new Error("no orchestrator in the fixture");
-      const worker: AgentRow = { ...first, session_id: SESSION_C, host_id: HOST_B, workers: [] };
-      return { orchestrators: [{ ...first, workers: [...first.workers, worker] }, ...rest] };
-    });
-  });
+const PEER_PROMPT = `perm-${PEER_SESSION}`;
 
-  await openHerdr();
-  await flush();
-  expect(screen.getByRole("status").textContent).toMatch(
-    /^Focused on host-b - select host-b in herdr's sidebar,/,
+// Turns host-d's pairing read-only.
+function readOnlyPeer(queryClient: QueryClient) {
+  queryClient.setQueryData<MachinesResponse>(machinesQuery().queryKey, (machines) =>
+    machines
+      ? {
+          ...machines,
+          machines: machines.machines.map((machine) =>
+            machine.label === "host-d"
+              ? { ...machine, view_only: true, peer_scope: "read" }
+              : machine,
+          ),
+        }
+      : machines,
   );
-});
-
-// Moves a session's agent to host-b, a saved remote machine.
-function onSavedMachine(sessionId: string) {
-  const moved = (row: AgentRow) =>
-    row.session_id === sessionId ? { ...row, host_id: HOST_B } : row;
-  return (queryClient: QueryClient) =>
-    queryClient.setQueryData<AgentsResponse>(agentsQuery().queryKey, (agents) => {
-      const rows = agents?.orchestrators ?? [];
-      const found = rows.some(
-        (row) =>
-          row.session_id === sessionId ||
-          row.workers.some((worker) => worker.session_id === sessionId),
-      );
-      const [first, ...rest] = rows;
-      if (!first) throw new Error("no orchestrator in the fixture");
-      if (!found) {
-        const worker: AgentRow = { ...first, session_id: sessionId, host_id: HOST_B, workers: [] };
-        return { orchestrators: [{ ...first, workers: [...first.workers, worker] }, ...rest] };
-      }
-      return {
-        orchestrators: rows.map((row) => ({ ...moved(row), workers: row.workers.map(moved) })),
-      };
-    });
 }
 
-test("a refused prompt read is not tried again", async () => {
-  stubDaemon("default");
-  promptRefused = true;
-  await renderInbox("default", `perm-${SESSION_C}`);
-  expect(await screen.findByText("What the pane is asking", {}, { timeout: 4000 })).toBeTruthy();
-  expect(reads).toEqual([SESSION_C]);
+test("a peer's permission prompt is read and answered through the peer, with a key", async () => {
+  stubDaemon("federated");
+  await renderInbox("federated", PEER_PROMPT);
+  const yes = await screen.findByRole("button", { name: "Answer 1: Yes" });
+  expect(readHosts).toEqual(["host-d"]);
+  expect(
+    screen.getByText(/Press an answer, and the board types it in the pane on host-d\./),
+  ).toBeTruthy();
+  fireEvent.click(yes);
+  await flush();
+  expect(calls).toHaveLength(1);
+  expect(calls[0]?.path).toBe(`/api/v1/agents/${PEER_SESSION}/prompt/answer`);
+  expect(calls[0]?.body).toMatchObject({ option: 1, screen: "s1", host: "host-d" });
+  expect(typeof calls[0]?.body.idempotency_key).toBe("string");
 });
 
-test("a permission prompt on a saved machine says to answer it in herdr there", async () => {
-  stubDaemon("default");
-  await renderInbox("default", `perm-${SESSION_C}`, onSavedMachine(SESSION_C));
+test("a peer answer the peer did not confirm says so, and a retry carries the same key", async () => {
+  stubDaemon("federated");
+  replies.push({
+    status: 504,
+    body: {
+      ok: false,
+      error: { code: "forward_uncertain", message: "host-d did not answer within 60 seconds" },
+    },
+  });
+  await renderInbox("federated", PEER_PROMPT);
+  fireEvent.click(await screen.findByRole("button", { name: "Answer 1: Yes" }));
+  await flush();
+  expect(await screen.findByText(/Sent, not confirmed\./)).toBeTruthy();
+  expect(screen.getByText(/did not answer within 60 seconds/)).toBeTruthy();
+  fireEvent.click(await screen.findByRole("button", { name: "Answer 1: Yes" }));
+  await flush();
+  expect(calls).toHaveLength(2);
+  expect(calls[1]?.body.idempotency_key).toBe(calls[0]?.body.idempotency_key);
+});
+
+test("a permission prompt on a peer paired read-only says to answer it from that host", async () => {
+  stubDaemon("federated");
+  await renderInbox("federated", PEER_PROMPT, readOnlyPeer);
   expect(
-    screen.getByText(/runs on the saved machine host-b\. Answer it in herdr on host-b\./),
+    screen.getByText(
+      /is stopped on a permission dialog on host-d\. The board cannot answer it here \(view only pairing\), so answer it from that host\./,
+    ),
   ).toBeTruthy();
   expect(screen.getByText("What the pane is asking")).toBeTruthy();
   await flush();
@@ -955,16 +976,16 @@ test("a permission prompt on a saved machine says to answer it in herdr there", 
   expect(screen.queryByRole("button", { name: /^Answer \d/ })).toBeNull();
 });
 
-test("a dialog on a saved machine says to answer it in herdr there, not in the live view", async () => {
-  stubDaemon("dialog");
-  await renderInbox("dialog", `dialog-${SESSION_MENU}`, onSavedMachine(SESSION_MENU));
-  expect(
-    screen.getByText(/runs on the saved machine host-b\. Answer it in herdr on host-b\./),
-  ).toBeTruthy();
-  expect(screen.queryByText(/Look at the live terminal and answer there/)).toBeNull();
-  expect(await screen.findByText("What the pane shows")).toBeTruthy();
-  await flush();
-  expect(reads).toEqual([]);
+test("a peer's pane opens in a terminal only on its own host", async () => {
+  stubDaemon("federated");
+  await renderInbox("federated", PEER_PROMPT);
+  const detail = document.querySelector<HTMLElement>(".in-detail");
+  if (!detail) throw new Error("no detail pane");
+  fireEvent.click(within(detail).getByRole("button", { name: "More actions" }));
+  const menu = await screen.findByRole("menu", { name: "More actions" });
+  const item = within(menu).getByRole("menuitem", { name: /Open in terminal/ });
+  expect(item.getAttribute("aria-disabled")).toBe("true");
+  expect(item.getAttribute("title")).toBe("host-d owns this pane: open it from that host");
 });
 
 test("pressing O twice while the first focus is in flight focuses once", async () => {
@@ -1004,7 +1025,7 @@ function paneTail(): HTMLElement {
   return head;
 }
 
-test("a current decision's pane tail has View live, with Open in herdr in its ··· menu", async () => {
+test("a current decision's pane tail has View live, with Open in terminal in its ··· menu", async () => {
   stubDaemon("default");
   await renderInbox("default", CAPACITY);
   const head = paneTail();
@@ -1013,10 +1034,10 @@ test("a current decision's pane tail has View live, with Open in herdr in its ·
   // The primary is rightmost, the menu on its left.
   expect(more.compareDocumentPosition(live) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(live.className).toContain("primary");
-  expect(within(head).queryByRole("button", { name: /Open in herdr/ })).toBeNull();
+  expect(within(head).queryByRole("button", { name: /Open in terminal/ })).toBeNull();
   fireEvent.click(more);
   const menu = await screen.findByRole("menu", { name: "More actions" });
-  fireEvent.click(within(menu).getByRole("menuitem", { name: /Open in herdr/ }));
+  fireEvent.click(within(menu).getByRole("menuitem", { name: /Open in terminal/ }));
   await flush();
   expect(calls.map((call) => call.path)).toEqual([`/api/v1/agents/${GAMMA_ORCH}/focus`]);
 });

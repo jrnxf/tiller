@@ -2,11 +2,11 @@ import type { AgentRow, AgentsResponse, BoardRow, Project } from "../../lib/api-
 import { ownerKey, projectKey, shownId } from "../../lib/peers";
 
 // One project's block on the Agents view: the orchestrator first, its workers
-// under it as `├` rows with the last one `└`, the way herdr nests workspaces.
+// under it as `├` rows with the last one `└`, as a file tree nests folders.
 export interface AgentLine {
   agent: AgentRow;
   orchestrator: boolean;
-  // The herdr workspace label as drawn: the project id for an orchestrator,
+  // The pane label as drawn: the project id for an orchestrator,
   // `├ alpha-42 build` for a worker.
   label: string;
   // The short name the rail shows: the project id for an orchestrator, the

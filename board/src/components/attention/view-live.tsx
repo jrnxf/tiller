@@ -3,14 +3,14 @@ import { useState } from "react";
 
 import { TerminalIcon } from "../board/icons";
 import { LiveTerminal } from "../board/live-terminal";
+import { ownerOf } from "../../lib/peers";
 import { agentTitle, useSessionAgent } from "./agent-name";
 
 // View live: the session's own live terminal, the Agents view's expanded
-// one, opened over the page and closed back to it. A saved machine's agent
-// shows as its read-only tail, as on the card page.
+// one, opened over the page and closed back to it.
 export function ViewLive({ sessionId }: { sessionId: string }) {
   const [open, setOpen] = useState(false);
-  const { agent, saved: remote } = useSessionAgent(sessionId);
+  const { agent } = useSessionAgent(sessionId);
   const name = agentTitle(agent);
   return (
     <>
@@ -28,12 +28,7 @@ export function ViewLive({ sessionId }: { sessionId: string }) {
           variant="popup"
           sessionId={sessionId}
           label={name}
-          heading={
-            <span className="mir-title">
-              {name}
-              {remote ? <span className="meta">{remote}</span> : null}
-            </span>
-          }
+          heading={<span className="mir-title">{name}</span>}
           actions={
             <Link
               to="/agents"
@@ -43,7 +38,7 @@ export function ViewLive({ sessionId }: { sessionId: string }) {
               View in Agents
             </Link>
           }
-          machine={remote}
+          peer={agent ? ownerOf(agent) : undefined}
           onClose={() => setOpen(false)}
         />
       ) : null}

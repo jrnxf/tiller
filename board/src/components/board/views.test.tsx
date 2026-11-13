@@ -30,7 +30,7 @@ import { createTestQueryClient, loadRouteChunks } from "../../test-app";
 
 await loadRouteChunks();
 
-const HOST_B = "01JHOSTB00000000000000000B";
+const HOST_D = "01JPEERD0000000000000000D";
 const CARD_43 = "01JCARD0000000000000000043";
 const CARD_44 = "01JCARD0000000000000000044";
 const CARD_42 = "01JCARD0000000000000000042";
@@ -92,7 +92,7 @@ function stubApi(scenario: Scenario, focusStatus = 200, focused: unknown = null)
           : new Response(
               JSON.stringify({
                 ok: false,
-                error: { code: "unavailable", message: "herdr is down" },
+                error: { code: "unavailable", message: "the terminal holder is down" },
               }),
               { status: focusStatus },
             );
@@ -276,12 +276,14 @@ test("a filter in the URL is applied on the first render", async () => {
 });
 
 test("a machine filter keeps only the lanes that have cards there", async () => {
-  stubApi("default");
-  await renderApp("default", `/?host=${HOST_B}`);
-  expect(screen.getByTestId("lane-alpha")).toBeTruthy();
-  expect(screen.queryByTestId("lane-beta")).toBeNull();
-  expect(screen.getByText("Move the poller behind a trait")).toBeTruthy();
-  expect(screen.queryByText("Add the machines summary to the sidebar")).toBeNull();
+  stubApi("federated");
+  await renderApp("federated", `/?host=${HOST_D}`);
+  expect(screen.getByTestId("lane-host-d/gamma")).toBeTruthy();
+  expect(screen.getByTestId("lane-host-d/fleet")).toBeTruthy();
+  expect(screen.queryByTestId("lane-alpha")).toBeNull();
+  expect(screen.queryByTestId("lane-host-e/ledger")).toBeNull();
+  expect(screen.getByText("Rotate the signing key")).toBeTruthy();
+  expect(screen.queryByText("Move the poller behind a trait")).toBeNull();
 });
 
 test("a project with no cards says so", async () => {
@@ -466,11 +468,11 @@ function agentRow(name: string) {
   return row;
 }
 
-// The selected agent's Open in herdr, the rightmost action on the stage.
+// The selected agent's Open in terminal, the rightmost action on the stage.
 function stageOpen() {
   const acts = document.querySelector<HTMLElement>(".av-acts");
   if (!acts) throw new Error("no agent on the stage");
-  return within(acts).getByRole("button", { name: /Open in herdr/ }) as HTMLButtonElement;
+  return within(acts).getByRole("button", { name: /Open in terminal/ }) as HTMLButtonElement;
 }
 
 async function selectAgent(name: string) {
@@ -616,19 +618,16 @@ test("an agent on the trust dialog gets its buttons, which no digit taps", async
   expect(posted.filter(({ path }) => path.endsWith("/prompt/answer"))).toEqual([]);
 });
 
-test("the button says it opens herdr on the remote machine first only for a remote agent", async () => {
+test("the button says it shows the pane in a terminal on this host", async () => {
   stubApi("default");
   await renderApp("default", "/agents");
-
   await selectAgent("alpha-42");
-  expect(stageOpen().getAttribute("title")).toBe("Focus this agent's terminal in herdr");
-  await selectAgent("alpha-43");
   expect(stageOpen().getAttribute("title")).toBe(
-    "Focuses this agent's terminal on the remote machine; select that machine in herdr's sidebar to see it",
+    "Show this agent's pane in a terminal on this host",
   );
 });
 
-test("Open in herdr asks the daemon to focus that agent, and says where to find the remote one", async () => {
+test("Open in terminal asks the daemon to focus that agent, and says what it did", async () => {
   const posted = stubApi("default", 200, { opened: "raised", terminal: "Ghostty" });
   await renderApp("default", "/agents");
 
@@ -639,11 +638,32 @@ test("Open in herdr asks the daemon to focus that agent, and says where to find 
   const sessionId = agentRow("alpha-43").dataset.testid?.replace("agent-", "");
   expect(posted[0]).toMatchObject({ path: `/api/v1/agents/${sessionId}/focus`, method: "POST" });
   await waitFor(() =>
-    expect(screen.getByTestId("toast").textContent).toContain("Brought herdr to the front"),
+    expect(screen.getByTestId("toast").textContent).toContain("Brought Ghostty to the front"),
   );
   expect(screen.getByTestId("toast").textContent).toContain(
-    "Select host-b in herdr's sidebar to see the agent's terminal.",
+    "Its tiller attach window shows the agent's pane.",
   );
+});
+
+test("Open in terminal says when it switched a terminal, with no app named", async () => {
+  stubApi("default", 200, { opened: "focused", terminal: null });
+  await renderApp("default", "/agents");
+  await selectAgent("alpha-42");
+  fireEvent.click(stageOpen());
+  await waitFor(() =>
+    expect(screen.getByTestId("toast").textContent).toContain("Switched the terminal to the agent"),
+  );
+});
+
+test("Open in terminal says when the terminal app did not open", async () => {
+  stubApi("default", 200, { opened: "failed", terminal: "Ghostty", problem: "Ghostty exited 1" });
+  await renderApp("default", "/agents");
+  await selectAgent("alpha-42");
+  fireEvent.click(stageOpen());
+  await waitFor(() =>
+    expect(screen.getByTestId("toast").textContent).toContain("Ghostty did not open"),
+  );
+  expect(screen.getByTestId("toast").textContent).toContain("Ghostty exited 1");
 });
 
 function laneToggle(header: HTMLElement) {
@@ -747,25 +767,27 @@ test("no lane offers Start orchestrator while the agents cannot be read", async 
   expect(screen.queryByRole("button", { name: "Start orchestrator" })).toBeNull();
 });
 
-test("Open in herdr says when herdr opened, and when no herdr window here can show it", async () => {
+test("Open in terminal says when it started the app, and gives the attach command when nothing here can show the agent", async () => {
   stubApi("default", 200, { opened: "launched", terminal: "Ghostty" });
   await renderApp("default", "/agents");
 
   await selectAgent("alpha-42");
+  const sessionId = agentRow("alpha-42").dataset.testid?.replace("agent-", "");
   fireEvent.click(stageOpen());
   await waitFor(() =>
-    expect(screen.getByTestId("toast").textContent).toContain("Opened herdr in Ghostty"),
+    expect(screen.getByTestId("toast").textContent).toContain("Opened the agent in Ghostty"),
   );
 
   stubApi("default", 200, { opened: "unseen", terminal: null });
   fireEvent.click(stageOpen());
   await waitFor(() =>
-    expect(screen.getByTestId("toast").textContent).toContain("No herdr window here"),
+    expect(screen.getByTestId("toast").textContent).toContain("No terminal here shows the agent"),
   );
-  expect(screen.getByTestId("toast").textContent).toContain(
-    "Start herdr there, or open the board on the machine you are at.",
-  );
-  expect(screen.getByTestId("toast").textContent).not.toContain("Focused in herdr");
+  const toast = screen.getByTestId("toast");
+  expect(toast.textContent).toContain("Run this in a terminal on the daemon's host:");
+  expect(toast.textContent).toContain(`tiller attach ${sessionId}`);
+  expect(within(toast).getByRole("button", { name: /Copy/ })).toBeTruthy();
+  expect(toast.textContent).not.toContain("Opened the agent in Ghostty");
 });
 
 test("the O key opens the selected agent, and a letter typed into a field does not", async () => {
@@ -789,17 +811,19 @@ test("the O key opens the selected agent, and a letter typed into a field does n
   expect(posted).toHaveLength(1);
 });
 
-test("when herdr cannot be reached the board says so and changes nothing", async () => {
+test("when the terminal holder cannot be reached the board says so and changes nothing", async () => {
   stubApi("default", 503);
   await renderApp("default", "/agents");
   await selectAgent("alpha-42");
   fireEvent.click(stageOpen());
   await waitFor(() =>
-    expect(screen.getByTestId("toast").textContent).toContain("herdr did not answer"),
+    expect(screen.getByTestId("toast").textContent).toContain(
+      "The terminal holder did not switch to the pane, so nothing was opened",
+    ),
   );
 });
 
-test("the I key opens the details with the focus command, branch, worktree, label and recent events", async () => {
+test("the I key opens the details with the attach command, branch, worktree, label and recent events", async () => {
   stubApi("default");
   await renderApp("default", "/agents");
   await selectAgent("alpha-42");
@@ -808,7 +832,7 @@ test("the I key opens the details with the focus command, branch, worktree, labe
   expect(panel.dataset.open).toBe("false");
   fireEvent.keyDown(window, { key: "i" });
   await waitFor(() => expect(panel.dataset.open).toBe("true"));
-  expect(panel.textContent).toContain("herdr agent focus alpha-42-build");
+  expect(panel.textContent).toMatch(/tiller attach 01J\w+/);
   expect(panel.textContent).toContain("ship/fixture");
   expect(panel.textContent).toContain("/home/user/work/fixture");
   expect(panel.textContent).toContain("alpha-42 build");
@@ -823,11 +847,15 @@ test("the I key opens the details with the focus command, branch, worktree, labe
 });
 
 test("a machine filter keeps only that machine's agents and redraws the tree", async () => {
-  stubApi("default");
-  await renderApp("default", `/agents?host=${HOST_B}`);
-  expect(agentRow("alpha-43").classList.contains("last")).toBe(true);
+  stubApi("federated");
+  await renderApp("federated", `/agents?host=${HOST_D}`);
+  const hosts = new Set(
+    within(agentList())
+      .getAllByTestId("host-chip")
+      .map((chip) => chip.textContent),
+  );
+  expect(hosts).toEqual(new Set(["host-d"]));
   expect(within(agentList()).queryByText("alpha-42")).toBeNull();
-  expect(within(agentList()).queryByRole("group", { name: "beta" })).toBeNull();
 });
 
 test("moving between views keeps the screen you were on until the next one is ready", async () => {
@@ -979,9 +1007,9 @@ test("the page lists runs, the PR with its head, events and how fresh each signa
   );
   expect(page.textContent).toContain("ci.pass 4/4");
   expect(page.textContent).toContain("Observation freshness");
-  expect(page.textContent).toContain("Pane (herdr)");
-  // Only the running attempt can be opened in herdr.
-  expect(within(page).getAllByRole("button", { name: /Open in herdr/ })).toHaveLength(1);
+  expect(page.textContent).toContain("Pane (holder)");
+  // Only the running attempt can be opened in a terminal.
+  expect(within(page).getAllByRole("button", { name: /Open in terminal/ })).toHaveLength(1);
 });
 
 test("the PR shows the newest review and the head it covered", async () => {
@@ -1125,7 +1153,9 @@ test("a refused remove shows in the dialog, which stays open", async () => {
   fireEvent.click(within(row).getByRole("button", { name: "Remove gamma-12" }));
   const dialog = await screen.findByRole("dialog", { name: "Remove gamma-12?" });
   fireEvent.click(within(dialog).getByRole("button", { name: "Remove" }));
-  expect((await within(dialog).findByRole("alert")).textContent).toBe("herdr is down");
+  expect((await within(dialog).findByRole("alert")).textContent).toBe(
+    "the terminal holder is down",
+  );
 });
 
 test("the card page's Board link is a bordered button, not a ghost", async () => {

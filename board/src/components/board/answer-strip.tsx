@@ -9,6 +9,7 @@ import { CheckIcon } from "../shell/icons";
 import { Modal } from "../ui/modal";
 import { Ago } from "./ago";
 import { ShieldIcon, WarnIcon } from "./icons";
+import { ulid } from "../attention/ulid";
 import { promptPath, readPane } from "./terminal-stream";
 import "./answer-strip.css";
 
@@ -35,7 +36,8 @@ type Answer =
       digit: boolean;
       folded: boolean;
     }
-  | { kind: "refused"; at: string; detail: string };
+  // `unsure`: a peer took the answer and did not confirm it (504).
+  | { kind: "refused"; at: string; detail: string; unsure?: boolean };
 
 // A prompt read that failed: `status` is the daemon's, or null when it did
 // not answer or found no dialog yet.
@@ -48,9 +50,15 @@ class PromptReadError extends Error {
   }
 }
 
+// A forwarded answer the peer did not confirm in its proof wait (protocol.md
+// 7.4, Agent verbs on a peer): it may have been typed.
+function unconfirmed(host: string): string {
+  return `${host} did not answer within 60 seconds, so the answer may or may not have been typed. Tap the same option again to retry: it carries the same key, so it is typed once.`;
+}
+
 // A read is tried again only when a later one could find what this one did
-// not: no dialog drawn yet, no answer, or a server fault. A refusal (a saved
-// machine's agent, a session that waits on nothing) stays one.
+// not: no dialog drawn yet, no answer, or a server fault. A refusal (a
+// read-scope peer, a session that waits on nothing) stays one.
 function tryAgain(failures: number, error: Error): boolean {
   if (failures >= 2) return false;
   const status = error instanceof PromptReadError ? error.status : null;
@@ -76,6 +84,7 @@ export function AnswerStrip({
   sessionId,
   waiting,
   observedAt,
+  host,
   agent = null,
   fallback = null,
   reading = null,
@@ -86,6 +95,8 @@ export function AnswerStrip({
   waiting: boolean;
   // Null while the daemon has not read the pane: there is no wait to answer.
   observedAt: string | null;
+  // The peer that owns the agent: the read and the answer go to it.
+  host?: string;
   agent?: StripAgent | null;
   // What shows in the strip's place once a read found no dialog to answer.
   fallback?: ReactNode;
@@ -100,17 +111,24 @@ export function AnswerStrip({
   // The option whose answer waits on the owner's yes: "No, exit" ends the session.
   const [confirm, setConfirm] = useState<{ dialog: PromptDialog; n: number } | null>(null);
   // The wait the strip answers, named by the activity time it began at. A
-  // later observation of the same wait (herdr seeing the dialog after the
-  // hook did) keeps it; a later one after an answer went is the next wait.
+  // later observation of the same wait (the screen verdict seeing the dialog
+  // after the hook did) keeps it; a later one after an answer went is the next wait.
   const [wait, setWait] = useState<string | null>(null);
+  // A forwarded answer's key, kept for the same tap after a 504 so a retry is
+  // typed once.
+  const pending = useRef<{ tap: string; key: string } | null>(null);
   const answered = answer?.kind === "sent" && answer.at === wait && answer.seen !== observedAt;
   const next =
     waiting && observedAt !== null ? (wait === null || answered ? observedAt : wait) : null;
   if (next !== wait) setWait(next);
   const read = useQuery({
-    queryKey: ["prompt", sessionId, next],
+    queryKey: ["prompt", host ?? null, sessionId, next],
     queryFn: async ({ signal }) => {
-      const result = await readPane<PromptRead>(promptPath(sessionId), signal);
+      const result = await readPane<PromptRead>(
+        promptPath(sessionId),
+        signal,
+        host ? { host } : {},
+      );
       if (!result.ok) throw new PromptReadError(result.detail, result.status);
       if (result.body.reason === "no_dialog") {
         throw new PromptReadError("no dialog on the screen yet", null);
@@ -136,10 +154,19 @@ export function AnswerStrip({
     const seen = observedAt;
     const digit = shown.layout === "permission";
     setAnswer({ kind: "sending", at, n });
+    const same = `${shown.screen}:${n}`;
+    const key = pending.current?.tap === same ? pending.current.key : ulid();
+    pending.current = null;
     const sent = await readPane(`${promptPath(sessionId)}/answer`, undefined, {
       option: n,
       screen: shown.screen,
+      ...(host ? { host, idempotency_key: key } : {}),
     });
+    if (host && !sent.ok && sent.status === 504) {
+      pending.current = { tap: same, key };
+      setAnswer({ kind: "refused", at, detail: unconfirmed(host), unsure: true });
+      return;
+    }
     if (sent.ok) {
       setAnswer({ kind: "sent", at, seen, n, text, digit, folded: false });
       onSent?.(digit ? `${n} · ${text}` : text);
@@ -183,7 +210,7 @@ export function AnswerStrip({
           <div className="av-refused" role="alert">
             <WarnIcon />
             <div>
-              <b>Not sent.</b> {current.detail}
+              <b>{current.unsure ? "Sent, not confirmed." : "Not sent."}</b> {current.detail}
             </div>
           </div>
         ) : null}
@@ -254,6 +281,7 @@ export function AnswerStrip({
   const exitDialog = confirm ? (
     <ExitDialog
       agent={agent}
+      host={host}
       folder={confirm.dialog.folder}
       onClose={() => setConfirm(null)}
       onExit={() => {
@@ -281,17 +309,19 @@ export function AnswerStrip({
 // "No, exit" ends the agent's session, so it asks first.
 function ExitDialog({
   agent,
+  host,
   folder,
   onClose,
   onExit,
 }: {
   agent: StripAgent | null;
+  host: string | undefined;
   folder: string | null;
   onClose: () => void;
   onExit: () => void;
 }) {
   const name = agent?.name ?? "the agent";
-  const run = useQuery({ ...runQuery(agent?.runId ?? ""), enabled: Boolean(agent?.runId) });
+  const run = useQuery({ ...runQuery(agent?.runId ?? "", host), enabled: Boolean(agent?.runId) });
   const started = formatLisbon(run.data?.started_at ?? null);
   const card = agent?.card ?? null;
   const keep = useRef<HTMLButtonElement>(null);

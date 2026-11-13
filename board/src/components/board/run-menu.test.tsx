@@ -168,7 +168,7 @@ test("a paused run's primary is Resume, which clears the pause and sends one go 
   expect(itemsOf(await openRunMenu(acts))).toEqual([
     "Pause until...",
     "Relaunch...",
-    "Open in herdr",
+    "Open in terminal",
     "Stop agent...",
   ]);
   fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
@@ -183,7 +183,7 @@ test("a paused run's primary is Resume, which clears the pause and sends one go 
   expect(resumed.closest(".run-paused")?.textContent).toContain("go on");
   expect(screen.queryByText(/^Paused until /)).toBeNull();
   await waitFor(() =>
-    expect(within(acts).getAllByRole("button").at(-1)?.textContent).toContain("Open in herdr"),
+    expect(within(acts).getAllByRole("button").at(-1)?.textContent).toContain("Open in terminal"),
   );
 });
 
@@ -258,7 +258,7 @@ test("a dead worker's primary is Relaunch, which needs a note first", async () =
     body: { note: "The tests pass; open the PR next.", new_attempt: false },
   });
   await waitFor(() =>
-    expect(within(acts).getAllByRole("button").at(-1)?.textContent).toMatch(/^Open in herdr/),
+    expect(within(acts).getAllByRole("button").at(-1)?.textContent).toMatch(/^Open in terminal/),
   );
 });
 
@@ -312,7 +312,7 @@ test("a refused stop says what to do next where the board can, and the daemon's 
       "session s: run r1 is active; end it first with tiller done r1 --outcome <outcome>, then stop its agent; nothing was sent",
     ),
   ).toMatch(/^Not stopped: its run is still open\./);
-  expect(refusal("herdr is down")).toBe("herdr is down");
+  expect(refusal("the holder is down")).toBe("the holder is down");
 });
 
 test("a working agent's stage has no message bar: the terminal takes the input (D15)", async () => {

@@ -487,7 +487,7 @@ test("an option that changes a peer's project is picked on that host's board", a
   expect(posted[0]?.body).toMatchObject({ answer: "Keep 2", host: "host-d" });
 });
 
-test("the Agents screen shows the host of every agent, and a peer's pane is watched here and opened in herdr only on its host", async () => {
+test("the Agents screen shows the host of every agent, and a peer's pane is watched here and opened in a terminal only on its host", async () => {
   stubApi("federated");
   const agents = (fixtureSnapshot("federated").queries[agentsPath()] as AgentsResponse)
     .orchestrators;
@@ -498,12 +498,14 @@ test("the Agents screen shows the host of every agent, and a peer's pane is watc
     (await screen.findAllByTestId("host-chip")).map((chip) => chip.textContent),
   );
   expect(hosts).toEqual(new Set(["host-a", "host-d", "host-e", "host-f"]));
-  const open = (await screen.findByRole("button", { name: /Open in herdr/ })) as HTMLButtonElement;
+  const open = (await screen.findByRole("button", {
+    name: /Open in terminal/,
+  })) as HTMLButtonElement;
   expect(open.disabled).toBe(true);
   expect(open.title).toBe("host-d owns this pane: open it from that host");
 });
 
-test("a peer's pane streams through its board host, and is never read as a saved machine's tail", async () => {
+test("a peer's pane streams through its board host, never as a tail", async () => {
   stubApi("federated");
   const api = globalThis.fetch;
   const asked: { path: string; body: Record<string, unknown> }[] = [];
@@ -515,8 +517,6 @@ test("a peer's pane streams through its board host, and is never read as a saved
   });
   const agents = (fixtureSnapshot("federated").queries[agentsPath()] as AgentsResponse)
     .orchestrators;
-  // The peer is a remote host in the Machines read, as a saved machine is;
-  // only its link tells the two apart.
   const worker = agents.flatMap((a) => a.workers).find((w) => w.host === "host-d");
   if (!worker) throw new Error("no host-d worker in the fixture");
   await renderApp("federated", `/agents?agent=${worker.session_id}`);
@@ -655,4 +655,65 @@ test("the fleet lane moves the Tiller bugs that wait there to the new bug projec
       "Moved 1 Tiller bug to host-a · tiller",
     ),
   );
+});
+
+// The first agent a peer runs, and the Stage once its header shows it.
+async function peerStage(host: string, worker: boolean) {
+  const agents = (fixtureSnapshot("federated").queries[agentsPath()] as AgentsResponse)
+    .orchestrators;
+  const agent = worker
+    ? agents.flatMap((a) => a.workers).find((w) => w.host === host)
+    : agents.find((a) => a.host === host);
+  if (!agent) throw new Error(`no ${host} agent in the fixture`);
+  await renderApp("federated", `/agents?agent=${agent.session_id}`);
+  await waitFor(() => expect(document.querySelector(".av-card-h .av-who-1 .nm")).toBeTruthy());
+  const acts = document.querySelector<HTMLElement>(".av-acts");
+  if (!acts) throw new Error("no agent on the stage");
+  return { agent, acts };
+}
+
+test("a live act peer's worker pauses through the board host, with its host", async () => {
+  const posted = stubApi("federated");
+  const { agent, acts } = await peerStage("host-d", true);
+  fireEvent.click(within(acts).getByRole("button", { name: "Run actions" }));
+  const menu = await screen.findByRole("menu", { name: "Run actions" });
+  fireEvent.click(within(menu).getByRole("menuitem", { name: "Pause until..." }));
+  const dialog = await screen.findByRole("dialog", { name: /^Pause / });
+  fireEvent.change(within(dialog).getByLabelText("Reason"), {
+    target: { value: "Waiting on the release." },
+  });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Pause" }));
+  await waitFor(() =>
+    expect(posted.find(({ path }) => path.endsWith("/pause"))).toMatchObject({
+      path: `/api/v1/agents/${agent.session_id}/pause`,
+      body: { reason: "Waiting on the release.", host: "host-d" },
+    }),
+  );
+});
+
+test("a live act peer's orchestrator stops through the board host, and cannot be restarted here", async () => {
+  const posted = stubApi("federated");
+  const { agent, acts } = await peerStage("host-d", false);
+  fireEvent.click(within(acts).getByRole("button", { name: "Run actions" }));
+  const menu = await screen.findByRole("menu", { name: "Run actions" });
+  expect(within(menu).queryByRole("menuitem", { name: "Restart..." })).toBeNull();
+  fireEvent.click(within(menu).getByRole("menuitem", { name: "Stop agent..." }));
+  const dialog = await screen.findByRole("dialog", { name: /^Stop / });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Stop agent" }));
+  await waitFor(() =>
+    expect(posted.find(({ path }) => path.endsWith("/stop"))).toMatchObject({
+      path: `/api/v1/agents/${agent.session_id}/stop`,
+      body: { host: "host-d" },
+    }),
+  );
+});
+
+test("a read pairing's or a down peer's agent shows its pane with no controls", async () => {
+  for (const host of ["host-f", "host-e"]) {
+    stubApi("federated");
+    const { acts } = await peerStage(host, true);
+    expect(within(acts).queryByRole("button", { name: "Run actions" })).toBeNull();
+    expect(screen.queryByRole("group", { name: "Answer" })).toBeNull();
+    cleanup();
+  }
 });
