@@ -744,6 +744,26 @@ test("an agent waiting on a dialog no hook asked for is a row in Permission prom
   expect(screen.queryByText(/went quiet/)).toBeNull();
 });
 
+test("an agent's name shows on screen under the field the daemon's contract names", async () => {
+  // The generated contract is what the daemon sends. A fixture agent with a
+  // field the contract lacks (an old name, say) would pass here and show
+  // a blank name against a real daemon.
+  const openapi = JSON.parse(
+    readFileSync(resolvePath(import.meta.dirname, "../../../../contract/openapi.json"), "utf8"),
+  ) as { components: { schemas: { AgentRow: { properties: Record<string, unknown> } } } };
+  const fields = Object.keys(openapi.components.schemas.AgentRow.properties);
+  expect(fields).toContain("name");
+  const roster = fixtureResource("/api/v1/agents", "dialog") as AgentsResponse;
+  for (const agent of roster.orchestrators.flatMap((top) => [top, ...top.workers])) {
+    for (const key of Object.keys(agent)) expect(fields).toContain(key);
+  }
+
+  stubDaemon("dialog");
+  await renderInbox("dialog");
+  const prompts = screen.getByRole("region", { name: "Permission prompts" });
+  expect(within(prompts).getByText("alpha-42-build waits on a dialog")).toBeTruthy();
+});
+
 test("the folder trust dialog is answered from its detail, with no digits", async () => {
   stubDaemon("dialog");
   screens = [

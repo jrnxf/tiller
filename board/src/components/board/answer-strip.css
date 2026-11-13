@@ -142,9 +142,9 @@
 }
 
 .av-ans.first kbd {
-  border-color: #ffffff40;
-  background: #ffffff26;
-  color: #fff;
+  border-color: color-mix(in srgb, var(--accent-fg) 25%, transparent);
+  background: color-mix(in srgb, var(--accent-fg) 15%, transparent);
+  color: var(--accent-fg);
 }
 
 .av-ans:disabled {
