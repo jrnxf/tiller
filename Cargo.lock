@@ -1966,6 +1966,7 @@ dependencies = [
  "tiller-core",
  "tiller-delivery",
  "tiller-herdr",
+ "tiller-holder",
  "tiller-observe",
  "tiller-panes",
  "tiller-reconcile",
@@ -2055,6 +2056,7 @@ dependencies = [
  "thiserror",
  "tiller-core",
  "tokio",
+ "toml",
  "ulid",
 ]
 

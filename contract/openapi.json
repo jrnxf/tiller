@@ -8293,7 +8293,8 @@
           "last_event_seq",
           "pollers",
           "tools",
-          "merge_app"
+          "merge_app",
+          "warnings"
         ],
         "properties": {
           "initialized": {
@@ -8346,6 +8347,13 @@
           },
           "version": {
             "type": "string"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Problems that stop nothing, one line each: \"holder upgrade refused:\n<reason>\" until an upgrade succeeds (`recovery.md` R22)."
           }
         }
       },
@@ -8422,6 +8430,13 @@
             "type": "boolean",
             "description": "`federation.accept`: unset reads as true."
           },
+          "attach_terminal": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`attach.terminal`; absent when unset, so Open in terminal only\nfocuses."
+          },
           "boundary": {
             "type": [
               "string",
@@ -8441,7 +8456,7 @@
               "string",
               "null"
             ],
-            "description": "`herdr.terminal`; absent when unset, so Open in herdr only focuses."
+            "description": "`herdr.terminal`, the key `attach.terminal` replaces; absent when\nunset."
           },
           "learning": {
             "$ref": "#/components/schemas/LearningConfig"
@@ -8701,6 +8716,13 @@
           "health": {
             "type": "string",
             "description": "`ok`, `degraded` or `down` for this host; `ok` or `stale` for a\nremote one."
+          },
+          "holder_restarted_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When this host's terminal holder last restarted and lost its panes,\nfor 24 hours after (`recovery.md` R21); absent otherwise. A peer's\nis what its own row reports."
           },
           "id": {
             "type": "string"

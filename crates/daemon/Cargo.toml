@@ -25,6 +25,7 @@ tiller-agents.workspace = true
 tiller-core.workspace = true
 tiller-delivery.workspace = true
 tiller-herdr.workspace = true
+tiller-holder.workspace = true
 tiller-observe.workspace = true
 tiller-panes.workspace = true
 tiller-reconcile.workspace = true

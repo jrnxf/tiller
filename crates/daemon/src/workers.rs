@@ -26,7 +26,7 @@ use tiller_core::domain::{Host, HostKind, PipelineState, Session};
 use tiller_core::state::list;
 use tiller_core::state::memory_load::CopyMark;
 use tiller_core::{Actor, Ctx, Store, Timestamp};
-use tiller_delivery::notify::{Command, Notifier, Notify, ViaHerdr};
+use tiller_delivery::notify::{Command, Note, Notifier, Notify, ViaHerdr};
 use tiller_delivery::outbox::Deliverer;
 use tiller_delivery::sources::{Lavish, PageAnswers};
 use tiller_herdr::client::{Cli, Herdr};
@@ -35,8 +35,10 @@ use tiller_herdr::routed::Routed;
 use tiller_observe::tailer::Tailer;
 use tiller_panes::Panes;
 use tiller_reconcile::git::{GitScanner, WorktreePool};
+use tiller_reconcile::holder::{HolderSource, Link};
 use tiller_reconcile::sources::{
-    Forge, HerdrLauncher, HerdrStatusProbe, HostReadings, NoHarness, Readings,
+    Forge, HerdrLauncher, HerdrStatusProbe, HolderLauncher, HostReadings, Launcher, NoHarness,
+    Readings,
 };
 use tiller_reconcile::tools;
 use tiller_reconcile::{Config as ReconcileConfig, Reconciler, Sources};
@@ -112,6 +114,26 @@ impl Settings {
     }
 }
 
+/// The terminal holder as reconcile's observation source
+/// (`terminal-holder.md` 6.1).
+#[derive(Clone)]
+pub struct HolderWatch {
+    pub link: Arc<dyn Link>,
+    /// The `tiller` binary by its stable profile path, which the holder is
+    /// asked to re-exec into when it runs another (R22). None asks for no
+    /// upgrade.
+    pub stable: Option<PathBuf>,
+}
+
+/// The owner's `[notify] command` when set; herdr's notification until the
+/// cutover drops herdr otherwise.
+fn owner_notifier(settings: &Settings, herdr: &Cli) -> Box<dyn Notify + Send> {
+    match Command::new(settings.notify_command.clone()) {
+        Some(command) => Box::new(command),
+        None => Box::new(ViaHerdr(herdr.clone())),
+    }
+}
+
 /// How the workers reach the outside world.
 #[derive(Clone)]
 pub struct Tools {
@@ -120,6 +142,10 @@ pub struct Tools {
     /// The terminal holder, when this daemon runs with one: delivery, stop
     /// and the notifier reach a holder pane through it.
     pub holder: Option<Arc<dyn Panes>>,
+    /// The same holder as reconcile's observation source, with the stable
+    /// profile path its live upgrade aims at. Reconcile relaunches into the
+    /// holder when it is set.
+    pub holder_source: Option<HolderWatch>,
     /// `quota-axi`, with any leading arguments.
     pub quota: Vec<OsString>,
     /// The GitHub CLI program.
@@ -140,6 +166,7 @@ impl std::fmt::Debug for Tools {
         f.debug_struct("Tools")
             .field("herdr", &self.herdr)
             .field("holder", &self.holder.is_some())
+            .field("holder_source", &self.holder_source.is_some())
             .field("quota", &self.quota)
             .field("gh", &self.gh)
             .field("lavish", &self.lavish)
@@ -789,10 +816,10 @@ pub fn start(
     let open = || Store::open(&db);
     let store = open()?;
     let hosts: Vec<Host> = list(store.conn(), "1 = 1 ORDER BY id", &[])?;
-    let local = hosts
+    let (local, label) = hosts
         .iter()
         .find(|host| host.kind == HostKind::Local)
-        .map(|host| host.id.clone())
+        .map(|host| (host.id.clone(), host.label.clone()))
         .ok_or_else(|| {
             tiller_core::Error::Unavailable(format!(
                 "state.db has no local host; {}",
@@ -806,28 +833,62 @@ pub fn start(
     // registers each name afresh.
     let herdr = HerdrSource::local(tools.herdr.clone(), open()?, &local);
     let delivery = Deliverer::new(open()?, tools.routed(), &local);
-    // The owner's `[notify] command` when set; herdr's notification until
-    // the cutover drops herdr otherwise.
-    let notifier: Box<dyn Notify + Send> = match Command::new(settings.notify_command.clone()) {
-        Some(command) => Box::new(command),
-        None => Box::new(ViaHerdr(tools.herdr.clone())),
+    let notify = Notifier::new(open()?, owner_notifier(&settings, &tools.herdr))
+        .with_checkouts(settings.checkouts.clone());
+    let holder = match &tools.holder_source {
+        Some(watch) => Some(HolderSource::new(
+            Arc::clone(&watch.link),
+            open()?,
+            &local,
+            watch.stable.clone(),
+        )),
+        None => None,
     };
-    let notify = Notifier::new(open()?, notifier).with_checkouts(settings.checkouts.clone());
     let mut config = ReconcileConfig::new(&local, home);
     config.boot_id = boot_id();
     config.forge_login = settings.forge_login.clone();
     config.learning = settings.learning.clone();
+    // Reconcile closes a dead herdr pane through herdr (R15).
+    let close_herdr = {
+        let herdr = tools.herdr.clone();
+        move |pane: &str| herdr.close_pane(pane).map_err(|error| error.to_string())
+    };
+    // With a holder, a resumed agent starts in it, and the owner hears of
+    // a restore through `[notify] command` (R21).
+    let launcher: Box<dyn Launcher> = match &tools.holder_source {
+        Some(watch) => {
+            let notifier = owner_notifier(&settings, &tools.herdr);
+            let link: Arc<dyn Panes> = Arc::clone(&watch.link) as Arc<dyn Panes>;
+            Box::new(HolderLauncher::new(
+                link,
+                close_herdr,
+                move |title: &str, body: &str| {
+                    let note = Note {
+                        title: title.to_owned(),
+                        message: body.to_owned(),
+                        session_id: None,
+                        pane: None,
+                        cwd: None,
+                        host: label.clone(),
+                    };
+                    if let Err(error) = notifier.notify(&note) {
+                        tracing::warn!(%error, "reconcile notification failed");
+                    }
+                },
+            ))
+        }
+        None => Box::new(HerdrLauncher::new(tools.herdr.clone(), close_herdr)),
+    };
     let sources = Sources {
         herdr: Box::new(tools.herdr.clone()),
-        holder: None,
+        holder: tools
+            .holder_source
+            .as_ref()
+            .map(|watch| Arc::clone(&watch.link)),
         probe: Box::new(HerdrStatusProbe),
         scanner: Box::new(scanner(home)),
         forge: reconcile_forge(home, open()?, &tools.gh),
-        // Reconcile closes a dead pane through herdr (R15).
-        launcher: Box::new(HerdrLauncher::new(tools.herdr.clone(), {
-            let herdr = tools.herdr.clone();
-            move |pane: &str| herdr.close_pane(pane).map_err(|error| error.to_string())
-        })),
+        launcher,
         readings: Box::new(LiveReadings {
             home: home.to_owned(),
             tools: tools.clone(),
@@ -898,6 +959,9 @@ pub fn start(
     // names another system (R20). A reconcile pass checks the marker
     // itself, so it sees the flip back and runs its full pass.
     spawn(registry, Gated::new(home, herdr), stop, &mut handles);
+    if let Some(holder) = holder {
+        spawn(registry, Gated::new(home, holder), stop, &mut handles);
+    }
     spawn(registry, Gated::new(home, delivery), stop, &mut handles);
     spawn(registry, Gated::new(home, notify), stop, &mut handles);
     spawn(registry, reconcile, stop, &mut handles);

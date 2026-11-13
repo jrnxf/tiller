@@ -393,6 +393,7 @@ mod tests {
     #[test]
     fn the_host_keys_are_settable_and_the_secret_is_not() {
         for key in [
+            "attach.terminal",
             "herdr.terminal",
             "stop_hook_mode",
             "federation.accept",

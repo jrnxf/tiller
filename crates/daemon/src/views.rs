@@ -745,6 +745,11 @@ pub fn machines(store: &Store, local: &LocalHealth, now: Timestamp) -> Result<Ma
                 Some(seen) => ("ok", None, Some(seen)),
             }
         };
+        let holder_restarted = if is_local {
+            holder_restarted(store, &host.id, now)?
+        } else {
+            None
+        };
         machines.push(Machine {
             id: host.id,
             label: host.label,
@@ -769,13 +774,26 @@ pub fn machines(store: &Store, local: &LocalHealth, now: Timestamp) -> Result<Ma
             peer_scope: None,
             link_reason: None,
             bug_project: open_bug_project(store, host.bug_project_id)?,
+            holder_restarted_at: at_opt(holder_restarted),
             rev: host.rev,
         });
     }
     Ok(MachinesResponse { machines })
 }
 
-/// One host's machine row, for an SSE `host.changed` event.
+/// How long the Machines row shows a holder restart (R21).
+const HOLDER_RESTART_SHOWN_MINUTES: i64 = 24 * 60;
+
+/// The newest lost holder of `host_id` in the last 24 hours (R21).
+fn holder_restarted(store: &Store, host_id: &str, now: Timestamp) -> Result<Option<Timestamp>> {
+    one(
+        store,
+        "SELECT max(at) FROM events WHERE kind = 'holder.lost' AND entity = 'host'
+           AND entity_id = ?1 AND at >= ?2",
+        &[&host_id, &now.plus_minutes(-HOLDER_RESTART_SHOWN_MINUTES)],
+    )
+}
+
 /// A host's bug project while it is open. A retired one routes nothing, so
 /// Tiller bugs wait in `fleet`.
 fn open_bug_project(store: &Store, id: Option<String>) -> Result<Option<String>> {
@@ -789,6 +807,7 @@ fn open_bug_project(store: &Store, id: Option<String>) -> Result<Option<String>>
     )
 }
 
+/// One host's machine row, for an SSE `host.changed` event.
 pub fn machine(
     store: &Store,
     local: &LocalHealth,
@@ -2110,6 +2129,7 @@ fn peer_machine(host: &tiller_core::domain::Host, view: &PeerView) -> Machine {
         peer_scope: Some(view.scope.to_string()),
         link_reason: view.link_reason.clone(),
         bug_project: cached.and_then(|row| row.bug_project.clone()),
+        holder_restarted_at: cached.and_then(|row| row.holder_restarted_at.clone()),
         rev: host.rev,
     }
 }

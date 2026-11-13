@@ -9,17 +9,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tiller_panes::config::ConfigError;
 use tiller_panes::frame::{Decoder, Frame, FrameError};
 use tiller_panes::handshake::{self, Hello, Refused, SUPPORTED};
 use tiller_panes::message::{ErrorCode, HolderMessage, Request};
-use tiller_panes::paths::{SocketPathTooLong, check_socket_path};
-use tiller_panes::{run_dir, socket_path};
+use tiller_panes::paths::{SocketPathTooLong, check_socket_path, default_socket_path};
+use tiller_panes::run_dir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 
-use crate::holder::{Conn, HandoverFds, Holder, Slot, message_frame, ok};
+use crate::holder::{Conn, HandoverFds, Holder, Limits, Slot, check_size, message_frame, ok};
 use crate::lock::{Acquired, HolderLock, lock_path};
 use crate::outbox::{self, OUTBOX_CAP};
 use crate::peer::{self, PeerCred};
@@ -48,6 +49,13 @@ pub enum Outcome {
 pub enum HolderError {
     #[error(transparent)]
     SocketPath(#[from] SocketPathTooLong),
+
+    /// `config.toml` does not read, or its `[holder]` table is wrong.
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+
+    #[error("config.toml [holder] default_size: {0}")]
+    DefaultSize(String),
 
     #[error("{what} {path}: {source}")]
     Io {
@@ -82,7 +90,7 @@ fn io_error(what: &'static str, path: &Path) -> impl FnOnce(io::Error) -> Holder
 
 /// Runs the holder for `home` until `SIGTERM` or `SIGINT`.
 pub fn run(home: &Path) -> Result<Outcome, HolderError> {
-    run_with(home, Holder::new)
+    run_with(home, Holder::with_limits)
 }
 
 /// Runs a holder that records every pane's raw output into `out`
@@ -90,11 +98,28 @@ pub fn run(home: &Path) -> Result<Outcome, HolderError> {
 #[cfg(feature = "record")]
 pub fn run_recording(home: &Path, out: &Path) -> Result<Outcome, HolderError> {
     let recorder = crate::record::Recorder::create(out).map_err(io_error("create", out))?;
-    run_with(home, || Holder::recording(recorder))
+    run_with(home, |limits| Holder::recording(recorder, limits))
 }
 
-fn run_with(home: &Path, holder: impl FnOnce() -> Arc<Holder>) -> Result<Outcome, HolderError> {
+fn run_with(
+    home: &Path,
+    holder: impl FnOnce(Limits) -> Arc<Holder>,
+) -> Result<Outcome, HolderError> {
     runtime()?.block_on(serve(home, holder))
+}
+
+/// What `config.toml` sets for the holder of `home`: its socket and its
+/// limits. A file that does not read, or a bad `[holder]` key, stops the
+/// start, so the holder never runs on a guess.
+fn settings(home: &Path) -> Result<(PathBuf, Limits), HolderError> {
+    let config = tiller_panes::config::load(home)?;
+    let socket = config.socket.unwrap_or_else(|| default_socket_path(home));
+    let mut limits = Limits::default();
+    if let Some(size) = config.default_size {
+        check_size(size).map_err(|(_, message)| HolderError::DefaultSize(message))?;
+        limits.default_size = size;
+    }
+    Ok((socket, limits))
 }
 
 /// The new program image of a live upgrade (section 6.2 step 6): takes
@@ -103,7 +128,7 @@ fn run_with(home: &Path, holder: impl FnOnce() -> Arc<Holder>) -> Result<Outcome
 pub fn resume(home: &Path, fd: i32) -> Result<Outcome, HolderError> {
     // Before anything opens an fd, so no fd the record names is taken.
     let resumed = upgrade::resume(fd)?;
-    let socket = socket_path(home);
+    let (socket, limits) = settings(home)?;
     let run = run_dir(home);
     runtime()?.block_on(async move {
         let listener = std::os::unix::net::UnixListener::from(resumed.listener);
@@ -118,12 +143,13 @@ pub fn resume(home: &Path, fd: i32) -> Result<Outcome, HolderError> {
         // The reaper's signal is in place before the panes are, so no exit
         // is missed.
         let sigchld = signal(SignalKind::child()).map_err(HolderError::Runtime)?;
-        let holder = Holder::resumed(resumed.record, resumed.masters).map_err(|source| {
-            HolderError::Handover {
-                what: "panes",
-                source,
-            }
-        })?;
+        let holder =
+            Holder::resumed(resumed.record, resumed.masters, limits).map_err(|source| {
+                HolderError::Handover {
+                    what: "panes",
+                    source,
+                }
+            })?;
         keep_for_handover(&holder, &listener, &lock, run)?;
         if let Some((requester, id)) = resumed.requester {
             tokio::task::spawn_blocking(move || upgrade::answer(requester, id));
@@ -166,8 +192,11 @@ fn keep_for_handover(
     Ok(())
 }
 
-async fn serve(home: &Path, holder: impl FnOnce() -> Arc<Holder>) -> Result<Outcome, HolderError> {
-    let socket = socket_path(home);
+async fn serve(
+    home: &Path,
+    holder: impl FnOnce(Limits) -> Arc<Holder>,
+) -> Result<Outcome, HolderError> {
+    let (socket, limits) = settings(home)?;
     check_socket_path(&socket)?;
     let run = run_dir(home);
     std::fs::DirBuilder::new()
@@ -186,7 +215,7 @@ async fn serve(home: &Path, holder: impl FnOnce() -> Arc<Holder>) -> Result<Outc
     };
     let listener = bind(&socket)?;
 
-    let holder = holder();
+    let holder = holder(limits);
     keep_for_handover(&holder, &listener, &lock, run)?;
     // The reaper listens before the first spawn, so no exit is missed.
     let sigchld = signal(SignalKind::child()).map_err(HolderError::Runtime)?;
@@ -709,7 +738,38 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
-    use crate::holder::Limits;
+
+    /// `[holder] socket` and `default_size` set where the holder binds and
+    /// the size a pane starts at; a size the holder cannot use stops it.
+    #[test]
+    fn the_holder_table_sets_the_socket_and_the_default_size() {
+        let home = tempfile::tempdir().unwrap();
+        let (socket, limits) = settings(home.path()).unwrap();
+        assert_eq!(socket, default_socket_path(home.path()));
+        assert_eq!(limits.default_size, tiller_panes::message::DEFAULT_SIZE);
+
+        let config = home.path().join("config.toml");
+        std::fs::write(
+            &config,
+            "[holder]\nsocket = \"/home/user/h.sock\"\ndefault_size = \"100x30\"\n",
+        )
+        .unwrap();
+        let (socket, limits) = settings(home.path()).unwrap();
+        assert_eq!(socket, Path::new("/home/user/h.sock"));
+        assert_eq!(
+            limits.default_size,
+            tiller_panes::Size {
+                cols: 100,
+                rows: 30
+            }
+        );
+
+        std::fs::write(&config, "[holder]\ndefault_size = \"2000x40\"\n").unwrap();
+        let error = settings(home.path()).unwrap_err().to_string();
+        assert!(error.contains("default_size"), "{error}");
+        std::fs::write(&config, "[holder\n").unwrap();
+        assert!(matches!(settings(home.path()), Err(HolderError::Config(_))));
+    }
 
     async fn hello_on(stream: &mut UnixStream) -> Vec<u8> {
         let hello = serde_json::to_string(&Request::Hello(Hello::new("daemon"))).unwrap();

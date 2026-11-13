@@ -1511,11 +1511,13 @@ async fn signals(State(state): State<AppState>) -> ApiResult<SignalsResponse> {
 async fn health(State(state): State<AppState>) -> Json<Health> {
     let db = state.db();
     let home = state.0.home.clone();
-    let (seq, merge_app) = tokio::task::spawn_blocking(move || {
-        let seq = db
-            .exists()
-            .then(|| Store::open_current(&db).and_then(|store| store.last_seq()));
-        (seq, merge_app_health(&home))
+    let (seq, warnings, merge_app) = tokio::task::spawn_blocking(move || {
+        let (seq, warnings) = match db.exists().then(|| Store::open_current(&db)) {
+            Some(Ok(store)) => (Some(store.last_seq()), health_warnings(&store)),
+            Some(Err(error)) => (Some(Err(error)), Vec::new()),
+            None => (None, Vec::new()),
+        };
+        (seq, warnings, merge_app_health(&home))
     })
     .await
     .unwrap_or_else(|error| {
@@ -1525,7 +1527,7 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
             app_id: None,
             detail,
         };
-        (None, merge_app)
+        (None, Vec::new(), merge_app)
     });
     let pollers = state.0.pollers.health();
     let failing = pollers.iter().any(|p| p.consecutive_failures > 0);
@@ -1548,7 +1550,20 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
         tools,
         links: state.0.peers.links(),
         merge_app,
+        warnings,
     })
+}
+
+/// Health's warnings: a holder upgrade the holder refused (R22). A read
+/// that fails shows no warning; the pollers carry a failing database.
+fn health_warnings(store: &Store) -> Vec<String> {
+    match store.host_degraded(tiller_reconcile::holder::UPGRADE_CHECK) {
+        Ok(problem) => problem.into_iter().collect(),
+        Err(error) => {
+            tracing::warn!(%error, "health warnings not read");
+            Vec::new()
+        }
+    }
 }
 
 /// How long Run now waits for the poll it asked for.
@@ -3703,6 +3718,7 @@ fn host_config_of(home: &std::path::Path, boundary: Option<String>) -> HostConfi
             Err(error) => (Default::default(), Some(error.to_string())),
         };
     HostConfig {
+        attach_terminal: text(host_config::ATTACH_TERMINAL),
         herdr_terminal: text(host_config::HERDR_TERMINAL),
         stop_hook_mode: text(host_config::STOP_HOOK_MODE)
             .filter(|mode| host_config::STOP_HOOK_MODES.contains(&mode.as_str()))
@@ -6808,6 +6824,63 @@ pub(crate) mod tests {
         let root = get(&app, "/").await;
         assert_eq!(root.status, StatusCode::OK);
         assert!(!root.body.contains("tiller-boot"));
+    }
+
+    /// R22: a refused holder upgrade is a Health warning until an upgrade
+    /// succeeds.
+    #[tokio::test]
+    async fn health_warns_of_a_refused_holder_upgrade_until_one_succeeds() {
+        let mut fleet = Fleet::new();
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let warnings = async |app: &Router| {
+            let health: Value =
+                serde_json::from_str(&get(app, "/api/v1/health").await.body).unwrap();
+            health["warnings"].clone()
+        };
+        assert_eq!(warnings(&app).await, serde_json::json!([]));
+        let daemon = Ctx::new(Actor::Daemon);
+        let check = tiller_reconcile::holder::UPGRADE_CHECK;
+        fleet
+            .store
+            .host_health(&daemon, check, Some("holder upgrade refused: busy"))
+            .unwrap();
+        assert_eq!(
+            warnings(&app).await,
+            serde_json::json!(["holder upgrade refused: busy"])
+        );
+        fleet.store.host_health(&daemon, check, None).unwrap();
+        assert_eq!(warnings(&app).await, serde_json::json!([]));
+    }
+
+    /// R21: this host's Machines row shows a lost holder for 24 hours.
+    #[tokio::test]
+    async fn the_machines_row_shows_a_holder_restart_for_a_day() {
+        let mut fleet = Fleet::new();
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let restarted = async |app: &Router| {
+            let machines: Value =
+                serde_json::from_str(&get(app, "/api/v1/machines").await.body).unwrap();
+            let local = machines["machines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["kind"] == "local")
+                .cloned()
+                .unwrap();
+            local.get("holder_restarted_at").cloned()
+        };
+        assert_eq!(restarted(&app).await, None);
+        let now = Timestamp::now();
+        let old = Ctx::at(Actor::Daemon, now.plus_minutes(-25 * 60));
+        fleet.store.holder_restored(&old, "i-old").unwrap();
+        assert_eq!(restarted(&app).await, None, "a day old is not shown");
+        let recent = now.plus_minutes(-60);
+        let ctx = Ctx::at(Actor::Daemon, recent);
+        fleet.store.holder_restored(&ctx, "i-new").unwrap();
+        assert_eq!(
+            restarted(&app).await,
+            Some(Value::String(recent.to_string()))
+        );
     }
 
     #[tokio::test]
@@ -11134,6 +11207,7 @@ esac"#,
         // A value its reader would refuse changes nothing.
         for (setting, value) in [
             ("herdr.terminal", ""),
+            ("attach.terminal", ""),
             ("stop_hook_mode", "block once"),
             ("federation.accept", "yes"),
             ("memory.remote", "http://example.com/memory.git"),
@@ -11186,6 +11260,7 @@ esac"#,
             ("learning.window_cards", "12"),
             ("learning.curator_model", "opus"),
             ("learning.curator_timeout_minutes", "30"),
+            ("attach.terminal", "WezTerm"),
         ] {
             let sent = send(&app, set(setting, value)).await;
             assert_eq!(sent.status, StatusCode::OK, "{setting}: {}", sent.body);
@@ -11199,6 +11274,7 @@ esac"#,
         let table: toml::Table = std::fs::read_to_string(&config).unwrap().parse().unwrap();
         assert_eq!(table["stop_hook_mode"].as_str(), Some("observe"));
         assert_eq!(table["herdr"]["terminal"].as_str(), Some("Ghostty"));
+        assert_eq!(table["attach"]["terminal"].as_str(), Some("WezTerm"));
         assert_eq!(table["federation"]["accept"].as_bool(), Some(false));
         assert_eq!(table["learning"]["sample_every"].as_integer(), Some(3));
         assert_eq!(table["learning"]["window_cards"].as_integer(), Some(12));
@@ -11218,7 +11294,7 @@ esac"#,
                 .map(Result::unwrap)
                 .collect()
         };
-        assert_eq!(events.len(), 10, "{events:?}");
+        assert_eq!(events.len(), 11, "{events:?}");
         assert_eq!(events[0].0, "stop_hook_mode");
         assert!(events[0].1.contains("\"off\""), "{}", events[0].1);
         assert_eq!(events[3].0, "federation.accept");
@@ -11235,6 +11311,7 @@ esac"#,
             serde_json::from_str(&get(&app, "/api/v1/host-config").await.body).unwrap();
         assert_eq!(read["stop_hook_mode"], "observe", "{read}");
         assert_eq!(read["herdr_terminal"], "Ghostty", "{read}");
+        assert_eq!(read["attach_terminal"], "WezTerm", "{read}");
         assert_eq!(read["accept_peers"], false, "{read}");
         assert_eq!(
             read["memory_remote"], "git@example.com:team/memory.git",
