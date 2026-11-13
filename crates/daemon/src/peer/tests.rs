@@ -32,12 +32,13 @@ use super::pane::{self, PaneInput, PaneKind, PaneOpen, PaneSigner};
 use super::serve::{ServeConfig, own_snapshot, serve};
 use super::{Frame, Hello, HelloKey, Timing, Welcome};
 use crate::api::tests::{
-    Answer, app_with_peers, get, holder_pane, mirror_herdr, mutation, next_line, owner_cookie, send,
+    Answer, app_with_peers, b64, get, holder_calls, holder_pane, mirror_herdr, mutation, next_line,
+    owner_cookie, send,
 };
 use crate::api::{OrchestratorStart, StartError};
 use crate::dto::{BoardResponse, ErrorBody, ErrorDetail, LinkState, MutationResponse};
-use crate::holder::fake::FakeHolder;
 use crate::readonly::Damage;
+use tiller_panes::FakePanes;
 
 fn ms(millis: u64) -> Duration {
     Duration::from_millis(millis)
@@ -2373,7 +2374,7 @@ async fn watching(
 /// is given, and `prepare` run on the pair before the link starts.
 async fn watching_on(
     scratch: &Path,
-    holder: Option<&FakeHolder>,
+    holder: Option<&FakePanes>,
     prepare: impl FnOnce(&Pair),
 ) -> (
     Pair,
@@ -2583,17 +2584,46 @@ async fn keys_typed_on_the_board_reach_a_peer_pane() {
     );
 }
 
+/// The one pane in the peer's `holder`.
+fn peer_pane_id(holder: &FakePanes) -> tiller_panes::PaneId {
+    tiller_panes::Panes::list(holder).unwrap().panes[0]
+        .pane
+        .clone()
+}
+
+/// The next `size` line of a peer view, past its frames.
+async fn next_size(body: &mut axum::body::BodyDataStream, pending: &mut String) -> Value {
+    loop {
+        let line = next_line(body, pending).await;
+        if line["type"] != "frame" {
+            return line;
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn keys_typed_on_the_board_reach_a_peer_holder_pane() {
+async fn a_peer_holder_pane_streams_and_takes_keys_over_the_pane_link() {
     let scratch = tempfile::tempdir().unwrap();
-    let holder = FakeHolder::default();
+    let holder = FakePanes::new();
     let (_pair, session, app, cookie, _dialed, _stop) =
         watching_on(scratch.path(), Some(&holder), |_| {}).await;
+    let pane = peer_pane_id(&holder);
+    holder.set_screen(&pane, &["$ "]);
     let mut body = view_peer(&app, &cookie, &session, json!({"host": "peer"})).await;
     let mut pending = String::new();
     assert_eq!(
         next_line(&mut body, &mut pending).await,
         json!({"type": "size", "cols": 120, "rows": 40})
+    );
+    assert_eq!(
+        next_line(&mut body, &mut pending).await,
+        json!({"type": "frame", "seq": 1, "full": true, "bytes": b64(b"$ ")})
+    );
+    // The peer's PTY writes come over the link as they come.
+    assert!(holder.output(&pane, b"ls\r\n"));
+    assert_eq!(
+        next_line(&mut body, &mut pending).await,
+        json!({"type": "frame", "seq": 2, "full": false, "bytes": b64(b"ls\r\n")})
     );
     for keys in [json!(["l", "s"]), json!(["enter"]), json!(["ctrl+c"])] {
         let answer = act_on_peer(
@@ -2606,23 +2636,63 @@ async fn keys_typed_on_the_board_reach_a_peer_holder_pane() {
         .await;
         assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
     }
-    let inputs: Vec<u8> = holder
-        .inputs()
-        .into_iter()
-        .flat_map(|(_, bytes)| bytes)
-        .collect();
-    assert_eq!(inputs, b"ls\r\x03");
+    assert_eq!(
+        holder_calls(&holder, "keys"),
+        [
+            format!("keys {pane} l s"),
+            format!("keys {pane} enter"),
+            format!("keys {pane} ctrl+c"),
+        ]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_fit_resizes_a_peer_pane_and_gives_its_size_back() {
+async fn a_peer_holder_pane_history_comes_over_the_pane_link() {
     let scratch = tempfile::tempdir().unwrap();
-    let holder = FakeHolder::default();
+    let holder = FakePanes::new();
     let (_pair, session, app, cookie, _dialed, _stop) =
         watching_on(scratch.path(), Some(&holder), |_| {}).await;
-    let pane = tiller_panes::Panes::list(&holder).unwrap().panes[0]
-        .pane
-        .clone();
+    let pane = peer_pane_id(&holder);
+    holder.set_screen(&pane, &["one", "\u{1b}[34mtwo\u{1b}[0m", "$ "]);
+    let answer = act_on_peer(
+        &app,
+        &cookie,
+        &session,
+        "terminal/history",
+        json!({"host": "peer", "lines": 2}),
+    )
+    .await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    let history: Value = serde_json::from_str(&answer.body).unwrap();
+    assert_eq!(history["session_id"], session);
+    assert_eq!(history["text"], "\u{1b}[34mtwo\u{1b}[0m\n$ ");
+    assert!(
+        holder
+            .calls()
+            .contains(&format!("screen {pane} Recent(2) Ansi")),
+        "{:?}",
+        holder.calls()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_fit_on_a_peer_holder_pane_is_a_lease_and_the_size_falls_back() {
+    let scratch = tempfile::tempdir().unwrap();
+    let holder = FakePanes::new();
+    let (_pair, session, app, cookie, _dialed, _stop) =
+        watching_on(scratch.path(), Some(&holder), |_| {}).await;
+    let pane = peer_pane_id(&holder);
+    // An attach client on the peer holds the pane at its window's size.
+    let attach = tiller_panes::Live::subscribe(&holder, &pane, Default::default()).unwrap();
+    attach.resize(80, 24).unwrap();
+    let leases = || {
+        holder
+            .leases(&pane)
+            .into_iter()
+            .map(|(_, cols, rows)| (cols, rows))
+            .collect::<Vec<_>>()
+    };
+
     let mut body = view_peer(
         &app,
         &cookie,
@@ -2632,12 +2702,16 @@ async fn a_fit_resizes_a_peer_pane_and_gives_its_size_back() {
     .await;
     let mut pending = String::new();
     assert_eq!(
-        next_line(&mut body, &mut pending).await,
+        next_size(&mut body, &mut pending).await,
+        json!({"type": "size", "cols": 80, "rows": 24})
+    );
+    assert_eq!(
+        next_size(&mut body, &mut pending).await,
         json!({"type": "size", "cols": 100, "rows": 30})
     );
-    assert_eq!(holder.size(&pane), Some((100, 30)));
+    assert_eq!(leases(), [(80, 24), (100, 30)]);
 
-    // The board changes size: the Fit on the peer follows it in place.
+    // The board changes size: the Fit on the peer moves its lease.
     let refit = act_on_peer(
         &app,
         &cookie,
@@ -2647,15 +2721,12 @@ async fn a_fit_resizes_a_peer_pane_and_gives_its_size_back() {
     )
     .await;
     assert_eq!(refit.status, StatusCode::OK, "{}", refit.body);
-    loop {
-        let line = next_line(&mut body, &mut pending).await;
-        if line["type"] == "size" {
-            assert_eq!(line, json!({"type": "size", "cols": 110, "rows": 35}));
-            break;
-        }
-    }
+    assert_eq!(
+        next_size(&mut body, &mut pending).await,
+        json!({"type": "size", "cols": 110, "rows": 35})
+    );
 
-    // A second viewer on the board host gets no Fit while the first holds it.
+    // A second viewer's Fit is a lease of its own, on top.
     let mut second = view_peer(
         &app,
         &cookie,
@@ -2665,10 +2736,20 @@ async fn a_fit_resizes_a_peer_pane_and_gives_its_size_back() {
     .await;
     let mut second_pending = String::new();
     assert_eq!(
-        next_line(&mut second, &mut second_pending).await["type"],
-        "unfit"
+        next_size(&mut second, &mut second_pending).await,
+        json!({"type": "size", "cols": 110, "rows": 35})
     );
-    // A new size still goes to the stream that holds the Fit, not the newest.
+    assert_eq!(
+        next_size(&mut second, &mut second_pending).await,
+        json!({"type": "size", "cols": 90, "rows": 20})
+    );
+    assert_eq!(
+        next_size(&mut body, &mut pending).await,
+        json!({"type": "size", "cols": 90, "rows": 20})
+    );
+    assert_eq!(leases(), [(80, 24), (110, 35), (90, 20)]);
+
+    // A refit moves the newest Fit.
     let refit = act_on_peer(
         &app,
         &cookie,
@@ -2678,53 +2759,44 @@ async fn a_fit_resizes_a_peer_pane_and_gives_its_size_back() {
     )
     .await;
     assert_eq!(refit.status, StatusCode::OK, "{}", refit.body);
-    // The second viewer leaves: the first one's keys still reach the pane.
-    drop(second);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let answer = act_on_peer(
-            &app,
-            &cookie,
-            &session,
-            "terminal/input",
-            json!({"host": "peer", "keys": ["q"]}),
-        )
-        .await;
-        if answer.status == StatusCode::OK {
-            break;
-        }
-        // Only a stream that was ending may refuse, and then nothing was sent.
-        assert_eq!(
-            answer.status,
-            StatusCode::SERVICE_UNAVAILABLE,
-            "{}",
-            answer.body
-        );
-        assert!(Instant::now() < deadline, "the first viewer's keys stopped");
-        tokio::time::sleep(ms(50)).await;
-    }
-    let inputs: Vec<u8> = holder
-        .inputs()
-        .into_iter()
-        .flat_map(|(_, bytes)| bytes)
-        .collect();
-    assert_eq!(inputs, b"q");
+    assert_eq!(
+        next_size(&mut second, &mut second_pending).await,
+        json!({"type": "size", "cols": 115, "rows": 38})
+    );
+    assert_eq!(
+        next_size(&mut body, &mut pending).await,
+        json!({"type": "size", "cols": 115, "rows": 38})
+    );
+    assert_eq!(leases(), [(80, 24), (110, 35), (115, 38)]);
 
-    // The viewer leaves: the peer's pane gets back the size it had.
+    // The second viewer leaves: the size falls back to the first's Fit,
+    // and the first one's keys still reach the pane.
+    drop(second);
+    assert_eq!(
+        next_size(&mut body, &mut pending).await,
+        json!({"type": "size", "cols": 110, "rows": 35})
+    );
+    let answer = act_on_peer(
+        &app,
+        &cookie,
+        &session,
+        "terminal/input",
+        json!({"host": "peer", "keys": ["q"]}),
+    )
+    .await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    assert_eq!(holder_calls(&holder, "keys"), [format!("keys {pane} q")]);
+
+    // The first viewer leaves: the size falls back to the attach client's.
     drop(body);
     let deadline = Instant::now() + Duration::from_secs(15);
-    while holder.size(&pane) != Some((120, 40)) {
-        assert!(Instant::now() < deadline, "the size never came back");
+    while leases() != [(80, 24)] {
+        assert!(Instant::now() < deadline, "the Fit's lease never ended");
         tokio::time::sleep(ms(50)).await;
     }
-    assert_eq!(
-        holder
-            .sizes_set()
-            .into_iter()
-            .map(|(_, size)| size)
-            .collect::<Vec<_>>(),
-        [(100, 30), (110, 35), (115, 38), (120, 40)]
-    );
+    let size = tiller_panes::Panes::get(&holder, &pane).unwrap().unwrap();
+    assert_eq!((size.cols, size.rows), (80, 24));
+    drop(attach);
 }
 
 /// Turns every pairing on `fleet` to the `read` scope.
@@ -2744,7 +2816,7 @@ fn read_scope(fleet: &Fleet) {
 async fn a_read_pairing_cannot_type_into_or_fit_a_peer_pane() {
     // A `read` pairing on the board host never sends a key or a Fit.
     let scratch = tempfile::tempdir().unwrap();
-    let holder = FakeHolder::default();
+    let holder = FakePanes::new();
     let (_pair, session, app, cookie, _dialed, _stop) =
         watching_on(scratch.path(), Some(&holder), |pair| {
             read_scope(&pair.board);
@@ -2785,8 +2857,8 @@ async fn a_read_pairing_cannot_type_into_or_fit_a_peer_pane() {
         );
         assert_eq!(error.host.as_deref(), Some("peer"));
     }
-    assert!(holder.inputs().is_empty());
-    assert!(holder.sizes_set().is_empty());
+    assert!(holder_calls(&holder, "keys").is_empty());
+    assert!(holder_calls(&holder, "resize").is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]

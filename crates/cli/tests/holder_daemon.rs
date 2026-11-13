@@ -129,10 +129,11 @@ fn pane_size(client: &HolderClient, session: &str) -> (u16, u16) {
     (pane.cols, pane.rows)
 }
 
-/// The board's Fit on a holder pane: the PTY takes the board's size while
-/// the view is open, and gets its own size back when the view ends.
+/// The board's Fit on a holder pane is a lease: the PTY takes the board's
+/// size while the view is open. When the view ends no lease is left, so the
+/// size stays (`terminal-holder.md` 2.6) and the app does not redraw.
 #[test]
-fn a_fit_sizes_the_holder_pane_and_the_view_gives_it_back_when_it_ends() {
+fn a_fit_sizes_the_holder_pane_and_the_size_stays_when_the_last_lease_ends() {
     let world = World::initialized();
     launchable(&world);
     let (_holder, client) = start_holder(&world);
@@ -162,21 +163,18 @@ fn a_fit_sizes_the_holder_pane_and_the_view_gives_it_back_when_it_ends() {
     assert_eq!(pane_size(&client, &session), (100, 30));
 
     drop(view);
-    let deadline = Instant::now() + WAIT;
-    while pane_size(&client, &session) != own {
-        assert!(
-            Instant::now() < deadline,
-            "the pane kept the Fit's size: {:?}",
-            pane_size(&client, &session)
-        );
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
+    keeps_size(&client, &session, (100, 30));
 }
 
 /// Another holder client resizes `session`'s pane through its own lease, as
-/// `tiller attach` will, and waits for the holder to take it. The holder
-/// tells only that client, so the board's view never hears of it.
-fn resize_as_another_client(client: &HolderClient, session: &str, cols: u16, rows: u16) {
+/// `tiller attach` does, and waits for the holder to take it. The lease
+/// lasts while the returned subscription lives.
+fn resize_as_another_client(
+    client: &HolderClient,
+    session: &str,
+    cols: u16,
+    rows: u16,
+) -> tiller_panes::Subscription {
     let listing = client.list().unwrap();
     let pane = listing
         .panes
@@ -193,7 +191,7 @@ fn resize_as_another_client(client: &HolderClient, session: &str, cols: u16, row
         match other.recv().unwrap() {
             Some(tiller_panes::Update::Resized { cols: c, rows: r }) => {
                 assert_eq!((c, r), (cols, rows));
-                break;
+                return other;
             }
             Some(_) => {}
             None => panic!("the other client's stream ended before its resize"),
@@ -201,16 +199,12 @@ fn resize_as_another_client(client: &HolderClient, session: &str, cols: u16, row
     }
 }
 
-/// Holds `pane_size` to `want` for a while after a view ends, so a give back
-/// that came late would show.
+/// Holds `pane_size` to `want` for a while after a view ends, so a size
+/// change that came late would show.
 fn keeps_size(client: &HolderClient, session: &str, want: (u16, u16)) {
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
-        assert_eq!(
-            pane_size(client, session),
-            want,
-            "the give back overwrote the other client's size"
-        );
+        assert_eq!(pane_size(client, session), want, "the pane left {want:?}");
         std::thread::sleep(Duration::from_millis(50));
     }
 }
@@ -228,9 +222,9 @@ fn reaches_size(client: &HolderClient, session: &str, want: (u16, u16)) {
     }
 }
 
-/// The real holder tells no other subscriber of a resize, so the Fit reads
-/// the pane's size itself: a size another client set during the Fit is
-/// kept when the view ends, and is the one given back after a later refit.
+/// Another client's lease on top of the Fit keeps its size when the view
+/// ends. A refit moves the Fit's lease to the top, and when the view ends the
+/// size falls back to the other client's lease.
 #[test]
 fn a_size_another_holder_client_sets_during_a_fit_is_kept_or_given_back() {
     let world = World::initialized();
@@ -255,7 +249,7 @@ fn a_size_another_holder_client_sets_during_a_fit_is_kept_or_given_back() {
             .any(|l| l["type"] == "size" && l["cols"] == 100 && l["rows"] == 30)
     });
     reaches_size(&client, &session, (100, 30));
-    resize_as_another_client(&client, &session, 90, 25);
+    let first = resize_as_another_client(&client, &session, 90, 25);
     drop(view);
     keeps_size(&client, &session, (90, 25));
 
@@ -273,7 +267,7 @@ fn a_size_another_holder_client_sets_during_a_fit_is_kept_or_given_back() {
             .any(|l| l["type"] == "size" && l["cols"] == 100 && l["rows"] == 30)
     });
     reaches_size(&client, &session, (100, 30));
-    resize_as_another_client(&client, &session, 95, 28);
+    let second = resize_as_another_client(&client, &session, 95, 28);
     let mut refit = post(
         port,
         &cookie,
@@ -287,4 +281,5 @@ fn a_size_another_holder_client_sets_during_a_fit_is_kept_or_given_back() {
     drop(view);
     reaches_size(&client, &session, (95, 28));
     keeps_size(&client, &session, (95, 28));
+    drop((first, second));
 }

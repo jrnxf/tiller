@@ -629,9 +629,9 @@ fn refused(failure: Failure) -> StartError {
     }
 }
 
-/// `tiller agent focus <run|session>`: focuses the agent's pane in the
-/// herdr client, on its saved machine for a remote host, or in the attach
-/// clients of the terminal holder. Writes nothing.
+/// `tiller agent focus <run|session>`: focuses the agent's pane on this
+/// host, in the attach clients of the terminal holder or in the herdr
+/// client. Writes nothing.
 pub fn focus(app: &App, target: &str) -> Done {
     app.require_owner("tiller agent focus")?;
     let tools = Tools::load(app)?;
@@ -660,7 +660,6 @@ pub fn focus(app: &App, target: &str) -> Done {
         return Ok(Outcome::read(json!({
             "session_id": session.id,
             "pane_id": pane,
-            "machine": null,
             "attach_clients": clients,
         }))
         .with_warning(warning));
@@ -680,6 +679,5 @@ pub fn focus(app: &App, target: &str) -> Done {
     Ok(Outcome::read(json!({
         "session_id": session.id,
         "pane_id": pane,
-        "machine": null,
     })))
 }

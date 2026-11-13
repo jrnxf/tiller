@@ -17,7 +17,7 @@ use serde_json::Value;
 use tiller_core::state::runs::{NewRun, SpawnChecks};
 use tiller_core::{Actor, Ctx};
 use tiller_panes::composer::{Composer, classify};
-use tiller_panes::{Format, HolderClient, Key, PaneId, Panes, Read};
+use tiller_panes::{Format, HolderClient, Key, Live, PaneId, Panes, Read, Subscribe};
 
 /// A home whose launches run `fake-agent` as Claude Code. The `claude` the
 /// launch line names fires the `SessionStart` hook Claude Code would, under
@@ -243,6 +243,24 @@ fn submit(client: &HolderClient, pane: &str, line: &str) {
     client.input(&pane, line).unwrap();
     std::thread::sleep(Duration::from_millis(300));
     client.keys(&pane, &[Key::ENTER]).unwrap();
+}
+
+/// Waits until the pane's PTY is `cols` by `rows`.
+fn sized(client: &HolderClient, pane: &str, cols: u16, rows: u16, what: &str) {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let now = client.get(&PaneId::from(pane)).unwrap().unwrap();
+        if (now.cols, now.rows) == (cols, rows) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{what}: the pane is {}x{}, not {cols}x{rows}",
+            now.cols,
+            now.rows
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// Waits until the pane's screen holds `text`.
@@ -621,7 +639,9 @@ enum Kill {
 
 /// Spec 9.2: SIGKILL the daemon at `kill` while a message goes to a run's
 /// `fake-agent`. The agent runs on in its pane, a restarted daemon delivers
-/// the message once, nothing is typed twice, and a dead daemon's Fit holds nothing.
+/// the message once, nothing is typed twice, and a dead daemon's Fit holds
+/// nothing: its lease ends with its connection, and the size falls back to
+/// the lease under it, an outside client's 80 by 24.
 fn killed_daemon_delivers_once(kill: Kill) {
     let agents = Agents::new(300);
     let (_holder, client) = start_holder(&agents.world);
@@ -629,6 +649,15 @@ fn killed_daemon_delivers_once(kill: Kill) {
     let (session, pane) = agents.launch(&run);
     shows(&client, &pane, "? for shortcuts");
     let cookie = cookie(&agents.world);
+    // An outside client, such as an attach, holds a lease under the Fit.
+    let base = matches!(kill, Kill::Fit).then(|| {
+        let base = client
+            .subscribe(&PaneId::from(pane.as_str()), Subscribe::default())
+            .unwrap();
+        base.resize(80, 24).unwrap();
+        sized(&client, &pane, 80, 24, "the outside lease");
+        base
+    });
 
     let (mut daemon, port) = git_only_daemon(&agents.world);
     let mut view = match kill {
@@ -649,17 +678,7 @@ fn killed_daemon_delivers_once(kill: Kill) {
         });
     }
     if matches!(kill, Kill::Fit) {
-        let deadline = Instant::now() + WAIT;
-        while client
-            .get(&PaneId::from(pane.as_str()))
-            .unwrap()
-            .unwrap()
-            .cols
-            != 100
-        {
-            assert!(Instant::now() < deadline, "the Fit never sized the pane");
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        sized(&client, &pane, 100, 30, "the Fit");
     }
     let sent = agents.world.must(&[
         "send",
@@ -689,12 +708,13 @@ fn killed_daemon_delivers_once(kill: Kill) {
             "the Enter came before the kill"
         );
     }
+    if matches!(kill, Kill::Fit) {
+        // The dead daemon's connection ended, and its lease with it.
+        sized(&client, &pane, 80, 24, "after the kill");
+    }
     let (_daemon, port) = git_only_daemon(&agents.world);
     if matches!(kill, Kill::Fit) {
-        // The dead daemon's Fit leaves nothing in the way: a new one sizes
-        // the pane. The Fit is a one-shot resize until H11 makes it a
-        // lease, and the holder keeps a size no lease holds, so the pane
-        // getting its own size back is H11's to test.
+        // A new Fit takes its own lease, and gives it back when it ends.
         let mut view = View::open_with(
             port,
             &cookie,
@@ -706,16 +726,11 @@ fn killed_daemon_delivers_once(kill: Kill) {
                 .iter()
                 .any(|l| l["type"] == "frame" && l["full"] == true)
         });
-        let deadline = Instant::now() + WAIT;
-        loop {
-            let now = client.get(&PaneId::from(pane.as_str())).unwrap().unwrap();
-            if (now.cols, now.rows) == (90, 25) {
-                break;
-            }
-            assert!(Instant::now() < deadline, "a new Fit never sized the pane");
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        sized(&client, &pane, 90, 25, "a new Fit");
+        drop(view);
+        sized(&client, &pane, 80, 24, "after the new Fit");
     }
+    drop(base);
     // A delivery pass that meets a busy screen, a working holder status or an
     // unreadable composer defers by design for 30 s, which outlasts WAIT. The
     // wait covers one such deferral. 30 is BUSY_DEFER_SECS in
