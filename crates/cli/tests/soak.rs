@@ -65,7 +65,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use common::holder::{cookie, fake_agent, get, script};
-use common::{Running, World, git_only_daemon};
+use common::{Running, World, git_only_daemon_logging};
 use jiff::Timestamp;
 use serde_json::{Value, json};
 use tiller_core::state::runs::{NewRun, SpawnChecks};
@@ -499,6 +499,20 @@ fn log_path(world: &World) -> PathBuf {
     world.dir.path().join("holder.log")
 }
 
+/// The daemon, every one of them logging into one file the report keeps.
+fn start_daemon(world: &World) -> (Running, u16) {
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(daemon_log_path(world))
+        .unwrap();
+    git_only_daemon_logging(world, log.into(), "info")
+}
+
+fn daemon_log_path(world: &World) -> PathBuf {
+    world.dir.path().join("daemon.log")
+}
+
 /// A new client, once the holder listens.
 fn client(world: &World) -> Result<HolderClient, String> {
     let socket = socket_path(&world.home());
@@ -606,7 +620,7 @@ impl Soak {
                 .map_err(|e| format!("the session of {run}: {e}"))?;
             counters.push(counter);
         }
-        let daemon = git_only_daemon(&world);
+        let daemon = start_daemon(&world);
         let cookie = cookie(&world);
         let mut soak = Self {
             world,
@@ -862,7 +876,7 @@ impl Soak {
         }
         drop(daemon);
         let at = Timestamp::now();
-        self.daemon = Some(git_only_daemon(&self.world));
+        self.daemon = Some(start_daemon(&self.world));
         self.restarts += 1;
         self.note(
             "daemon_restart",
@@ -1090,6 +1104,63 @@ impl Soak {
         Ok(())
     }
 
+    /// Why `waiting` is still unacked, as the store tells it: each
+    /// message's state and every deferral, the orchestrator's session row
+    /// and the end of the daemon's log.
+    fn undelivered(&self, waiting: &[&str]) -> String {
+        let store = self.world.store();
+        let mut out = String::new();
+        for id in waiting {
+            let (state, next): (String, Option<String>) = store
+                .conn()
+                .query_row(
+                    "SELECT state, next_attempt_at FROM outbox WHERE id = ?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap_or_default();
+            out.push_str(&format!("\n  {id} {state}, next attempt {next:?}"));
+            let mut statement = store
+                .conn()
+                .prepare(
+                    "SELECT at, kind, payload FROM events \
+                     WHERE entity = 'outbox' AND entity_id = ?1 ORDER BY seq",
+                )
+                .unwrap();
+            let events = statement
+                .query_map([id], |row| {
+                    Ok(format!(
+                        "{} {} {}",
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?
+                    ))
+                })
+                .unwrap()
+                .flatten();
+            for event in events {
+                out.push_str(&format!("\n    {event}"));
+            }
+        }
+        let session: String = store
+            .conn()
+            .query_row(
+                "SELECT coalesce(pane_id, '-') || ' ' || activity || ' ' || \
+                 coalesce(activity_observed_at, '-') FROM sessions WHERE id = ?1",
+                [&self.orchestrator],
+                |row| row.get(0),
+            )
+            .unwrap_or_default();
+        out.push_str(&format!("\n  orchestrator pane, activity: {session}"));
+        let log = std::fs::read_to_string(daemon_log_path(&self.world)).unwrap_or_default();
+        let lines: Vec<&str> = log.lines().collect();
+        out.push_str("\n  daemon log:");
+        for line in &lines[lines.len().saturating_sub(40)..] {
+            out.push_str(&format!("\n    {line}"));
+        }
+        out
+    }
+
     /// Every message to the orchestrator so far was delivered and taken by
     /// exactly one submitted line, and no line named an acked message
     /// later than a settle after its ack. With
@@ -1108,22 +1179,10 @@ impl Soak {
                 break;
             }
             if Instant::now() > deadline {
-                let store = self.world.store();
-                let states: Vec<String> = waiting
-                    .iter()
-                    .map(|id| {
-                        let state: String = store
-                            .conn()
-                            .query_row("SELECT state FROM outbox WHERE id = ?1", [id], |row| {
-                                row.get(0)
-                            })
-                            .unwrap_or_default();
-                        format!("{id} {state}")
-                    })
-                    .collect();
                 return Err(format!(
-                    "after {} s no submit took {states:?}",
-                    DELIVER.as_secs()
+                    "after {} s no submit took {}",
+                    DELIVER.as_secs(),
+                    self.undelivered(&waiting)
                 ));
             }
             std::thread::sleep(Duration::from_millis(200));
@@ -1402,9 +1461,9 @@ impl Soak {
             Err(error) => {
                 self.note("failed", error.clone());
                 self.failure = Some(error);
-                self.keep_home();
             }
         }
+        self.keep_home();
         self.save(if self.failure.is_some() {
             "failed"
         } else {
@@ -1412,7 +1471,7 @@ impl Soak {
         });
     }
 
-    /// After a failure, copies what a diagnosis reads into `home/` of the
+    /// At the end, copies what a diagnosis reads into `home/` of the
     /// report directory: the state database, the holder's log and the
     /// stand-in's logs. The test home itself is removed with the test.
     fn keep_home(&self) {
@@ -1424,6 +1483,7 @@ impl Soak {
             let _ = std::fs::copy(&from, kept.join(format!("state.db{suffix}")));
         }
         let _ = std::fs::copy(log_path(&self.world), kept.join("holder.log"));
+        let _ = std::fs::copy(daemon_log_path(&self.world), kept.join("daemon.log"));
         let home = self.world.home();
         for name in ["log/hook.log", "config.toml"] {
             let _ = std::fs::copy(home.join(name), kept.join(name.replace('/', "-")));
