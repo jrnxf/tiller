@@ -141,6 +141,47 @@ test("a peer's read_scope refusal is read once and shows the fallback", async ()
   expect(calls).toEqual([PATH]);
 });
 
+test("a peer answer left unconfirmed in one wait is not replayed in the next wait with the same screen", async () => {
+  const answers: { idempotency_key?: string }[] = [];
+  const replies = [504, 504];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === PATH) {
+        const read = { session_id: "s1", read_at: new Date().toISOString(), reason: null };
+        return new Response(JSON.stringify({ ...read, prompt: dialog("ls") }), { status: 200 });
+      }
+      answers.push(JSON.parse(String(init?.body ?? "{}")) as { idempotency_key?: string });
+      const status = replies.shift() ?? 200;
+      if (status === 200) {
+        return new Response(JSON.stringify({ ok: true, data: {} }), { status });
+      }
+      const error = { code: "forward_uncertain", message: "charlie did not answer" };
+      return new Response(JSON.stringify({ ok: false, error }), { status });
+    }),
+  );
+  const client = new QueryClient();
+  const strip = (waiting: boolean, observedAt: string) => (
+    <QueryClientProvider client={client}>
+      <AnswerStrip sessionId="s1" waiting={waiting} observedAt={observedAt} host="charlie" />
+    </QueryClientProvider>
+  );
+  const { rerender } = render(strip(true, "2026-11-06T10:00:00Z"));
+  fireEvent.click(await screen.findByRole("button", { name: "Answer 1: Yes" }));
+  expect(await screen.findByText(/Sent, not confirmed\./)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Answer 1: Yes" }));
+  await waitFor(() => expect(answers).toHaveLength(2));
+  expect(answers[1]?.idempotency_key).toBe(answers[0]?.idempotency_key);
+  await screen.findByText(/Sent, not confirmed\./);
+  rerender(strip(false, "2026-11-06T10:01:00Z"));
+  rerender(strip(true, "2026-11-06T10:02:00Z"));
+  fireEvent.click(await screen.findByRole("button", { name: "Answer 1: Yes" }));
+  expect((await screen.findByRole("status")).textContent).toBe("Sent 1 · Yes.");
+  expect(answers).toHaveLength(3);
+  expect(typeof answers[2]?.idempotency_key).toBe("string");
+  expect(answers[2]?.idempotency_key).not.toBe(answers[0]?.idempotency_key);
+});
+
 const TRUST: PromptDialog = {
   layout: "trust",
   tool: "",

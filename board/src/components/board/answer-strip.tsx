@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 
 import type { PromptDialog, PromptRead } from "../../lib/api-types";
@@ -67,17 +67,19 @@ function tryAgain(failures: number, error: Error): boolean {
 }
 
 // Forwarded answers the peer has not confirmed, by host and session: one in
-// flight, or one a 503 or 504 left open. They outlive the strip, so a view
-// that would hide it while its peer lags keeps it up, and the same tap after
-// it carries the same key, so it is typed once.
-const openAnswers = new Map<string, { tap: string; key: string }>();
+// flight, or one a 503 or 504 left open, in the wait it was sent in (`at`).
+// They outlive the strip, so a view that would hide it while its peer lags
+// keeps it up, and the same tap in the same wait carries the same key, so it
+// is typed once. The next wait drops it, so its taps mint new keys.
+type OpenAnswer = { at: string; tap: string; key: string };
+const openAnswers = new Map<string, OpenAnswer>();
 const listeners = new Set<() => void>();
 
 function openKey(host: string, sessionId: string): string {
   return `${host}\n${sessionId}`;
 }
 
-function setOpen(id: string, answer: { tap: string; key: string } | null) {
+function setOpen(id: string, answer: OpenAnswer | null) {
   if (answer) openAnswers.set(id, answer);
   else openAnswers.delete(id);
   for (const listener of listeners) listener();
@@ -147,6 +149,11 @@ export function AnswerStrip({
   const next =
     waiting && observedAt !== null ? (wait === null || answered ? observedAt : wait) : null;
   if (next !== wait) setWait(next);
+  useEffect(() => {
+    if (!host) return;
+    const id = openKey(host, sessionId);
+    if (openAnswers.has(id) && openAnswers.get(id)?.at !== wait) setOpen(id, null);
+  }, [host, sessionId, wait]);
   const read = useQuery({
     queryKey: ["prompt", host ?? null, sessionId, next],
     queryFn: async ({ signal }) => {
@@ -183,8 +190,8 @@ export function AnswerStrip({
     const same = `${shown.screen}:${n}`;
     const id = host ? openKey(host, sessionId) : null;
     const before = id ? openAnswers.get(id) : undefined;
-    const key = before?.tap === same ? before.key : ulid();
-    if (id) setOpen(id, { tap: same, key });
+    const key = before?.at === at && before.tap === same ? before.key : ulid();
+    if (id) setOpen(id, { at, tap: same, key });
     const sent = await readPane(`${promptPath(sessionId)}/answer`, undefined, {
       option: n,
       screen: shown.screen,
