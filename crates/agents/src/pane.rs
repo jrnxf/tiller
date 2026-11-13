@@ -54,7 +54,8 @@ impl<'a> Holder<'a> {
     pub fn require(&self) -> Result<&'a dyn Panes> {
         self.panes.ok_or_else(|| {
             PanesError::Unreachable(
-                "no terminal holder runs in this home; tiller daemon starts one".to_owned(),
+                "no terminal holder runs in this home; its own service (programs.tiller.holder) or `tiller holder` starts one"
+                    .to_owned(),
             )
         })
     }
