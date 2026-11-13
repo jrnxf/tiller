@@ -2,10 +2,10 @@
 //! real notifier and a fake that records what it was asked to show.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::sync::{Arc, Mutex};
 use tiller_core::domain::{Attention, AttentionKind};
 use tiller_core::state::attention::NewAttention;
 use tiller_core::state::list;
-use std::sync::{Arc, Mutex};
 
 use tiller_delivery::notify::{Command, NEW_MINUTES, Note, Notifier, Notify};
 use tiller_panes::testing::{Fleet, at, owner};

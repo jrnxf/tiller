@@ -48,11 +48,12 @@ impl World {
         let panes = FakeClaude::new(fleet.dir.path().join("holder.json"));
         fleet.place(&panes);
         let mut world = Self {
-            deliverer: Deliverer::new(fleet.open(), Arc::new(panes.clone()), &fleet.host)
-                .pacing(Pacing {
+            deliverer: Deliverer::new(fleet.open(), Arc::new(panes.clone()), &fleet.host).pacing(
+                Pacing {
                     settle: Duration::ZERO,
                     recheck: Duration::ZERO,
-                }),
+                },
+            ),
             fleet,
             panes,
             worker,
@@ -279,11 +280,7 @@ fn a_wrapped_wake_line_is_finished_but_a_draft_starting_with_one_is_not() {
     let report = w.pass(at(4));
     assert_eq!(report.deferred[0].1, "composer holds text");
     assert_eq!(w.panes.fake_pane("w2:p1").composer, draft);
-    assert_eq!(
-        w.calls("keys"),
-        1,
-        "the owner's draft is never submitted"
-    );
+    assert_eq!(w.calls("keys"), 1, "the owner's draft is never submitted");
 }
 
 /// Two panes, the first one never taking its Enter: the pass types both
@@ -324,8 +321,8 @@ fn a_pane_that_never_submits_does_not_delay_another() {
     }
     panes.enter_as_newline("w2:p1", 100);
 
-    let mut deliverer = Deliverer::new(fleet.open(), Arc::new(panes.clone()), &fleet.host)
-        .pacing(Pacing {
+    let mut deliverer =
+        Deliverer::new(fleet.open(), Arc::new(panes.clone()), &fleet.host).pacing(Pacing {
             settle: Duration::ZERO,
             recheck: Duration::ZERO,
         });

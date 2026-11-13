@@ -15,9 +15,9 @@ use tiller_core::domain::{Activity, ObservationSource, Session};
 use tiller_core::state::get;
 use tiller_core::state::runs::NewObservation;
 use tiller_core::{Actor, Ctx};
-use tiller_panes::testing::at;
 use tiller_panes::Panes as _;
 use tiller_panes::message::{Event, PaneId};
+use tiller_panes::testing::at;
 use tiller_poll::{Poller, Registry};
 use tiller_reconcile::holder::{HOLDER_DOWN, HolderSource, Memory, UPGRADE_CHECK};
 

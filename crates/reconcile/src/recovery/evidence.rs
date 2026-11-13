@@ -179,7 +179,11 @@ impl Reconciler {
         // Two panes for one session.
         let mut by_session: std::collections::HashMap<&str, Vec<&str>> =
             std::collections::HashMap::new();
-        for pane in listing.panes.iter().filter(|p| p.state == PaneState::Running) {
+        for pane in listing
+            .panes
+            .iter()
+            .filter(|p| p.state == PaneState::Running)
+        {
             if let Some(named) = pane.meta.get("session") {
                 by_session
                     .entry(named.as_str())
@@ -301,8 +305,7 @@ impl Reconciler {
                     if let Some(at) = self.message_at(&key)?
                         && at.plus_minutes(self.config.thresholds.orphan_note_developer) <= now
                     {
-                        let item =
-                            format!("reconcile:R15:orphan-recovery:{host}:{pane_id}");
+                        let item = format!("reconcile:R15:orphan-recovery:{host}:{pane_id}");
                         if self.recovery(
                             now,
                             &item,
@@ -631,7 +634,11 @@ impl Reconciler {
             return false;
         }
         panes.iter().all(|pane| {
-            match listing.panes.iter().find(|p| p.pane.as_str() == pane.pane_id) {
+            match listing
+                .panes
+                .iter()
+                .find(|p| p.pane.as_str() == pane.pane_id)
+            {
                 None => true,
                 Some(listed) => {
                     listed.state == PaneState::Exited
@@ -819,4 +826,3 @@ impl Reconciler {
         )?)
     }
 }
-

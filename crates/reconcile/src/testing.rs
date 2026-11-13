@@ -18,12 +18,12 @@ use tiller_core::state::runs::NewObservation;
 use tiller_core::state::{get, list};
 use tiller_core::{Actor, Ctx, Store, Timestamp};
 pub use tiller_panes::fake_claude::Screen;
-pub use tiller_panes::testing::{Fleet, owner};
 use tiller_panes::handshake::Welcome;
 pub use tiller_panes::message::Meta;
 use tiller_panes::message::{
     Exit, Format, Listing, Pane, PaneId, Read, Screen as PaneScreen, Signal, Spawn,
 };
+pub use tiller_panes::testing::{Fleet, owner};
 use tiller_panes::{
     Events, FakePanes, Key, Live, Panes, PanesError, Subscribe, Subscription, Upgrade,
 };

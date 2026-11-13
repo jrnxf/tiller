@@ -671,10 +671,10 @@ impl Reconciler {
 
     /// The bounded pane tail a note carries (P22): the last 40 visible lines.
     pub(crate) fn pane_tail(&self, pane_id: &str) -> String {
-        let screen = self
-            .sources
-            .holder
-            .screen(&PaneId::from(pane_id), Read::Visible, Format::Text);
+        let screen =
+            self.sources
+                .holder
+                .screen(&PaneId::from(pane_id), Read::Visible, Format::Text);
         match screen {
             Ok(screen) => {
                 let text = screen.text();

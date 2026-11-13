@@ -206,7 +206,13 @@ mod tests {
         let s = session(None);
         let list = listing(&[]);
         assert_eq!(
-            climb(&s, "stale", false, reading(&list, None), &Fixed(Probe::Dead)),
+            climb(
+                &s,
+                "stale",
+                false,
+                reading(&list, None),
+                &Fixed(Probe::Dead)
+            ),
             Verdict::Unknown
         );
     }
@@ -285,13 +291,7 @@ mod tests {
             (Probe::Unknown, Verdict::Unknown),
         ] {
             assert_eq!(
-                climb(
-                    &s,
-                    "stale",
-                    false,
-                    reading(&list, None),
-                    &Fixed(probe)
-                ),
+                climb(&s, "stale", false, reading(&list, None), &Fixed(probe)),
                 verdict,
                 "{probe:?}"
             );
