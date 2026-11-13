@@ -69,6 +69,12 @@ const SCREEN_READS: usize = 2;
 /// at once unless the kernel holds it, so a longer wait is an error.
 const KILL_WAIT: Duration = Duration::from_secs(5);
 
+/// The kernel takes the controlling terminal from its whole session when
+/// the session's leader exits (macOS `proc_exit` revokes it), so the PTY's
+/// output ends while the rest of the child's group may live on. Linux
+/// leaves the others their open terminal.
+const REVOKES_TTY: bool = cfg!(target_os = "macos");
+
 /// How often the reaper drops exited panes past their age (section 2.8).
 const PRUNE_EVERY: Duration = Duration::from_secs(60);
 
@@ -708,15 +714,46 @@ impl PaneCell {
         Ok(running)
     }
 
-    /// Kills the child's group while the child runs, or while something
-    /// still holds the PTY after the child was reaped: the rest of its
-    /// group, which outlived it. Says whether it did. The group's id stays
-    /// taken while any process of the group lives, so it is not another's.
-    /// A close's kill is spent once this runs.
+    /// Whether what the child left of its group may still be there once
+    /// the child exits: something holds the PTY, or the kernel took the
+    /// PTY from them ([`REVOKES_TTY`]).
+    fn may_leave_group(&self) -> bool {
+        REVOKES_TTY || !*self.output_ended.borrow()
+    }
+
+    /// Whether the rest of the reaped child's group outlived it: something
+    /// still holds the PTY, or, where the kernel took the PTY from them
+    /// ([`REVOKES_TTY`]), the group is there with no process of the
+    /// child's pid. A reaped child's pid may be taken again only once its
+    /// group is gone, and a new group of that id needs a live leader of
+    /// that pid, so the group found is the child's.
+    fn group_left(&self, inner: &Inner) -> bool {
+        if !inner.reaped {
+            return false;
+        }
+        if !*self.output_ended.borrow() {
+            return true;
+        }
+        REVOKES_TTY
+            && rustix::process::test_kill_process(self.pid) == Err(rustix::io::Errno::SRCH)
+            && match rustix::process::test_kill_process_group(self.pid) {
+                Ok(()) => true,
+                Err(err) => {
+                    tracing::debug!(pane = %self.id, %err, "the child's group is gone");
+                    false
+                }
+            }
+    }
+
+    /// Kills the child's group while the child runs, or while the rest of
+    /// its group outlived it after the child was reaped
+    /// ([`PaneCell::group_left`]). Says whether it did. The group's id
+    /// stays taken while any process of the group lives, so it is not
+    /// another's. A close's kill is spent once this runs.
     fn kill_what_is_left(&self) -> Result<bool, Failure> {
         let mut inner = self.live()?;
         inner.closing = None;
-        let left = inner.running() || (inner.reaped && !*self.output_ended.borrow());
+        let left = inner.running() || self.group_left(&inner);
         if left {
             self.signal(Signal::KILL);
         }
@@ -1704,7 +1741,7 @@ impl Holder {
         if let Ok(Ok(got)) = tokio::time::timeout_at(deadline, exit.wait_for(has_exit)).await
             && let Some(got) = *got
         {
-            if !*cell.output_ended.borrow() {
+            if cell.may_leave_group() {
                 tokio::spawn(kill_at(cell.clone(), deadline));
             }
             return Ok(got);
@@ -1755,7 +1792,7 @@ impl Holder {
         }
         // A close kills what is left of the group at the end of its grace:
         // with the pane gone, nothing else would.
-        if inner.closing.is_some() && inner.reaped && !*cell.output_ended.borrow() {
+        if inner.closing.is_some() && cell.group_left(inner) {
             cell.signal(Signal::KILL);
         }
         cell.forgotten.send_replace(true);
@@ -2086,14 +2123,20 @@ fn arm(timer: Pin<&mut Sleep>, at: &mut Option<Instant>, next: Option<Instant>) 
 }
 
 /// Kills what is left of a closed pane's group at `deadline`, if it still
-/// holds the PTY then.
+/// holds the PTY then, or, where the kernel took the PTY from it
+/// ([`REVOKES_TTY`]), if it is still there.
 async fn kill_at(cell: Arc<PaneCell>, deadline: Instant) {
     let mut ended = cell.output_ended.subscribe();
     if tokio::time::timeout_at(deadline, ended.wait_for(|ended| *ended))
         .await
-        .is_err()
-        && let Ok(true) = cell.kill_what_is_left()
+        .is_ok()
     {
+        if !REVOKES_TTY {
+            return;
+        }
+        tokio::time::sleep_until(deadline).await;
+    }
+    if let Ok(true) = cell.kill_what_is_left() {
         tracing::info!(pane = %cell.id, "what the child left of its group outlived its close grace and was killed");
     }
 }
@@ -2108,7 +2151,7 @@ async fn close_resumed(cell: Arc<PaneCell>, deadline: Instant) {
         Ok(Ok(_))
     );
     if exited {
-        if !*cell.output_ended.borrow() {
+        if cell.may_leave_group() {
             kill_at(cell, deadline).await;
         }
         return;

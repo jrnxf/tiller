@@ -1305,7 +1305,8 @@ mod tests {
 
     // A child that leaves its group behind as it exits: the exit is
     // reported, and what is left of the group, which outlived `hup` and
-    // holds the PTY, is killed at the end of the grace. Past the
+    // holds the PTY (on macOS the kernel takes the PTY from it), is killed
+    // at the end of the grace. Past the
     // connection's limit of requests in flight, one more is `busy`.
     #[tokio::test]
     async fn a_close_kills_the_group_its_child_left_and_a_request_past_the_flight_limit_is_busy() {
@@ -1358,7 +1359,16 @@ mod tests {
             }
         })
         .await;
-        assert!(dead.is_ok(), "what the shell left lives on");
+        assert!(dead.is_ok(), "what the shell left lives on: {}", {
+            let ps = std::process::Command::new("ps")
+                .args(["-o", "pid,ppid,pgid,sess,stat,command", "-p"])
+                .arg(left.as_raw_nonzero().to_string())
+                .output();
+            match ps {
+                Ok(ps) => String::from_utf8_lossy(&ps.stdout).into_owned(),
+                Err(err) => format!("no ps: {err}"),
+            }
+        });
         assert!(
             started.elapsed() >= Duration::from_millis(900),
             "the group was killed before its grace ended: {:?}",
