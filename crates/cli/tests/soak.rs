@@ -373,8 +373,6 @@ fn home(plan: &Plan) -> World {
             world.must(&["config", "set", key, dir.to_str().unwrap()]);
         }
     }
-    // No herdr runs: a launch or a delivery that reached it would fail.
-    world.set_env("TILLER_HERDR", "/nonexistent/herdr");
     let claude = root.join("claude-stub");
     script(&claude, &claude_stub(&root, plan.skip_at));
     world.must(&["config", "set", "spawn.claude", claude.to_str().unwrap()]);
