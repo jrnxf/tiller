@@ -715,18 +715,20 @@ impl PaneCell {
     }
 
     /// Whether what the child left of its group may still be there once
-    /// the child exits: something holds the PTY, or the kernel took the
-    /// PTY from them ([`REVOKES_TTY`]).
+    /// the child exits: something holds the PTY, or, during a close, the
+    /// kernel took the PTY from them ([`REVOKES_TTY`]).
     fn may_leave_group(&self) -> bool {
-        REVOKES_TTY || !*self.output_ended.borrow()
+        !*self.output_ended.borrow() || (REVOKES_TTY && self.inner().closing.is_some())
     }
 
     /// Whether the rest of the reaped child's group outlived it: something
     /// still holds the PTY, or, where the kernel took the PTY from them
-    /// ([`REVOKES_TTY`]), the group is there with no process of the
-    /// child's pid. A reaped child's pid may be taken again only once its
-    /// group is gone, and a new group of that id needs a live leader of
-    /// that pid, so the group found is the child's.
+    /// ([`REVOKES_TTY`]), a close is pending and the group is there with
+    /// no process of the child's pid. The child exited within that close's
+    /// grace, and its pid is not taken again while its group lives. For
+    /// the group found to be another's, the child's group would have to
+    /// end, its pid be taken again, and that process lead a group of its
+    /// own and exit before it, all within the grace.
     fn group_left(&self, inner: &Inner) -> bool {
         if !inner.reaped {
             return false;
@@ -735,11 +737,12 @@ impl PaneCell {
             return true;
         }
         REVOKES_TTY
+            && inner.closing.is_some()
             && rustix::process::test_kill_process(self.pid) == Err(rustix::io::Errno::SRCH)
             && match rustix::process::test_kill_process_group(self.pid) {
                 Ok(()) => true,
                 Err(err) => {
-                    tracing::debug!(pane = %self.id, %err, "the child's group is gone");
+                    tracing::debug!(pane = %self.id, %err, "no group of the child's is left to kill");
                     false
                 }
             }
@@ -752,8 +755,8 @@ impl PaneCell {
     /// another's. A close's kill is spent once this runs.
     fn kill_what_is_left(&self) -> Result<bool, Failure> {
         let mut inner = self.live()?;
-        inner.closing = None;
         let left = inner.running() || self.group_left(&inner);
+        inner.closing = None;
         if left {
             self.signal(Signal::KILL);
         }
@@ -2131,7 +2134,7 @@ async fn kill_at(cell: Arc<PaneCell>, deadline: Instant) {
         .await
         .is_ok()
     {
-        if !REVOKES_TTY {
+        if !cell.may_leave_group() {
             return;
         }
         tokio::time::sleep_until(deadline).await;

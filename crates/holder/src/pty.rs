@@ -83,8 +83,8 @@ pub fn start(launch: Launch<'_>) -> io::Result<Started> {
         .env("COLORTERM", "truecolor")
         .env("TILLER_PANE", launch.pane)
         .current_dir(launch.cwd)
-        .stdin(Stdio::from(slave.try_clone()?))
-        .stdout(Stdio::from(slave.try_clone()?))
+        .stdin(Stdio::from(slave.try_clone().map_err(at("dup the slave"))?))
+        .stdout(Stdio::from(slave.try_clone().map_err(at("dup the slave"))?))
         .stderr(Stdio::from(slave));
     child_setup(&mut command);
     let child = command.spawn()?;
