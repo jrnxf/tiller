@@ -256,6 +256,40 @@ fn a_refused_upgrade_is_a_health_warning() {
     assert_eq!(link.upgrades().len(), 2, "it runs the stable binary now");
 }
 
+/// An upgrade that keeps the version string, as a rebuild to a new store
+/// path does, still clears a refusal once the holder runs the stable
+/// binary: the re-exec keeps the instance and records no `holder.upgraded`.
+#[test]
+fn a_taken_upgrade_that_keeps_the_version_clears_a_refusal() {
+    let mut w = World::new();
+    let link = w.use_holder();
+    let stable = w.fleet.dir.path().join("stable-tiller");
+    std::fs::write(&stable, "").unwrap();
+    let stable = std::fs::canonicalize(stable).unwrap();
+    link.set_next_version("0.1.0");
+    link.refuse_upgrades(Some("preflight: the binary did not run"));
+    let mut poller = poller(&w, &link, Some(stable.clone()));
+    poller.poll_once(at(0));
+    assert!(w.store().host_degraded(UPGRADE_CHECK).unwrap().is_some());
+
+    link.refuse_upgrades(None);
+    w.store_mut()
+        .config_changed(&owner(), "holder.socket", json!(null))
+        .unwrap();
+    let instance = link.instance();
+    let before = poller.source().received();
+    poller.poll_once(at(42));
+    assert_eq!(link.upgrades().len(), 2, "asked again after config.changed");
+    received(&poller, before + 1);
+    poller.poll_once(at(44));
+    poller.poll_once(at(46));
+    assert!(poller.source().connected());
+    assert_eq!(link.instance(), instance, "a re-exec keeps the instance");
+    assert!(event_payloads(&w, "holder.upgraded").is_empty());
+    assert_eq!(w.store().host_degraded(UPGRADE_CHECK).unwrap(), None);
+    assert_eq!(link.upgrades().len(), 2, "it runs the stable binary now");
+}
+
 /// A refusal does not outlive its cause: once the holder restarts from the
 /// stable binary, the next check clears the warning without asking.
 #[test]
@@ -297,7 +331,10 @@ fn a_refused_upgrade_clears_when_a_new_instance_runs_the_stable_binary() {
     poller.poll_once(at(0));
     assert!(w.store().host_degraded(UPGRADE_CHECK).unwrap().is_some());
 
+    // The old watch closes, and the next poll connects to the new instance.
+    let before = poller.source().received();
     link.restart();
+    received(&poller, before + 1);
     poller.poll_once(at(40));
     poller.poll_once(at(80));
     assert!(poller.source().connected());
@@ -306,8 +343,10 @@ fn a_refused_upgrade_clears_when_a_new_instance_runs_the_stable_binary() {
         "a new instance on another binary keeps the warning"
     );
 
+    let before = poller.source().received();
     link.restart();
     link.set_binary(Some(&stable));
+    received(&poller, before + 1);
     poller.poll_once(at(120));
     poller.poll_once(at(160));
     assert!(poller.source().connected());

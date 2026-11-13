@@ -242,13 +242,11 @@ impl HolderSource {
             tracing::info!(%from, to = %welcome.holder, "terminal holder upgraded");
             self.store.host_health(ctx, UPGRADE_CHECK, None)?;
         } else if self
-            .seen
-            .as_ref()
-            .is_some_and(|(instance, _)| *instance != welcome.instance)
-            && self
-                .binaries()
-                .is_some_and(|(running, stable)| running == stable)
+            .binaries()
+            .is_some_and(|(running, stable)| running == stable)
         {
+            // A new instance or a re-exec that kept its version, on the
+            // stable binary: nothing is left to upgrade.
             self.store.host_health(ctx, UPGRADE_CHECK, None)?;
         }
         self.seen = Some((welcome.instance.clone(), welcome.holder.clone()));

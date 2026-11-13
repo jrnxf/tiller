@@ -171,6 +171,12 @@ impl FakeLink {
         lock(&self.world).binary = binary.map(Path::to_owned);
     }
 
+    /// The version a taken upgrade moves to. A rebuild to a new store path
+    /// can keep the version it had.
+    pub fn set_next_version(&self, version: &str) {
+        lock(&self.world).next_version = version.to_owned();
+    }
+
     /// Every `upgrade` refuses with `reason` (Some), or takes it (None).
     pub fn refuse_upgrades(&self, reason: Option<&str>) {
         lock(&self.world).refuse = reason.map(str::to_owned);
