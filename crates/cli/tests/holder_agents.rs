@@ -23,12 +23,17 @@ use tiller_panes::{Format, HolderClient, Key, PaneId, Panes, Read};
 /// launch line names fires the `SessionStart` hook Claude Code would, under
 /// the Claude session id `claude-<session>`, then becomes `fake-agent`
 /// logging to a file per session, which [`Agents::events`] reads. Its turns
-/// run `busy_ms`.
+/// run `busy_ms`, and a `--replay` plays a frame each [`FRAME_MS`].
 struct Agents {
     world: World,
     worktree: PathBuf,
     logs: PathBuf,
 }
+
+/// The replay's frame pace: longer than the holder's 500 ms `quiet`, so the
+/// holder source reads the screen again between frames as it does in a real
+/// stream, and well under the 3 s settle of the output-quiet guard.
+const FRAME_MS: u64 = 800;
 
 impl Agents {
     fn new(busy_ms: u64) -> Self {
@@ -69,7 +74,7 @@ impl Agents {
                 "if [ \"$1\" = --version ]; then exec {agent} --version; fi\n\
                  printf '{{\"session_id\":\"claude-%s\",\"source\":\"startup\"}}' \"$TILLER_SESSION_ID\" \
                  | {tiller} hook SessionStart >/dev/null 2>&1\n\
-                 exec env FAKE_AGENT_LOG={logs}/\"$TILLER_SESSION_ID\".jsonl FAKE_AGENT_BUSY_MS={busy_ms} {agent} {args} \"$@\"\n",
+                 exec env FAKE_AGENT_LOG={logs}/\"$TILLER_SESSION_ID\".jsonl FAKE_AGENT_BUSY_MS={busy_ms} FAKE_AGENT_FRAME_MS={FRAME_MS} {agent} {args} \"$@\"\n",
                 agent = fake_agent().display(),
                 tiller = env!("CARGO_BIN_EXE_tiller"),
                 logs = logs.display(),
@@ -674,9 +679,9 @@ fn essay() -> PathBuf {
 
 /// The output-quiet guard, on H08's `sleep-then-essay` recording. Its
 /// essay streams with the spinner off screen, so for 13 frames the composer
-/// reads Empty while Claude still prints. A message sent then is not typed
-/// into the stream: delivery waits until the pane has been quiet, then
-/// types the line once.
+/// reads Empty while Claude still prints, and the holder source reads the
+/// pane idle. A message sent then is not typed into the stream: delivery
+/// waits until the pane has been quiet, then types the line once.
 #[test]
 fn a_message_waits_out_a_reply_that_streams_with_an_empty_composer() {
     // It paces frames on the wall clock, so `.config/nextest.toml` runs it
@@ -688,11 +693,16 @@ fn a_message_waits_out_a_reply_that_streams_with_an_empty_composer() {
             "the nextest override that runs this test alone no longer matches it"
         );
     }
-    // From the busy Bash run (a mark at byte 9000) to the idle composer
-    // after the essay (the frame that ends at byte 16181).
+    // From the essay's first Empty frame (it ends at byte 9808) to the idle
+    // composer after the essay (the frame that ends at byte 16181). The
+    // holder source reads the screen at first sight, and only on `quiet`
+    // after that: a start in the Bash run would read its spinner, and the
+    // session's `working` would hold the message before the guard is asked.
+    // From here the holder reads idle while the essay still streams, the
+    // case the guard is for.
     let agents = Agents::with_args(
         300,
-        &format!("--replay {} 9000 16181 120x40", essay().display()),
+        &format!("--replay {} 9808 16181 120x40", essay().display()),
     );
     let (_holder, client) = start_holder(&agents.world);
     let (session, pane) = agents.orchestrator();
