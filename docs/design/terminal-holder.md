@@ -110,7 +110,7 @@ JSON keeps the control path easy to read in logs and easy to extend. Bulk bytes 
 | `close {pane, grace_ms}` | `exited {pane}` | `hup` to the group, then `kill` after `grace_ms` (default 3,000). It answers when the child is reaped. When the child exits first, what is left of the group still gets the `kill` at the deadline |
 | `forget {pane}` | `ok` | Drops an exited pane and its screen. A running pane is refused |
 | `watch {}` | `watching` | Starts `event` messages on this connection |
-| `switch {pane}` | `ok {clients}` | Tells every attach client on this host to show `pane`: each one's watch gets a `show {pane}` event, and `clients` counts them (section 5.3) |
+| `switch {pane}` | `ok {clients}` | Tells every attach client on this host to show `pane`: each one's watch gets a `show {pane}` event, and `clients` counts those watches, not streams (section 5.3) |
 | `upgrade {binary, dry_run}` | `upgrading` or `upgrade_refused {reason}` | Section 6.2 |
 | `ping {}` | `pong {}` | Health check |
 
@@ -145,7 +145,7 @@ A PTY has one size. Many clients may want different sizes. The holder keeps a st
 
 - `spawn` sets the base size (`[holder] default_size`, such as `"100x30"`; default 120 by 40).
 - A lease belongs to the connection that made it. Its id is the client's own string.
-- `resize` with a new lease id pushes a lease. `resize` with a lease id the connection already holds changes that lease and moves it to the top. The top lease sets the PTY size, and the holder sends `SIGWINCH` through `TIOCSWINSZ`. The `resized` event names the top lease.
+- `resize` with a new lease id pushes a lease. `resize` with a lease id the connection already holds changes that lease and moves it to the top. The top lease sets the PTY size, and the holder sends `SIGWINCH` through `TIOCSWINSZ`. The `resized` event gives the top lease's size. It names no lease.
 - `release`, or the end of the connection that holds the lease, removes it. The size falls back to the next lease. When no lease is left, the size stays as it is, so the app does not redraw for nothing.
 - An attach client takes a lease on start. When its owner types and its lease is not the top one, it sends `resize` again with its own size, so the size follows the person at the keyboard. A board Fit takes a lease while its stream is open. A read-only viewer takes none.
 - A live upgrade ends every connection, so it ends every lease (section 6.2). The PTY keeps its size. Each client takes its lease again when it reconnects.

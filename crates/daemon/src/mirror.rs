@@ -75,13 +75,15 @@ const FIT_DIFFS: u32 = 64;
 /// Where the sizes to give back are kept, under the daemon's home.
 const FITS_FILE: &str = "mirror-fits.json";
 
-/// The mirror's shared state: open views, the input budget, the Fits, and
-/// the lock each session's prompt answers take in turn.
+/// The mirror's shared state: open views, the input budget, the Fits on
+/// herdr panes and the leases on holder panes, and the lock each session's
+/// prompt answers take in turn.
 #[derive(Debug)]
 pub struct Mirrors {
     viewers: Arc<AtomicUsize>,
     budget: Mutex<Budget>,
     fits: Arc<Fits>,
+    leases: Arc<crate::holder_mirror::Leases>,
     answers: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
@@ -113,6 +115,7 @@ impl Mirrors {
                 at: Instant::now(),
             }),
             fits: Arc::new(Fits::at(home.join(FITS_FILE))),
+            leases: Arc::default(),
             answers: Mutex::new(HashMap::new()),
         }
     }
@@ -133,6 +136,19 @@ impl Mirrors {
 
     pub fn fits(&self) -> Arc<Fits> {
         self.fits.clone()
+    }
+
+    /// The Fits on holder panes, each a size lease (`terminal-holder.md`
+    /// 2.6).
+    pub fn leases(&self) -> Arc<crate::holder_mirror::Leases> {
+        self.leases.clone()
+    }
+
+    /// Gives the view that holds a Fit on `pane` the board's new size: a
+    /// herdr Fit, or the newest lease on a holder pane. False when no view
+    /// holds a Fit on it.
+    pub fn refit(&self, pane: &str, fit: (u16, u16)) -> bool {
+        self.fits.refit(pane, fit) || self.leases.refit(&tiller_panes::PaneId::from(pane), fit)
     }
 
     /// A slot for one more view, or `None` at the cap.
@@ -220,10 +236,6 @@ pub struct Fits {
     turns: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// The board's size for each pane a Fit streams now, for a refit.
     boards: Mutex<HashMap<String, watch::Sender<(u16, u16)>>>,
-    /// A count for each holder pane the daemon resized, which each view on
-    /// the pane follows: the slice's holder reports a resize only to the
-    /// subscription that asked for it (`holder_mirror`).
-    sized: Mutex<HashMap<String, watch::Sender<u64>>>,
 }
 
 impl Fits {
@@ -240,7 +252,6 @@ impl Fits {
             held: Mutex::new(held),
             turns: Mutex::new(HashMap::new()),
             boards: Mutex::new(HashMap::new()),
-            sized: Mutex::new(HashMap::new()),
         }
     }
 
@@ -288,24 +299,6 @@ impl Fits {
         boards.retain(|_, sender| !sender.is_closed());
         boards.insert(pane.to_owned(), sender);
         receiver
-    }
-
-    /// Follows the daemon's resizes of the holder pane `pane`.
-    pub(crate) fn sized(&self, pane: &str) -> watch::Receiver<u64> {
-        let mut sized = self.sized.lock().unwrap_or_else(PoisonError::into_inner);
-        sized.retain(|_, sender| sender.receiver_count() > 0);
-        sized
-            .entry(pane.to_owned())
-            .or_insert_with(|| watch::channel(0).0)
-            .subscribe()
-    }
-
-    /// Tells each view on the holder pane `pane` that the daemon resized it.
-    pub(crate) fn resized(&self, pane: &str) {
-        let sized = self.sized.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(sender) = sized.get(pane) {
-            sender.send_modify(|count| *count = count.wrapping_add(1));
-        }
     }
 
     /// Gives the Fit streaming `pane` the board's new size; false when no

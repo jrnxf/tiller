@@ -245,8 +245,8 @@ fn show(app: &App, reference: &str, tail: Option<u32>) -> Done {
 }
 
 /// The last `keep` lines of the run's live pane, read the way the board
-/// reads it: the terminal holder for a holder pane, else the saved machine
-/// of a remote host, or the local herdr. The error is why there is no tail, for the caller to read.
+/// reads it: the terminal holder for a holder pane, else the local herdr.
+/// The error is why there is no tail, for the caller to read.
 fn read_tail(
     app: &App,
     store: &tiller_core::Store,

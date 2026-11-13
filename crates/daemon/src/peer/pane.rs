@@ -37,8 +37,8 @@ use super::nonces;
 use super::serve::{Denied, ServeConfig, ServeError, current_key, refused, skew_ms};
 use super::{Frame, HelloKey};
 use crate::api::{
-    ApiError, fit_sent, herdr_only, holder_error, input_sent, pane_error, pane_gone, pane_target,
-    remote_pane, terminal_keys, type_into,
+    ApiError, fit_sent, holder_error, holder_history, input_sent, pane_error, pane_gone,
+    pane_target, remote_pane, terminal_keys, type_into,
 };
 use crate::dto::{TerminalFit, TerminalHistory};
 use crate::holder;
@@ -85,8 +85,9 @@ pub struct PaneOpen {
     /// Scrollback rows for [`PaneKind::History`], 1 to 1000.
     pub lines: Option<u16>,
     /// The board's size for a [`PaneKind::Stream`]: the pane is fitted to
-    /// it while the stream runs, and given its size back after. Absent, the
-    /// pane keeps its size. Asking for one needs the `act` scope.
+    /// it while the stream runs, as a lease on a holder pane, or with its
+    /// size given back after on a herdr pane. Absent, the pane keeps its
+    /// size. Asking for one needs the `act` scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fit: Option<TerminalFit>,
     pub ts: String,
@@ -596,7 +597,6 @@ async fn history(
     session_id: String,
     pane: String,
 ) -> Result<Value, ApiError> {
-    herdr_only(&pane, "A peer's history")?;
     let lines = open.lines.unwrap_or(mirror::MAX_HISTORY);
     if !(1..=mirror::MAX_HISTORY).contains(&lines) {
         return Err(ApiError::usage(format!(
@@ -604,14 +604,28 @@ async fn history(
             mirror::MAX_HISTORY
         )));
     }
-    let herdr = herdr(config)?;
-    let target = pane.clone();
-    let text = tokio::task::spawn_blocking(move || herdr.read_recent(&target, lines))
-        .await
-        .map_err(|error| ApiError::from(tiller_core::Error::Internal(error.to_string())))?
-        .map_err(|error| pane_error(&pane, &error))?;
+    let text = if ids::is_holder_pane(&pane) {
+        holder_history(holder(config)?, &pane, lines).await?
+    } else {
+        let herdr = herdr(config)?;
+        let target = pane.clone();
+        tokio::task::spawn_blocking(move || herdr.read_recent(&target, lines))
+            .await
+            .map_err(|error| ApiError::from(tiller_core::Error::Internal(error.to_string())))?
+            .map_err(|error| pane_error(&pane, &error))?
+    };
     serde_json::to_value(TerminalHistory { session_id, text })
         .map_err(|error| ApiError::from(tiller_core::Error::from(error)))
+}
+
+fn holder(config: &ServeConfig) -> Result<Arc<dyn crate::holder::Holder>, ApiError> {
+    config.holder.clone().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            "the terminal holder is unreachable: this peer has no link to it",
+        )
+    })
 }
 
 fn herdr(config: &ServeConfig) -> Result<tiller_herdr::client::Cli, ApiError> {
@@ -857,7 +871,7 @@ impl Typist {
     ) -> Result<Value, ApiError> {
         self.check(store, last, &frame.header())?;
         let fit = mirror::check_fit(frame.cols, frame.rows).map_err(ApiError::usage)?;
-        if !self.mirrors.fits().refit(&self.pane, fit) {
+        if !self.mirrors.refit(&self.pane, fit) {
             return Err(ApiError::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "refused",
@@ -900,13 +914,7 @@ async fn view(
         )
     })?;
     if ids::is_holder_pane(pane) {
-        let holder = config.holder.clone().ok_or_else(|| {
-            ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "unavailable",
-                "the terminal holder is unreachable: this peer has no link to it",
-            )
-        })?;
+        let holder = holder(config)?;
         let id = tiller_panes::PaneId::from(pane);
         let lister = Arc::clone(&holder);
         let listing = tokio::task::spawn_blocking(move || lister.list())
@@ -918,7 +926,7 @@ async fn view(
                 holder,
                 id,
                 fit,
-                mirrors.fits(),
+                mirrors.leases(),
                 stop,
                 viewer,
             )),

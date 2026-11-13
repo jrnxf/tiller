@@ -152,7 +152,7 @@ struct Desk {
 
 /// The open streams' input queues, by the peer's `hosts` row id and the
 /// session they show, oldest first. The newest open stream on a pane takes
-/// its keys, and the one that holds the Fit takes its sizes.
+/// its keys, and the newest that holds a Fit takes its sizes.
 #[derive(Default)]
 pub struct PaneDesks {
     open: Mutex<HashMap<String, Vec<Desk>>>,
@@ -184,8 +184,8 @@ impl PaneDesks {
         }
     }
 
-    /// The queue an act goes to: a size to the stream that holds the Fit,
-    /// anything else to the newest stream.
+    /// The queue an act goes to: a size to the newest stream that holds a
+    /// Fit, anything else to the newest stream.
     fn get(&self, key: &str, act: &PaneAct) -> Option<mpsc::Sender<PaneAsk>> {
         let open = self.open.lock().unwrap_or_else(PoisonError::into_inner);
         open.get(key)?
@@ -221,19 +221,22 @@ impl PaneStream {
     /// closes, `stop` turns true or the browser falls a whole queue
     /// behind; a link that ends is followed by an `unavailable` line, so
     /// the browser opens again and learns whether the peer is still there.
-    /// `fit` is the turn this host's Fit on the pane holds, kept until the
-    /// peer has given the pane back.
+    /// `fitted` says the open asked the peer for a Fit, and `fit` is the
+    /// turn this host's Fit on a herdr pane holds, kept until the peer has
+    /// given the pane back. A Fit on a pane in the peer's terminal holder
+    /// is a lease there, and needs no turn.
     pub fn relay(
         self,
         label: String,
         stop: watch::Receiver<bool>,
         viewer: crate::mirror::Viewer,
+        fitted: bool,
         fit: Option<tokio::sync::OwnedMutexGuard<()>>,
         unfit: Option<String>,
     ) -> Body {
         let (tx, mut rx) = mpsc::channel::<Bytes>(PANE_QUEUE);
         let (desk, mut asks) = mpsc::channel::<PaneAsk>(PANE_ASKS);
-        let fitted = fit.is_some() && unfit.is_none();
+        let fitted = fitted && unfit.is_none();
         tokio::spawn(async move {
             let _viewer = viewer;
             let _fit = fit;

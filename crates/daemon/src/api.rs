@@ -1586,8 +1586,8 @@ async fn doctor(
                 .await
                 .map(Json);
         }
-        // Any other label must name this host: a herdr machine has no
-        // daemon to check.
+        // Any other label must name this host: a remote host that is not
+        // a peer has no daemon to check.
         read(&state, move |store| {
             let this = store.this_host()?;
             if this.id == host || this.label == host {
@@ -4476,18 +4476,35 @@ pub(crate) fn pane_gone(pane: &str) -> ApiError {
     error
 }
 
+/// Whether the peer's rows put `session` in a pane of the peer's terminal
+/// holder.
+fn peer_holder_pane(view: &PeerView, session: &str) -> bool {
+    fn find<'a>(rows: &'a [AgentRow], session: &str) -> Option<&'a AgentRow> {
+        rows.iter().find_map(|row| {
+            (row.session_id == session)
+                .then_some(row)
+                .or_else(|| find(&row.workers, session))
+        })
+    }
+    view.queries
+        .as_ref()
+        .and_then(|queries| find(&queries.agents.orchestrators, session))
+        .and_then(|row| row.pane_id.as_deref())
+        .is_some_and(ids::is_holder_pane)
+}
+
 /// The terminal mirror: the agent's live pane as NDJSON (`protocol.md`
 /// 7.4). A POST, so it passes every mutation check, owner cookie included,
 /// though it writes nothing.
 #[utoipa::path(post, path = "/api/v1/agents/{session}/terminal", tag = "mutations", request_body = TerminalOpen,
     params(("session" = String, Path)),
     responses((status = 200, content_type = "application/x-ndjson", body = TerminalLine,
-               description = "One `TerminalLine` per line: `size`, then `frame`s, until `closed` or `unavailable` or the end of the body; `unfit` when herdr would not resize the pane for the Fit"),
+               description = "One `TerminalLine` per line: `size`, then `frame`s, and a `size` again for each new PTY size, until `closed` or `unavailable` or the end of the body; `unfit` when herdr would not resize the pane for the Fit (never for a pane in the terminal holder, whose Fit is a size lease)"),
               (status = 400, body = ErrorBody, description = "a `fit` outside 20 to 500 cols by 5 to 200 rows"),
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such agent, or its pane closed"),
               (status = 422, body = ErrorBody, description = "`refused`: the agent runs on a remote host"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: the peer refused the pane link"),
-              (status = 503, body = ErrorBody, description = "herdr or the peer is unreachable, or too many terminal views are open")))]
+              (status = 503, body = ErrorBody, description = "herdr, the terminal holder or the peer is unreachable, or too many terminal views are open")))]
 async fn terminal(
     State(state): State<AppState>,
     Path(session): Path<String>,
@@ -4512,8 +4529,10 @@ async fn terminal(
     };
     let to = addressed(&state, request.host.as_deref()).await?;
     let held = if to.is_peer() { Some(viewer()?) } else { None };
-    // A peer's Fit takes its turn here, one per pane as on this host's own
-    // panes, and sizes the pane on the peer only with an `act` pairing.
+    // A peer's Fit sizes the pane on the peer only with an `act` pairing.
+    // On a pane in the peer's terminal holder each view's Fit is a lease of
+    // its own; on a herdr pane it takes its turn here, one per pane as on
+    // this host's own panes.
     let (mut peer_fit, mut turn, mut unfit) = (None, None, None);
     if let (Addressed::Peer(view), Some((cols, rows))) = (&to, fit) {
         if view.scope != PeerScope::Act {
@@ -4521,6 +4540,8 @@ async fn terminal(
                 "{} is paired with a read scope; the view shows the pane at its own size",
                 view.label
             ));
+        } else if peer_holder_pane(view, &session) {
+            peer_fit = Some(TerminalFit { cols, rows });
         } else if let Some(held) = state
             .0
             .mirrors
@@ -4564,6 +4585,7 @@ async fn terminal(
             label,
             stop_or_signed_out(&state, &headers),
             held,
+            peer_fit.is_some(),
             turn.take(),
             unfit.take(),
         );
@@ -4797,7 +4819,7 @@ async fn holder_terminal(
             holder,
             id,
             fit,
-            state.0.mirrors.fits(),
+            state.0.mirrors.leases(),
             stop_or_signed_out(state, headers),
             viewer,
         ),
@@ -4819,48 +4841,38 @@ async fn holder_terminal(
         .into_response())
 }
 
-/// Keys or a paste for a pane in the terminal holder, as the bytes a
-/// terminal sends for them.
+/// Keys or a paste for a pane in the terminal holder: the board's key
+/// names are the holder's (`terminal-holder.md` 2.4), and a paste goes
+/// inside bracketed paste when the app turned it on.
 async fn holder_input(
     mirrors: &Mirrors,
     holder: Option<Arc<dyn Holder>>,
     pane: &str,
     input: Result<Vec<String>, String>,
 ) -> Result<Value, ApiError> {
-    let (bytes, sent) = match input {
-        Ok(keys) => (
-            crate::holder_mirror::key_bytes(&keys).map_err(ApiError::usage)?,
-            json!({"keys": keys.len()}),
-        ),
-        // A paste goes as its bytes, as herdr's `send_text` types it. A
-        // bracketed paste needs the pane's mode 2004, which only the
-        // holder's screen knows.
-        Err(text) => {
-            let sent = json!({"text": text.len()});
-            (text.into_bytes(), sent)
-        }
+    let input = match input {
+        Ok(names) => Ok(names
+            .iter()
+            .map(|name| name.parse::<tiller_panes::Key>())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                ApiError::usage(format!("{error}; the terminal holder cannot send it"))
+            })?),
+        Err(text) => Err(text),
     };
     let holder = linked(holder)?;
     spend_input(mirrors)?;
     let id = tiller_panes::PaneId::from(pane);
-    on_holder(holder, move |holder| holder.raw_input(&id, &bytes))
-        .await?
-        .map_err(|error| holder_error(pane, &error))?;
-    Ok(sent)
-}
-
-/// Refuses a pane call that only herdr answers yet, for a pane in the
-/// terminal holder (H11 brings it there).
-pub(crate) fn herdr_only(pane: &str, what: &str) -> Result<(), ApiError> {
-    if !ids::is_holder_pane(pane) {
-        return Ok(());
-    }
-    Err(ApiError::new(
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "refused",
-        format!("{what} is not ready yet for an agent in the terminal holder"),
-    )
-    .hint("use the live terminal view"))
+    on_holder(holder, move |holder| match input {
+        Ok(keys) => holder
+            .keys(&id, &keys)
+            .map(|()| json!({"keys": keys.len()})),
+        Err(text) => holder
+            .paste(&id, &text)
+            .map(|()| json!({"text": text.len()})),
+    })
+    .await?
+    .map_err(|error| holder_error(pane, &error))
 }
 
 /// One spend of the mirror's input rate, which keys, pastes and prompt
@@ -4908,13 +4920,37 @@ async fn read_dialog(
     pane: &str,
     wait: prompt::Wait,
 ) -> Result<Option<prompt::Dialog>, ApiError> {
-    let herdr = state.0.herdr.clone();
-    let target = pane.to_owned();
-    let screen = tokio::task::spawn_blocking(move || herdr.read_visible(&target))
-        .await
-        .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
-        .map_err(|error| pane_error(pane, &error))?;
+    let screen = if ids::is_holder_pane(pane) {
+        holder_screen(
+            holder_of(state)?,
+            pane,
+            tiller_panes::Read::Visible,
+            tiller_panes::Format::Text,
+        )
+        .await?
+        .text()
+    } else {
+        let herdr = state.0.herdr.clone();
+        let target = pane.to_owned();
+        tokio::task::spawn_blocking(move || herdr.read_visible(&target))
+            .await
+            .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
+            .map_err(|error| pane_error(pane, &error))?
+    };
     Ok(prompt::read(&screen, &wait))
+}
+
+/// One `screen` read of a pane in the terminal holder.
+pub(crate) async fn holder_screen(
+    holder: Arc<dyn Holder>,
+    pane: &str,
+    read: tiller_panes::Read,
+    format: tiller_panes::Format,
+) -> Result<tiller_panes::Screen, ApiError> {
+    let id = tiller_panes::PaneId::from(pane);
+    on_holder(holder, move |holder| holder.screen(&id, read, format))
+        .await?
+        .map_err(|error| holder_error(pane, &error))
 }
 
 /// How long an answer holds its session's turn for the dialog to leave the
@@ -4967,7 +5003,6 @@ async fn prompt_read(
     )
     .await?;
     let (session_id, pane) = local_pane(&state, session).await?;
-    herdr_only(&pane, "Reading a prompt")?;
     let (prompt, reason) = match waiting_on(&state, session_id.clone()).await? {
         None => (None, Some(NoPrompt::NotWaiting)),
         Some(wait) => {
@@ -5014,7 +5049,6 @@ async fn prompt_answer(
     )
     .await?;
     let (session_id, pane) = local_pane(&state, session).await?;
-    herdr_only(&pane, "Answering a prompt")?;
     spend_input(&state.0.mirrors)?;
     // Two taps on one dialog (two tabs, two devices) take turns: the second
     // reads the screen only after the first one's keys went and the dialog
@@ -5039,16 +5073,23 @@ async fn prompt_answer(
     let keys = dialog
         .keys(option)
         .ok_or_else(|| ApiError::usage(format!("the prompt has no option {option}")))?;
-    let herdr = state.0.herdr.clone();
-    let target = pane.clone();
-    tokio::task::spawn_blocking(move || {
-        let names: Vec<String> = keys.iter().map(ToString::to_string).collect();
-        let names: Vec<&str> = names.iter().map(String::as_str).collect();
-        herdr.send_keys(&target, &names)
-    })
-    .await
-    .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
-    .map_err(|error| pane_error(&pane, &error))?;
+    if ids::is_holder_pane(&pane) {
+        let id = tiller_panes::PaneId::from(pane.as_str());
+        on_holder(holder_of(&state)?, move |holder| holder.keys(&id, &keys))
+            .await?
+            .map_err(|error| holder_error(&pane, &error))?;
+    } else {
+        let herdr = state.0.herdr.clone();
+        let target = pane.clone();
+        tokio::task::spawn_blocking(move || {
+            let names: Vec<String> = keys.iter().map(ToString::to_string).collect();
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            herdr.send_keys(&target, &names)
+        })
+        .await
+        .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
+        .map_err(|error| pane_error(&pane, &error))?;
+    }
     dialog_left(&state, &pane, wait, &request.screen).await;
     Ok(Json(MutationResponse {
         ok: true,
@@ -5065,9 +5106,10 @@ async fn prompt_answer(
     }))
 }
 
-/// A new board size for the Fit an open stream holds on the agent's pane,
-/// sent to herdr's control session in place, or over the pane link to a
-/// peer's (`protocol.md` 7.4, 10.7).
+/// A new board size for the Fit an open stream holds on the agent's pane:
+/// sent to herdr's control session in place, or the stream's size lease
+/// moved in the terminal holder, or over the pane link to a peer's
+/// (`protocol.md` 7.4, 10.7).
 #[utoipa::path(post, path = "/api/v1/agents/{session}/terminal/fit", tag = "mutations", request_body = TerminalRefit,
     params(("session" = String, Path)),
     responses((status = 200, body = MutationResponse),
@@ -5094,7 +5136,7 @@ async fn terminal_fit(
         return Ok(Json(answer));
     }
     let (session_id, pane) = local_pane(&state, session).await?;
-    if !state.0.mirrors.fits().refit(&pane, (cols, rows)) {
+    if !state.0.mirrors.refit(&pane, (cols, rows)) {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "refused",
@@ -5120,6 +5162,23 @@ pub(crate) fn fit_sent(session_id: &str, (cols, rows): (u16, u16)) -> MutationRe
         host: None,
         warning: None,
     }
+}
+
+/// The last `lines` rows of a pane in the terminal holder, its screen
+/// included, with their colors (`protocol.md` 7.4, History).
+pub(crate) async fn holder_history(
+    holder: Arc<dyn Holder>,
+    pane: &str,
+    lines: u16,
+) -> Result<String, ApiError> {
+    let screen = holder_screen(
+        holder,
+        pane,
+        tiller_panes::Read::Recent(lines),
+        tiller_panes::Format::Ansi,
+    )
+    .await?;
+    Ok(screen.text())
 }
 
 /// The pane's scrollback, for the board to read back without herdr
@@ -5174,7 +5233,10 @@ async fn terminal_history(
         return Ok(Json(history));
     }
     let (session_id, pane) = local_pane(&state, session).await?;
-    herdr_only(&pane, "The terminal history")?;
+    if ids::is_holder_pane(&pane) {
+        let text = holder_history(holder_of(&state)?, &pane, lines).await?;
+        return Ok(Json(TerminalHistory { session_id, text }));
+    }
     let herdr = state.0.herdr.clone();
     let target = pane.clone();
     let text = tokio::task::spawn_blocking(move || herdr.read_recent(&target, lines))
@@ -5184,8 +5246,8 @@ async fn terminal_history(
     Ok(Json(TerminalHistory { session_id, text }))
 }
 
-/// Tail reads in flight at once: each makes two herdr calls, to a saved
-/// machine for a remote agent, so a busy board never stacks them up.
+/// Tail reads in flight at once: each makes two herdr calls, so a busy
+/// board never stacks them up.
 const MAX_TAIL_READS: usize = 4;
 static TAIL_READS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(MAX_TAIL_READS);
 
@@ -5197,7 +5259,7 @@ static TAIL_READS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(MA
     responses((status = 200, body = TerminalTail),
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such agent, or its pane closed"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
-              (status = 503, body = ErrorBody, description = "herdr is unreachable, or 4 tail reads are in flight")))]
+              (status = 503, body = ErrorBody, description = "herdr or the terminal holder is unreachable, or 4 tail reads are in flight")))]
 async fn terminal_tail(
     State(state): State<AppState>,
     Path(session): Path<String>,
@@ -5220,18 +5282,13 @@ async fn terminal_tail(
         ));
     }
     if ids::is_holder_pane(&pane) {
-        let holder = holder_of(&state)?;
-        let id = tiller_panes::PaneId::from(pane.as_str());
-        let read = id.clone();
-        let screen = on_holder(holder, move |holder| {
-            holder.screen(
-                &read,
-                tiller_panes::Read::Visible,
-                tiller_panes::Format::Ansi,
-            )
-        })
-        .await?
-        .map_err(|error| holder_error(&pane, &error))?;
+        let screen = holder_screen(
+            holder_of(&state)?,
+            &pane,
+            tiller_panes::Read::Visible,
+            tiller_panes::Format::Ansi,
+        )
+        .await?;
         return Ok(Json(TerminalTail {
             session_id,
             cols: screen.cols,
@@ -6125,14 +6182,24 @@ pub(crate) mod tests {
     }
 
     /// The board API with `holder` as its terminal holder.
-    fn holder_app(home: &std::path::Path, holder: &crate::holder::fake::FakeHolder) -> Router {
+    fn holder_app(home: &std::path::Path, holder: &tiller_panes::FakePanes) -> Router {
+        holder_app_with(home, holder, None)
+    }
+
+    /// The board API with `holder` as its terminal holder and `terminal`
+    /// as the app Open in terminal uses.
+    fn holder_app_with(
+        home: &std::path::Path,
+        holder: &tiller_panes::FakePanes,
+        terminal: Option<Arc<dyn Terminal>>,
+    ) -> Router {
         app_holding(
             home,
             Assets::of::<Fixture>(),
             Damage::default(),
             Peers::idle(),
             Cli::local(),
-            None,
+            terminal,
             vec!["ssh".into()],
             memory::eval::Evals::default(),
             Some(Arc::new(holder.clone())),
@@ -9952,10 +10019,7 @@ esac"#,
     }
 
     /// A plain shell in the fake holder, as a spawn starts it.
-    pub(crate) fn holder_pane(
-        holder: &crate::holder::fake::FakeHolder,
-        key: &str,
-    ) -> tiller_panes::PaneId {
+    pub(crate) fn holder_pane(holder: &tiller_panes::FakePanes, key: &str) -> tiller_panes::PaneId {
         use tiller_panes::Panes;
         holder
             .spawn(&tiller_panes::Spawn {
@@ -9970,7 +10034,37 @@ esac"#,
             .pane
     }
 
-    fn b64(bytes: &[u8]) -> String {
+    /// The holder's calls that begin with `verb`.
+    pub(crate) fn holder_calls(holder: &tiller_panes::FakePanes, verb: &str) -> Vec<String> {
+        holder
+            .calls()
+            .into_iter()
+            .filter(|call| call.split(' ').next() == Some(verb))
+            .collect()
+    }
+
+    /// The PTY size of `pane` in the holder.
+    fn pane_size(holder: &tiller_panes::FakePanes, pane: &tiller_panes::PaneId) -> (u16, u16) {
+        let pane = tiller_panes::Panes::get(holder, pane).unwrap().unwrap();
+        (pane.cols, pane.rows)
+    }
+
+    /// Another client's lease on `pane` at `cols`x`rows`, as `tiller attach`
+    /// holds one, until the subscription drops.
+    fn other_client(
+        holder: &tiller_panes::FakePanes,
+        pane: &tiller_panes::PaneId,
+        cols: u16,
+        rows: u16,
+    ) -> tiller_panes::Subscription {
+        let subscription =
+            tiller_panes::Live::subscribe(holder, pane, tiller_panes::Subscribe::default())
+                .unwrap();
+        subscription.resize(cols, rows).unwrap();
+        subscription
+    }
+
+    pub(crate) fn b64(bytes: &[u8]) -> String {
         use base64::Engine as _;
         base64::engine::general_purpose::STANDARD.encode(bytes)
     }
@@ -10012,6 +10106,27 @@ esac"#,
         .await
     }
 
+    /// Posts `body` to the session's `path` as the owner.
+    async fn holder_post(
+        app: &Router,
+        home: &std::path::Path,
+        session: &str,
+        path: &str,
+        body: Value,
+    ) -> Answer {
+        let cookie = owner_cookie(home);
+        send(
+            app,
+            mutation(
+                "POST",
+                &format!("/api/v1/agents/{session}/{path}"),
+                body,
+                &[("cookie", cookie.as_str())],
+            ),
+        )
+        .await
+    }
+
     /// Waits up to 5 seconds for `check`.
     async fn eventually(check: impl Fn() -> bool) -> bool {
         for _ in 0..100 {
@@ -10023,41 +10138,143 @@ esac"#,
         false
     }
 
+    /// One open terminal view: its lines as they come.
+    struct View {
+        body: axum::body::BodyDataStream,
+        pending: String,
+    }
+
+    impl View {
+        async fn open(app: &Router, home: &std::path::Path, session: &str, body: Value) -> Self {
+            let response = open_stream(app, home, session, body).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                "application/x-ndjson"
+            );
+            Self {
+                body: response.into_body().into_data_stream(),
+                pending: String::new(),
+            }
+        }
+
+        async fn next(&mut self) -> Value {
+            next_line(&mut self.body, &mut self.pending).await
+        }
+
+        /// The next line, which must be a size.
+        async fn size(&mut self) -> (u64, u64) {
+            let line = self.next().await;
+            assert_eq!(line["type"], "size", "{line}");
+            (
+                line["cols"].as_u64().unwrap(),
+                line["rows"].as_u64().unwrap(),
+            )
+        }
+
+        /// The next line, which must be a full frame.
+        async fn full(&mut self) {
+            let line = self.next().await;
+            assert_eq!(line["type"], "frame", "{line}");
+            assert_eq!(line["full"], true, "{line}");
+        }
+
+        /// Ends the view, as the browser leaving does.
+        fn close(self) {
+            drop(self);
+        }
+    }
+
     #[tokio::test]
-    async fn a_holder_pane_streams_its_repaint_then_its_output_and_takes_raw_input() {
+    async fn a_holder_view_streams_its_size_a_full_frame_then_partial_frames_and_closed_with_the_code()
+     {
         let mut fleet = Fleet::new();
-        let holder = crate::holder::fake::FakeHolder::default();
+        let holder = tiller_panes::FakePanes::new();
         let pane = holder_pane(&holder, "s-1");
         let session = fleet.worker(pane.as_str());
-        holder.write(&pane, b"$ echo hi\r\nhi\r\n$ ");
+        holder.set_screen(&pane, &["$ echo hi", "hi", "$ "]);
         let home = fleet.dir.path();
         let app = holder_app(home, &holder);
 
-        let response = open_stream(&app, home, &session, json!({})).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers()[header::CONTENT_TYPE],
-            "application/x-ndjson"
-        );
-        let mut body = response.into_body().into_data_stream();
-        let mut pending = String::new();
+        let mut view = View::open(&app, home, &session, json!({})).await;
         // The pane's size, then the holder's repaint as a full frame.
         assert_eq!(
-            next_line(&mut body, &mut pending).await,
+            view.next().await,
             json!({"type": "size", "cols": 120, "rows": 40})
         );
         assert_eq!(
-            next_line(&mut body, &mut pending).await,
+            view.next().await,
             json!({"type": "frame", "seq": 1, "full": true, "bytes": b64(b"$ echo hi\r\nhi\r\n$ ")})
         );
-        // Then each write as it comes.
-        holder.write(&pane, b"ls\r\n");
+        // Then each write as it comes, passed through.
+        assert!(holder.output(&pane, b"ls\r\n"));
         assert_eq!(
-            next_line(&mut body, &mut pending).await,
+            view.next().await,
             json!({"type": "frame", "seq": 2, "full": false, "bytes": b64(b"ls\r\n")})
         );
+        // A plain view takes no lease, and its subscription asked for none.
+        assert!(holder.leases(&pane).is_empty());
+        assert!(holder_calls(&holder, "resize").is_empty());
 
-        // Keys go as the bytes a terminal sends, a paste as it is.
+        // The child's exit closes the view with its code.
+        holder.exit(&pane, Some(3), None);
+        assert_eq!(
+            view.next().await,
+            json!({"type": "closed", "reason": "the agent exited with code 3"})
+        );
+        use futures_util::StreamExt;
+        assert!(view.body.next().await.is_none());
+
+        // A view opened after the exit says so at once, and input is refused.
+        let mut after = View::open(&app, home, &session, json!({})).await;
+        assert_eq!(
+            after.next().await,
+            json!({"type": "closed", "reason": "the agent exited with code 3"})
+        );
+        let late = holder_send(&app, home, &session, json!({"text": "x"})).await;
+        assert_eq!(
+            late.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            late.body
+        );
+    }
+
+    #[tokio::test]
+    async fn a_holder_view_is_unavailable_when_the_holder_stops_answering() {
+        let mut fleet = Fleet::new();
+        let holder = tiller_panes::FakePanes::new();
+        let pane = holder_pane(&holder, "s-1");
+        let session = fleet.worker(pane.as_str());
+        let home = fleet.dir.path();
+        let app = holder_app(home, &holder);
+
+        let mut view = View::open(&app, home, &session, json!({})).await;
+        assert_eq!(view.size().await, (120, 40));
+        view.full().await;
+        holder.set_unreachable(true);
+        let line = view.next().await;
+        assert_eq!(line["type"], "unavailable", "{line}");
+        assert!(
+            line["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("went down")),
+            "{line}"
+        );
+        use futures_util::StreamExt;
+        assert!(view.body.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_holder_pane_takes_named_keys_and_pasted_text() {
+        let mut fleet = Fleet::new();
+        let holder = tiller_panes::FakePanes::new();
+        let pane = holder_pane(&holder, "s-1");
+        let session = fleet.worker(pane.as_str());
+        let home = fleet.dir.path();
+        let app = holder_app(home, &holder);
+
+        // Keys go by name, for the holder to encode as the app asked.
         let keys = holder_send(
             &app,
             home,
@@ -10071,31 +10288,39 @@ esac"#,
             keys["data"],
             json!({"session_id": session, "sent": {"keys": 4}})
         );
-        let text = holder_send(&app, home, &session, json!({"text": "-rf x\n"})).await;
+        assert_eq!(
+            holder_calls(&holder, "keys"),
+            [format!("keys {pane} l s enter ctrl+c")]
+        );
+        // Text goes as a paste, bracketed when the app turned that on.
+        let text = holder_send(&app, home, &session, json!({"text": "-rf x"})).await;
         assert_eq!(text.status, StatusCode::OK, "{}", text.body);
         assert_eq!(
-            holder.inputs(),
-            [
-                (pane.clone(), b"ls\r\x03".to_vec()),
-                (pane.clone(), b"-rf x\n".to_vec())
-            ]
+            holder_calls(&holder, "paste"),
+            [format!("paste {pane} -rf x")]
         );
+        // A key the holder has no name for is refused, and nothing goes.
         let unknown = holder_send(&app, home, &session, json!({"keys": ["menu"]})).await;
         assert_eq!(unknown.status, StatusCode::BAD_REQUEST, "{}", unknown.body);
-        assert_eq!(holder.inputs().len(), 2);
+        assert!(
+            unknown.body.contains("the terminal holder cannot send it"),
+            "{}",
+            unknown.body
+        );
+        assert_eq!(holder_calls(&holder, "keys").len(), 1);
+    }
 
-        // The tail reads the holder's screen.
-        let cookie = owner_cookie(home);
-        let tail = send(
-            &app,
-            mutation(
-                "POST",
-                &format!("/api/v1/agents/{session}/terminal/tail"),
-                json!({}),
-                &[("cookie", cookie.as_str())],
-            ),
-        )
-        .await;
+    #[tokio::test]
+    async fn a_holder_pane_reads_its_tail_and_history_from_its_screen() {
+        let mut fleet = Fleet::new();
+        let holder = tiller_panes::FakePanes::new();
+        let pane = holder_pane(&holder, "s-1");
+        let session = fleet.worker(pane.as_str());
+        holder.set_screen(&pane, &["one", "\u{1b}[34mtwo\u{1b}[0m", "$ "]);
+        let home = fleet.dir.path();
+        let app = holder_app(home, &holder);
+
+        let tail = holder_post(&app, home, &session, "terminal/tail", json!({})).await;
         assert_eq!(tail.status, StatusCode::OK, "{}", tail.body);
         let tail: Value = serde_json::from_str(&tail.body).unwrap();
         assert_eq!(
@@ -10103,111 +10328,119 @@ esac"#,
             (Some(120), Some(40))
         );
 
-        // What only herdr answers yet is refused, not sent to herdr.
-        for path in ["terminal/history", "prompt"] {
-            let answer = send(
-                &app,
-                mutation(
-                    "POST",
-                    &format!("/api/v1/agents/{session}/{path}"),
-                    json!({}),
-                    &[("cookie", cookie.as_str())],
-                ),
-            )
-            .await;
-            assert_eq!(
-                answer.status,
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "{path}: {}",
-                answer.body
-            );
-            assert!(
-                answer.body.contains("terminal holder"),
-                "{path}: {}",
-                answer.body
-            );
-        }
+        // History is the rendered recent rows, with their colors.
+        let history = holder_post(
+            &app,
+            home,
+            &session,
+            "terminal/history",
+            json!({"lines": 2}),
+        )
+        .await;
+        assert_eq!(history.status, StatusCode::OK, "{}", history.body);
+        let history: Value = serde_json::from_str(&history.body).unwrap();
+        assert_eq!(history["session_id"], session);
+        assert_eq!(history["text"], "\u{1b}[34mtwo\u{1b}[0m\n$ ");
+        assert!(
+            holder
+                .calls()
+                .contains(&format!("screen {pane} Recent(2) Ansi")),
+            "{:?}",
+            holder.calls()
+        );
+        // With no count, the most a read gives.
+        let all = holder_post(&app, home, &session, "terminal/history", json!({})).await;
+        assert_eq!(all.status, StatusCode::OK, "{}", all.body);
+        assert!(
+            holder
+                .calls()
+                .contains(&format!("screen {pane} Recent(1000) Ansi")),
+            "{:?}",
+            holder.calls()
+        );
+    }
 
-        // The child's exit closes the view with its code.
-        holder.exit(&pane, 3);
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "closed", "reason": "the agent exited with code 3"})
-        );
-        use futures_util::StreamExt;
-        assert!(body.next().await.is_none());
+    #[tokio::test]
+    async fn a_holder_pane_shows_its_dialog_and_presses_the_answer() {
+        let mut fleet = Fleet::new();
+        let holder = tiller_panes::FakePanes::new();
+        let pane = holder_pane(&holder, "s-1");
+        let session = fleet.worker(pane.as_str());
+        let home = fleet.dir.path();
+        let app = holder_app(home, &holder);
 
-        // A view opened after the exit says so at once, and input is refused.
-        let after = open_stream(&app, home, &session, json!({})).await;
-        assert_eq!(after.status(), StatusCode::OK);
-        let mut after = after.into_body().into_data_stream();
-        let mut pending = String::new();
+        waiting(&fleet, &session, "Bash");
+        let bash = include_str!("../../panes/tests/fixtures/claude/permission-dialog.ansi");
+        let rows: Vec<&str> = bash.lines().collect();
+        holder.set_screen(&pane, &rows);
+        let shown = holder_post(&app, home, &session, "prompt", json!({})).await;
+        assert_eq!(shown.status, StatusCode::OK, "{}", shown.body);
+        let shown: Value = serde_json::from_str(&shown.body).unwrap();
+        assert_eq!(shown["reason"], Value::Null, "{shown}");
         assert_eq!(
-            next_line(&mut after, &mut pending).await,
-            json!({"type": "closed", "reason": "the agent exited with code 3"})
+            shown["prompt"]["command"],
+            "rm -f nothing-here.txt && touch made.txt"
         );
-        let late = holder_send(&app, home, &session, json!({"text": "x"})).await;
-        assert_eq!(
-            late.status,
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "{}",
-            late.body
-        );
+        let screen = shown["prompt"]["screen"].as_str().unwrap();
+
+        // A stale screen types nothing; the matching one gets its digit.
+        let stale = holder_post(
+            &app,
+            home,
+            &session,
+            "prompt/answer",
+            json!({"option": 1, "screen": "other"}),
+        )
+        .await;
+        assert_eq!(stale.status, StatusCode::CONFLICT, "{}", stale.body);
+        assert!(holder_calls(&holder, "keys").is_empty());
+        let sent = holder_post(
+            &app,
+            home,
+            &session,
+            "prompt/answer",
+            json!({"option": 4, "screen": screen}),
+        )
+        .await;
+        assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
+        assert_eq!(holder_calls(&holder, "keys"), [format!("keys {pane} 4")]);
     }
 
     #[tokio::test]
     async fn a_restarted_daemon_serves_the_same_holder_pane_and_starts_nothing() {
         let mut fleet = Fleet::new();
-        let holder = crate::holder::fake::FakeHolder::default();
+        let holder = tiller_panes::FakePanes::new();
         let pane = holder_pane(&holder, "s-1");
         let session = fleet.worker(pane.as_str());
-        holder.write(&pane, b"$ history\r\n");
+        holder.set_screen(&pane, &["$ history"]);
         let home = fleet.dir.path();
-        let first_full =
-            json!({"type": "frame", "seq": 1, "full": true, "bytes": b64(b"$ history\r\n")});
 
         let first = holder_app(home, &holder);
-        let response = open_stream(&first, home, &session, json!({})).await;
-        let mut body = response.into_body().into_data_stream();
-        let mut pending = String::new();
-        next_line(&mut body, &mut pending).await;
-        assert_eq!(next_line(&mut body, &mut pending).await, first_full);
+        let mut view = View::open(&first, home, &session, json!({})).await;
+        view.size().await;
+        assert_eq!(
+            view.next().await,
+            json!({"type": "frame", "seq": 1, "full": true, "bytes": b64(b"$ history")})
+        );
         // The daemon stops: its views and its link to the holder go.
-        drop(body);
+        view.close();
         drop(first);
-        assert!(eventually(|| holder.subscribers(&pane) == 0).await);
-        holder.write(&pane, b"more\r\n");
+        holder.set_screen(&pane, &["$ history", "more"]);
 
         // A new daemon on the same home and the same holder.
         crate::holder::reattach(&home.join("state.db"), &holder);
         let second = holder_app(home, &holder);
-        let response = open_stream(&second, home, &session, json!({})).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let mut body = response.into_body().into_data_stream();
-        let mut pending = String::new();
-        next_line(&mut body, &mut pending).await;
+        let mut view = View::open(&second, home, &session, json!({})).await;
+        view.size().await;
         assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "frame", "seq": 1, "full": true, "bytes": b64(b"$ history\r\nmore\r\n")})
+            view.next().await,
+            json!({"type": "frame", "seq": 1, "full": true, "bytes": b64(b"$ history\r\nmore")})
         );
         let keys = holder_send(&second, home, &session, json!({"keys": ["enter"]})).await;
         assert_eq!(keys.status, StatusCode::OK, "{}", keys.body);
-        assert_eq!(holder.inputs(), [(pane.clone(), b"\r".to_vec())]);
         // One spawn in all: the pane was found again, never started again.
-        let spawns = holder
-            .panes
-            .calls()
-            .into_iter()
-            .filter(|call| call.starts_with("spawn"))
-            .count();
-        assert_eq!(spawns, 1);
-        assert_eq!(
-            tiller_panes::Panes::list(&holder.panes)
-                .unwrap()
-                .panes
-                .len(),
-            1
-        );
+        assert_eq!(holder_calls(&holder, "spawn").len(), 1);
+        assert_eq!(tiller_panes::Panes::list(&holder).unwrap().panes.len(), 1);
     }
 
     /// Sends the board's new size to the Fit on the session's pane.
@@ -10218,71 +10451,65 @@ esac"#,
         cols: u16,
         rows: u16,
     ) -> Answer {
-        let cookie = owner_cookie(home);
-        send(
+        holder_post(
             app,
-            mutation(
-                "POST",
-                &format!("/api/v1/agents/{session}/terminal/fit"),
-                json!({"cols": cols, "rows": rows}),
-                &[("cookie", cookie.as_str())],
-            ),
+            home,
+            session,
+            "terminal/fit",
+            json!({"cols": cols, "rows": rows}),
         )
         .await
     }
 
+    /// The lease sizes on `pane`, the top one last.
+    fn lease_sizes(
+        holder: &tiller_panes::FakePanes,
+        pane: &tiller_panes::PaneId,
+    ) -> Vec<(u16, u16)> {
+        holder
+            .leases(pane)
+            .into_iter()
+            .map(|(_, cols, rows)| (cols, rows))
+            .collect()
+    }
+
     #[tokio::test]
-    async fn a_fit_sizes_a_holder_pane_to_the_board_and_gives_it_back_when_the_view_ends() {
+    async fn a_fit_is_a_lease_the_view_holds_and_the_size_falls_back_when_it_ends() {
         let mut fleet = Fleet::new();
-        let holder = crate::holder::fake::FakeHolder::default();
+        let holder = tiller_panes::FakePanes::new();
         let pane = holder_pane(&holder, "s-1");
         let session = fleet.worker(pane.as_str());
-        holder.write(&pane, b"hi");
         let home = fleet.dir.path();
         let app = holder_app(home, &holder);
+        // `tiller attach` holds the pane at its window's size.
+        let attach = other_client(&holder, &pane, 80, 24);
 
-        // The Fit sets the pane to the board's size, and the view opens at it.
-        let response = open_stream(
+        // The Fit pushes a lease at the board's size, and the view shows
+        // the pane at it.
+        let mut view = View::open(
             &app,
             home,
             &session,
             json!({"fit": {"cols": 100, "rows": 30}}),
         )
         .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let mut body = response.into_body().into_data_stream();
-        let mut pending = String::new();
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "size", "cols": 100, "rows": 30})
-        );
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "frame", "seq": 1, "full": true, "bytes": b64(b"hi")})
-        );
-        assert_eq!(holder.size(&pane), Some((100, 30)));
+        assert_eq!(view.size().await, (80, 24));
+        view.full().await;
+        assert_eq!(view.size().await, (100, 30));
+        assert_eq!(lease_sizes(&holder, &pane), [(80, 24), (100, 30)]);
+        assert_eq!(pane_size(&holder, &pane), (100, 30));
 
-        // The board changes size: the Fit follows it in place.
+        // The board changes size: the Fit moves its own lease.
         let refit = holder_refit(&app, home, &session, 110, 35).await;
         assert_eq!(refit.status, StatusCode::OK, "{}", refit.body);
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "size", "cols": 110, "rows": 35})
-        );
-        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
+        assert_eq!(view.size().await, (110, 35));
+        assert_eq!(lease_sizes(&holder, &pane), [(80, 24), (110, 35)]);
 
-        // The viewer leaves: the pane gets back the size it had before the Fit.
-        drop(body);
-        assert!(eventually(|| holder.size(&pane) == Some((120, 40))).await);
-        assert!(eventually(|| holder.subscribers(&pane) == 0).await);
-        assert_eq!(
-            holder
-                .sizes_set()
-                .into_iter()
-                .map(|(_, size)| size)
-                .collect::<Vec<_>>(),
-            [(100, 30), (110, 35), (120, 40)]
-        );
+        // The viewer leaves: the lease ends with the subscription, and the
+        // size falls back to the attach client's.
+        view.close();
+        assert!(eventually(|| lease_sizes(&holder, &pane) == [(80, 24)]).await);
+        assert_eq!(pane_size(&holder, &pane), (80, 24));
         // With no Fit streaming, a refit is refused.
         let late = holder_refit(&app, home, &session, 100, 30).await;
         assert_eq!(
@@ -10291,261 +10518,149 @@ esac"#,
             "{}",
             late.body
         );
+        // Nothing went to disk to give back later.
+        assert!(!home.join("mirror-fits.json").exists());
+        drop(attach);
     }
 
     #[tokio::test]
-    async fn a_size_another_client_sets_during_a_fit_is_the_one_given_back() {
+    async fn two_fits_each_hold_a_lease_the_top_one_sets_the_size_and_a_plain_view_follows() {
         let mut fleet = Fleet::new();
-        let holder = crate::holder::fake::FakeHolder::default();
+        let holder = tiller_panes::FakePanes::new();
         let pane = holder_pane(&holder, "s-1");
         let session = fleet.worker(pane.as_str());
         let home = fleet.dir.path();
         let app = holder_app(home, &holder);
-        let response = open_stream(
+
+        let mut plain = View::open(&app, home, &session, json!({})).await;
+        assert_eq!(plain.size().await, (120, 40));
+        plain.full().await;
+
+        // The first viewer's Fit: the plain view follows, from the watch.
+        let mut first = View::open(
             &app,
             home,
             &session,
             json!({"fit": {"cols": 100, "rows": 30}}),
         )
         .await;
-        let mut body = response.into_body().into_data_stream();
-        let mut pending = String::new();
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "size", "cols": 100, "rows": 30})
-        );
-        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
+        assert_eq!(first.size().await, (120, 40));
+        first.full().await;
+        assert_eq!(first.size().await, (100, 30));
+        assert_eq!(plain.size().await, (100, 30));
 
-        // Another client resizes the PTY: the view shows that size, and the
-        // Fit does not fight it.
-        holder.resize(&pane, 90, 25);
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "size", "cols": 90, "rows": 25})
-        );
-        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
-
-        // The viewer leaves while the pane has that size: nothing to give back.
-        drop(body);
-        assert!(eventually(|| holder.subscribers(&pane) == 0).await);
-        assert_eq!(holder.size(&pane), Some((90, 25)));
-
-        // A new board size after it sets the Fit again, and the view gives
-        // back the other client's size, not the one from before the Fit.
-        let response = open_stream(
+        // A second viewer's Fit is on top: every view shows its size.
+        let mut second = View::open(
             &app,
             home,
             &session,
-            json!({"fit": {"cols": 100, "rows": 30}}),
+            json!({"fit": {"cols": 90, "rows": 25}}),
         )
         .await;
-        let mut body = response.into_body().into_data_stream();
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "size", "cols": 100, "rows": 30})
-        );
-        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
-        holder.resize(&pane, 95, 28);
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "size", "cols": 95, "rows": 28})
-        );
-        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
-        let refit = holder_refit(&app, home, &session, 110, 35).await;
+        assert_eq!(second.size().await, (100, 30));
+        second.full().await;
+        assert_eq!(second.size().await, (90, 25));
+        assert_eq!(first.size().await, (90, 25));
+        assert_eq!(plain.size().await, (90, 25));
+        assert_eq!(lease_sizes(&holder, &pane), [(100, 30), (90, 25)]);
+
+        // A refit moves the newest Fit.
+        let refit = holder_refit(&app, home, &session, 95, 28).await;
         assert_eq!(refit.status, StatusCode::OK, "{}", refit.body);
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "size", "cols": 110, "rows": 35})
-        );
-        drop(body);
-        assert!(eventually(|| holder.size(&pane) == Some((95, 28))).await);
-        assert_eq!(
-            holder
-                .sizes_set()
-                .into_iter()
-                .map(|(_, size)| size)
-                .collect::<Vec<_>>(),
-            [(100, 30), (100, 30), (110, 35), (95, 28)]
-        );
+        assert_eq!(second.size().await, (95, 28));
+        assert_eq!(first.size().await, (95, 28));
+        assert_eq!(plain.size().await, (95, 28));
+        assert_eq!(lease_sizes(&holder, &pane), [(100, 30), (95, 28)]);
+
+        // The second viewer leaves: the size falls back to the first's Fit.
+        second.close();
+        assert_eq!(first.size().await, (100, 30));
+        assert_eq!(plain.size().await, (100, 30));
+        assert_eq!(lease_sizes(&holder, &pane), [(100, 30)]);
+
+        // The last Fit ends: no lease is left, so the size stays.
+        first.close();
+        assert!(eventually(|| holder.leases(&pane).is_empty()).await);
+        assert_eq!(pane_size(&holder, &pane), (100, 30));
+        assert!(holder.output(&pane, b"x"));
+        assert_eq!(plain.next().await["full"], false);
     }
 
     #[tokio::test]
-    async fn a_size_another_client_sets_unseen_during_a_fit_is_the_one_given_back() {
+    async fn a_daemon_that_stops_mid_fit_leaves_no_lease_and_the_next_fit_takes_its_own() {
         let mut fleet = Fleet::new();
-        let holder = crate::holder::fake::FakeHolder::default();
+        let holder = tiller_panes::FakePanes::new();
         let pane = holder_pane(&holder, "s-1");
         let session = fleet.worker(pane.as_str());
         let home = fleet.dir.path();
-        let app = holder_app(home, &holder);
-        let response = open_stream(
-            &app,
+        let attach = other_client(&holder, &pane, 80, 24);
+
+        let first = holder_app(home, &holder);
+        let mut view = View::open(
+            &first,
             home,
             &session,
             json!({"fit": {"cols": 100, "rows": 30}}),
         )
         .await;
-        let mut body = response.into_body().into_data_stream();
-        let mut pending = String::new();
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "size", "cols": 100, "rows": 30})
-        );
-        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
+        assert_eq!(view.size().await, (80, 24));
+        view.full().await;
+        assert_eq!(view.size().await, (100, 30));
 
-        // Another client resizes the PTY, which the holder tells no view. The
-        // viewer leaves: the pane keeps that size.
-        holder.resize_unseen(&pane, 90, 25);
-        drop(body);
-        assert!(eventually(|| holder.subscribers(&pane) == 0).await);
+        // The daemon stops mid-Fit: its connection ends, and the holder
+        // pops the lease at once. Nothing is left to give back later.
+        view.close();
+        drop(first);
+        assert!(eventually(|| lease_sizes(&holder, &pane) == [(80, 24)]).await);
+        assert_eq!(pane_size(&holder, &pane), (80, 24));
+        assert!(!home.join("mirror-fits.json").exists());
 
-        // The next Fit waits for the first to give back, so by its first
-        // line the first gave nothing back.
-        let response = open_stream(
-            &app,
+        // The restarted daemon's Fit takes a lease of its own, and gives
+        // the size back when it ends.
+        crate::holder::reattach(&home.join("state.db"), &holder);
+        let second = holder_app(home, &holder);
+        let mut view = View::open(
+            &second,
             home,
             &session,
-            json!({"fit": {"cols": 100, "rows": 30}}),
+            json!({"fit": {"cols": 90, "rows": 25}}),
         )
         .await;
-        let mut body = response.into_body().into_data_stream();
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "size", "cols": 100, "rows": 30})
-        );
-        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
-        let sizes = || {
-            holder
-                .sizes_set()
-                .into_iter()
-                .map(|(_, size)| size)
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(sizes(), [(100, 30), (100, 30)]);
-
-        // Another client resizes it unseen again, and the board refits: the
-        // view gives back the other client's size.
-        holder.resize_unseen(&pane, 95, 28);
-        let refit = holder_refit(&app, home, &session, 110, 35).await;
-        assert_eq!(refit.status, StatusCode::OK, "{}", refit.body);
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "size", "cols": 110, "rows": 35})
-        );
-        drop(body);
-        assert!(eventually(|| holder.size(&pane) == Some((95, 28))).await);
-        assert_eq!(sizes(), [(100, 30), (100, 30), (110, 35), (95, 28)]);
-    }
-
-    #[tokio::test]
-    async fn a_view_without_a_fit_follows_the_size_a_fit_sets_and_gives_back() {
-        let mut fleet = Fleet::new();
-        let holder = crate::holder::fake::FakeHolder::default();
-        let pane = holder_pane(&holder, "s-1");
-        let session = fleet.worker(pane.as_str());
-        let home = fleet.dir.path();
-        let app = holder_app(home, &holder);
-
-        let plain = open_stream(&app, home, &session, json!({})).await;
-        let mut plain = plain.into_body().into_data_stream();
-        let mut plain_pending = String::new();
-        assert_eq!(
-            next_line(&mut plain, &mut plain_pending).await,
-            json!({"type": "size", "cols": 120, "rows": 40})
-        );
-        next_line(&mut plain, &mut plain_pending).await;
-
-        // A Fit from another view: the plain view opens again at its size.
-        let fitted = open_stream(
-            &app,
-            home,
-            &session,
-            json!({"fit": {"cols": 100, "rows": 30}}),
-        )
-        .await;
-        let mut fitted = fitted.into_body().into_data_stream();
-        let mut fitted_pending = String::new();
-        assert_eq!(
-            next_line(&mut fitted, &mut fitted_pending).await,
-            json!({"type": "size", "cols": 100, "rows": 30})
-        );
-        assert_eq!(
-            next_line(&mut plain, &mut plain_pending).await,
-            json!({"type": "size", "cols": 100, "rows": 30})
-        );
-        assert_eq!(
-            next_line(&mut plain, &mut plain_pending).await["full"],
-            true
-        );
-
-        // The Fit ends (the board turned it off): the plain view follows the
-        // size given back.
-        drop(fitted);
-        assert_eq!(
-            next_line(&mut plain, &mut plain_pending).await,
-            json!({"type": "size", "cols": 120, "rows": 40})
-        );
-        assert_eq!(
-            next_line(&mut plain, &mut plain_pending).await["full"],
-            true
-        );
-    }
-
-    #[tokio::test]
-    async fn a_fit_the_holder_refuses_is_unfit_and_the_view_goes_on() {
-        let mut fleet = Fleet::new();
-        let holder = crate::holder::fake::FakeHolder::default();
-        let pane = holder_pane(&holder, "s-1");
-        let session = fleet.worker(pane.as_str());
-        let home = fleet.dir.path();
-        let app = holder_app(home, &holder);
-        holder.refuse_sizes(true);
-
-        let response = open_stream(
-            &app,
-            home,
-            &session,
-            json!({"fit": {"cols": 100, "rows": 30}}),
-        )
-        .await;
-        let mut body = response.into_body().into_data_stream();
-        let mut pending = String::new();
-        assert_eq!(next_line(&mut body, &mut pending).await["type"], "unfit");
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "size", "cols": 120, "rows": 40})
-        );
-        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
-        assert!(holder.sizes_set().is_empty());
+        assert_eq!(view.size().await, (80, 24));
+        view.full().await;
+        assert_eq!(view.size().await, (90, 25));
+        assert_eq!(lease_sizes(&holder, &pane), [(80, 24), (90, 25)]);
+        view.close();
+        assert!(eventually(|| lease_sizes(&holder, &pane) == [(80, 24)]).await);
+        assert_eq!(pane_size(&holder, &pane), (80, 24));
+        drop(attach);
     }
 
     #[tokio::test]
     async fn a_burst_of_output_reaches_the_view_whole_and_keeps_it_open() {
         use base64::Engine as _;
         let mut fleet = Fleet::new();
-        let holder = crate::holder::fake::FakeHolder::default();
+        let holder = tiller_panes::FakePanes::new();
         let pane = holder_pane(&holder, "s-1");
         let session = fleet.worker(pane.as_str());
         let home = fleet.dir.path();
         let app = holder_app(home, &holder);
 
-        let response = open_stream(&app, home, &session, json!({})).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let mut body = response.into_body().into_data_stream();
-        let mut pending = String::new();
-        assert_eq!(next_line(&mut body, &mut pending).await["type"], "size");
-        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
+        let mut view = View::open(&app, home, &session, json!({})).await;
+        view.size().await;
+        view.full().await;
 
         // Far more writes than the view's queue holds lines, before the
         // browser reads any of them.
         let mut written = Vec::new();
         for n in 0..500 {
             let chunk = format!("line {n}\r\n");
-            holder.write(&pane, chunk.as_bytes());
+            holder.output(&pane, chunk.as_bytes());
             written.extend_from_slice(chunk.as_bytes());
         }
         let mut seen = Vec::new();
         while seen.len() < written.len() {
-            let line = next_line(&mut body, &mut pending).await;
+            let line = view.next().await;
             assert_eq!(line["type"], "frame", "{line}");
             assert_eq!(line["full"], false, "{line}");
             let bytes = base64::engine::general_purpose::STANDARD
@@ -10559,7 +10674,7 @@ esac"#,
     #[tokio::test]
     async fn a_holder_that_does_not_answer_or_has_no_pane_is_not_a_herdr_error() {
         let mut fleet = Fleet::new();
-        let holder = crate::holder::fake::FakeHolder::default();
+        let holder = tiller_panes::FakePanes::new();
         let missing = tiller_panes::PaneId::generate();
         let session = fleet.worker(missing.as_str());
         let home = fleet.dir.path();
@@ -10575,7 +10690,8 @@ esac"#,
             gone.body
         );
 
-        holder.panes.set_unreachable(true);
+        let keys = holder_calls(&holder, "keys").len();
+        holder.set_unreachable(true);
         let down = holder_send(&app, home, &session, json!({"keys": ["enter"]})).await;
         assert_eq!(
             down.status,
@@ -10589,7 +10705,75 @@ esac"#,
             message.starts_with("the terminal holder is unreachable"),
             "{message}"
         );
-        assert!(holder.inputs().is_empty());
+        assert_eq!(holder_calls(&holder, "keys").len(), keys);
+    }
+
+    #[tokio::test]
+    async fn open_in_terminal_on_a_holder_pane_is_focused_raised_launched_unseen_or_failed() {
+        let mut fleet = Fleet::new();
+        let holder = tiller_panes::FakePanes::new();
+        let pane = holder_pane(&holder, "s-1");
+        let session = fleet.worker(pane.as_str());
+        let home = fleet.dir.path();
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path();
+        let focus = |terminal: Option<Arc<dyn Terminal>>, key: &'static str| {
+            let app = holder_app_with(home, &holder, terminal);
+            let session = session.clone();
+            async move {
+                let answer = holder_post(
+                    &app,
+                    home,
+                    &session,
+                    "focus",
+                    json!({"idempotency_key": key}),
+                )
+                .await;
+                assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+                let body: Value = serde_json::from_str(&answer.body).unwrap();
+                body["data"].clone()
+            }
+        };
+        let app_did = || std::fs::read_to_string(dir.join("app")).unwrap_or_default();
+        let ghostty = || Some(Arc::new(ScriptedApp(dir.to_owned())) as Arc<dyn Terminal>);
+
+        // No terminal and no attach client: switched, but nothing shows it.
+        let data = focus(None, "k-1").await;
+        assert_eq!(data["opened"], "unseen");
+        assert_eq!(data["terminal"], Value::Null);
+        assert_eq!(holder_calls(&holder, "switch"), [format!("switch {pane}")]);
+
+        // An attach client moved to the pane, with no app to raise.
+        holder.set_attach_clients(1);
+        let data = focus(None, "k-2").await;
+        assert_eq!(data["opened"], "focused");
+
+        // An attach client and an app: the app comes to the front.
+        let data = focus(ghostty(), "k-3").await;
+        assert_eq!(data["opened"], "raised");
+        assert_eq!(data["terminal"], "Ghostty");
+        assert_eq!(app_did(), "raise");
+
+        // No attach client: the app opens on `tiller attach <session>`.
+        holder.set_attach_clients(0);
+        let data = focus(ghostty(), "k-4").await;
+        assert_eq!(data["opened"], "launched");
+        assert!(app_did().starts_with("open /"), "{}", app_did());
+        assert!(
+            app_did().ends_with(&format!(" attach {session}")),
+            "{}",
+            app_did()
+        );
+
+        // The app will not open: the switch still landed, so the answer is
+        // 200 and names the problem.
+        let data = focus(Some(Arc::new(MissingApp)), "k-5").await;
+        assert_eq!(data["opened"], "failed");
+        assert_eq!(
+            data["problem"],
+            "Ghostty did not open: Unable to find application named 'Ghostty'"
+        );
+        assert_eq!(holder_calls(&holder, "switch").len(), 5);
     }
 
     /// Puts `session` on a permission prompt for `tool`, as its hook does.

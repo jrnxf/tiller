@@ -956,7 +956,7 @@
         },
         "responses": {
           "200": {
-            "description": "One `TerminalLine` per line: `size`, then `frame`s, until `closed` or `unavailable` or the end of the body; `unfit` when herdr would not resize the pane for the Fit",
+            "description": "One `TerminalLine` per line: `size`, then `frame`s, and a `size` again for each new PTY size, until `closed` or `unavailable` or the end of the body; `unfit` when herdr would not resize the pane for the Fit (never for a pane in the terminal holder, whose Fit is a size lease)",
             "content": {
               "application/x-ndjson": {
                 "schema": {
@@ -1015,7 +1015,7 @@
             }
           },
           "503": {
-            "description": "herdr or the peer is unreachable, or too many terminal views are open",
+            "description": "herdr, the terminal holder or the peer is unreachable, or too many terminal views are open",
             "content": {
               "application/json": {
                 "schema": {
@@ -1032,7 +1032,7 @@
         "tags": [
           "mutations"
         ],
-        "summary": "A new board size for the Fit an open stream holds on the agent's pane,\nsent to herdr's control session in place, or over the pane link to a\npeer's (`protocol.md` 7.4, 10.7).",
+        "summary": "A new board size for the Fit an open stream holds on the agent's pane:\nsent to herdr's control session in place, or the stream's size lease\nmoved in the terminal holder, or over the pane link to a peer's\n(`protocol.md` 7.4, 10.7).",
         "operationId": "terminal_fit",
         "parameters": [
           {
@@ -1408,7 +1408,7 @@
             }
           },
           "503": {
-            "description": "herdr is unreachable, or 4 tail reads are in flight",
+            "description": "herdr or the terminal holder is unreachable, or 4 tail reads are in flight",
             "content": {
               "application/json": {
                 "schema": {

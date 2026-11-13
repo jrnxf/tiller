@@ -120,8 +120,10 @@ impl World {
             .retain(|(_, tx)| tx.send(Msg::Item(event.clone())).is_ok());
     }
 
-    /// Sets `pane` to the top lease's size, and tells everyone when it
-    /// changed. With no lease left the size stays (spec 2.6).
+    /// Sets `pane` to the top lease's size, and tells the watches when it
+    /// changed, as the holder does: a subscription hears of a size only in
+    /// the answer to its own resize or release. With no lease left the
+    /// size stays (spec 2.6).
     fn apply_leases(&mut self, pane: &PaneId) -> Result<(u16, u16)> {
         let top = self
             .leases
@@ -136,7 +138,6 @@ impl World {
         }
         let (cols, rows) = (record.cols, record.rows);
         if (cols, rows) != before {
-            self.tell(pane, &Update::Resized { cols, rows });
             self.emit(&Event::Resized {
                 pane: pane.clone(),
                 cols,
@@ -683,11 +684,8 @@ impl FakeControl {
     /// The answer to a resize or a release: the size now, to this
     /// subscription even when it did not change.
     fn answer(&self, world: &mut World) -> Result<()> {
-        let before = world.pane(&self.pane).map(|p| (p.cols, p.rows))?;
         let (cols, rows) = world.apply_leases(&self.pane)?;
-        if (cols, rows) == before {
-            let _ = self.tx.send(Msg::Item(Update::Resized { cols, rows }));
-        }
+        let _ = self.tx.send(Msg::Item(Update::Resized { cols, rows }));
         Ok(())
     }
 }
@@ -951,25 +949,39 @@ mod tests {
             Some(Update::Output(b"tick".to_vec()))
         );
 
-        // The top lease sets the size, and every subscriber sees it.
+        // The top lease sets the size. Only the asker hears of it in its
+        // answer; the other subscriber learns of it from a watch.
+        let mut events = live.watch().unwrap();
         first.resize(100, 30).unwrap();
         let resized = Some(Update::Resized {
             cols: 100,
             rows: 30,
         });
         assert_eq!(first.recv().unwrap(), resized);
-        assert_eq!(second.recv().unwrap(), resized);
         second.resize(80, 24).unwrap();
         second.release().unwrap();
         assert_eq!(fake.leases(&pane).len(), 1);
         // 80x24, then back to the first lease's 100x30.
-        for subscription in [&mut first, &mut second] {
-            assert!(matches!(
-                subscription.recv(),
-                Ok(Some(Update::Resized { cols: 80, .. }))
-            ));
-            assert_eq!(subscription.recv().unwrap(), resized);
+        assert!(matches!(
+            second.recv(),
+            Ok(Some(Update::Resized { cols: 80, .. }))
+        ));
+        assert_eq!(second.recv().unwrap(), resized);
+        for (cols, rows) in [(100, 30), (80, 24), (100, 30)] {
+            assert_eq!(
+                events.recv().unwrap(),
+                Some(Event::Resized {
+                    pane: pane.clone(),
+                    cols,
+                    rows
+                })
+            );
         }
+        assert!(fake.output(&pane, b"tock"));
+        assert_eq!(
+            first.recv().unwrap(),
+            Some(Update::Output(b"tock".to_vec()))
+        );
 
         // Dropping a subscription ends its lease; the size stays.
         drop(first);
