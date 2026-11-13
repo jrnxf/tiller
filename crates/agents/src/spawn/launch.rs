@@ -128,6 +128,9 @@ pub enum Start<'a> {
     Fresh { note: &'a str },
     /// `claude --resume <claude session id>`.
     Resume { claude_session_id: &'a str },
+    /// A new session with no first prompt: the daemon's second try at a
+    /// resume (`recovery.md` R02, R04, R21), which its wake follows.
+    Plain,
 }
 
 /// The files written for a launch, and the line that starts it.
@@ -697,7 +700,7 @@ pub fn write_again(spec: &AgainSpec<'_>, start: Start<'_>) -> Result<Launch, Spa
         mcp: spec.scratch.join("mcp.json"),
         script: spec.scratch.join(match start {
             Start::Fresh { .. } => format!("relaunch-{}.sh", spec.session_id),
-            Start::Resume { .. } => format!("resume-{}.sh", spec.session_id),
+            Start::Resume { .. } | Start::Plain => format!("resume-{}.sh", spec.session_id),
         }),
         config_hash: String::new(),
         manifest: Value::Null,
@@ -725,6 +728,7 @@ pub fn write_again(spec: &AgainSpec<'_>, start: Start<'_>) -> Result<Launch, Spa
         Start::Resume { claude_session_id } => {
             vec!["--resume".to_owned(), claude_session_id.to_owned()]
         }
+        Start::Plain => Vec::new(),
     };
     let command = Command {
         role: spec.role,

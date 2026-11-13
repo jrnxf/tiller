@@ -204,6 +204,20 @@ impl Paths {
         }
         Ok(paths)
     }
+
+    /// The run scratch root: `scratch_root`, else
+    /// `$HOME/.local/state/tiller/runs`.
+    pub fn scratch_dir(&self) -> Result<PathBuf, SpawnError> {
+        if let Some(root) = &self.scratch_root {
+            return Ok(root.clone());
+        }
+        std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .map(|home| PathBuf::from(home).join(".local/state/tiller/runs"))
+            .ok_or_else(|| {
+                SpawnError::Usage("HOME is not set; set spawn.scratch_root in config.toml".into())
+            })
+    }
 }
 
 impl SpawnConfig {

@@ -4231,3 +4231,149 @@ fn a_stop_of_a_holder_pane_reads_the_holder_and_never_takes_it_for_gone() {
     assert!(session.ended_at.is_some());
     assert!(herdr_launches(&rig).is_empty(), "{:?}", rig.herdr.calls());
 }
+
+/// A launch script up to the value of its last flag, `--effort`: what a
+/// later start of the same launch must repeat.
+fn up_to_effort(script: &str) -> &str {
+    let at = script.find(" '--effort' '").unwrap() + " '--effort' '".len();
+    let end = at + script[at..].find('\'').unwrap() + 1;
+    &script[..end]
+}
+
+/// The daemon's resume writes the script `tiller agent resume` writes:
+/// every flag of the first launch, with `--resume <id>` (or nothing, for a
+/// plain start) in place of the first prompt. A worker's comes from its run.
+#[test]
+fn a_worker_resume_script_repeats_its_first_launch() {
+    let mut rig = Rig::new();
+    let card = rig.card(CardKind::Ship, None);
+    let spawned = rig.spawn(&card, RunRole::Builder);
+    let dir = rig.scratch.join(&spawned.run.id);
+    let first = std::fs::read_to_string(dir.join("launch.sh")).unwrap();
+    let world = world!(rig);
+    let worktree = PathBuf::from(&spawned.worktree);
+    let resumed = resume::write(
+        rig.fleet.store.conn(),
+        &world.resume_host(),
+        &spawned.session,
+        &worktree,
+        launch::Start::Resume {
+            claude_session_id: "claude-1",
+        },
+    )
+    .unwrap();
+    let text = std::fs::read_to_string(&resumed.script).unwrap();
+    assert_eq!(
+        resumed.script,
+        dir.join(format!("resume-{}.sh", spawned.session.id))
+    );
+    assert_eq!(up_to_effort(&text), up_to_effort(&first), "{text}");
+    assert!(
+        text.trim_end().ends_with(" '--resume' 'claude-1'"),
+        "{text}"
+    );
+    for flag in [
+        "--append-system-prompt-file",
+        "--settings",
+        "--permission-mode",
+        "--strict-mcp-config",
+        "--mcp-config",
+        "--model",
+    ] {
+        assert!(
+            up_to_effort(&text).contains(&format!(" '{flag}'")),
+            "{flag}: {text}"
+        );
+    }
+
+    let plain = resume::write(
+        rig.fleet.store.conn(),
+        &world.resume_host(),
+        &spawned.session,
+        &worktree,
+        launch::Start::Plain,
+    )
+    .unwrap();
+    let text = std::fs::read_to_string(&plain.script).unwrap();
+    assert_eq!(text.trim_end(), up_to_effort(&first), "{text}");
+}
+
+/// An orchestrator's resume takes its model and effort from the manifest
+/// its start recorded, and its launch files from its own scratch.
+#[test]
+fn an_orchestrator_resume_script_repeats_its_first_launch() {
+    let (mut rig, homes) = orchestrator_rig();
+    let started = start_orchestrator(&mut rig, &homes, &owner())
+        .unwrap()
+        .value;
+    let session: Session = get(rig.fleet.store.conn(), "session", &started.session.id).unwrap();
+    let dir = rig.scratch.join(&session.id);
+    let first = std::fs::read_to_string(dir.join("launch.sh")).unwrap();
+    let world = world!(rig);
+    let resumed = resume::write(
+        rig.fleet.store.conn(),
+        &world.resume_host(),
+        &session,
+        &rig.repo.checkout,
+        launch::Start::Resume {
+            claude_session_id: "claude-1",
+        },
+    )
+    .unwrap();
+    let text = std::fs::read_to_string(&resumed.script).unwrap();
+    assert_eq!(up_to_effort(&text), up_to_effort(&first), "{text}");
+    assert!(
+        text.trim_end().ends_with(" '--resume' 'claude-1'"),
+        "{text}"
+    );
+
+    // A session that recorded no manifest cannot say how it started.
+    let unrecorded = Session {
+        config_hash: None,
+        ..session
+    };
+    let error = resume::write(
+        rig.fleet.store.conn(),
+        &world.resume_host(),
+        &unrecorded,
+        &rig.repo.checkout,
+        launch::Start::Plain,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, SpawnError::Refused(why) if why.contains("recorded no launch manifest")),
+        "{error}"
+    );
+}
+
+/// A session whose launch files are gone is refused, and nothing is
+/// rebuilt: no script is written.
+#[test]
+fn a_resume_of_a_session_whose_launch_files_are_gone_is_refused() {
+    let mut rig = Rig::new();
+    let card = rig.card(CardKind::Ship, None);
+    let spawned = rig.spawn(&card, RunRole::Builder);
+    let dir = rig.scratch.join(&spawned.run.id);
+    std::fs::remove_file(dir.join("settings.json")).unwrap();
+    let world = world!(rig);
+    let error = resume::write(
+        rig.fleet.store.conn(),
+        &world.resume_host(),
+        &spawned.session,
+        Path::new(&spawned.worktree),
+        launch::Start::Resume {
+            claude_session_id: "claude-1",
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, SpawnError::Refused(why) if why.contains("settings.json is missing")),
+        "{error}"
+    );
+    assert!(!dir.join("settings.json").exists());
+    assert!(
+        !dir.join(format!("resume-{}.sh", spawned.session.id))
+            .exists(),
+        "a refused resume wrote a script"
+    );
+}

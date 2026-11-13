@@ -712,6 +712,99 @@ fn lost_holder_resumes_sessions_and_notifies_once() {
     assert_eq!(w.launcher.launches().len(), 2);
 }
 
+/// R21, a session whose launch files are gone: its resume is refused before
+/// any attempt is recorded, and it is skipped like any other session the
+/// restore cannot resume. Nothing rebuilds its files.
+#[test]
+fn lost_holder_skips_a_session_whose_launch_files_are_gone() {
+    let mut w = World::new();
+    w.place();
+    let link = w.use_holder();
+    let (a, _) = w.holder_worker();
+    w.holder_seen();
+    let t0 = now();
+    w.pass(t0);
+
+    link.restart();
+    w.launcher
+        .refuse_next("run r1: launch file settings.json is missing");
+    let report = w.pass(t0.plus_minutes(10));
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert!(report.did("R21 restore complete"), "{report:?}");
+    assert!(w.launcher.launches().is_empty(), "nothing was launched");
+    assert!(
+        !w.event_kinds()
+            .iter()
+            .any(|k| k == "session.resume_attempted"),
+        "a refused resume records no attempt"
+    );
+    let items = w.items();
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].card_id, w.run_of(&a).card_id);
+    assert!(
+        items[0].question.contains("was not resumed")
+            && items[0].question.contains("settings.json is missing"),
+        "{}",
+        items[0].question
+    );
+    let notes = w.notes();
+    assert!(
+        notes.iter().any(|n| n
+            .body
+            .contains("skipped: run r1: launch file settings.json is missing")),
+        "{notes:?}"
+    );
+    // As for any skipped session, R03 then ends the paneless session; the
+    // run keeps its worktree for the owner's relaunch.
+    assert!(w.session(&a).ended_at.is_some());
+    assert!(w.run_of(&a).ended_at.is_none());
+
+    // Later passes do not try again or ask twice.
+    w.pass(t0.plus_minutes(11));
+    assert!(w.launcher.launches().is_empty());
+    assert_eq!(w.items().len(), 1);
+}
+
+/// R02, a crashed orchestrator whose launch files are gone: the resume is
+/// refused, the session ends, and the owner gets one item to relaunch it
+/// or hold the project.
+#[test]
+fn orchestrator_crash_with_lost_launch_files_asks_the_owner() {
+    let mut w = World::new();
+    w.worker("w2:p1");
+    w.place();
+    let orchestrator = w.fleet.orchestrator_session.clone();
+    let t0 = now();
+    w.pass(t0);
+
+    w.launcher
+        .refuse_next("session s1 recorded no launch manifest, so its launch cannot be repeated");
+    w.herdr.remove_pane("w1:p1");
+    let report = w.pass(t0.plus_minutes(1));
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert!(w.launcher.launches().is_empty(), "nothing was launched");
+    assert!(
+        !w.event_kinds()
+            .iter()
+            .any(|k| k == "session.resume_attempted"),
+        "a refused resume records no attempt"
+    );
+    assert!(w.session(&orchestrator).ended_at.is_some());
+    let items = w.items();
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert!(
+        items[0]
+            .question
+            .contains("could not be resumed after a crash")
+            && items[0].question.contains("recorded no launch manifest"),
+        "{}",
+        items[0].question
+    );
+    w.pass(t0.plus_minutes(2));
+    assert!(w.launcher.launches().is_empty());
+    assert_eq!(w.items().len(), 1, "asked once");
+}
+
 /// R04: a daemon that dies in the middle of the restore repeats it safely:
 /// a session already alive is not launched again, and the boot id is still
 /// written only at the end.

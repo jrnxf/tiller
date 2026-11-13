@@ -188,52 +188,30 @@ pub struct Launched {
     pub pane_id: String,
 }
 
-/// What a launcher tells a resumed pane about Tiller beyond its session:
-/// the daemon's home and Claude config. With the session's id, run and role
-/// it is the environment a first launch's script exports
-/// ([`tiller_panes::env::agent`]), so a resumed agent's hooks bind in the
-/// same home.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PaneEnv {
-    pub tiller_home: PathBuf,
-    /// `CLAUDE_CONFIG_DIR`, when the daemon has one.
-    pub claude_config: Option<PathBuf>,
-}
+/// Writes the script that resumes a session, with every flag of its first
+/// launch: the daemon wires the builder `tiller agent resume` writes its
+/// script with, so the two never differ. `resume` names the Claude session
+/// to `--resume`; `None` writes a plain start. `Err` is a refusal, such as
+/// a session whose launch files are gone, and nothing was started.
+pub type ScriptWriter =
+    Box<dyn FnMut(&Session, &Path, Option<&str>) -> Result<PathBuf, String> + Send>;
 
-impl PaneEnv {
-    /// `tiller_home` and this process's `CLAUDE_CONFIG_DIR`.
-    pub fn from_env(tiller_home: impl Into<PathBuf>) -> Self {
-        Self {
-            tiller_home: tiller_home.into(),
-            claude_config: std::env::var_os("CLAUDE_CONFIG_DIR")
-                .filter(|dir| !dir.is_empty())
-                .map(PathBuf::from),
-        }
-    }
-
-    /// The Tiller environment of `session`'s pane.
-    pub fn of(&self, session: &Session) -> Vec<(&'static str, String)> {
-        tiller_panes::env::agent(&tiller_panes::env::Agent {
-            tiller_home: &self.tiller_home,
-            session: &session.id,
-            run: session.run_id.as_deref().unwrap_or(""),
-            role: session.role.as_str(),
-            claude_config: self.claude_config.as_deref(),
-        })
-    }
-}
-
-/// Starts and stops Claude Code sessions in herdr panes (`session.resume`,
-/// R02 and R04) and closes dead panes (R15).
+/// Starts and stops Claude Code sessions in panes (`session.resume`, R02,
+/// R04 and R21) and closes dead panes (R15).
 pub trait Launcher: Send {
-    /// Launches `claude` for `session` in `cwd`: `--resume <id>` when
-    /// `resume` names the Claude session, a fresh session otherwise.
-    fn launch(
+    /// Writes the script that starts `claude` for `session` in `cwd`:
+    /// `--resume <id>` when `resume` names the Claude session, a fresh
+    /// session otherwise ([`ScriptWriter`]). `Err` is a refusal: nothing
+    /// was started.
+    fn prepare(
         &mut self,
         session: &Session,
         cwd: &Path,
         resume: Option<&str>,
-    ) -> Result<Launched, String>;
+    ) -> Result<PathBuf, String>;
+    /// Runs `script`, which [`Launcher::prepare`] wrote, in a new pane for
+    /// `session` in `cwd`.
+    fn launch(&mut self, session: &Session, cwd: &Path, script: &Path) -> Result<Launched, String>;
     /// Closes a pane whose agent is dead and whose run has ended.
     fn close_pane(&mut self, pane_id: &str) -> Result<(), String>;
     /// One desktop notification (R04's reboot summary).
@@ -242,11 +220,11 @@ pub trait Launcher: Send {
 
 /// A launcher over the herdr adapter: a new workspace in `cwd`, the row
 /// tokens reported so the pane names its session before anything else reads
-/// it, and the launch command typed as one line. Closing a pane needs a
-/// herdr call the adapter does not expose yet, so `close` is injected.
+/// it, and `sh <script>` typed as one line. Closing a pane needs a herdr
+/// call the adapter does not expose yet, so `close` is injected.
 pub struct HerdrLauncher<H: Herdr> {
     herdr: H,
-    env: PaneEnv,
+    scripts: ScriptWriter,
     close: PaneCloser,
 }
 
@@ -256,45 +234,28 @@ pub type PaneCloser = Box<dyn FnMut(&str) -> Result<(), String> + Send>;
 impl<H: Herdr + Send> HerdrLauncher<H> {
     pub fn new(
         herdr: H,
-        env: PaneEnv,
+        scripts: ScriptWriter,
         close: impl FnMut(&str) -> Result<(), String> + Send + 'static,
     ) -> Self {
         Self {
             herdr,
-            env,
+            scripts,
             close: Box::new(close),
         }
-    }
-
-    /// The command line a resume types. A herdr pane's shell does not have
-    /// the daemon's environment, so the line sets the session's own, and
-    /// drops a `CLAUDE_CONFIG_DIR` the shell has when the daemon has none,
-    /// as a first launch's script does.
-    pub fn command(env: &PaneEnv, session: &Session, resume: Option<&str>) -> String {
-        let mut words = vec!["env".to_owned()];
-        if env.claude_config.is_none() {
-            words.push("-u CLAUDE_CONFIG_DIR".to_owned());
-        }
-        words.extend(
-            env.of(session)
-                .into_iter()
-                .map(|(name, value)| format!("{name}={}", quote(&value))),
-        );
-        words.push("claude".to_owned());
-        if let Some(id) = resume {
-            words.extend(["--resume".to_owned(), quote(id)]);
-        }
-        words.join(" ")
     }
 }
 
 impl<H: Herdr + Send> Launcher for HerdrLauncher<H> {
-    fn launch(
+    fn prepare(
         &mut self,
         session: &Session,
         cwd: &Path,
         resume: Option<&str>,
-    ) -> Result<Launched, String> {
+    ) -> Result<PathBuf, String> {
+        (self.scripts)(session, cwd, resume)
+    }
+
+    fn launch(&mut self, session: &Session, cwd: &Path, script: &Path) -> Result<Launched, String> {
         let label = format!("{} resuming", session.project_id);
         let created = self
             .herdr
@@ -307,7 +268,9 @@ impl<H: Herdr + Send> Launcher for HerdrLauncher<H> {
         self.herdr
             .report_tokens(&created.pane_id, &tokens)
             .map_err(|e| e.to_string())?;
-        let line = Self::command(&self.env, session, resume);
+        // The script sets the session's environment, which the pane's
+        // shell does not have.
+        let line = format!("sh {}", quote(&script.to_string_lossy()));
         self.herdr
             .send_text(&created.pane_id, &line)
             .and_then(|()| self.herdr.send_enter(&created.pane_id))
@@ -335,14 +298,14 @@ pub const HOLDER_CLOSE_GRACE: Duration = Duration::from_secs(3);
 pub type Notifier = Box<dyn FnMut(&str, &str) + Send>;
 
 /// A launcher over the terminal holder (`terminal-holder.md` 4.4): one
-/// `spawn` keyed by the session, whose child runs the resume line through
-/// `/bin/sh` in `cwd`, with the session named in the pane's `meta`. A spawn
-/// for a key the holder already runs returns that pane, so a second try
-/// starts nothing. A herdr pane left from before the cutover is closed
+/// `spawn` keyed by the session, whose child runs the resume script
+/// through `/bin/sh` in `cwd`, with the session named in the pane's `meta`.
+/// A spawn for a key the holder already runs returns that pane, so a second
+/// try starts nothing. A herdr pane left from before the cutover is closed
 /// through `close`.
 pub struct HolderLauncher {
     holder: Arc<dyn Panes>,
-    env: PaneEnv,
+    scripts: ScriptWriter,
     close: PaneCloser,
     notify: Notifier,
 }
@@ -350,22 +313,22 @@ pub struct HolderLauncher {
 impl HolderLauncher {
     pub fn new(
         holder: Arc<dyn Panes>,
-        env: PaneEnv,
+        scripts: ScriptWriter,
         close: impl FnMut(&str) -> Result<(), String> + Send + 'static,
         notify: impl FnMut(&str, &str) + Send + 'static,
     ) -> Self {
         Self {
             holder,
-            env,
+            scripts,
             close: Box::new(close),
             notify: Box::new(notify),
         }
     }
 
-    /// The `spawn` that resumes `session` in `cwd`: the pane gets what any
-    /// pane gets ([`tiller_panes::env::current`]) and the session's Tiller
-    /// environment ([`PaneEnv::of`]).
-    pub fn request(env: &PaneEnv, session: &Session, cwd: &Path, resume: Option<&str>) -> Spawn {
+    /// The `spawn` that runs `script` for `session` in `cwd`. The pane gets
+    /// what any pane gets ([`tiller_panes::env::current`]); the script
+    /// exports the session's own environment, as a first launch's does.
+    pub fn request(session: &Session, cwd: &Path, script: &Path) -> Spawn {
         let mut meta = Meta::from([
             ("session".to_owned(), session.id.clone()),
             ("project".to_owned(), session.project_id.clone()),
@@ -378,21 +341,14 @@ impl HolderLauncher {
         if let Some(run) = &session.run_id {
             meta.insert("run".to_owned(), run.clone());
         }
-        let line = match resume {
-            Some(id) => format!("exec claude --resume {}", quote(id)),
-            None => "exec claude".to_owned(),
-        };
-        let mut pane_env = tiller_panes::env::current();
-        pane_env.extend(
-            env.of(session)
-                .into_iter()
-                .map(|(name, value)| (name.to_owned(), value)),
-        );
         Spawn {
             key: session.id.clone(),
-            argv: vec![tiller_panes::env::SHELL.to_owned(), "-c".to_owned(), line],
+            argv: vec![
+                tiller_panes::env::SHELL.to_owned(),
+                script.to_string_lossy().into_owned(),
+            ],
             cwd: cwd.to_string_lossy().into_owned(),
-            env: pane_env,
+            env: tiller_panes::env::current(),
             size: None,
             meta,
         }
@@ -405,15 +361,19 @@ fn quote(text: &str) -> String {
 }
 
 impl Launcher for HolderLauncher {
-    fn launch(
+    fn prepare(
         &mut self,
         session: &Session,
         cwd: &Path,
         resume: Option<&str>,
-    ) -> Result<Launched, String> {
+    ) -> Result<PathBuf, String> {
+        (self.scripts)(session, cwd, resume)
+    }
+
+    fn launch(&mut self, session: &Session, cwd: &Path, script: &Path) -> Result<Launched, String> {
         let pane = self
             .holder
-            .spawn(&Self::request(&self.env, session, cwd, resume))
+            .spawn(&Self::request(session, cwd, script))
             .map_err(|e| e.to_string())?;
         Ok(Launched {
             pane_id: pane.pane.as_str().to_owned(),
@@ -525,55 +485,20 @@ mod tests {
         }
     }
 
-    fn env() -> PaneEnv {
-        PaneEnv {
-            tiller_home: PathBuf::from("/home/user/.tiller-b"),
-            claude_config: Some(PathBuf::from("/home/user/.claude-b")),
-        }
-    }
-
     #[test]
-    fn a_resumed_holder_pane_gets_the_tiller_env_of_a_first_launch() {
+    fn a_resumed_holder_pane_runs_the_written_script() {
         let session = worker();
         let req = HolderLauncher::request(
-            &env(),
             &session,
             Path::new("/home/user/pool/w1"),
-            Some("claude-S1"),
-        );
-        assert_eq!(req.argv[2], "exec claude --resume 'claude-S1'");
-        for (name, value) in [
-            ("TILLER_HOME", "/home/user/.tiller-b"),
-            ("TILLER_SESSION_ID", "S1"),
-            ("TILLER_RUN_ID", "R1"),
-            ("TILLER_ROLE", "builder"),
-            ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
-            ("CLAUDE_CONFIG_DIR", "/home/user/.claude-b"),
-        ] {
-            assert_eq!(req.env.get(name).map(String::as_str), Some(value), "{name}");
-        }
-    }
-
-    #[test]
-    fn a_herdr_resume_line_sets_the_tiller_env_the_shell_lacks() {
-        let session = worker();
-        let line = HerdrLauncher::<tiller_herdr::fake::FakeHerdr>::command(
-            &env(),
-            &session,
-            Some("claude-S1"),
+            Path::new("/home/user/runs/R1/resume-S1.sh"),
         );
         assert_eq!(
-            line,
-            "env CLAUDE_CODE_DISABLE_AUTO_MEMORY='1' TILLER_SESSION_ID='S1' TILLER_RUN_ID='R1' \
-             TILLER_ROLE='builder' TILLER_HOME='/home/user/.tiller-b' \
-             CLAUDE_CONFIG_DIR='/home/user/.claude-b' claude --resume 'claude-S1'"
+            req.argv,
+            [tiller_panes::env::SHELL, "/home/user/runs/R1/resume-S1.sh"]
         );
-        let bare = PaneEnv {
-            claude_config: None,
-            ..env()
-        };
-        let line = HerdrLauncher::<tiller_herdr::fake::FakeHerdr>::command(&bare, &session, None);
-        assert!(line.starts_with("env -u CLAUDE_CONFIG_DIR "), "{line}");
-        assert!(line.ends_with(" claude"), "{line}");
+        assert_eq!(req.key, "S1");
+        assert_eq!(req.cwd, "/home/user/pool/w1");
+        assert_eq!(req.meta.get("run").map(String::as_str), Some("R1"));
     }
 }
