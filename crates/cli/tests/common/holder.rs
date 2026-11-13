@@ -215,3 +215,22 @@ impl View {
         String::from_utf8_lossy(&self.screen).contains(text)
     }
 }
+
+/// A board GET of `path` on the daemon at `port`: the response body.
+pub fn get(port: u16, cookie: &str, path: &str) -> Value {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream.set_read_timeout(Some(WAIT)).unwrap();
+    stream
+        .write_all(
+            format!(
+                "GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nCookie: {}={cookie}\r\n\r\n",
+                tiller_daemon::auth::COOKIE
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    let (_, body) = response.split_once("\r\n\r\n").unwrap();
+    serde_json::from_str(body).unwrap()
+}

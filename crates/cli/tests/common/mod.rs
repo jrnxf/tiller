@@ -829,6 +829,15 @@ pub fn listening_port(child: &mut std::process::Child, wait: std::time::Duration
 /// nothing else, so no poller reaches a real `gh` or `quota-axi`.
 /// Returns its guard and its port.
 pub fn git_only_daemon(world: &World) -> (Running, u16) {
+    git_only_daemon_logging(world, std::process::Stdio::null(), "warn")
+}
+
+/// [`git_only_daemon`] with its stderr sent to `log` at `level`.
+pub fn git_only_daemon_logging(
+    world: &World,
+    log: std::process::Stdio,
+    level: &str,
+) -> (Running, u16) {
     use std::process::Stdio;
     let bin = world.dir.path().join("git-only");
     std::fs::create_dir_all(&bin).unwrap();
@@ -850,10 +859,10 @@ pub fn git_only_daemon(world: &World) -> (Running, u16) {
             .args(["daemon", "--port", "0"])
             .env("PATH", &bin)
             .env("TILLER_QUOTA_AXI", "/nonexistent/quota-axi")
-            .env("TILLER_LOG", "warn")
+            .env("TILLER_LOG", level)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(log)
             .spawn()
             .unwrap(),
     );

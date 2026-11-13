@@ -11,7 +11,7 @@ mod common;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use common::holder::{View, WAIT, cookie, fake_agent, script, start_holder};
+use common::holder::{View, WAIT, cookie, fake_agent, get, script, start_holder};
 use common::{World, git_only_daemon};
 use serde_json::Value;
 use tiller_core::state::runs::{NewRun, SpawnChecks};
@@ -490,26 +490,6 @@ fn the_notify_command_gets_the_orchestrator_holder_pane_for_a_new_question() {
         })
         .unwrap();
     assert_eq!(env.trim(), format!("{session} {pane} {host}"));
-}
-
-/// A board GET of `path` on the daemon at `port`: the response body.
-fn get(port: u16, cookie: &str, path: &str) -> Value {
-    use std::io::{Read as _, Write as _};
-    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-    stream.set_read_timeout(Some(WAIT)).unwrap();
-    stream
-        .write_all(
-            format!(
-                "GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nCookie: {}={cookie}\r\n\r\n",
-                tiller_daemon::auth::COOKIE
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
-    let (_, body) = response.split_once("\r\n\r\n").unwrap();
-    serde_json::from_str(body).unwrap()
 }
 
 /// R21 on the real holder: a holder killed under a running worker comes
@@ -1142,4 +1122,138 @@ fn a_message_waits_out_a_reply_that_streams_with_an_empty_composer() {
     let text = submits[0]["text"].as_str().unwrap();
     assert!(text.starts_with(&format!("tiller inbox {id} ")), "{text}");
     drop(view);
+}
+
+/// The output-quiet guard has no limit: a pane whose composer reads Empty
+/// while it never stops printing holds a message for as long as it prints.
+/// Each pass defers it 5 s ("pane still printing"), nothing is typed into
+/// the output, and the message lands once, as soon as the pane goes quiet.
+/// The guard never gives up and never delivers into the stream.
+#[test]
+fn a_message_waits_for_a_pane_that_never_stops_printing() {
+    // It paces output on the wall clock, so `.config/nextest.toml` runs it
+    // alone.
+    if std::env::var_os("NEXTEST_RUN_ID").is_some() {
+        assert_eq!(
+            std::env::var("NEXTEST_TEST_GROUP").as_deref(),
+            Ok("wall-clock"),
+            "the nextest override that runs this test alone no longer matches it"
+        );
+    }
+    let agents = Agents::new(300);
+    let root = agents.world.dir.path().to_owned();
+    let stop = root.join("stop-printing");
+    // Until `stop` exists, a whole frame with an empty composer every
+    // 300 ms, well under the guard's 3 s settle; then the stand-in.
+    let rule = "\u{2500}".repeat(40);
+    script(
+        &root.join("claude-stub"),
+        &format!(
+            "if [ \"$1\" = --version ]; then exec {agent} --version; fi\n\
+             printf '{{\"session_id\":\"claude-%s\",\"source\":\"startup\"}}' \"$TILLER_SESSION_ID\" \
+             | {tiller} hook SessionStart >/dev/null 2>&1\n\
+             n=0\n\
+             while [ ! -e {stop} ]; do\n\
+             n=$((n + 1))\n\
+             printf '\\033[H\\033[2Jprinting %s\\n\\n{rule}\\n{PROMPT}\\n{rule}\\n  ? for shortcuts' \"$n\"\n\
+             sleep 0.3\n\
+             done\n\
+             exec env FAKE_AGENT_LOG={logs}/\"$TILLER_SESSION_ID\".jsonl {agent} \"$@\"\n",
+            agent = fake_agent().display(),
+            tiller = env!("CARGO_BIN_EXE_tiller"),
+            logs = agents.logs.display(),
+            stop = stop.display(),
+        ),
+    );
+    let (_holder, client) = start_holder(&agents.world);
+    let (session, pane) = agents.orchestrator();
+    let pane = PaneId::from(pane.as_str());
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let shown = client
+            .screen(&pane, Read::Visible, Format::Ansi)
+            .unwrap()
+            .text();
+        if shown.contains("printing") && classify(&shown) == Composer::Empty {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the pane never read Empty: {shown}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let (_daemon, _port) = git_only_daemon(&agents.world);
+    let sent = agents.world.must(&[
+        "send",
+        &session,
+        "--kind",
+        "steer",
+        "--text",
+        "look at the tests",
+    ]);
+    let id = sent.data()["id"].as_str().unwrap().to_owned();
+    let state = || -> String {
+        agents
+            .world
+            .store()
+            .conn()
+            .query_row("SELECT state FROM outbox WHERE id = ?1", [&id], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+    let printing = || {
+        deferrals(&agents.world, &id)
+            .iter()
+            .filter(|(_, payload)| payload.contains("pane still printing"))
+            .count()
+    };
+
+    // Six guard passes, 5 s apart, and the message is still held.
+    let deadline = Instant::now() + 3 * WAIT;
+    while printing() < 6 {
+        assert!(
+            Instant::now() < deadline,
+            "the guard held the message {} times: {:?}",
+            printing(),
+            deferrals(&agents.world, &id)
+        );
+        assert_ne!(state(), "delivered");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert_ne!(state(), "delivered");
+    let reasons = deferrals(&agents.world, &id);
+    assert!(
+        reasons
+            .iter()
+            .all(|(_, payload)| payload.contains("pane still printing")),
+        "{reasons:?}"
+    );
+    let typed = client
+        .screen(&pane, Read::Recent(10_000), Format::Text)
+        .unwrap()
+        .text();
+    assert!(
+        !typed.contains("tiller inbox"),
+        "typed into the output: {typed}"
+    );
+
+    // Quiet: the message lands once.
+    std::fs::write(&stop, "").unwrap();
+    let deadline = Instant::now() + 3 * WAIT;
+    while !has(&agents.events(&session), "submit") {
+        assert!(
+            Instant::now() < deadline,
+            "the message never landed after the pane went quiet: {:?}",
+            deferrals(&agents.world, &id)
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_secs(2));
+    let submits = agents.of(&session, "submit");
+    assert_eq!(submits.len(), 1, "{submits:#?}");
+    let text = submits[0]["text"].as_str().unwrap();
+    assert!(text.starts_with(&format!("tiller inbox {id} ")), "{text}");
+    assert_eq!(state(), "delivered");
 }
