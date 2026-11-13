@@ -10286,10 +10286,11 @@ esac"#,
         holder.set_unreachable(true);
         let line = view.next().await;
         assert_eq!(line["type"], "unavailable", "{line}");
+        // The watch ending races the update stream's error; either line is right.
         assert!(
-            line["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("went down")),
+            line["message"].as_str().is_some_and(|message| {
+                message.contains("went down") || message.contains("ended the view's watch")
+            }),
             "{line}"
         );
         use futures_util::StreamExt;
