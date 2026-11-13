@@ -425,6 +425,174 @@ fn the_notify_command_gets_the_orchestrator_holder_pane_for_a_new_question() {
     assert_eq!(env.trim(), format!("{session} {pane} {host}"));
 }
 
+/// A board GET of `path` on the daemon at `port`: the response body.
+fn get(port: u16, cookie: &str, path: &str) -> Value {
+    use std::io::{Read as _, Write as _};
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream.set_read_timeout(Some(WAIT)).unwrap();
+    stream
+        .write_all(
+            format!(
+                "GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nCookie: {}={cookie}\r\n\r\n",
+                tiller_daemon::auth::COOKIE
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    let (_, body) = response.split_once("\r\n\r\n").unwrap();
+    serde_json::from_str(body).unwrap()
+}
+
+/// R21 on the real holder: a holder killed under a running worker comes
+/// back as a new instance, the daemon resumes the worker with its Claude
+/// session in a pane of the new holder, the owner's `[notify] command`
+/// hears of it once, and the Machines row shows the restart. A daemon
+/// restart after that sends no second notification.
+#[test]
+fn a_lost_holder_resumes_its_worker_and_notifies_the_owner_once() {
+    let agents = Agents::new(300);
+    let (mut holder, _client) = start_holder(&agents.world);
+    let run = agents.run();
+    let (session, pane) = agents.launch(&run);
+    agents.until(&session, "start", |events| has(events, "start"));
+
+    let root = agents.world.dir.path();
+    let out = root.join("notified");
+    let notify = root.join("notify");
+    script(
+        &notify,
+        &format!(
+            // The daemon's PATH holds only git: shell builtins copy stdin.
+            "while IFS= read -r line || [ -n \"$line\" ]; do printf '%s' \"$line\"; done >> {out}\necho >> {out}\n",
+            out = out.display()
+        ),
+    );
+    let config = agents.world.home().join("config.toml");
+    let mut table = std::fs::read_to_string(&config).unwrap_or_default();
+    table.push_str(&format!(
+        "\n[notify]\ncommand = [\"{}\"]\n",
+        notify.display()
+    ));
+    std::fs::write(&config, table).unwrap();
+    let count = |sql: &str| -> i64 {
+        agents
+            .world
+            .store()
+            .conn()
+            .query_row(sql, [], |row| row.get(0))
+            .unwrap()
+    };
+
+    // The resumed agent starts with the daemon's PATH and runs `claude`
+    // from it, and the claude stub runs `env`: both sit beside the git the
+    // daemon's PATH holds.
+    let bin = root.join("git-only");
+    std::fs::create_dir_all(&bin).unwrap();
+    let found = std::process::Command::new("sh")
+        .args(["-c", "command -v env"])
+        .output()
+        .unwrap();
+    std::os::unix::fs::symlink(String::from_utf8(found.stdout).unwrap().trim(), bin.join("env"))
+        .unwrap();
+    std::os::unix::fs::symlink(root.join("claude-stub"), bin.join("claude")).unwrap();
+    let (daemon, port) = git_only_daemon(&agents.world);
+    let cookie = cookie(&agents.world);
+    // The holder source records the pane and its pid first.
+    let deadline = Instant::now() + WAIT;
+    while count("SELECT count(*) FROM panes WHERE holder_instance IS NOT NULL AND pid IS NOT NULL")
+        < 2
+    {
+        assert!(Instant::now() < deadline, "the holder source never listed");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let machines = get(port, &cookie, "/api/v1/machines");
+    assert!(
+        machines["machines"][0]["holder_restarted_at"].is_null(),
+        "{machines}"
+    );
+
+    holder.kill().unwrap();
+    holder.wait().unwrap();
+    drop(holder);
+    let (_holder, client) = start_holder(&agents.world);
+
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let notes = |out: &PathBuf| -> Vec<Value> {
+        std::fs::read_to_string(out)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_str(line).unwrap())
+            .filter(|note: &Value| {
+                note["title"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("terminal holder"))
+            })
+            .collect()
+    };
+    while notes(&out).is_empty() {
+        if Instant::now() >= deadline {
+            let store = agents.world.store();
+            let mut stmt = store
+                .conn()
+                .prepare("SELECT kind || ' ' || substr(payload, 1, 400) FROM events WHERE seq > 20 ORDER BY seq")
+                .unwrap();
+            let rows: Vec<String> = stmt
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            panic!(
+                "no R21 notification: {}\n{}",
+                std::fs::read_to_string(&out).unwrap_or_default(),
+                rows.join("\n")
+            );
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let (again, new_pane) = agents.live(&run);
+    assert_eq!(again, session, "the resume keeps the session row");
+    assert_ne!(new_pane, pane);
+    assert!(
+        client
+            .list()
+            .unwrap()
+            .panes
+            .iter()
+            .any(|p| p.pane.as_str() == new_pane),
+        "the worker runs in a pane of the new holder"
+    );
+    agents.until(&session, "the resumed start", |events| {
+        events.iter().filter(|e| e["event"] == "start").count() == 2
+    });
+    let argv = agents.of(&session, "start")[1]["argv"].clone();
+    let argv: Vec<&str> = argv
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap())
+        .collect();
+    let at = argv.iter().position(|a| *a == "--resume").unwrap();
+    assert_eq!(argv[at + 1], format!("claude-{session}"), "{argv:?}");
+    assert_eq!(count("SELECT count(*) FROM events WHERE kind = 'holder.lost'"), 1);
+    let machines = get(port, &cookie, "/api/v1/machines");
+    assert!(
+        machines["machines"][0]["holder_restarted_at"].is_string(),
+        "{machines}"
+    );
+    eprintln!("R21 note: {}", notes(&out)[0]);
+    eprintln!("machines: {machines}");
+
+    // A daemon restart on the same new holder notifies nothing again.
+    drop(daemon);
+    let (_daemon, _port) = git_only_daemon(&agents.world);
+    std::thread::sleep(Duration::from_secs(8));
+    assert_eq!(notes(&out).len(), 1, "{:?}", notes(&out));
+    assert_eq!(count("SELECT count(*) FROM events WHERE kind = 'holder.lost'"), 1);
+}
+
 /// Where a 9.2 kill lands.
 #[derive(Clone, Copy, Debug)]
 enum Kill {
