@@ -1005,7 +1005,10 @@ fn stop_hook_after_escape(world: &World, log: &Path, session: &str) -> std::thre
         let deadline = Instant::now() + WAIT;
         while Instant::now() < deadline {
             let calls = std::fs::read_to_string(&log).unwrap_or_default();
-            if calls.lines().any(|call| call.starts_with("pane send-keys w2:p1 esc")) {
+            if calls
+                .lines()
+                .any(|call| call.starts_with("pane send-keys w2:p1 esc"))
+            {
                 store
                     .conn()
                     .execute(
@@ -1097,7 +1100,8 @@ fn board_interrupts_answers_steers_and_stops_a_peer_agent() {
         "{prompt}"
     );
     let screen = prompt["prompt"]["screen"].as_str().unwrap().to_owned();
-    let answer = json!({"idempotency_key": "answer-1", "host": LABEL, "option": 4, "screen": screen});
+    let answer =
+        json!({"idempotency_key": "answer-1", "host": LABEL, "option": 4, "screen": screen});
     let (status, answered) = world.post(&agent("prompt/answer"), &answer);
     assert_eq!(status, 200, "{answered}");
     assert_eq!(answered["host"], LABEL);

@@ -2232,7 +2232,8 @@ impl Mutation {
             )?),
             Parsed::Steer(text) => {
                 let session = resolve_id(store.conn(), "sessions", "session", id)?;
-                let applied = store.outbox_send(ctx, Some(key), &session, OutboxKind::Steer, text)?;
+                let applied =
+                    store.outbox_send(ctx, Some(key), &session, OutboxKind::Steer, text)?;
                 let outbox_id = Some(applied.value.id.clone());
                 let mut done = Done::of(applied)?;
                 done.outbox_id = outbox_id;
@@ -5438,7 +5439,9 @@ async fn prompt_read(
 ) -> ApiResult<PromptRead> {
     guard(&state, &headers).await?;
     let request: PromptAsk = body(&bytes)?;
-    if let Some(read) = agent_read(&state, request.host.as_deref(), &session, "prompt", true).await? {
+    if let Some(read) =
+        agent_read(&state, request.host.as_deref(), &session, "prompt", true).await?
+    {
         return Ok(Json(read));
     }
     let (session_id, pane) = local_pane(&state, session).await?;
@@ -6020,8 +6023,14 @@ async fn resume_agent(
 ) -> ApiResult<MutationResponse> {
     guard(&state, &headers).await?;
     let request: AgentControlBody = body(&bytes)?;
-    if let Some(answer) =
-        on_peer(&state, request.host.as_deref(), Op::Resume, &session, &bytes).await?
+    if let Some(answer) = on_peer(
+        &state,
+        request.host.as_deref(),
+        Op::Resume,
+        &session,
+        &bytes,
+    )
+    .await?
     {
         return Ok(Json(answer));
     }

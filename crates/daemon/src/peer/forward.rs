@@ -315,14 +315,16 @@ fn target_project(store: &Store, op: Op, frame: &Mutate) -> tiller_core::Result<
             .get("project")
             .and_then(Value::as_str)
             .map(str::to_owned),
-        Op::Answer | Op::Withdraw => match found(resolve_id(conn, "attention", "attention", target))? {
-            Some(id) => {
-                let item: Attention = get(conn, "attention", &id)?;
-                let card: Card = get(conn, "card", &item.card_id)?;
-                Some(card.project_id)
+        Op::Answer | Op::Withdraw => {
+            match found(resolve_id(conn, "attention", "attention", target))? {
+                Some(id) => {
+                    let item: Attention = get(conn, "attention", &id)?;
+                    let card: Card = get(conn, "card", &item.card_id)?;
+                    Some(card.project_id)
+                }
+                None => None,
             }
-            None => None,
-        },
+        }
         Op::Decide => match found(resolve_id(conn, "approvals", "approval", target))? {
             Some(id) => {
                 let approval: Approval = get(conn, "approval", &id)?;
@@ -360,7 +362,10 @@ fn target_project(store: &Store, op: Op, frame: &Mutate) -> tiller_core::Result<
 
 /// The project an agent session works for. `None` when the session does
 /// not exist.
-fn session_project(conn: &rusqlite::Connection, target: &str) -> tiller_core::Result<Option<String>> {
+fn session_project(
+    conn: &rusqlite::Connection,
+    target: &str,
+) -> tiller_core::Result<Option<String>> {
     let Some(id) = found(resolve_id(conn, "sessions", "session", target))? else {
         return Ok(None);
     };

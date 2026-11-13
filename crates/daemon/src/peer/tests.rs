@@ -36,9 +36,9 @@ use crate::api::tests::{
     owner_cookie, send, waiting,
 };
 use crate::api::{BoardRelaunch, Controlled, OrchestratorStart, StartError};
-use tiller_core::domain::{Run, Session};
 use crate::dto::{BoardResponse, ErrorBody, ErrorDetail, LinkState, MutationResponse};
 use crate::readonly::Damage;
+use tiller_core::domain::{Run, Session};
 use tiller_panes::FakePanes;
 
 fn ms(millis: u64) -> Duration {
@@ -2559,19 +2559,16 @@ async fn a_pane_link_takes_no_forwarded_verb() {
         .peer
         .open()
         .conn()
-        .query_row("SELECT count(*) FROM idempotency_keys", [], |row| row.get(0))
+        .query_row("SELECT count(*) FROM idempotency_keys", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(keys, 0);
 }
 
 /// [`open_pane`], with every line the peer sends until it is quiet for a
 /// second.
-async fn open_pane_lines(
-    pair: &Pair,
-    scratch: &Path,
-    open: PaneOpen,
-    extra: &str,
-) -> Vec<String> {
+async fn open_pane_lines(pair: &Pair, scratch: &Path, open: PaneOpen, extra: &str) -> Vec<String> {
     let config = ServeConfig {
         home: pair.peer.dir.path().to_owned(),
         from: "test-host".into(),
@@ -3655,7 +3652,10 @@ impl PeerAgent {
 fn verbs() -> Vec<(&'static str, Value)> {
     let until = Timestamp::now().plus_minutes(60).to_string();
     vec![
-        ("interrupt", json!({"idempotency_key": "k-int", "host": "peer"})),
+        (
+            "interrupt",
+            json!({"idempotency_key": "k-int", "host": "peer"}),
+        ),
         (
             "steer",
             json!({"idempotency_key": "k-steer", "host": "peer", "text": "use the new API"}),
@@ -3665,8 +3665,14 @@ fn verbs() -> Vec<(&'static str, Value)> {
             "pause",
             json!({"idempotency_key": "k-pause", "host": "peer", "until": until, "reason": "waits on review"}),
         ),
-        ("unpause", json!({"idempotency_key": "k-unpause", "host": "peer"})),
-        ("resume", json!({"idempotency_key": "k-resume", "host": "peer"})),
+        (
+            "unpause",
+            json!({"idempotency_key": "k-unpause", "host": "peer"}),
+        ),
+        (
+            "resume",
+            json!({"idempotency_key": "k-resume", "host": "peer"}),
+        ),
         (
             "relaunch",
             json!({"idempotency_key": "k-relaunch", "host": "peer", "note": "start from the tests"}),
@@ -3729,9 +3735,7 @@ async fn the_board_reads_a_peer_agents_tail() {
         })
         .await;
         agent.holder.set_screen(&agent.pane, &["one", "two", "$ "]);
-        let tail = agent
-            .post("terminal/tail", json!({"host": "peer"}))
-            .await;
+        let tail = agent.post("terminal/tail", json!({"host": "peer"})).await;
         assert_eq!(tail.status, StatusCode::OK, "{scope:?}: {}", tail.body);
         let tail: Value = serde_json::from_str(&tail.body).unwrap();
         assert_eq!(tail["session_id"], agent.session);
@@ -3884,11 +3888,20 @@ async fn a_read_pairing_cannot_read_or_answer_a_peer_prompt() {
         )
         .await;
     let error = refusal(&answer, StatusCode::BAD_GATEWAY);
-    assert_eq!(error.reason.as_deref(), Some("read_scope"), "{}", answer.body);
+    assert_eq!(
+        error.reason.as_deref(),
+        Some("read_scope"),
+        "{}",
+        answer.body
+    );
     assert!(agent.keys().is_empty());
     // A read spends no input: the peer read no screen for it.
     assert!(
-        !agent.holder.calls().iter().any(|call| call.starts_with("screen")),
+        !agent
+            .holder
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("screen")),
         "{:?}",
         agent.holder.calls()
     );
@@ -3936,7 +3949,11 @@ async fn the_board_interrupts_steers_and_stops_a_peer_agent() {
     hook.join().unwrap();
     let interrupted = applied(&interrupted);
     assert_eq!(interrupted.host.as_deref(), Some("peer"));
-    assert_eq!(interrupted.data["cancel"], "confirmed", "{:?}", interrupted.data);
+    assert_eq!(
+        interrupted.data["cancel"], "confirmed",
+        "{:?}",
+        interrupted.data
+    );
     assert_eq!(interrupted.data["session"], session);
     assert_eq!(agent.keys(), [format!("keys {} esc", agent.pane)]);
 
@@ -4095,7 +4112,10 @@ async fn the_board_withdraws_a_peer_attention_item() {
     )
     .await;
     assert!(applied(&again).replayed);
-    assert_eq!(agent.asked(), ["mutate POST /api/v1/attention/{id}/withdraw"; 2]);
+    assert_eq!(
+        agent.asked(),
+        ["mutate POST /api/v1/attention/{id}/withdraw"; 2]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -4218,7 +4238,11 @@ async fn a_forwarded_agent_verb_records_the_forwarded_owner() {
         assert_eq!(actor, "board@test-host", "{kind}");
         let payload: Value = serde_json::from_str(&payload).unwrap();
         let via = &payload["via_peer"];
-        assert_eq!(via["key_id"], Value::from(agent.pair.key_id.clone()), "{kind}: {payload}");
+        assert_eq!(
+            via["key_id"],
+            Value::from(agent.pair.key_id.clone()),
+            "{kind}: {payload}"
+        );
         assert_eq!(via["viewer_label"], "test-host");
         assert!(via["frame_id"].is_string(), "{payload}");
     }
@@ -4251,7 +4275,11 @@ async fn a_forwarded_agent_verb_passes_the_peers_refusal_back() {
         )
         .await;
     let error = refusal(&paused, StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(error.message.contains("is not in the future"), "{}", paused.body);
+    assert!(
+        error.message.contains("is not in the future"),
+        "{}",
+        paused.body
+    );
     assert_eq!(error.host.as_deref(), Some("peer"));
 
     // The peer's controls refuse an interrupt of an idle agent.
@@ -4324,7 +4352,11 @@ async fn a_forwarded_relaunch_starts_its_agent_on_the_owning_host_only() {
         )
         .await;
     let error = refusal(&third, StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(error.message.contains("not a paired peer"), "{}", third.body);
+    assert!(
+        error.message.contains("not a paired peer"),
+        "{}",
+        third.body
+    );
 
     // The peer forwards no frame on (G42): a relaunch that names a host is
     // refused there, and nothing starts.
@@ -4379,6 +4411,10 @@ async fn a_peer_agent_verb_waits_for_its_proof_past_ten_seconds() {
     let interrupted = applied(&interrupted);
     assert!(started.elapsed() >= Duration::from_secs(10));
     assert_eq!(interrupted.host.as_deref(), Some("peer"));
-    assert_eq!(interrupted.data["cancel"], "unconfirmed", "{:?}", interrupted.data);
+    assert_eq!(
+        interrupted.data["cancel"], "unconfirmed",
+        "{:?}",
+        interrupted.data
+    );
     assert_eq!(agent.keys(), [format!("keys {} esc", agent.pane)]);
 }

@@ -405,7 +405,13 @@ impl Link<'_> {
     /// Verifies a `mutate` (`protocol.md` 10.3 step 3) and applies it; `None`
     /// when it went to [`Proofs`], which answers it once it has its proof.
     fn mutate(&mut self, frame: Mutate) -> Option<(u16, Value)> {
-        match forward::verify(&self.store, self.config, &self.key, &frame, Timestamp::now()) {
+        match forward::verify(
+            &self.store,
+            self.config,
+            &self.key,
+            &frame,
+            Timestamp::now(),
+        ) {
             Ok(op) => match std::fs::read_to_string(self.config.home.join(READ_ONLY_MARKER)) {
                 // The daemon found `state.db` damaged (`recovery.md` R10):
                 // a forwarded write is refused as a local one is.
@@ -625,13 +631,12 @@ impl Proofs {
         let mirrors = Arc::clone(mirrors);
         std::thread::spawn(move || {
             for (frame, op) in asked {
-                let (http_status, body) =
-                    match Store::open_current(config.home.join("state.db")) {
-                        Ok(mut store) => {
-                            forward::apply(&mut store, &config, &key, &frame, op, &mirrors)
-                        }
-                        Err(error) => ApiError::from(error).into_result(),
-                    };
+                let (http_status, body) = match Store::open_current(config.home.join("state.db")) {
+                    Ok(mut store) => {
+                        forward::apply(&mut store, &config, &key, &frame, op, &mirrors)
+                    }
+                    Err(error) => ApiError::from(error).into_result(),
+                };
                 if answer.send((frame.id, http_status, body)).is_err() {
                     return;
                 }
