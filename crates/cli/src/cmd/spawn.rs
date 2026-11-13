@@ -1,6 +1,6 @@
 //! `tiller spawn` and `tiller orchestrator start`, and the tools they,
 //! `tiller done`, `tiller run clean` and `tiller agent` reach outside
-//! `state.db` with (T4.2): treehouse, herdr and git.
+//! `state.db` with (T4.2): treehouse, the terminal holder and git.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,6 @@ use tiller_agents::spawn::{self as agents, Request, SpawnError, World, readings}
 use tiller_core::state::resolve_card;
 use tiller_daemon::api::{BoardRelaunch, Controlled, StartError};
 use tiller_daemon::holder::HolderLink;
-use tiller_herdr::client::{Cli, HerdrError};
 use tiller_panes::{Panes, PanesError};
 use tiller_reconcile::git::GitScanner;
 
@@ -66,17 +65,13 @@ pub fn failure(error: SpawnError) -> Failure {
         error @ (SpawnError::Refused(_) | SpawnError::Pool(_) | SpawnError::Git(_)) => {
             Failure::refused(error.to_string())
         }
-        SpawnError::Herdr(error @ HerdrError::Unreachable(_)) => {
-            Failure::unavailable(format!("herdr: {error}")).hint("start herdr, then retry")
-        }
         SpawnError::Panes(error @ PanesError::Unreachable(_)) => {
             Failure::unavailable(error.to_string()).hint("start `tiller holder`, then retry")
         }
         SpawnError::Panes(error @ (PanesError::Refused { .. } | PanesError::Version { .. })) => {
             Failure::refused(format!("the terminal holder: {error}"))
         }
-        error @ (SpawnError::Herdr(_)
-        | SpawnError::Panes(_)
+        error @ (SpawnError::Panes(_)
         | SpawnError::Role(_)
         | SpawnError::Io(_)
         | SpawnError::Json(_)) => Failure::new("internal", 1, error.to_string()),
@@ -93,9 +88,8 @@ pub fn failure(error: SpawnError) -> Failure {
 pub struct Tools {
     pub config: SpawnConfig,
     pool: Treehouse,
-    herdr: Cli,
-    /// The terminal holder new agents launch in, when one has made its
-    /// socket in this home; else herdr.
+    /// The terminal holder agents run in, when one has made its socket in
+    /// this home.
     holder: Option<HolderLink>,
     scanner: GitScanner,
     listeners: Lavish,
@@ -124,32 +118,6 @@ pub(super) fn absolute_home(home: &Path) -> Result<PathBuf, Failure> {
     Ok(std::path::absolute(home)?.components().collect())
 }
 
-/// The herdr `tiller spawn` drives: `spawn.herdr`, with `spawn.herdr_socket`
-/// for `workspace.move`.
-fn herdr_cli(paths: &Paths) -> Cli {
-    let herdr = Cli::local().program(words(&paths.herdr));
-    match &paths.herdr_socket {
-        Some(socket) => herdr.socket(socket),
-        None => herdr,
-    }
-}
-
-/// The herdr every command and the daemon drive: `TILLER_HERDR` when set
-/// (tests and labs; the program only, socket and all replaced), else
-/// `spawn.herdr` with `spawn.herdr_socket`.
-pub fn resolve_herdr(paths: &Paths) -> Cli {
-    match crate::daemon::env_command("TILLER_HERDR") {
-        Some(program) => Cli::local().program(program),
-        None => herdr_cli(paths),
-    }
-}
-
-/// The herdr command the daemon, `tiller peer serve` and `tiller doctor`
-/// reach: `TILLER_HERDR` when set (tests and labs), else `spawn.herdr`.
-pub fn herdr_program(paths: &Paths) -> Vec<OsString> {
-    crate::daemon::env_command("TILLER_HERDR").unwrap_or_else(|| words(&paths.herdr))
-}
-
 /// The review page tool `tiller spawn` ends pages with and the daemon reads
 /// their annotations from: `TILLER_LAVISH_AXI` when set (tests and labs),
 /// else `spawn.lavish`.
@@ -164,31 +132,15 @@ pub fn lavish_from_config(table: &toml::Table) -> Result<(Vec<OsString>, Vec<Str
     Ok((lavish_program(&paths), paths.review_allowed_hosts))
 }
 
-/// The daemon's and `tiller peer serve`'s herdr, from the `[spawn]` table of
-/// `config.toml`: the one `tiller spawn` drives, unless `TILLER_HERDR`
-/// replaces it, socket and all.
-pub fn configured_herdr(app: &App) -> Result<Cli, Failure> {
-    herdr_from_config(&load_config(app)?)
-}
-
-/// [`configured_herdr`] from a `config.toml` already read.
-pub fn herdr_from_config(table: &toml::Table) -> Result<Cli, Failure> {
-    let paths = Paths::from_table(table).map_err(failure)?;
-    Ok(resolve_herdr(&paths))
-}
-
 impl Tools {
     pub fn load(app: &App) -> Result<Self, Failure> {
         let config = SpawnConfig::from_table(&load_config(app)?).map_err(failure)?;
-        let herdr = resolve_herdr(&config.spawn);
         let scratch = config.spawn.scratch_dir().map_err(failure)?;
         let tiller_home = absolute_home(&app.home)?;
-        // A home whose holder has made its socket launches new agents
-        // there; agents already in herdr stay in herdr.
+        // A home whose holder has made no socket launches nothing.
         let holder = HolderLink::present(&tiller_home).then(|| HolderLink::new(&tiller_home));
         Ok(Self {
             pool: Treehouse::new(words(&config.spawn.treehouse)),
-            herdr,
             holder,
             scanner: GitScanner::new(),
             listeners: Lavish::new(
@@ -218,11 +170,15 @@ impl Tools {
         &self.tiller_home
     }
 
+    /// The holder the pane controls reach.
+    pub fn holder(&self) -> tiller_agents::pane::Holder<'_> {
+        tiller_agents::pane::Holder::new(self.holder.as_ref().map(|holder| holder as &dyn Panes))
+    }
+
     pub fn world(&self, ram_free_mb: Option<i64>, disk_free_mb: Option<i64>) -> World<'_> {
         World {
             config: &self.config,
             pool: &self.pool,
-            herdr: &self.herdr,
             panes: self.holder.as_ref().map(|holder| holder as &dyn Panes),
             scanner: &self.scanner,
             listeners: &self.listeners,
@@ -350,7 +306,7 @@ pub fn done(
 }
 
 /// `tiller orchestrator start <project>`: the live orchestrator, or a new
-/// one launched in the project's herdr workspace. With `restart`, the live
+/// one launched in a terminal holder pane. With `restart`, the live
 /// one is stopped first and replaced.
 pub fn orchestrator_start(app: &App, project: &str, restart: bool) -> Done {
     let tools = Tools::load(app)?;
@@ -627,8 +583,7 @@ fn refused(failure: Failure) -> StartError {
 }
 
 /// `tiller agent focus <run|session>`: focuses the agent's pane on this
-/// host, in the attach clients of the terminal holder or in the herdr
-/// client. Writes nothing.
+/// host, in the attach clients of the terminal holder. Writes nothing.
 pub fn focus(app: &App, target: &str) -> Done {
     app.require_owner("tiller agent focus")?;
     let tools = Tools::load(app)?;
@@ -669,12 +624,7 @@ pub fn focus(app: &App, target: &str) -> Done {
             host.label
         )));
     }
-    tools
-        .herdr
-        .focus_agent(&pane)
-        .map_err(|error| failure(SpawnError::Herdr(error)))?;
-    Ok(Outcome::read(json!({
-        "session_id": session.id,
-        "pane_id": pane,
-    })))
+    Err(Failure::refused(format!(
+        "the pane {pane} is not in the terminal holder; tiller agent focus reaches holder panes only"
+    )))
 }

@@ -176,11 +176,11 @@ mod tests {
         let raise = app.raise_command();
         assert_eq!(raise.get_program(), "open");
         assert_eq!(raise.get_args().collect::<Vec<_>>(), ["-a", "Ghostty"]);
-        let command: Vec<OsString> = vec!["/home/user/bin/herdr".into()];
+        let command: Vec<OsString> = vec!["/home/user/bin/tiller".into()];
         let open = app.open_command(&command);
         assert_eq!(
             open.get_args().collect::<Vec<_>>(),
-            ["-na", "Ghostty", "--args", "-e", "/home/user/bin/herdr"]
+            ["-na", "Ghostty", "--args", "-e", "/home/user/bin/tiller"]
         );
         let open = MacApp::new("WezTerm")
             .exec(vec!["start".into(), "--".into()])
@@ -193,7 +193,7 @@ mod tests {
                 "--args",
                 "start",
                 "--",
-                "/home/user/bin/herdr"
+                "/home/user/bin/tiller"
             ]
         );
     }

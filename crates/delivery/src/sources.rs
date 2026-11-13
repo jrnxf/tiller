@@ -28,7 +28,7 @@ use tiller_core::state::outbox::{NewMessage, live_orchestrator};
 use tiller_core::state::runs::live_session;
 use tiller_core::state::{get, list};
 use tiller_core::{Actor, Ctx, Store, Timestamp};
-use tiller_herdr::poller::{PollError, Source};
+use tiller_poll::{PollError, Source};
 
 /// How often the pages are read: every 30 s (`protocol.md` 3.5).
 pub const PAGES_INTERVAL: Duration = Duration::from_secs(30);

@@ -1,7 +1,7 @@
 //! Reads a Claude Code pane's composer from its visible viewport, so delivery
 //! types only into a composer it has proved empty (`protocol.md` 3.3).
 //!
-//! The rule is Firstmate's herdr backend's: `empty` is the one verdict that
+//! The rule is Firstmate's: `empty` is the one verdict that
 //! lets anything be typed, so every doubt resolves away from it. Claude Code
 //! 2.x draws its composer as a full-width `─` rule, a row starting with `❯`
 //! and a no-break space, and another `─` rule, with only its footer below. A
@@ -267,7 +267,6 @@ mod tests {
     use super::*;
 
     fn fixture(name: &str) -> Composer {
-        // The herdr crate keeps the frozen snapshots of these fixtures.
         let path = format!(
             "{}/tests/fixtures/claude/{name}.ansi",
             env!("CARGO_MANIFEST_DIR")
@@ -275,8 +274,8 @@ mod tests {
         classify(&std::fs::read_to_string(path).unwrap())
     }
 
-    // Each fixture is a real Claude Code 2.1.312 viewport read through herdr
-    // 0.9.5 in an isolated lab session, with paths and names scrubbed.
+    // Each fixture is a real Claude Code 2.1.312 viewport, 119 columns wide,
+    // in an isolated lab session, with paths and names scrubbed.
 
     #[test]
     fn idle_claude_composer_is_empty() {

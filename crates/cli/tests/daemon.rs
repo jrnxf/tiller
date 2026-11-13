@@ -3,7 +3,7 @@
 //! newer than the binary.
 //!
 //! Each daemon runs with an empty `PATH` and helper programs that do not
-//! exist, so no test ever reaches a real herdr server, `gh` or `quota-axi`.
+//! exist, so no test ever reaches a real `gh` or `quota-axi`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -26,16 +26,10 @@ struct Daemon {
 }
 
 fn spawn(world: &World, args: &[&str]) -> Running {
-    Running::new(
-        daemon_command(world)
-            .args(args)
-            .env("TILLER_HERDR", "/nonexistent/herdr")
-            .spawn()
-            .unwrap(),
-    )
+    Running::new(daemon_command(world).args(args).spawn().unwrap())
 }
 
-/// The daemon command without `TILLER_HERDR`, so `config.toml` names herdr.
+/// The daemon command, with an empty `PATH` and a missing `quota-axi`.
 fn daemon_command(world: &World) -> Command {
     let empty = world.dir.path().join("empty-path");
     std::fs::create_dir_all(&empty).unwrap();
@@ -43,7 +37,6 @@ fn daemon_command(world: &World) -> Command {
     command
         .args(["daemon", "--port", "0"])
         .env("PATH", &empty)
-        .env_remove("TILLER_HERDR")
         .env("TILLER_QUOTA_AXI", "/nonexistent/quota-axi")
         .env("TILLER_LOG", "warn")
         .stdin(Stdio::null())
@@ -138,7 +131,6 @@ fn a_db_other_than_the_home_database_is_refused() {
     // The environment variable is the same flag.
     let mut child = Running::new(
         daemon_command(&world)
-            .env("TILLER_HERDR", "/nonexistent/herdr")
             .env("TILLER_DB", &other)
             .spawn()
             .unwrap(),
@@ -172,7 +164,7 @@ fn every_poller_is_registered_when_the_daemon_says_it_is_listening() {
             .collect();
         // The first poller, the reconcile loop and one from the middle of the
         // list `workers::start` spawns.
-        for expected in ["herdr:local", "reconcile", "memory_loads"] {
+        for expected in ["holder", "reconcile", "memory_loads"] {
             assert!(sources.contains(&expected), "{expected} in {sources:?}");
         }
         assert!(terminate(&mut daemon).success());
@@ -480,119 +472,10 @@ fn a_daemon_leaves_a_home_owned_by_another_system_uninitialized() {
     assert!(terminate(&mut daemon).success());
 }
 
+/// Only `[spawn]` is read, and a retired herdr key there is no bar: the
+/// daemon starts and names it (`terminal-holder.md` 11).
 #[test]
-fn the_daemon_drives_the_herdr_spawn_names() {
-    let world = World::initialized();
-    // A herdr command with a leading argument, like a named session's
-    // wrapper; it records every call and answers none.
-    let calls = world.dir.path().join("herdr-calls");
-    let herdr = world.dir.path().join("herdr");
-    std::fs::write(
-        &herdr,
-        format!("#!/bin/sh\necho \"$*\" >> '{}'\nexit 1\n", calls.display()),
-    )
-    .unwrap();
-    std::fs::set_permissions(&herdr, std::fs::Permissions::from_mode(0o755)).unwrap();
-    world.must(&[
-        "config",
-        "set",
-        "spawn.herdr",
-        &format!("[\"{}\", \"lab\"]", herdr.display()),
-    ]);
-
-    // Every failed call logs; nothing reads stderr here, so it must not fill.
-    let child = Running::new(
-        daemon_command(&world)
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
-    let mut daemon = Daemon { child, port: 0 };
-    let deadline = Instant::now() + WAIT;
-    let seen = loop {
-        let seen = std::fs::read_to_string(&calls).unwrap_or_default();
-        if !seen.is_empty() || Instant::now() > deadline {
-            break seen;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    };
-    assert!(terminate(&mut daemon).success());
-    let first = seen
-        .lines()
-        .next()
-        .unwrap_or_else(|| panic!("the daemon never ran spawn.herdr"));
-    assert!(first.starts_with("lab "), "{seen}");
-}
-
-/// A herdr stand-in that records its arguments, led by `name`.
-fn recording_herdr(world: &World, name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-    let calls = world.dir.path().join(format!("{name}-calls"));
-    let herdr = world.dir.path().join(name);
-    std::fs::write(
-        &herdr,
-        format!("#!/bin/sh\necho \"$*\" >> '{}'\nexit 1\n", calls.display()),
-    )
-    .unwrap();
-    std::fs::set_permissions(&herdr, std::fs::Permissions::from_mode(0o755)).unwrap();
-    (herdr, calls)
-}
-
-fn wait_for_file(path: &std::path::Path) -> bool {
-    let deadline = Instant::now() + WAIT;
-    while !path.exists() {
-        if Instant::now() > deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    true
-}
-
-#[test]
-fn the_daemon_follows_a_changed_spawn_herdr_without_a_restart() {
-    let world = World::initialized();
-    let (first, first_calls) = recording_herdr(&world, "first");
-    let (second, second_calls) = recording_herdr(&world, "second");
-    let set = |herdr: &std::path::Path| {
-        world.must(&[
-            "config",
-            "set",
-            "spawn.herdr",
-            &format!("[\"{}\"]", herdr.display()),
-        ]);
-    };
-    set(&first);
-    let child = Running::new(
-        daemon_command(&world)
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
-    let mut daemon = Daemon { child, port: 0 };
-    assert!(
-        wait_for_file(&first_calls),
-        "the daemon never ran spawn.herdr"
-    );
-
-    set(&second);
-    let followed = wait_for_file(&second_calls);
-    // A half-written table keeps the herdr in use rather than blinding the
-    // daemon.
-    std::fs::write(world.home().join("config.toml"), "[spawn\n").unwrap();
-    std::thread::sleep(Duration::from_millis(1500));
-    assert!(
-        daemon.child.try_wait().unwrap().is_none(),
-        "the daemon died"
-    );
-    assert!(terminate(&mut daemon).success());
-    assert!(
-        followed,
-        "the daemon kept driving the herdr it started with"
-    );
-}
-
-#[test]
-fn the_daemon_reads_only_spawn_and_needs_its_herdr() {
+fn the_daemon_reads_only_spawn_and_warns_of_a_retired_key() {
     let world = World::initialized();
     // Only [spawn] is read: a dispatch table spawn would refuse is no bar.
     std::fs::write(
@@ -604,18 +487,20 @@ fn the_daemon_reads_only_spawn_and_needs_its_herdr() {
     assert!(terminate(&mut daemon).success());
 
     std::fs::write(world.home().join("config.toml"), "[spawn]\nherdr = []\n").unwrap();
-    let mut daemon = Running::new(daemon_command(&world).spawn().unwrap());
-    let status = wait(&mut daemon);
-    assert_eq!(status.code(), Some(1));
+    let mut daemon = start(&world);
+    assert!(terminate(&mut daemon).success());
     let mut stderr = String::new();
     daemon
+        .child
         .stderr
         .take()
         .unwrap()
         .read_to_string(&mut stderr)
         .unwrap();
-    assert!(stderr.contains("spawn: herdr names a command"), "{stderr}");
-    assert!(info(&world).is_none());
+    assert!(
+        stderr.contains("config.toml names a herdr key") && stderr.contains("spawn.herdr"),
+        "{stderr}"
+    );
 }
 
 /// `tiller board --login` names each `--allow-host` name with an https link;
@@ -692,7 +577,6 @@ fn the_login_code_signs_in_at_an_allowed_host_until_sign_out() {
     let mut child = Running::new(
         daemon_command(&world)
             .args(["--allow-host", "tiller.example.com"])
-            .env("TILLER_HERDR", "/nonexistent/herdr")
             .env("TILLER_LOG", "trace")
             .spawn()
             .unwrap(),

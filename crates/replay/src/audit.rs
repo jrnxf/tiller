@@ -27,8 +27,8 @@ const LEAVING: &[&str] = &[
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Audit {
-    /// The fake herdr's calls, by verb.
-    pub herdr_calls: BTreeMap<String, usize>,
+    /// The fake holder's calls, by verb.
+    pub holder_calls: BTreeMap<String, usize>,
     pub leases_taken: usize,
     pub leases_returned: usize,
     /// Events the replay wrote, by kind.
@@ -60,16 +60,18 @@ impl Audit {
         let root = &sandbox.root;
         let conn = sandbox.store.conn();
 
-        for call in sandbox.herdr.calls() {
+        for call in sandbox.holder.calls() {
             let verb = call
                 .split_whitespace()
                 .next()
                 .unwrap_or_default()
                 .to_owned();
-            if verb == "send_text" {
-                // A pane send launches a script; it must be one spawn wrote
-                // into the sandbox.
-                for path in call.split('\'').filter(|part| part.starts_with('/')) {
+            if verb == "spawn" {
+                // A spawn runs a program (`spawn <key> <program> <args>`) on
+                // a launch script; each path it is given must be one spawn
+                // wrote into the sandbox.
+                let args = call.split_whitespace().skip(3);
+                for path in args.filter(|part| part.starts_with('/')) {
                     if !Path::new(path).starts_with(root) {
                         audit
                             .findings
@@ -77,7 +79,7 @@ impl Audit {
                     }
                 }
             }
-            *audit.herdr_calls.entry(verb).or_default() += 1;
+            *audit.holder_calls.entry(verb).or_default() += 1;
         }
 
         let leases = sandbox.pool.leases();

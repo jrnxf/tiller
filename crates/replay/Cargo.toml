@@ -23,9 +23,9 @@ tempfile.workspace = true
 thiserror.workspace = true
 tiller-agents.workspace = true
 tiller-core.workspace = true
-# The fake herdr stands in for every pane: spawn's pane opens and sends land
-# in its call log, never on a real herdr server.
-tiller-herdr = { workspace = true, features = ["testing"] }
+# The fake terminal holder stands in for every pane: spawn's pane opens and
+# sends land in its call log, never in a real holder.
+tiller-panes = { workspace = true, features = ["testing"] }
 tiller-observe.workspace = true
 tiller-reconcile.workspace = true
 toml.workspace = true

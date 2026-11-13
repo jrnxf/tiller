@@ -6,9 +6,8 @@
 use std::path::{Component, Path};
 
 /// The terminal app "Open in terminal" brings to the front
-/// (`terminal-holder.md` 11.1). `herdr.terminal` is the key it replaces.
+/// (`terminal-holder.md` 11.1).
 pub const ATTACH_TERMINAL: &str = "attach.terminal";
-pub const HERDR_TERMINAL: &str = "herdr.terminal";
 pub const STOP_HOOK_MODE: &str = "stop_hook_mode";
 pub const FEDERATION_ACCEPT: &str = "federation.accept";
 pub const MEMORY_REMOTE: &str = "memory.remote";
@@ -19,9 +18,8 @@ pub const CURATOR_TIMEOUT: &str = "learning.curator_timeout_minutes";
 pub const EVALS_DIR: &str = "learning.evals_dir";
 
 /// Every key here, in the order the board lists them.
-pub const KEYS: [&str; 10] = [
+pub const KEYS: [&str; 9] = [
     ATTACH_TERMINAL,
-    HERDR_TERMINAL,
     STOP_HOOK_MODE,
     FEDERATION_ACCEPT,
     MEMORY_REMOTE,
@@ -164,7 +162,7 @@ pub fn check(key: &str, value: &str, host: Host<'_>) -> Result<toml::Value, Stri
     plain(key, value)?;
     let text = |value: &str| Ok(toml::Value::String(value.to_owned()));
     match key {
-        ATTACH_TERMINAL | HERDR_TERMINAL => {
+        ATTACH_TERMINAL => {
             if value.is_empty() {
                 return Err(format!("{key} names the terminal app a pane opens in"));
             }
@@ -245,7 +243,6 @@ mod tests {
     #[test]
     fn each_key_takes_the_type_its_reader_takes() {
         assert_eq!(ok(ATTACH_TERMINAL, "Ghostty"), "Ghostty".into());
-        assert_eq!(ok(HERDR_TERMINAL, "Ghostty"), "Ghostty".into());
         assert_eq!(ok(STOP_HOOK_MODE, "block-once"), "block-once".into());
         assert_eq!(ok(FEDERATION_ACCEPT, "false"), false.into());
         assert_eq!(ok(SAMPLE_EVERY, "5"), 5.into());
@@ -259,9 +256,8 @@ mod tests {
 
     #[test]
     fn values_a_reader_would_refuse_are_refused_here() {
-        assert!(refused(HERDR_TERMINAL, "").contains("names the terminal"));
         assert!(refused(ATTACH_TERMINAL, "").contains("names the terminal"));
-        assert!(refused(HERDR_TERMINAL, " Ghostty").contains("spaces at the ends"));
+        assert!(refused(ATTACH_TERMINAL, " Ghostty").contains("spaces at the ends"));
         assert!(refused(STOP_HOOK_MODE, "block once").contains("off, observe or block-once"));
         assert!(refused(STOP_HOOK_MODE, "").contains("off, observe"));
         assert!(refused(FEDERATION_ACCEPT, "yes").contains("true or false"));

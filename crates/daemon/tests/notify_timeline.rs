@@ -1,20 +1,41 @@
 //! What the card timeline says about an owner notification (B6): the real
-//! notifier, a fake herdr that refuses the send, and the daemon's timeline
+//! notifier, a fake `[notify] command` that refuses the send, and the daemon's timeline
 //! read. A failed send must not read as a delivered notification.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tiller_core::domain::{AttentionKind, Run};
 use tiller_core::state::attention::NewAttention;
 use tiller_core::state::get;
 use tiller_daemon::views::timeline;
-use tiller_delivery::notify::{Notifier, ViaHerdr};
-use tiller_herdr::fake::FakeHerdr;
-use tiller_herdr::testing::{Fleet, at};
+
+use tiller_delivery::notify::{Note, Notifier, Notify};
+use tiller_panes::testing::{Fleet, at};
+
+/// The owner's notify command, which takes every send unless it refuses.
+#[derive(Clone, Default)]
+struct Command(Arc<AtomicBool>);
+
+impl Command {
+    fn refuse(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+impl Notify for Command {
+    fn notify(&self, _note: &Note) -> Result<(), String> {
+        if self.0.load(Ordering::SeqCst) {
+            return Err("the notify command exited 1".to_owned());
+        }
+        Ok(())
+    }
+}
 
 struct World {
     fleet: Fleet,
-    herdr: FakeHerdr,
-    notifier: Notifier<ViaHerdr<FakeHerdr>>,
+    command: Command,
+    notifier: Notifier<Command>,
     card: String,
 }
 
@@ -22,14 +43,13 @@ impl World {
     fn new() -> Self {
         let mut fleet = Fleet::new();
         fleet.worker("w2:p1");
-        let herdr = FakeHerdr::new(fleet.dir.path().join("herdr.json"));
-        fleet.place(&herdr);
+        let command = Command::default();
         let run = fleet.workers[0].1.clone();
         let card = get::<Run>(fleet.store.conn(), "run", &run).unwrap().card_id;
         Self {
-            notifier: Notifier::new(fleet.open(), ViaHerdr(herdr.clone())),
+            notifier: Notifier::new(fleet.open(), command.clone()),
             fleet,
-            herdr,
+            command,
             card,
         }
     }
@@ -64,9 +84,9 @@ impl World {
 }
 
 #[test]
-fn a_notification_herdr_refused_does_not_read_as_sent() {
+fn a_notification_the_command_refused_does_not_read_as_sent() {
     let mut w = World::new();
-    w.herdr.refuse("notify");
+    w.command.refuse();
     w.open_decision();
     let report = w.notifier.pass(at(4)).unwrap();
     assert_eq!(report.failed.len(), 1, "{report:?}");
@@ -78,7 +98,7 @@ fn a_notification_herdr_refused_does_not_read_as_sent() {
 }
 
 #[test]
-fn a_notification_herdr_took_reads_as_sent() {
+fn a_notification_the_command_took_reads_as_sent() {
     let mut w = World::new();
     w.open_decision();
     assert_eq!(w.notifier.pass(at(4)).unwrap().notified.len(), 1);

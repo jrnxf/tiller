@@ -148,7 +148,7 @@ pub fn tag(display_id: &str) -> String {
 }
 
 /// Resolves a run: a ULID or short form, `<display id> <role>` (`alpha-42
-/// build`), or a herdr name (`alpha-42-build`, `alpha-42-build-2`).
+/// build`), or a run name (`alpha-42-build`, `alpha-42-build-2`).
 ///
 /// A role without an attempt means the card's active run of that role, else
 /// the newest.

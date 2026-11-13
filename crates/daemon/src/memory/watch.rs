@@ -48,7 +48,7 @@ use serde::{Deserialize, Serialize};
 use tiller_core::memory::sha256_hex;
 use tiller_core::state::memory_repo::TillerCommit;
 use tiller_core::{Actor, Ctx, Error, Result, Store, Timestamp};
-use tiller_herdr::poller::{PollError, Source};
+use tiller_poll::{PollError, Source};
 
 use super::apply::{Repo, TryLock, checked};
 

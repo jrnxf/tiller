@@ -6,7 +6,6 @@ members = [
     "crates/core",
     "crates/daemon",
     "crates/delivery",
-    "crates/herdr",
     "crates/holder",
     "crates/observe",
     "crates/panes",
@@ -33,7 +32,6 @@ tiller-agents = { path = "crates/agents" }
 tiller-core = { path = "crates/core" }
 tiller-daemon = { path = "crates/daemon" }
 tiller-delivery = { path = "crates/delivery" }
-tiller-herdr = { path = "crates/herdr" }
 tiller-holder = { path = "crates/holder" }
 tiller-observe = { path = "crates/observe" }
 tiller-panes = { path = "crates/panes" }

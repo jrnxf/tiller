@@ -8,11 +8,11 @@
 
 #![allow(clippy::unwrap_used)]
 
-use tiller_herdr::composer::classify;
+use tiller_panes::composer::classify;
 
 fn fixture(name: &str) -> String {
     let path = format!(
-        "{}/../panes/tests/fixtures/claude/{name}.ansi",
+        "{}/tests/fixtures/claude/{name}.ansi",
         env!("CARGO_MANIFEST_DIR")
     );
     std::fs::read_to_string(path).unwrap()

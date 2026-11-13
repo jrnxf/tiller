@@ -441,7 +441,6 @@ fn applied(
         }));
     let hands = Hands {
         starter: config.orchestrators.as_deref(),
-        herdr: config.herdr.as_ref(),
         holder: config.holder.as_ref(),
         mirrors,
     };

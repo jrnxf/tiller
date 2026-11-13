@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use tiller_core::state::caches::QuotaReading;
 use tiller_core::{Actor, Ctx, Store, Timestamp};
-use tiller_herdr::poller::{PollError, Source};
+use tiller_poll::{PollError, Source};
 
 /// How often the feed reads.
 pub const EVERY: Duration = Duration::from_secs(300);
@@ -395,7 +395,7 @@ mod tests {
         let fixture = dir.path().join("out.json");
         std::fs::write(&fixture, FIXTURE).unwrap();
         let good = script(dir.path(), &format!("cat {}", fixture.display()));
-        let fleet = tiller_herdr::testing::Fleet::new();
+        let fleet = tiller_panes::testing::Fleet::new();
         let mut feed = Feed::new(fleet.open(), good, vec!["claude".into()]);
         let first: Timestamp = "2026-11-02T14:00:00.000Z".parse().unwrap();
         feed.read_all(first).unwrap();

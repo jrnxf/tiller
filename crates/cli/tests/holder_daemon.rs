@@ -36,8 +36,6 @@ fn launchable(world: &World) {
         std::fs::create_dir_all(&dir).unwrap();
         world.must(&["config", "set", key, dir.to_str().unwrap()]);
     }
-    // No herdr runs: a launch that reached it would fail.
-    world.set_env("TILLER_HERDR", "/nonexistent/herdr");
     let claude = root.join("claude-stub");
     script(
         &claude,

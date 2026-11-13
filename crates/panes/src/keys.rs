@@ -3,8 +3,7 @@
 //! mode.
 //!
 //! The list is the one `board/src/components/board/terminal-keys.ts` and
-//! `crates/daemon/src/prompt.rs` send, with herdr's spelling, so the board
-//! does not change. A name is optional modifier prefixes, `ctrl+`, `alt+`
+//! `crates/daemon/src/prompt.rs` send. A name is optional modifier prefixes, `ctrl+`, `alt+`
 //! and `shift+`, and then a named key or one printable character. Space is
 //! always `space`, never a literal space.
 //!

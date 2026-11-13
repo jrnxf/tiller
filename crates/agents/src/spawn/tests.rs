@@ -1,5 +1,5 @@
 //! Spawn, `tiller done` and cleanup against real git repositories, a fake
-//! treehouse pool, the fake herdr and a file-backed `state.db`.
+//! treehouse pool, the fake terminal holder and a file-backed `state.db`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
@@ -15,8 +15,9 @@ use tiller_core::state::caches::QuotaReading;
 use tiller_core::state::cards::NewCard;
 use tiller_core::state::records::NewArtifact;
 use tiller_core::{Actor, Ctx, Timestamp};
-use tiller_herdr::fake::{FakeHerdr, Screen};
-use tiller_herdr::testing::{Fleet, owner};
+use tiller_panes::fake_claude::Screen;
+use tiller_panes::testing::{Fleet, owner};
+use tiller_panes::{FakeClaude, PaneId, Panes};
 use tiller_reconcile::git::GitScanner;
 
 use super::listeners::NoListeners;
@@ -226,14 +227,16 @@ fn config(checkout: &Path, extra: &str) -> SpawnConfig {
 }
 
 /// Project `alpha` with a live orchestrator in pane `w1:p1`, its checkout,
-/// a pool, a herdr laid out as a fresh server, and a scanner over git.
+/// a pool, a holder laid out as a fresh daemon spawned it, and a scanner
+/// over git.
 pub(crate) struct Rig {
     pub(crate) fleet: Fleet,
     pub(crate) repo: Repo,
     pub(crate) pool: FakePool,
-    pub(crate) herdr: FakeHerdr,
-    /// The terminal holder new sessions launch in; `None` launches them in
-    /// herdr.
+    /// The terminal holder, whose panes run a stand-in Claude.
+    pub(crate) holder: FakeClaude,
+    /// An in-memory holder that takes the place of `holder`, for a test
+    /// that reads its exact calls.
     pub(crate) panes: Option<tiller_panes::FakePanes>,
     pub(crate) scanner: GitScanner,
     pub(crate) listeners: FakeListeners,
@@ -252,11 +255,10 @@ macro_rules! world {
         World {
             config: &$rig.config,
             pool: &$rig.pool,
-            herdr: &$rig.herdr,
-            panes: $rig
-                .panes
-                .as_ref()
-                .map(|panes| panes as &dyn tiller_panes::Panes),
+            panes: Some(match $rig.panes.as_ref() {
+                Some(panes) => panes as &dyn tiller_panes::Panes,
+                None => &$rig.holder as &dyn tiller_panes::Panes,
+            }),
             scanner: &$rig.scanner,
             listeners: &$rig.listeners,
             tiller: &$rig.tiller,
@@ -278,8 +280,8 @@ impl Rig {
     pub(crate) fn with_config(extra: &str) -> Self {
         let fleet = Fleet::new();
         let repo = Repo::new();
-        let herdr = FakeHerdr::new(fleet.dir.path().join("herdr.json"));
-        fleet.place(&herdr);
+        let holder = FakeClaude::new(fleet.dir.path().join("holder.json"));
+        fleet.place(&holder);
         let pool = FakePool {
             slots: repo.root.path().join("pool"),
             origin: repo.origin.clone(),
@@ -294,7 +296,7 @@ impl Rig {
             fleet,
             repo,
             pool,
-            herdr,
+            holder,
             panes: None,
             scanner: GitScanner::new(),
             listeners: FakeListeners::default(),
@@ -410,13 +412,12 @@ impl Rig {
         config["projects"][dir.to_string_lossy().as_ref()][trust::FLAG] == true
     }
 
-    pub(crate) fn workspace_ids(&self) -> Vec<String> {
-        self.herdr
-            .snapshot()
-            .unwrap()
-            .workspaces
+    /// Every pane the holder has, in spawn order.
+    pub(crate) fn pane_ids(&self) -> Vec<String> {
+        self.holder
+            .panes()
             .into_iter()
-            .map(|w| w.workspace_id)
+            .map(|p| p.pane.pane.to_string())
             .collect()
     }
 
@@ -509,41 +510,29 @@ fn spawn_creates_worktree_pane_and_run() {
     assert_eq!(row.run_id.as_deref(), Some(run.id.as_str()));
     assert_eq!((row.dirty, row.unlanded_commits), (Some(false), Some(0)));
 
-    // The workspace sits right under the project's orchestrator, labelled,
-    // with the row tokens that name the session.
-    let ids = rig.workspace_ids();
-    let orchestrator = ids.iter().position(|id| id == "w1").unwrap();
-    assert_eq!(ids[orchestrator + 1], spawned.workspace_id, "{ids:?}");
-    let snapshot = rig.herdr.snapshot().unwrap();
-    let workspace = snapshot
-        .workspaces
-        .iter()
-        .find(|w| w.workspace_id == spawned.workspace_id)
-        .unwrap();
-    assert_eq!(workspace.label, spawned.label);
-    let pane = rig.herdr.fake_pane(&spawned.pane_id);
+    // The holder's pane is keyed by the session, sits in the worktree and
+    // names whose it is.
+    let pane = rig.holder.fake_pane(&spawned.pane_id).pane;
+    assert_eq!(pane.key, spawned.session.id);
+    assert_eq!(pane.cwd, spawned.worktree);
     assert_eq!(
-        pane.tokens.get("session").map(String::as_str),
+        pane.meta.get("session").map(String::as_str),
         Some(spawned.session.id.as_str())
     );
     assert_eq!(
-        pane.tokens.get("run").map(String::as_str),
+        pane.meta.get("run").map(String::as_str),
         Some(run.id.as_str())
     );
+    assert_eq!(pane.meta.get("label"), Some(&spawned.label));
 
-    // The tokens are reported before the launch line is typed, and the
-    // line runs the launch script for this run.
-    let calls = rig.herdr.calls();
-    let at = |prefix: &str| {
-        calls
-            .iter()
-            .position(|c| c.starts_with(prefix))
-            .unwrap_or_else(|| panic!("no {prefix} in {calls:?}"))
-    };
+    // The pane runs the launch script for this run, and nothing is typed.
     let script = rig.scratch.join(&run.id).join("launch.sh");
-    let line = format!("send_text {} sh '{}'", spawned.pane_id, script.display());
-    assert!(at("report_tokens") < at(&line));
-    assert!(at(&line) < at("send_enter"));
+    assert_eq!(
+        pane.argv,
+        ["/bin/sh".to_owned(), script.display().to_string()]
+    );
+    let calls = rig.holder.calls();
+    assert!(!calls.iter().any(|c| c.starts_with("input")), "{calls:?}");
 
     // The role and the brief are what the session starts from.
     let prompt = std::fs::read_to_string(rig.scratch.join(&run.id).join("prompt.md")).unwrap();
@@ -579,14 +568,9 @@ fn spawn_refuses_when_trust_cannot_be_recorded() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("workspace-trust dialog"), "{error}");
-    // Nothing was typed and the owner's config was left as it was.
-    let calls = rig.herdr.calls();
-    assert!(
-        !calls
-            .iter()
-            .any(|c| c.starts_with("create_workspace") || c.starts_with("send_text")),
-        "{calls:?}"
-    );
+    // No pane opened and the owner's config was left as it was.
+    let calls = rig.holder.calls();
+    assert!(!calls.iter().any(|c| c.starts_with("spawn")), "{calls:?}");
     assert_eq!(std::fs::read_to_string(&store).unwrap(), "{\"projects\": [");
 }
 
@@ -723,7 +707,7 @@ fn refuses_model_below_rule_without_owner_permission() {
 }
 
 /// Spawns that race from separate processes: each has its own connection,
-/// pool handle and herdr, and starts at the same instant.
+/// pool handle and holder, and starts at the same instant.
 fn race(rig: &Rig, cards: &[Card]) -> Vec<Result<Outcome>> {
     let barrier = Arc::new(Barrier::new(cards.len()));
     let servers = tempfile::tempdir_in(rig.fleet.dir.path()).unwrap();
@@ -735,7 +719,7 @@ fn race(rig: &Rig, cards: &[Card]) -> Vec<Result<Outcome>> {
                 let barrier = Arc::clone(&barrier);
                 let pool = rig.pool.clone();
                 let db = rig.fleet.db.clone();
-                let herdr_file = servers.path().join(format!("herdr-{i}.json"));
+                let holder_file = servers.path().join(format!("holder-{i}.json"));
                 let config = rig.config.clone();
                 let scratch = rig.scratch.clone();
                 let claude = rig.claude.clone();
@@ -744,15 +728,13 @@ fn race(rig: &Rig, cards: &[Card]) -> Vec<Result<Outcome>> {
                 let request = Rig::request(card, RunRole::Builder);
                 scope.spawn(move || {
                     let mut store = Store::open(&db).unwrap();
-                    let herdr = FakeHerdr::new(herdr_file);
-                    herdr.add_workspace("w1", "alpha");
-                    herdr.add_pane("w1", "w1:p1", Screen::Idle);
+                    let holder = FakeClaude::new(holder_file);
+                    holder.add_pane("w1:p1", "orchestrator", Screen::Idle);
                     let scanner = GitScanner::new();
                     let world = World {
                         config: &config,
                         pool: &pool,
-                        herdr: &herdr,
-                        panes: None,
+                        panes: Some(&holder),
                         scanner: &scanner,
                         listeners: &NoListeners,
                         tiller: &tiller,
@@ -832,7 +814,7 @@ fn spawn_refuses_below_ram_floor() {
     rig.sql("UPDATE hosts SET ram_floor_mb = 8000");
     let card = rig.card(CardKind::Ship, None);
     let ctx = rig.orchestrator();
-    let workspaces = rig.workspace_ids();
+    let panes_before = rig.pane_ids();
     let count = |rig: &Rig, table: &str| -> i64 {
         rig.fleet
             .store
@@ -852,7 +834,7 @@ fn spawn_refuses_below_ram_floor() {
         assert!(why.contains("RAM free"), "{error}");
         assert!(why.contains("8000 MB floor"), "{error}");
         assert!(rig.pool.taken().is_empty());
-        assert_eq!(rig.workspace_ids(), workspaces);
+        assert_eq!(rig.pane_ids(), panes_before);
         assert_eq!(
             (count(&rig, "runs"), count(&rig, "sessions")),
             (runs, sessions)
@@ -1327,6 +1309,7 @@ fn spawn_takes_treehouse_worktree_and_returns_it_on_cleanup() {
         Some(true)
     );
 
+    rig.holder.exit(&spawned.pane_id, 0);
     let cleaned = rig.cleanup(&run).unwrap();
     assert_eq!(cleaned.returned.as_deref(), Some(spawned.worktree.as_str()));
     assert_eq!(cleaned.closed_panes, vec![spawned.pane_id.clone()]);
@@ -1335,7 +1318,7 @@ fn spawn_takes_treehouse_worktree_and_returns_it_on_cleanup() {
         rig.pool.returned(),
         vec![(worktree.clone(), format!("tiller:{run}"))]
     );
-    assert!(!rig.workspace_ids().contains(&spawned.workspace_id));
+    assert!(!rig.pane_ids().contains(&spawned.pane_id));
     assert_eq!(rig.events("run.cleaned", &run), 1);
     let session: Session = get(rig.fleet.store.conn(), "session", &spawned.session.id).unwrap();
     assert!(session.ended_at.is_some());
@@ -1389,14 +1372,14 @@ fn cleanup_refuses_with_unlanded_commits() {
         if holding.dirty {
             std::fs::write(worktree.join("scratch.md"), "uncommitted\n").unwrap();
         }
-        if holding.live {
-            rig.herdr.set_screen(&spawned.pane_id, Screen::Idle);
+        if !holding.live {
+            rig.holder.exit(&spawned.pane_id, 0);
         }
         let ended = rig.done(&spawned.run.id, RunOutcome::Abandoned).unwrap();
         let holds = holding.unpushed || holding.dirty || holding.stash;
         assert_eq!(ended.kept.is_some(), holds, "{holding:?}");
 
-        let before = rig.herdr.calls().len();
+        let before = rig.holder.calls().len();
         let result = rig.cleanup(&spawned.run.id);
         let clean = !holds && !holding.live;
         assert_eq!(result.is_ok(), clean, "{holding:?}: {result:?}");
@@ -1408,9 +1391,11 @@ fn cleanup_refuses_with_unlanded_commits() {
                 assert!(text.contains("never removes unlanded work"), "{text}");
             }
             // A refusal closes nothing and returns nothing.
-            let calls = rig.herdr.calls();
+            let calls = rig.holder.calls();
             assert!(
-                !calls[before..].iter().any(|c| c.starts_with("close_pane")),
+                !calls[before..]
+                    .iter()
+                    .any(|c| c.starts_with("close") || c.starts_with("forget")),
                 "{holding:?}: {calls:?}"
             );
             assert!(rig.pool.returned().iter().all(|(p, _)| p != &worktree));
@@ -1464,6 +1449,7 @@ fn done_refuses_while_commits_are_unlanded() {
     git(&worktree, &["commit", "--quiet", "-m", "notes"]);
     git(&worktree, &["push", "--quiet", "origin", "HEAD:main"]);
     git(&worktree, &["fetch", "--quiet", "origin"]);
+    rig.holder.exit(&spawned.pane_id, 0);
     rig.cleanup(&spawned.run.id).unwrap();
     assert_eq!(rig.pool.returned().len(), 1);
 }
@@ -1642,13 +1628,13 @@ fn done_reports_a_builder_on_a_pr_only_from_a_fresh_reading() {
 #[test]
 fn failed_spawn_ends_the_run_and_returns_the_worktree() {
     let mut rig = Rig::new();
-    rig.herdr.refuse("create_workspace");
+    rig.holder.refuse("spawn");
     let card = rig.card(CardKind::Ship, None);
     let ctx = rig.orchestrator();
     let error = rig
         .try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
         .unwrap_err();
-    assert!(matches!(error, SpawnError::Herdr(_)), "{error}");
+    assert!(matches!(error, SpawnError::Panes(_)), "{error}");
 
     let run: Run = find(rig.fleet.store.conn(), "card_id = ?1", &[&card.id])
         .unwrap()
@@ -1671,11 +1657,7 @@ fn failed_spawn_ends_the_run_and_returns_the_worktree() {
         vec![(taken[0].0.clone(), taken[0].3.clone())]
     );
 
-    assert!(
-        rig.workspace_ids()
-            .iter()
-            .all(|id| id == "w1" || id == "w3")
-    );
+    assert_eq!(rig.pane_ids(), ["w1:p1", "w3:p1"]);
 }
 
 /// P67: the developer's own skills and slash commands stay callable in a
@@ -1861,6 +1843,7 @@ fn cleanup_without_card_leaves_no_marker() {
     rig.done(&spawned.run.id, RunOutcome::Abandoned).unwrap();
     // The card is closed and gone from the board; cleanup asks nothing of it.
     rig.sql("UPDATE cards SET state = 'closed', outcome = 'cancelled', closed_at = created_at");
+    rig.holder.exit(&spawned.pane_id, 0);
     let cleaned = rig.cleanup(&spawned.run.id).unwrap();
     assert!(cleaned.warnings.is_empty(), "{:?}", cleaned.warnings);
     // The run's launch files were its only files outside state.db.
@@ -1969,7 +1952,7 @@ fn spawn_whose_placement_fails_returns_the_unrecorded_worktree() {
 #[test]
 fn replaying_a_failed_spawn_refuses() {
     let mut rig = Rig::new();
-    rig.herdr.refuse("create_workspace");
+    rig.holder.refuse("spawn");
     let card = rig.card(CardKind::Ship, None);
     let ctx = rig.orchestrator();
     let world = world!(rig);
@@ -1981,7 +1964,7 @@ fn replaying_a_failed_spawn_refuses() {
         &world,
         request(),
     );
-    assert!(matches!(first, Err(SpawnError::Herdr(_))), "{first:?}");
+    assert!(matches!(first, Err(SpawnError::Panes(_))), "{first:?}");
     let again = spawn(
         &mut rig.fleet.store,
         &ctx,
@@ -2062,9 +2045,10 @@ fn a_failed_spawn_does_not_call_a_returned_worktree_kept() {
 #[test]
 fn a_failed_spawn_keeps_its_own_error_under_the_undo_notes() {
     let mut rig = Rig::new();
-    // The pane opens, the launch line fails, and cleanup cannot read herdr.
-    rig.herdr.refuse("send_text");
-    rig.herdr.refuse("pane");
+    // The pane may not have opened, and the holder cannot list its panes
+    // to check.
+    rig.holder.refuse("spawn");
+    rig.holder.refuse("list");
     let card = rig.card(CardKind::Ship, None);
     let ctx = rig.orchestrator();
     let error = rig
@@ -2073,9 +2057,8 @@ fn a_failed_spawn_keeps_its_own_error_under_the_undo_notes() {
     let SpawnError::Undone { error, notes } = &error else {
         panic!("expected an undo note: {error}");
     };
-    assert!(matches!(**error, SpawnError::Herdr(_)), "{error}");
-    assert!(notes.contains("the worktree was kept"), "{notes}");
-    assert!(rig.pool.returned().is_empty());
+    assert!(matches!(**error, SpawnError::Panes(_)), "{error}");
+    assert!(notes.contains("could not be checked"), "{notes}");
 }
 
 #[test]
@@ -2085,7 +2068,7 @@ fn cleaning_again_after_the_path_is_leased_again_changes_nothing() {
     let spawned = rig.spawn(&card, RunRole::Builder);
     let run = spawned.run.id.clone();
     rig.done(&run, RunOutcome::Abandoned).unwrap();
-    rig.herdr.close_pane(&spawned.pane_id).unwrap();
+    rig.holder.exit(&spawned.pane_id, 0);
     rig.cleanup(&run).unwrap();
 
     // treehouse hands the same path to a new run; its scan rewrites the row.
@@ -2101,35 +2084,6 @@ fn cleaning_again_after_the_path_is_leased_again_changes_nothing() {
         .unwrap()
         .unwrap();
     assert_eq!((row.gone_at, row.run_id), (None, None));
-}
-
-#[test]
-fn cleanup_never_closes_a_pane_another_session_holds() {
-    let mut rig = Rig::new();
-    let card = rig.card(CardKind::Ship, None);
-    let spawned = rig.spawn(&card, RunRole::Builder);
-    let run = spawned.run.id.clone();
-    rig.done(&run, RunOutcome::Abandoned).unwrap();
-    // herdr gave the run's pane id to another session's workspace, which
-    // runs an agent there.
-    rig.herdr
-        .report_tokens(
-            &spawned.pane_id,
-            &std::collections::BTreeMap::from([("session".into(), "01OTHERSESSION".into())]),
-        )
-        .unwrap();
-    rig.herdr.set_screen(&spawned.pane_id, Screen::Idle);
-
-    let cleaned = rig.cleanup(&run).unwrap();
-    assert!(cleaned.closed_panes.is_empty());
-    assert!(rig.workspace_ids().contains(&spawned.workspace_id));
-    assert!(
-        !rig.herdr
-            .calls()
-            .iter()
-            .any(|c| c.starts_with("close_pane"))
-    );
-    assert_eq!(cleaned.returned.as_deref(), Some(spawned.worktree.as_str()));
 }
 
 /// A rig whose config names the roots an orchestrator start needs, with the
@@ -2166,7 +2120,7 @@ fn start_orchestrator(
 #[test]
 fn orchestrator_start_takes_a_peer_board_and_refuses_the_fleet() {
     let (mut rig, homes) = orchestrator_rig();
-    let workspaces = rig.workspace_ids();
+    let panes_before = rig.pane_ids();
     for actor in [
         Actor::Session(rig.fleet.orchestrator_session.clone()),
         Actor::Hook,
@@ -2182,9 +2136,9 @@ fn orchestrator_start_takes_a_peer_board_and_refuses_the_fleet() {
         );
     }
     assert_eq!(
-        rig.workspace_ids(),
-        workspaces,
-        "a refused start reached herdr"
+        rig.pane_ids(),
+        panes_before,
+        "a refused start reached the holder"
     );
 
     let started = start_orchestrator(
@@ -2214,7 +2168,6 @@ fn orchestrator_restart_replaces_the_live_one_with_fresh_launch_files() {
         .unwrap()
         .value;
     let old_pane = first.pane_id.clone().unwrap();
-    rig.herdr.set_screen(&old_pane, Screen::Idle);
     rig.fleet.bind(&first.session.id, &old_pane);
 
     // Without a restart a live orchestrator is returned as it is.
@@ -2229,7 +2182,7 @@ fn orchestrator_restart_replaces_the_live_one_with_fresh_launch_files() {
         exit: std::time::Duration::from_secs(2),
         bind: std::time::Duration::from_secs(2),
         poll: std::time::Duration::from_millis(10),
-        pacing: tiller_herdr::submit::Pacing::INSTANT,
+        pacing: tiller_panes::submit::Pacing::INSTANT,
     };
     let world = world!(rig);
     let restarted = orchestrator::start(
@@ -2247,11 +2200,11 @@ fn orchestrator_restart_replaces_the_live_one_with_fresh_launch_files() {
     let old: Session = get(rig.fleet.store.conn(), "session", &first.session.id).unwrap();
     assert_eq!(old.end_reason.as_deref(), Some(orchestrator::RESTARTED));
     assert!(
-        rig.herdr
+        rig.holder
             .calls()
             .iter()
-            .any(|c| c.starts_with("close_pane") && c.contains(&old_pane)),
-        "the stopped pane was not closed"
+            .any(|c| c.starts_with("forget ") && c.contains(&old_pane)),
+        "the stopped pane was not forgotten"
     );
 
     let settings =
@@ -2269,7 +2222,6 @@ fn orchestrator_restart_of_a_retired_project_keeps_the_live_one() {
         .unwrap()
         .value;
     let pane = first.pane_id.clone().unwrap();
-    rig.herdr.set_screen(&pane, Screen::Idle);
     rig.fleet.bind(&first.session.id, &pane);
     rig.fleet.store.project_retire(&owner(), "alpha").unwrap();
 
@@ -2278,7 +2230,7 @@ fn orchestrator_restart_of_a_retired_project_keeps_the_live_one() {
         exit: std::time::Duration::from_secs(2),
         bind: std::time::Duration::from_secs(2),
         poll: std::time::Duration::from_millis(10),
-        pacing: tiller_herdr::submit::Pacing::INSTANT,
+        pacing: tiller_panes::submit::Pacing::INSTANT,
     };
     let world = world!(rig);
     let error = orchestrator::start(
@@ -2296,10 +2248,10 @@ fn orchestrator_restart_of_a_retired_project_keeps_the_live_one() {
         .unwrap();
     assert_eq!(live.id, first.session.id);
     assert!(
-        !rig.herdr
+        !rig.holder
             .calls()
             .iter()
-            .any(|c| c.starts_with("close_pane") && c.contains(&pane)),
+            .any(|c| c.starts_with("close ") && c.contains(&pane)),
         "the live pane was closed"
     );
 }
@@ -2311,14 +2263,13 @@ fn agent_stop_ends_a_live_orchestrator_and_closes_its_pane() {
         .unwrap()
         .value;
     let pane = first.pane_id.clone().unwrap();
-    rig.herdr.set_screen(&pane, Screen::Idle);
     rig.fleet.bind(&first.session.id, &pane);
     let waits = crate::control::Waits {
         interrupt: std::time::Duration::from_secs(2),
         exit: std::time::Duration::from_secs(2),
         bind: std::time::Duration::from_secs(2),
         poll: std::time::Duration::from_millis(10),
-        pacing: tiller_herdr::submit::Pacing::INSTANT,
+        pacing: tiller_panes::submit::Pacing::INSTANT,
     };
 
     // Only the owner stops an orchestrator.
@@ -2333,7 +2284,7 @@ fn agent_stop_ends_a_live_orchestrator_and_closes_its_pane() {
     .unwrap_err();
     assert!(error.to_string().contains("may not stop"), "{error}");
     assert!(
-        !rig.herdr
+        !rig.holder
             .calls()
             .contains(&format!("send_text {pane} /exit"))
     );
@@ -2369,7 +2320,6 @@ fn agent_stop_never_closes_a_pane_claude_still_holds() {
         .unwrap()
         .value;
     let pane = first.pane_id.clone().unwrap();
-    rig.herdr.set_screen(&pane, Screen::Idle);
     rig.fleet.bind(&first.session.id, &pane);
     // Its `SessionEnd` hook fired, but Claude is still in the pane.
     rig.fleet
@@ -2380,13 +2330,13 @@ fn agent_stop_never_closes_a_pane_claude_still_holds() {
             "prompt_input_exit",
         )
         .unwrap();
-    rig.herdr.ignore_exit(&pane);
+    rig.holder.ignore_exit(&pane);
     let waits = crate::control::Waits {
         interrupt: std::time::Duration::from_secs(2),
         exit: std::time::Duration::from_millis(300),
         bind: std::time::Duration::from_secs(2),
         poll: std::time::Duration::from_millis(10),
-        pacing: tiller_herdr::submit::Pacing::INSTANT,
+        pacing: tiller_panes::submit::Pacing::INSTANT,
     };
 
     let world = world!(rig);
@@ -2410,72 +2360,17 @@ fn agent_stop_never_closes_a_pane_claude_still_holds() {
         warning.contains(&format!("left pane {pane} open")),
         "{warning}"
     );
-    assert!(!rig.herdr.calls().contains(&format!("close_pane {pane}")));
+    let calls = rig.holder.calls();
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.starts_with(&format!("close {pane}"))),
+        "{calls:?}"
+    );
 }
 
 #[test]
-fn agent_stop_leaves_a_pane_another_session_now_holds() {
-    let waits = crate::control::Waits {
-        interrupt: std::time::Duration::from_secs(2),
-        exit: std::time::Duration::from_millis(300),
-        bind: std::time::Duration::from_secs(2),
-        poll: std::time::Duration::from_millis(10),
-        pacing: tiller_herdr::submit::Pacing::INSTANT,
-    };
-    // herdr gave the orchestrator's pane id to another workspace: once to an
-    // idle agent, after the orchestrator's hook ended it, and once to a bare
-    // shell while its row was still live.
-    for (ended, screen) in [(true, Screen::Idle), (false, Screen::Shell)] {
-        let (mut rig, homes) = orchestrator_rig();
-        let first = start_orchestrator(&mut rig, &homes, &owner())
-            .unwrap()
-            .value;
-        let pane = first.pane_id.clone().unwrap();
-        rig.herdr.set_screen(&pane, Screen::Idle);
-        rig.fleet.bind(&first.session.id, &pane);
-        if ended {
-            rig.fleet
-                .store
-                .session_end(
-                    &Ctx::new(Actor::Hook),
-                    &first.session.id,
-                    "prompt_input_exit",
-                )
-                .unwrap();
-        }
-        rig.herdr
-            .report_tokens(
-                &pane,
-                &std::collections::BTreeMap::from([("session".into(), "01OTHERSESSION".into())]),
-            )
-            .unwrap();
-        rig.herdr.set_screen(&pane, screen);
-
-        let world = world!(rig);
-        let stopped = crate::control::stop_agent(
-            &mut rig.fleet.store,
-            &owner(),
-            &world,
-            &waits,
-            &first.session,
-        )
-        .unwrap()
-        .value;
-        assert!(
-            stopped.stop_proof.contains("01OTHERSESSION"),
-            "{}",
-            stopped.stop_proof
-        );
-        assert_eq!(stopped.closed_pane, None);
-        assert_eq!(stopped.warning, None);
-        let calls = rig.herdr.calls();
-        assert!(!calls.contains(&format!("close_pane {pane}")));
-        assert!(!calls.contains(&format!("send_text {pane} /exit")));
-    }
-}
-
-#[test]
-fn orchestrator_start_launches_in_a_new_workspace() {
+fn orchestrator_start_launches_a_pane_in_the_checkout() {
     let (mut rig, homes) = orchestrator_rig();
     let started = start_orchestrator(&mut rig, &homes, &owner()).unwrap();
     assert!(!started.replayed);
@@ -2493,13 +2388,19 @@ fn orchestrator_start_launches_in_a_new_workspace() {
     );
     assert!(value.warning.is_none(), "{:?}", value.warning);
 
-    // A new workspace in the checkout, named for the project, with the
-    // tokens that name the session.
-    let workspace = value.workspace_id.clone().unwrap();
-    assert!(rig.workspace_ids().contains(&workspace));
-    let tokens = rig.herdr.fake_pane(&pane).tokens;
-    assert_eq!(tokens.get("role").map(String::as_str), Some("orchestrator"));
-    assert_eq!(tokens.get("project").map(String::as_str), Some("alpha"));
+    // A new pane in the checkout, keyed by the session, whose meta names
+    // the project and the role.
+    let record = rig.holder.fake_pane(&pane).pane;
+    assert_eq!(record.key, value.session.id);
+    assert_eq!(record.cwd, rig.repo.checkout.display().to_string());
+    assert_eq!(
+        record.meta.get("role").map(String::as_str),
+        Some("orchestrator")
+    );
+    assert_eq!(
+        record.meta.get("project").map(String::as_str),
+        Some("alpha")
+    );
 
     // The home exists, private, and the launch files are the worker form
     // with no run and no brief.
@@ -2528,17 +2429,16 @@ fn orchestrator_start_launches_in_a_new_workspace() {
     }
     assert!(settings.contains(&home.to_string_lossy().into_owned()));
 
-    // The tokens go out before the launch line, which runs the script.
-    let calls = rig.herdr.calls();
-    let at = |prefix: &str| {
-        calls
-            .iter()
-            .position(|c| c.starts_with(prefix))
-            .unwrap_or_else(|| panic!("no {prefix} in {calls:?}"))
-    };
-    let line = format!("send_text {pane} sh '{}'", dir.join("launch.sh").display());
-    assert!(at("report_tokens") < at(&line));
-    assert!(at(&line) < at("send_enter"));
+    // The pane runs the script, and nothing is typed.
+    assert_eq!(
+        record.argv,
+        [
+            "/bin/sh".to_owned(),
+            dir.join("launch.sh").display().to_string()
+        ]
+    );
+    let calls = rig.holder.calls();
+    assert!(!calls.iter().any(|c| c.starts_with("input")), "{calls:?}");
 
     // Spawn now finds a live orchestrator.
     let live = tiller_core::state::outbox::live_orchestrator(rig.fleet.store.conn(), "alpha")
@@ -2551,15 +2451,15 @@ fn orchestrator_start_launches_in_a_new_workspace() {
 fn a_second_orchestrator_start_returns_the_first() {
     let (mut rig, homes) = orchestrator_rig();
     let first = start_orchestrator(&mut rig, &homes, &owner()).unwrap();
-    let workspaces = rig.workspace_ids().len();
+    let panes_before = rig.pane_ids().len();
     let daemon = Ctx::new(Actor::Daemon);
     let second = start_orchestrator(&mut rig, &homes, &daemon).unwrap();
     assert!(second.replayed);
     assert!(second.events.is_empty());
     assert_eq!(second.value.session.id, first.value.session.id);
-    assert_eq!(second.value.workspace_id, first.value.workspace_id);
+    assert_eq!(second.value.pane_id, first.value.pane_id);
     assert!(second.value.warning.is_none(), "{:?}", second.value.warning);
-    assert_eq!(rig.workspace_ids().len(), workspaces, "no second workspace");
+    assert_eq!(rig.pane_ids().len(), panes_before, "no second pane");
 }
 
 #[test]
@@ -2570,12 +2470,12 @@ fn a_keyed_orchestrator_start_retried_replays_the_first() {
     assert!(!first.replayed);
     // The retry answers with the first, and launches nothing.
     let id = first.value.session.id.clone();
-    let workspaces = rig.workspace_ids().len();
+    let panes_before = rig.pane_ids().len();
     let retry = start_orchestrator(&mut rig, &homes, &keyed()).unwrap();
     assert!(retry.replayed);
     assert_eq!(retry.value.session.id, id);
     assert!(!retry.events.is_empty() && first.events.ends_with(&retry.events));
-    assert_eq!(rig.workspace_ids().len(), workspaces, "no second workspace");
+    assert_eq!(rig.pane_ids().len(), panes_before, "no second pane");
 
     // Once it has ended, as a failed launch ends it, a retry starts afresh.
     rig.fleet.store.session_end(&owner(), &id, "x").unwrap();
@@ -2589,69 +2489,68 @@ fn a_keyed_orchestrator_start_retried_replays_the_first() {
     );
 }
 
-/// The fake herdr, calling `hook` after each `create_workspace` and
-/// `send_text` it passes on, with the call and its text: another request's
-/// write lands mid-flight.
+/// A holder, calling `hook` after each `spawn` and `input` it passes on,
+/// with the call and its key or text: another request's write lands
+/// mid-flight.
 pub(crate) struct Hooked<'a> {
-    pub(crate) herdr: &'a FakeHerdr,
-    pub(crate) hook: &'a dyn Fn(&str, &str),
+    pub(crate) panes: &'a dyn Panes,
+    pub(crate) hook: &'a (dyn Fn(&str, &str) + Sync),
 }
 
-impl tiller_herdr::client::Herdr for Hooked<'_> {
-    fn snapshot(&self) -> tiller_herdr::client::Result<tiller_herdr::client::Snapshot> {
-        self.herdr.snapshot()
+impl Panes for Hooked<'_> {
+    fn spawn(&self, req: &tiller_panes::Spawn) -> tiller_panes::Result<tiller_panes::Pane> {
+        let pane = self.panes.spawn(req)?;
+        (self.hook)("spawn", &req.key);
+        Ok(pane)
     }
-    fn pane(
+    fn list(&self) -> tiller_panes::Result<tiller_panes::Listing> {
+        self.panes.list()
+    }
+    fn get(&self, pane: &PaneId) -> tiller_panes::Result<Option<tiller_panes::Pane>> {
+        self.panes.get(pane)
+    }
+    fn screen(
         &self,
-        pane_id: &str,
-    ) -> tiller_herdr::client::Result<Option<tiller_herdr::client::PaneInfo>> {
-        self.herdr.pane(pane_id)
+        pane: &PaneId,
+        read: tiller_panes::Read,
+        format: tiller_panes::Format,
+    ) -> tiller_panes::Result<tiller_panes::Screen> {
+        self.panes.screen(pane, read, format)
     }
-    fn read_visible(&self, pane_id: &str) -> tiller_herdr::client::Result<String> {
-        self.herdr.read_visible(pane_id)
-    }
-    fn send_text(&self, pane_id: &str, text: &str) -> tiller_herdr::client::Result<()> {
-        self.herdr.send_text(pane_id, text)?;
-        (self.hook)("send_text", text);
+    fn input(&self, pane: &PaneId, text: &str) -> tiller_panes::Result<()> {
+        self.panes.input(pane, text)?;
+        (self.hook)("input", text);
         Ok(())
     }
-    fn send_enter(&self, pane_id: &str) -> tiller_herdr::client::Result<()> {
-        self.herdr.send_enter(pane_id)
+    fn paste(&self, pane: &PaneId, text: &str) -> tiller_panes::Result<()> {
+        self.panes.paste(pane, text)
     }
-    fn send_escape(&self, pane_id: &str) -> tiller_herdr::client::Result<()> {
-        self.herdr.send_escape(pane_id)
+    fn keys(&self, pane: &PaneId, keys: &[tiller_panes::Key]) -> tiller_panes::Result<()> {
+        self.panes.keys(pane, keys)
     }
-    fn report_tokens(
+    fn set_meta(
         &self,
-        pane_id: &str,
-        tokens: &std::collections::BTreeMap<String, String>,
-    ) -> tiller_herdr::client::Result<()> {
-        self.herdr.report_tokens(pane_id, tokens)
+        pane: &PaneId,
+        set: &tiller_panes::Meta,
+        remove: &[&str],
+    ) -> tiller_panes::Result<tiller_panes::Pane> {
+        self.panes.set_meta(pane, set, remove)
     }
-    fn create_workspace(
+    fn signal(&self, pane: &PaneId, signal: tiller_panes::Signal) -> tiller_panes::Result<()> {
+        self.panes.signal(pane, signal)
+    }
+    fn close(
         &self,
-        label: &str,
-        cwd: Option<&Path>,
-    ) -> tiller_herdr::client::Result<tiller_herdr::client::Created> {
-        let created = self.herdr.create_workspace(label, cwd)?;
-        (self.hook)("create_workspace", label);
-        Ok(created)
+        pane: &PaneId,
+        grace: std::time::Duration,
+    ) -> tiller_panes::Result<tiller_panes::Exit> {
+        self.panes.close(pane, grace)
     }
-    fn rename_workspace(
-        &self,
-        workspace_id: &str,
-        label: &str,
-    ) -> tiller_herdr::client::Result<()> {
-        self.herdr.rename_workspace(workspace_id, label)
+    fn forget(&self, pane: &PaneId) -> tiller_panes::Result<()> {
+        self.panes.forget(pane)
     }
-    fn move_workspace(&self, workspace_id: &str, index: usize) -> tiller_herdr::client::Result<()> {
-        self.herdr.move_workspace(workspace_id, index)
-    }
-    fn close_pane(&self, pane_id: &str) -> tiller_herdr::client::Result<()> {
-        self.herdr.close_pane(pane_id)
-    }
-    fn notify(&self, title: &str, body: &str) -> tiller_herdr::client::Result<()> {
-        self.herdr.notify(title, body)
+    fn switch(&self, pane: &PaneId) -> tiller_panes::Result<usize> {
+        self.panes.switch(pane)
     }
 }
 
@@ -2659,9 +2558,9 @@ impl tiller_herdr::client::Herdr for Hooked<'_> {
 fn a_keyed_orchestrator_start_that_loses_its_race_closes_its_pane() {
     let (mut rig, homes) = orchestrator_rig();
     let db = rig.fleet.db.clone();
-    // Another request's keyed start lands while this one opens its workspace.
+    // Another request's keyed start lands while this one opens its pane.
     let rival = |call: &str, _: &str| {
-        if call != "create_workspace" {
+        if call != "spawn" {
             return;
         }
         let mut store = tiller_core::Store::open(&db).unwrap();
@@ -2676,11 +2575,11 @@ fn a_keyed_orchestrator_start_that_loses_its_race_closes_its_pane() {
             .unwrap();
     };
     let racing = Hooked {
-        herdr: &rig.herdr,
+        panes: &rig.holder,
         hook: &rival,
     };
     let mut world = world!(rig);
-    world.herdr = &racing;
+    world.panes = Some(&racing);
     let keyed = Ctx::new(Actor::Board).with_key("start-1");
     let started =
         orchestrator::start(&mut rig.fleet.store, &keyed, &world, &homes, "alpha", None).unwrap();
@@ -2691,36 +2590,24 @@ fn a_keyed_orchestrator_start_that_loses_its_race_closes_its_pane() {
     assert_eq!(started.value.session.id, live.id, "the rival's start");
     assert!(live.pane_id.is_none());
     // The pane this start opened is closed and nothing was typed into it.
-    let calls = rig.herdr.calls();
-    assert!(
-        calls.iter().any(|c| c.starts_with("close_pane")),
-        "{calls:?}"
-    );
-    assert!(
-        !calls.iter().any(|c| c.starts_with("send_text")),
-        "{calls:?}"
-    );
+    let calls = rig.holder.calls();
+    assert!(calls.iter().any(|c| c.starts_with("close ")), "{calls:?}");
+    assert!(!calls.iter().any(|c| c.starts_with("input")), "{calls:?}");
 }
 
 #[test]
 fn orchestrator_start_never_types_into_an_old_orchestrator_pane() {
     let (mut rig, homes) = orchestrator_rig();
-    // The ended orchestrator's pane shows no agent, its tokens intact: it
-    // may hold a shell or any other program, so it is left alone.
+    // The ended orchestrator's pane still runs, its meta intact: it may
+    // hold any program, so it is left alone.
     let pane = rig.fleet.orchestrator_pane.clone();
-    rig.herdr.set_screen(&pane, Screen::Shell);
-    rig.herdr.set_tokens(
-        &pane,
-        [("project", "alpha"), ("role", "orchestrator")]
-            .into_iter()
-            .map(|(k, v)| (k.into(), v.into()))
-            .collect(),
-    );
+    rig.holder
+        .set_meta(&pane, &[("project", "alpha"), ("role", "orchestrator")]);
     let started = start_orchestrator(&mut rig, &homes, &owner()).unwrap();
     assert_ne!(started.value.pane_id.as_deref(), Some(pane.as_str()));
-    assert_ne!(started.value.workspace_id.as_deref(), Some("w1"));
-    let typed = format!("send_text {pane} ");
-    assert!(!rig.herdr.calls().iter().any(|c| c.starts_with(&typed)));
+    assert!(rig.holder.fake_pane(&pane).running());
+    let typed = format!("input {pane} ");
+    assert!(!rig.holder.calls().iter().any(|c| c.starts_with(&typed)));
 }
 
 #[test]
@@ -2732,7 +2619,7 @@ fn orchestrator_start_is_the_owner_s_or_the_daemon_s() {
         matches!(error, SpawnError::State(tiller_core::Error::Forbidden(_))),
         "{error:?}"
     );
-    assert!(rig.herdr.calls().is_empty(), "{:?}", rig.herdr.calls());
+    assert!(rig.holder.calls().is_empty(), "{:?}", rig.holder.calls());
 }
 
 #[test]
@@ -2773,12 +2660,7 @@ fn orchestrator_start_needs_its_roots_and_a_home_apart() {
         refusal(&error).contains("spawn.scratch_root") && refusal(&error).contains("overlaps"),
         "{error}"
     );
-    assert!(
-        rig.herdr
-            .calls()
-            .iter()
-            .all(|c| !c.starts_with("create_workspace"))
-    );
+    assert!(rig.holder.calls().iter().all(|c| !c.starts_with("spawn")));
     assert!(
         tiller_core::state::outbox::live_orchestrator(rig.fleet.store.conn(), "alpha")
             .unwrap()
@@ -2789,9 +2671,9 @@ fn orchestrator_start_needs_its_roots_and_a_home_apart() {
 #[test]
 fn an_orchestrator_start_that_cannot_open_a_pane_leaves_no_new_home() {
     let (mut rig, homes) = orchestrator_rig();
-    rig.herdr.refuse("create_workspace");
+    rig.holder.refuse("spawn");
     let error = start_orchestrator(&mut rig, &homes, &owner()).unwrap_err();
-    assert!(matches!(error, SpawnError::Herdr(_)), "{error:?}");
+    assert!(matches!(error, SpawnError::Panes(_)), "{error:?}");
     assert!(!homes.join("alpha").exists());
 
     // A home an earlier orchestrator wrote to is kept.
@@ -2799,38 +2681,6 @@ fn an_orchestrator_start_that_cannot_open_a_pane_leaves_no_new_home() {
     std::fs::write(homes.join("alpha").join("notes.md"), "keep\n").unwrap();
     start_orchestrator(&mut rig, &homes, &owner()).unwrap_err();
     assert!(homes.join("alpha").join("notes.md").exists());
-}
-
-#[test]
-fn an_orchestrator_launch_that_fails_ends_its_session_and_closes_its_pane() {
-    let (mut rig, homes) = orchestrator_rig();
-    rig.herdr.refuse("send_text");
-    let before = rig.workspace_ids();
-    let error = start_orchestrator(&mut rig, &homes, &owner()).unwrap_err();
-    assert!(matches!(error, SpawnError::Herdr(_)), "{error:?}");
-    let calls = rig.herdr.calls();
-    assert!(
-        calls.iter().any(|c| c.starts_with("close_pane")),
-        "{calls:?}"
-    );
-    assert!(
-        tiller_core::state::outbox::live_orchestrator(rig.fleet.store.conn(), "alpha")
-            .unwrap()
-            .is_none()
-    );
-    let reason: String = rig
-        .fleet
-        .store
-        .conn()
-        .query_row(
-            "SELECT end_reason FROM sessions WHERE role = 'orchestrator' ORDER BY id DESC LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(reason, orchestrator::LAUNCH_FAILED);
-    assert_eq!(rig.workspace_ids(), before, "the new workspace is gone");
-    assert!(!rig.scratch.exists() || std::fs::read_dir(&rig.scratch).unwrap().next().is_none());
 }
 
 fn delivery_project(delivery: &str, stage: &str) -> Project {
@@ -2955,7 +2805,7 @@ fn cleanup_retires_task_review_listeners() {
         "/home/user/.lavish/theirs.html",
     );
     rig.done(&run, RunOutcome::Abandoned).unwrap();
-    rig.herdr.close_pane(&spawned.pane_id).unwrap();
+    rig.holder.exit(&spawned.pane_id, 0);
 
     // The review server is down: the pages stay live, and say so.
     rig.listeners.refuse(true);
@@ -3085,7 +2935,7 @@ fn quick_waits() -> crate::control::Waits {
         exit: std::time::Duration::from_secs(2),
         bind: std::time::Duration::from_secs(2),
         poll: std::time::Duration::from_millis(10),
-        pacing: tiller_herdr::submit::Pacing::INSTANT,
+        pacing: tiller_panes::submit::Pacing::INSTANT,
     }
 }
 
@@ -3094,7 +2944,6 @@ fn quick_waits() -> crate::control::Waits {
 fn stale_orchestrator(rig: &mut Rig, homes: &Path, activity: &str) -> String {
     let started = start_orchestrator(rig, homes, &owner()).unwrap().value;
     let pane = started.pane_id.clone().unwrap();
-    rig.herdr.set_screen(&pane, Screen::Idle);
     rig.fleet.bind(&started.session.id, &pane);
     rig.fleet
         .store
@@ -3271,7 +3120,8 @@ fn a_queued_restart_that_fails_is_dropped_and_shows_as_stale_again() {
     let (mut rig, homes) = orchestrator_rig();
     let id = stale_orchestrator(&mut rig, &homes, "working");
     let ctx = Ctx::new(Actor::Board);
-    let mut fail = |_: &mut Store, _: &Ctx, _: &Session| Err("herdr is not running".to_owned());
+    let mut fail =
+        |_: &mut Store, _: &Ctx, _: &Session| Err("the terminal holder is down".to_owned());
 
     crate::stale::restart_stale(&mut rig.fleet.store, &ctx, None, &mut fail).unwrap();
     rig.fleet
@@ -3285,7 +3135,7 @@ fn a_queued_restart_that_fails_is_dropped_and_shows_as_stale_again() {
     let drained = crate::stale::drain_queue(&mut rig.fleet.store, &ctx, &mut fail).unwrap();
     assert_eq!(
         drained[0].outcome,
-        crate::stale::Outcome::Failed("herdr is not running".to_owned())
+        crate::stale::Outcome::Failed("the terminal holder is down".to_owned())
     );
     assert!(rig.fleet.store.restart_queued().unwrap().is_empty());
     let session: Session = get(rig.fleet.store.conn(), "session", &id).unwrap();
@@ -3713,7 +3563,6 @@ fn orchestrator_restart_is_the_owners_or_this_boards() {
         .unwrap()
         .value;
     let pane = first.pane_id.clone().unwrap();
-    rig.herdr.set_screen(&pane, Screen::Idle);
     rig.fleet.bind(&first.session.id, &pane);
     let waits = quick_waits();
     let world = world!(rig);
@@ -3910,29 +3759,29 @@ impl Rig {
     }
 }
 
-/// A spawn whose launch line never went in records no load: "Loaded by"
+/// A spawn whose pane never opened records no load: "Loaded by"
 /// lists only sessions that got the prompt (`memory.md` section 7).
 #[test]
 fn a_spawn_that_fails_after_the_render_records_no_load() {
     let mut rig = Rig::new();
     rig.approved_memory("- Alpha line.\n");
-    rig.herdr.refuse("send_text");
+    rig.holder.refuse("spawn");
     let card = rig.card(CardKind::Ship, None);
     let ctx = rig.orchestrator();
     let error = rig
         .try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
         .map(|_| ())
         .unwrap_err();
-    assert!(matches!(error, SpawnError::Herdr(_)), "{error}");
+    assert!(matches!(error, SpawnError::Panes(_)), "{error}");
     assert_eq!(rig.all_loads(), 0);
 }
 
-/// The same for an orchestrator whose launch line never went in.
+/// The same for an orchestrator whose pane never opened.
 #[test]
 fn an_orchestrator_start_that_fails_after_the_render_records_no_load() {
     let (mut rig, homes) = orchestrator_rig();
     rig.approved_memory("- Alpha line.\n");
-    rig.herdr.refuse("send_text");
+    rig.holder.refuse("spawn");
     start_orchestrator(&mut rig, &homes, &owner())
         .map(|_| ())
         .unwrap_err();
@@ -3948,7 +3797,6 @@ fn orchestrator_restart_refused_by_its_memory_keeps_the_live_one() {
         .unwrap()
         .value;
     let pane = first.pane_id.clone().unwrap();
-    rig.herdr.set_screen(&pane, Screen::Idle);
     rig.fleet.bind(&first.session.id, &pane);
     rig.unreadable_memory();
 
@@ -3969,9 +3817,9 @@ fn orchestrator_restart_refused_by_its_memory_keeps_the_live_one() {
         .unwrap();
     assert_eq!(live.id, first.session.id);
     assert!(
-        !rig.herdr.calls().iter().any(|c| c.contains("/exit")),
+        !rig.holder.calls().iter().any(|c| c.contains("/exit")),
         "the live orchestrator was sent /exit: {:?}",
-        rig.herdr.calls()
+        rig.holder.calls()
     );
 }
 
@@ -3998,23 +3846,9 @@ fn holder_rig(mut rig: Rig) -> (Rig, tiller_panes::FakePanes) {
     (rig, panes)
 }
 
-/// The herdr calls that would make a pane or type into one.
-fn herdr_launches(rig: &Rig) -> Vec<String> {
-    rig.herdr
-        .calls()
-        .into_iter()
-        .filter(|c| {
-            ["create_workspace", "send_text", "send_enter"]
-                .iter()
-                .any(|verb| c.starts_with(verb))
-        })
-        .collect()
-}
-
 #[test]
 fn a_spawn_in_the_terminal_holder_records_its_pane_and_types_nothing() {
     let (mut rig, panes) = holder_rig(Rig::new());
-    let before = rig.workspace_ids();
     let card = rig.card(CardKind::Ship, Some(Size::M));
     let spawned = rig.spawn(&card, RunRole::Builder);
 
@@ -4036,11 +3870,6 @@ fn a_spawn_in_the_terminal_holder_records_its_pane_and_types_nothing() {
     let session: tiller_core::domain::Session =
         get(rig.fleet.store.conn(), "session", &spawned.session.id).unwrap();
     assert_eq!(session.pane_id.as_deref(), Some(spawned.pane_id.as_str()));
-
-    // No herdr workspace, no tokens and no typed launch line.
-    assert!(spawned.workspace_id.is_empty());
-    assert_eq!(rig.workspace_ids(), before);
-    assert!(herdr_launches(&rig).is_empty(), "{:?}", rig.herdr.calls());
 
     // The holder runs the run's launch script, keyed by the session, in
     // the worktree, and names whose the pane is.
@@ -4077,7 +3906,7 @@ fn a_spawn_with_a_holder_that_does_not_answer_launches_nothing() {
             .contains("the terminal holder is unreachable"),
         "{error}"
     );
-    // The launch is undone: no live run, no herdr pane in its place.
+    // The launch is undone: no live run.
     let live: Vec<Run> = list(
         rig.fleet.store.conn(),
         "card_id = ?1 AND ended_at IS NULL",
@@ -4085,7 +3914,6 @@ fn a_spawn_with_a_holder_that_does_not_answer_launches_nothing() {
     )
     .unwrap();
     assert!(live.is_empty(), "{live:?}");
-    assert!(herdr_launches(&rig).is_empty(), "{:?}", rig.herdr.calls());
 }
 
 #[test]
@@ -4105,7 +3933,7 @@ fn cleanup_never_ends_a_run_whose_holder_pane_runs() {
     );
 
     // Once the pane's agent exits, cleanup goes ahead: the holder forgets
-    // the pane, and herdr closes nothing.
+    // the pane, which it need not close.
     assert!(panes.exit(
         &tiller_panes::PaneId::from(spawned.pane_id.as_str()),
         Some(0),
@@ -4122,29 +3950,22 @@ fn cleanup_never_ends_a_run_whose_holder_pane_runs() {
     );
     assert!(tiller_panes::Panes::list(&panes).unwrap().panes.is_empty());
     assert!(
-        !rig.herdr
-            .calls()
-            .iter()
-            .any(|c| c.starts_with("close_pane")),
+        !panes.calls().iter().any(|c| c.starts_with("close ")),
         "{:?}",
-        rig.herdr.calls()
+        panes.calls()
     );
     assert_eq!(cleaned.returned.as_deref(), Some(spawned.worktree.as_str()));
 }
 
 #[test]
-fn an_orchestrator_starts_in_the_terminal_holder_with_no_workspace() {
+fn an_orchestrator_starts_in_the_terminal_holder() {
     let (rig, homes) = orchestrator_rig();
     let (mut rig, panes) = holder_rig(rig);
-    let before = rig.workspace_ids();
     let started = start_orchestrator(&mut rig, &homes, &owner()).unwrap();
     let value = &started.value;
     let pane = value.pane_id.clone().unwrap();
     assert!(tiller_core::ids::is_holder_pane(&pane), "{pane}");
     assert_eq!(value.session.pane_id.as_deref(), Some(pane.as_str()));
-    assert!(value.workspace_id.is_none());
-    assert_eq!(rig.workspace_ids(), before);
-    assert!(herdr_launches(&rig).is_empty(), "{:?}", rig.herdr.calls());
 
     let script = rig.scratch.join(&value.session.id).join("launch.sh");
     assert_eq!(
@@ -4182,13 +4003,12 @@ fn a_stop_of_a_holder_pane_reads_the_holder_and_never_takes_it_for_gone() {
         exit: std::time::Duration::from_millis(50),
         bind: std::time::Duration::from_millis(50),
         poll: std::time::Duration::from_millis(10),
-        pacing: tiller_herdr::submit::Pacing::INSTANT,
+        pacing: tiller_panes::submit::Pacing::INSTANT,
     };
     let pane = tiller_panes::PaneId::from(spawned.pane_id.as_str());
 
-    // herdr has no such pane, which a stop would read as proof the agent
-    // is gone: the stop asks the holder, which runs it at no composer, so
-    // the stop refuses and the session stays live.
+    // The stop asks the holder, which runs the pane at no composer, so the
+    // stop refuses and the session stays live.
     let world = world!(rig);
     let error = crate::control::stop_agent(
         &mut rig.fleet.store,
@@ -4229,7 +4049,6 @@ fn a_stop_of_a_holder_pane_reads_the_holder_and_never_takes_it_for_gone() {
     let session: tiller_core::domain::Session =
         get(rig.fleet.store.conn(), "session", &spawned.session.id).unwrap();
     assert!(session.ended_at.is_some());
-    assert!(herdr_launches(&rig).is_empty(), "{:?}", rig.herdr.calls());
 }
 
 /// A launch script up to the value of its last flag, `--effort`: what a

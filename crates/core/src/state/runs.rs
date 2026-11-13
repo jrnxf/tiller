@@ -93,7 +93,7 @@ pub struct Placement {
     pub base_sha: Option<String>,
     /// The SHA-256 of the run's settings fragment, for the run and its session.
     pub config_hash: Option<String>,
-    /// The herdr pane spawn opened for the run's session.
+    /// The holder pane spawn opened for the run's session.
     pub pane_id: Option<String>,
 }
 
@@ -186,7 +186,7 @@ pub struct Recorded {
     pub observation: Observation,
     /// The session's activity moved to the observation's verdict.
     pub verdict_changed: bool,
-    /// When the hold ends on a `holder:idle` (or `herdr:idle`) that a fresh
+    /// When the hold ends on a `holder:idle` that a fresh
     /// hook `working` held (`protocol.md` 4.5); `None` when the observation
     /// was not held.
     #[serde(default)]
@@ -212,14 +212,11 @@ fn rest_rank(activity: Activity) -> u8 {
     }
 }
 
-/// A screen reading's idle (`holder:idle`, and `herdr:idle` until the
-/// cutover drops herdr) never replaces a hook `working` less than 30 s old.
-/// Returns when the hold ends, if it holds.
+/// A screen reading's idle (`holder:idle`) never replaces a hook `working`
+/// less than 30 s old. Returns when the hold ends, if it holds.
 fn screen_idle_held(session: &Session, new: &NewObservation) -> Option<Timestamp> {
-    if !matches!(
-        new.source,
-        ObservationSource::Holder | ObservationSource::Herdr
-    ) || new.verdict != Some(Activity::Idle)
+    if new.source != ObservationSource::Holder
+        || new.verdict != Some(Activity::Idle)
         || session.activity != Activity::Working
         || session.activity_source != Some(ObservationSource::Hook)
     {
@@ -265,8 +262,8 @@ pub fn lease_holder(conn: &Connection, run: &Run) -> Result<String> {
     Ok(holder(&root))
 }
 
-/// Where `herdr agent focus` finds a session's agent (`tiller agent focus`,
-/// the board's "Open in herdr"): its pane, from the `panes` cache first and
+/// Where Open in terminal finds a session's agent (`tiller agent focus`,
+/// the board's O key): its pane, from the `panes` cache first and
 /// the session's own `pane_id` after. An ended session is refused: its pane
 /// may hold another.
 pub fn focus_target(conn: &Connection, session: &Session) -> Result<String> {

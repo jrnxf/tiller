@@ -3,10 +3,9 @@
 //!
 //! [`HolderSource`] is a `tiller_poll` source. It connects with `hello`,
 //! records the `welcome` against `meta.holder_instance`, starts a `watch`
-//! and runs `list` into the `panes` cache. Events then replace herdr's
-//! 2-second snapshot: each `quiet` reads the pane's visible screen and
-//! classifies it, and a `list` runs every 30 s as a check and after each
-//! reconnect.
+//! and runs `list` into the `panes` cache. Events drive it: each `quiet`
+//! reads the pane's visible screen and classifies it, and a `list` runs
+//! every 30 s as a check and after each reconnect.
 //!
 //! A holder that does not answer is unknown, never gone: the poll fails,
 //! backs off 5 s and then 15 s, and after three failures marks the host
@@ -21,7 +20,7 @@ use std::time::Duration;
 
 use serde_json::json;
 use tiller_core::domain::{Activity, ObservationSource, PaneState, Session};
-use tiller_core::state::caches::{HolderRecord, HolderSeen, PaneHolder, PaneReading};
+use tiller_core::state::caches::{HolderRecord, HolderSeen, PaneReading};
 use tiller_core::state::runs::NewObservation;
 use tiller_core::state::{get, list};
 use tiller_core::{Actor, Ctx, Store, Timestamp};
@@ -288,8 +287,7 @@ impl HolderSource {
     fn list(&mut self, ctx: &Ctx) -> Result<(), PollError> {
         let listing = self.link.list().map_err(polled)?;
         let rows = readings(&self.store, &listing)?;
-        self.store
-            .cache_panes(ctx, &self.host_id, PaneHolder::Holder, rows)?;
+        self.store.cache_panes(ctx, &self.host_id, rows)?;
         self.panes = listing
             .panes
             .into_iter()

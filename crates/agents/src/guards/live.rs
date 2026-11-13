@@ -569,9 +569,9 @@ fn outward_ip() -> Option<std::net::IpAddr> {
 
 #[test]
 #[ignore = "live: one model session on this host"]
-fn sandboxed_role_cannot_reach_herdr() {
+fn sandboxed_role_cannot_reach_the_holder_socket() {
     let lab = Lab::new(Role::Builder);
-    let socket = lab.path("herdr.sock");
+    let socket = lab.path("holder.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     listener.set_nonblocking(true).unwrap();
     lab.bash(&format!(

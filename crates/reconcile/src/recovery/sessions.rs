@@ -14,6 +14,7 @@ use tiller_core::state::runs::{Bind, NewObservation, live_session};
 use tiller_core::state::{find, get, list, projects};
 use tiller_core::{Actor, Result, Timestamp};
 use tiller_observe::liveness::Probe;
+use tiller_panes::{Format, PaneId, Read};
 
 use crate::ladder::{self, Death, Verdict};
 use crate::pass::{Reconciler, Report, minutes_since, ts};
@@ -93,7 +94,6 @@ impl Reconciler {
             session,
             &effective,
             errored,
-            self.snapshot.as_ref(),
             self.holder_reading(recorded_pid)?,
             self.sources.probe.as_ref(),
         );
@@ -836,16 +836,18 @@ impl Reconciler {
     }
 
     /// Whether the session's pane shows a prompt (a trust or permission
-    /// dialog) in this pass's snapshot: a resumed session there is left
-    /// alone, and never answered (R04, R17).
+    /// dialog) on its screen now: a resumed session there is left alone,
+    /// and never answered (R04, R17).
     fn at_prompt(&self, session: &Session) -> bool {
-        // Only this pass's snapshot: the stored activity of a dead session
-        // keeps its last prompt forever, since the view never ages a prompt.
-        let Some(snapshot) = &self.snapshot else {
+        // Only the screen now: the stored activity of a dead session keeps
+        // its last prompt forever, since the view never ages a prompt.
+        let Some(pane) = session.pane_id.as_deref() else {
             return false;
         };
-        ladder::bound_pane(snapshot, session)
-            .is_some_and(|p| p.agent.is_some() && p.agent_status.as_deref() == Some("blocked"))
+        self.sources
+            .holder
+            .screen(&PaneId::from(pane), Read::Visible, Format::Ansi)
+            .is_ok_and(|screen| crate::holder::screen_status(&screen.text()) == Some("blocked"))
     }
 
     /// Settles a session whose newest resume attempt is still open. Returns
@@ -1038,8 +1040,8 @@ impl Reconciler {
     /// that the session is not already alive. The boot id, or the holder
     /// instance, is written last, when every session is alive, settled or
     /// reported, so a daemon that dies mid-restore repeats it safely. R21
-    /// restores only the sessions of holder panes: the herdr panes did not
-    /// go with the holder.
+    /// restores only the sessions that had a pane: a spawn that never bound
+    /// did not go with the holder.
     pub(crate) fn restore(
         &mut self,
         restore: &Restore,
@@ -1064,28 +1066,16 @@ impl Reconciler {
         // resumed.
         let mut summary: Vec<(String, String, String)> = Vec::new();
         for session in self.live_sessions()? {
-            let probe = if session
-                .pane_id
-                .as_deref()
-                .is_some_and(tiller_core::ids::is_holder_pane)
-            {
-                match self.restore_probe(restore, &session)? {
-                    Some(probe) => probe,
-                    None => {
-                        // No holder list this pass: unknown, never gone.
-                        pending = true;
-                        continue;
-                    }
-                }
-            } else {
-                if matches!(restore, Restore::HolderLost { .. }) {
-                    continue;
-                }
-                let Some(snapshot) = &self.snapshot else {
+            if session.pane_id.is_none() && matches!(restore, Restore::HolderLost { .. }) {
+                continue;
+            }
+            let probe = match self.restore_probe(restore, &session)? {
+                Some(probe) => probe,
+                None => {
+                    // No holder list this pass: unknown, never gone.
                     pending = true;
                     continue;
-                };
-                ladder::bound_pane(snapshot, &session).map(|p| self.sources.probe.agent(p))
+                }
             };
             if probe == Some(Probe::Unknown) && !self.hook_seen_after(&session.id, since)? {
                 // Present, unproven: never a second agent on one run.
@@ -1223,15 +1213,10 @@ impl Reconciler {
                 }
             }
         }
-        // The new instance goes with the boot id (R04 step 5), so a holder
-        // wired here must have listed this pass.
-        let instance = match (&self.sources.holder, &self.listing) {
-            (None, _) => None,
-            (Some(_), Some(listing)) => Some(listing.instance.clone()),
-            (Some(_), None) => {
-                pending = true;
-                None
-            }
+        // The new instance goes with the boot id (R04 step 5), so the holder
+        // must have listed this pass.
+        let Some(instance) = self.listing.as_ref().map(|l| l.instance.clone()) else {
+            return Ok(());
         };
         if pending {
             return Ok(());
@@ -1333,7 +1318,7 @@ impl Reconciler {
                     &format!("{resumed_total} of {workers_total} workers resumed"),
                 );
                 self.store
-                    .daemon_boot_id(&self.ctx(now), boot_id, instance.as_deref())?;
+                    .daemon_boot_id(&self.ctx(now), boot_id, Some(&instance))?;
                 report.repair(format!("R04 restore complete: boot id {boot_id} written"));
             }
             Restore::HolderLost { instance } => {
@@ -1395,7 +1380,7 @@ impl Reconciler {
     /// When the holder of `instance` started, from its `welcome`: `None`
     /// when it does not answer or another instance does.
     fn holder_started(&self, instance: &str) -> Option<Timestamp> {
-        let welcome = self.sources.holder.as_ref()?.welcome().ok()?;
+        let welcome = self.sources.holder.welcome().ok()?;
         (welcome.instance == instance).then(|| Timestamp::from_jiff(welcome.started_at))
     }
 

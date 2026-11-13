@@ -30,7 +30,7 @@ use tiller_core::state::peers::{
 };
 use tiller_core::store::Actor;
 use tiller_daemon::auth;
-use tiller_herdr::testing::{Fleet, owner};
+use tiller_panes::testing::{Fleet, owner};
 
 const WAIT: Duration = Duration::from_secs(30);
 const ALIAS: &str = "peer-alias";
@@ -75,7 +75,6 @@ impl Daemon {
             .env_clear()
             .env("PATH", "")
             .env("TILLER_HOME", home)
-            .env("TILLER_HERDR", "/nonexistent/herdr")
             .env("TILLER_QUOTA_AXI", "/nonexistent/quota-axi")
             .env("TILLER_LOG", "warn");
         if let Some(ssh) = ssh {
@@ -104,6 +103,40 @@ impl Daemon {
 impl Drop for Daemon {
     fn drop(&mut self) {
         signal("-TERM", self.pid);
+    }
+}
+
+/// A `tiller holder` in `home`, stopped when dropped.
+struct Holder(std::process::Child);
+
+impl Holder {
+    fn start(home: &Path) -> Self {
+        let child = Command::new(tiller())
+            .arg("holder")
+            .env_clear()
+            .env("PATH", "")
+            .env("HOME", home)
+            .env("TILLER_HOME", home)
+            .env("TILLER_LOG", "warn")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let socket = tiller_panes::socket_path(home);
+        until("the holder's socket", || {
+            tiller_panes::HolderClient::connect(&socket, "test")
+                .ok()
+                .map(|_| ())
+        });
+        Self(child)
+    }
+}
+
+impl Drop for Holder {
+    fn drop(&mut self) {
+        signal("-TERM", self.0.id());
+        let _ = self.0.wait();
     }
 }
 
@@ -298,8 +331,7 @@ impl World {
 /// What the board host's daemon runs as `ssh`: it drops the options, takes
 /// the alias and runs the real `tiller peer serve` (or Add a host's `tiller
 /// peer accept --unattended`) for the peer's home, the way sshd would on the
-/// other machine. Its herdr is [`peer_herdr`], which a test writes only when
-/// the peer must start an orchestrator.
+/// other machine.
 fn write_shim(dir: &Path, peer_home: &Path, serve_pid: &Path) -> PathBuf {
     let shim = dir.join("ssh-shim");
     let script = format!(
@@ -317,24 +349,18 @@ shift
 [ "$1" = tiller ] || exit 127
 shift
 echo $$ > "{pid}"
-export HOME="{home}" TILLER_HOME="{home}" TILLER_HERDR="{herdr}"
+export HOME="{home}" TILLER_HOME="{home}"
 export SSH_CONNECTION="192.0.2.1 50000 192.0.2.2 22"
 exec "{tiller}" "$@"
 "#,
         pid = serve_pid.display(),
         home = peer_home.display(),
-        herdr = peer_herdr(peer_home).display(),
         tiller = tiller().display(),
     );
     std::fs::write(&shim, script).unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
     shim
-}
-
-/// The herdr the peer's `peer serve` drives; missing unless a test writes it.
-fn peer_herdr(peer_home: &Path) -> PathBuf {
-    peer_home.join("bin/herdr")
 }
 
 // -- http -------------------------------------------------------------------
@@ -448,7 +474,7 @@ fn count(fleet: &Fleet, sql: &str) -> i64 {
 /// The events `fleet` recorded after `seq`, as `kind by actor`, other than
 /// its daemon's records of the hosts. Those come from the daemon's own
 /// pollers and links, whatever a request does, and land when they land:
-/// the herdr poller's and each link change's `host.changed`, and the first
+/// the holder poller's and each link change's `host.changed`, and the first
 /// reconcile pass's `daemon.started` and host checks, which can come after
 /// the link is live. Every other event counts, whoever wrote it.
 fn written_since(fleet: &Fleet, seq: i64) -> Vec<String> {
@@ -824,16 +850,23 @@ fn board_starts_a_peers_orchestrator_and_asks_it() {
     let old = world.peer.orchestrator_session.clone();
     world.peer.open().session_end(&owner(), &old, "x").unwrap();
 
-    // The peer's start needs its roots and a herdr that opens a workspace.
+    // The peer's start needs its roots, a holder to open the pane in and a
+    // Claude Code that waits on its terminal.
     let lab = world.peer.dir.path().join("lab");
     let checkout = lab.join("checkouts/alpha");
     for dir in [&checkout, &lab.join("pool"), &lab.join("scratch")] {
         std::fs::create_dir_all(dir).unwrap();
     }
+    let claude = lab.join("claude");
+    std::fs::write(&claude, "#!/bin/sh\nread line\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let _holder = Holder::start(world.peer.dir.path());
     std::fs::write(
         world.peer.dir.path().join("config.toml"),
         format!(
-            "[spawn]\npool_root = {:?}\nscratch_root = {:?}\norchestrator_home = {:?}\ncheckouts_root = {:?}\n\n[checkouts]\nalpha = {:?}\n",
+            "[spawn]\nclaude = {:?}\npool_root = {:?}\nscratch_root = {:?}\norchestrator_home = {:?}\ncheckouts_root = {:?}\n\n[checkouts]\nalpha = {:?}\n",
+            claude.to_str().unwrap(),
             lab.join("pool").to_str().unwrap(),
             lab.join("scratch").to_str().unwrap(),
             lab.join("orchestrators").to_str().unwrap(),
@@ -842,26 +875,6 @@ fn board_starts_a_peers_orchestrator_and_asks_it() {
         ),
     )
     .unwrap();
-    let calls = lab.join("herdr.log");
-    let herdr = peer_herdr(world.peer.dir.path());
-    std::fs::create_dir_all(herdr.parent().unwrap()).unwrap();
-    std::fs::write(
-        &herdr,
-        format!(
-            r#"#!/bin/sh
-echo "$*" >> '{calls}'
-case "$1 $2" in
-"workspace create") echo '{{"result":{{"workspace":{{"workspace_id":"w9"}},"root_pane":{{"pane_id":"w9:p1"}}}}}}' ;;
-"api snapshot") echo '{{"result":{{"snapshot":{{"version":"0.9.5","workspaces":[{{"workspace_id":"w9","label":"alpha","number":1}}],"panes":[{{"pane_id":"w9:p1","workspace_id":"w9","agent_status":"unknown"}}]}}}}}}' ;;
-*) echo '{{"result":{{}}}}' ;;
-esac
-"#,
-            calls = calls.display()
-        ),
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&herdr, std::fs::Permissions::from_mode(0o755)).unwrap();
     world.live();
 
     let board_sessions = count(&world.board, "SELECT count(*) FROM sessions");
@@ -899,9 +912,18 @@ esac
         )
         .unwrap();
     assert_eq!(actor, "board@test-host");
-    let log = std::fs::read_to_string(&calls).unwrap();
-    assert!(log.contains("workspace create"), "{log}");
-    assert!(log.contains("pane send-text w9:p1"), "{log}");
+    // The orchestrator runs in a pane of the peer's own holder.
+    let pane: String = world
+        .peer
+        .open()
+        .conn()
+        .query_row(
+            "SELECT pane_id FROM sessions WHERE id = ?1",
+            [&session],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(tiller_core::ids::is_holder_pane(&pane), "{pane}");
 
     // The same key again is the start that landed, not a second one.
     let (status, again) = world.post(
@@ -942,78 +964,87 @@ esac
 /// Claude's screen mid-turn.
 const WORKING: &str = include_str!("../../panes/tests/fixtures/claude/working.ansi");
 
-/// A builder on the peer in herdr pane `w2:p1`, beside the orchestrator in
-/// `w1:p1`, and the herdr the peer's `peer serve` drives. The herdr logs
-/// each call to the returned file and answers from files next to it: the
-/// builder's `status` (`working` to start), the `screen` a read gives
-/// ([`WORKING`] to start), the
-/// `after-keys` screen a typed digit leaves (marked by `typed`), and
-/// `orchestrator-gone`, which
-/// makes the orchestrator's pane gone, and `no-agent`, which leaves the
-/// builder's pane with no Claude in it. Returns the builder's session and
-/// the log.
-fn peer_builder(world: &mut World) -> (String, PathBuf) {
-    let session = world.peer.worker("w2:p1");
+/// A builder on the peer, in a pane of the peer's own terminal holder.
+/// The pane's child draws the `screen` file next to the returned log
+/// ([`WORKING`] to start), or the `after-keys` screen once a digit was
+/// typed with that file there (marked by `typed`). It appends every byte
+/// typed into the pane to the log, and its tokens name the session, as a
+/// spawn's do. The orchestrator stays on `w1:p1`, a pane the holder never
+/// had. Returns the holder, the builder's session, its pane and the log.
+fn peer_builder(world: &mut World) -> (Holder, String, tiller_panes::PaneId, PathBuf) {
+    use tiller_panes::Panes;
     let lab = world.peer.dir.path().join("lab");
     std::fs::create_dir_all(&lab).unwrap();
-    std::fs::write(lab.join("status"), "working").unwrap();
     std::fs::write(lab.join("screen"), WORKING).unwrap();
-    let herdr = peer_herdr(world.peer.dir.path());
-    std::fs::create_dir_all(herdr.parent().unwrap()).unwrap();
-    std::fs::write(
-        &herdr,
-        format!(
-            r#"#!/bin/sh
-# The daemons run with an empty PATH: builtins only.
-show() {{ while IFS= read -r line || [ -n "$line" ]; do printf '%s\n' "$line"; done < "$1"; }}
-echo "$*" >> '{lab}/herdr.log'
-case "$*" in
-"pane get w2:p1"*)
-  if [ -e '{lab}/no-agent' ]; then
-    echo '{{"result":{{"pane":{{"pane_id":"w2:p1","workspace_id":"w2","agent_status":"unknown","tokens":{{"session":"{session}"}}}}}}}}'
-    exit 0
-  fi
-  read -r status < '{lab}/status'
-  printf '{{"result":{{"pane":{{"pane_id":"w2:p1","workspace_id":"w2","agent":"claude","agent_status":"%s","tokens":{{"session":"{session}"}}}}}}}}\n' "$status" ;;
-"pane get w1:p1"*)
-  if [ -e '{lab}/orchestrator-gone' ]; then
-    echo '{{"error":{{"code":"pane_not_found","message":"no pane w1:p1"}}}}' >&2
-    exit 1
-  fi
-  echo '{{"result":{{"pane":{{"pane_id":"w1:p1","workspace_id":"w1","agent":"claude","agent_status":"idle"}}}}}}' ;;
-"pane layout"*)
-  echo '{{"result":{{"layout":{{"panes":[{{"pane_id":"w2:p1","rect":{{"width":120,"height":40}}}}]}}}}}}' ;;
-"pane read"*)
-  if [ -e '{lab}/typed' ]; then show '{lab}/after-keys'; else show '{lab}/screen'; fi ;;
-"pane send-keys w2:p1 "[0-9]*)
-  if [ -e '{lab}/after-keys' ]; then : > '{lab}/typed'; fi ;;
-"api snapshot"*)
-  echo '{{"result":{{"snapshot":{{"version":"0.9.5","workspaces":[{{"workspace_id":"w1","label":"alpha","number":1}},{{"workspace_id":"w2","label":"alpha-1","number":2}}],"panes":[{{"pane_id":"w1:p1","workspace_id":"w1","agent":"claude","agent_status":"idle"}},{{"pane_id":"w2:p1","workspace_id":"w2","agent":"claude","agent_status":"working"}}]}}}}}}' ;;
-*) echo '{{"result":{{}}}}' ;;
-esac
-"#,
-            lab = lab.display()
-        ),
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&herdr, std::fs::Permissions::from_mode(0o755)).unwrap();
-    (session, lab.join("herdr.log"))
+    let holder = Holder::start(world.peer.dir.path());
+    let session = world.peer.worker("w2:p1");
+    // A redraw loop beside a key loop: the screen follows its files.
+    let child = r#"stty -icanon -echo min 1
+cd "$0"
+while :; do
+  if [ -e typed ]; then f=after-keys; else f=screen; fi
+  if ! cmp -s "$f" shown; then cp "$f" shown; printf '\033[H\033[2J'; cat shown; fi
+  sleep 0.1
+done &
+while :; do
+  key=$(dd bs=1 count=1 2>/dev/null)
+  printf '%s' "$key" >> keys
+  case "$key" in [0-9]) if [ -e after-keys ]; then : > typed; fi ;; esac
+done"#;
+    let pane = panes(world)
+        .spawn(&tiller_panes::Spawn {
+            key: "builder".into(),
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                child.into(),
+                lab.to_str().unwrap().into(),
+            ],
+            cwd: lab.to_str().unwrap().into(),
+            env: [("PATH".to_owned(), "/usr/bin:/bin".to_owned())].into(),
+            size: None,
+            meta: [("session".to_owned(), session.clone())].into(),
+        })
+        .unwrap()
+        .pane;
+    world.peer.bind(&session, pane.as_str());
+    shows(world, &pane, "esc to interrupt");
+    (holder, session, pane, lab.join("keys"))
+}
+
+/// A client of the peer's terminal holder.
+fn panes(world: &World) -> tiller_panes::HolderClient {
+    tiller_panes::HolderClient::connect(tiller_panes::socket_path(world.peer.dir.path()), "test")
+        .unwrap()
+}
+
+/// Waits until the peer's `pane` shows `needle`.
+fn shows(world: &World, pane: &tiller_panes::PaneId, needle: &str) {
+    use tiller_panes::Panes;
+    let client = panes(world);
+    until(&format!("the pane to show {needle:?}"), || {
+        client
+            .screen(
+                pane,
+                tiller_panes::Read::Visible,
+                tiller_panes::Format::Text,
+            )
+            .ok()
+            .filter(|screen| screen.text().contains(needle))
+            .map(|_| ())
+    });
 }
 
 /// The agent's own hook on the peer: once `log` shows the Escape reached
-/// `w2:p1`, the agent's turn ends with a `Stop`.
+/// the builder's pane, the agent's turn ends with a `Stop`.
 fn stop_hook_after_escape(world: &World, log: &Path, session: &str) -> std::thread::JoinHandle<()> {
     let store = world.peer.open();
     let (log, session) = (log.to_owned(), session.to_owned());
     std::thread::spawn(move || {
         let deadline = Instant::now() + WAIT;
         while Instant::now() < deadline {
-            let calls = std::fs::read_to_string(&log).unwrap_or_default();
-            if calls
-                .lines()
-                .any(|call| call.starts_with("pane send-keys w2:p1 esc"))
-            {
+            let typed = std::fs::read(&log).unwrap_or_default();
+            if typed.contains(&0x1b) {
                 store
                     .conn()
                     .execute(
@@ -1066,12 +1097,12 @@ fn ask_permission(world: &World, lab: &Path, session: &str) {
 /// (D20): reads its tail, interrupts its turn, reads and answers its
 /// permission prompt, steers it, and stops the peer's orchestrator. Each
 /// read is a query and each verb a signed `mutate` on the real link; the
-/// peer's real controls type into its own herdr and write its own store,
+/// peer's real controls type into its own holder and write its own store,
 /// as `board@<label>`. The board host writes nothing.
 #[test]
 fn board_interrupts_answers_steers_and_stops_a_peer_agent() {
     let mut world = World::start();
-    let (session, log) = peer_builder(&mut world);
+    let (_holder, session, pane, log) = peer_builder(&mut world);
     let lab = log.parent().unwrap().to_owned();
     world.live();
     let host_seq = world.board.open().last_seq().unwrap();
@@ -1092,12 +1123,12 @@ fn board_interrupts_answers_steers_and_stops_a_peer_agent() {
     assert_eq!(status, 200, "{interrupted}");
     assert_eq!(interrupted["host"], LABEL);
     assert_eq!(interrupted["data"]["cancel"], "confirmed", "{interrupted}");
-    let calls = std::fs::read_to_string(&log).unwrap();
-    assert!(calls.contains("pane send-keys w2:p1 esc"), "{calls}");
+    let typed = std::fs::read(&log).unwrap();
+    assert!(typed.contains(&0x1b), "{typed:?}");
 
     // The prompt, read and answered on the peer's own screen.
-    std::fs::write(lab.join("status"), "blocked").unwrap();
     ask_permission(&world, &lab, &session);
+    shows(&world, &pane, "Do you want to proceed?");
     let (status, prompt) = world.post(&agent("prompt"), &json!({"host": LABEL}));
     assert_eq!(status, 200, "{prompt}");
     assert_eq!(
@@ -1112,10 +1143,10 @@ fn board_interrupts_answers_steers_and_stops_a_peer_agent() {
     assert_eq!(answered["host"], LABEL);
     assert_eq!(answered["data"]["sent"]["option"], 4, "{answered}");
     let digits = || {
-        std::fs::read_to_string(&log)
+        std::fs::read(&log)
             .unwrap()
-            .lines()
-            .filter(|call| *call == "pane send-keys w2:p1 4")
+            .iter()
+            .filter(|byte| **byte == b'4')
             .count()
     };
     assert_eq!(digits(), 1);
@@ -1126,10 +1157,10 @@ fn board_interrupts_answers_steers_and_stops_a_peer_agent() {
     assert_eq!(digits(), 1);
 
     // A steer waits in the peer's outbox for the builder.
-    std::fs::write(lab.join("status"), "working").unwrap();
     std::fs::write(lab.join("screen"), WORKING).unwrap();
     let _ = std::fs::remove_file(lab.join("after-keys"));
     let _ = std::fs::remove_file(lab.join("typed"));
+    shows(&world, &pane, "esc to interrupt");
     let (status, steered) = world.post(
         &agent("steer"),
         &json!({"idempotency_key": "steer-1", "host": LABEL, "text": "use the new API"}),
@@ -1144,8 +1175,7 @@ fn board_interrupts_answers_steers_and_stops_a_peer_agent() {
     );
 
     // The peer's orchestrator is stopped through the peer's own starter:
-    // its pane is gone, so the stop is proven at once.
-    std::fs::write(lab.join("orchestrator-gone"), "").unwrap();
+    // its holder has no pane for it, so the stop is proven at once.
     let orchestrator = world.peer.orchestrator_session.clone();
     let (status, stopped) = world.post(
         &format!("/api/v1/agents/{orchestrator}/stop"),
@@ -1191,15 +1221,17 @@ fn launch_words(script: &str) -> (&str, &str) {
 /// A resume the board host forwards to the peer is the peer's own `tiller
 /// agent resume`, through the one launch builder (`recovery.md` section 2,
 /// step 2): with the run's launch files gone it is refused and nothing is
-/// typed; with them it types the peer's `resume-<session>.sh`, whose command
-/// line repeats every flag of the first launch with `--resume <id>`.
+/// started; with them a new pane of the peer's holder runs the peer's
+/// `resume-<session>.sh`, whose command line repeats every flag of the first
+/// launch with `--resume <id>`.
 #[test]
 fn board_resumes_a_peer_agent_with_its_first_launch_flags() {
     use tiller_agents::spawn::{launch, memory::Memory, trust::ClaudeConfig};
+    use tiller_panes::Panes;
 
     let mut world = World::start();
-    let (session, log) = peer_builder(&mut world);
-    let lab = log.parent().unwrap().to_owned();
+    let (_holder, session, pane, keys) = peer_builder(&mut world);
+    let lab = keys.parent().unwrap().to_owned();
     let worktree = lab.join("worktree");
     let scratch_root = lab.join("scratch");
     std::fs::create_dir_all(&worktree).unwrap();
@@ -1228,7 +1260,7 @@ fn board_resumes_a_peer_agent_with_its_first_launch_flags() {
         )
         .unwrap();
     // Claude is gone from the builder's own pane.
-    std::fs::write(lab.join("no-agent"), "").unwrap();
+    panes(&world).close(&pane, Duration::ZERO).unwrap();
     world.live();
     let resume = |key: &str| {
         world.post(
@@ -1236,14 +1268,18 @@ fn board_resumes_a_peer_agent_with_its_first_launch_flags() {
             &json!({"idempotency_key": key, "host": LABEL}),
         )
     };
-    let typed = || {
-        std::fs::read_to_string(&log)
-            .unwrap_or_default()
-            .lines()
-            .filter(|call| call.starts_with("pane send-text w2:p1"))
-            .map(str::to_owned)
+    // The argv of each pane the peer's holder started for the session.
+    let started = |client: &tiller_panes::HolderClient, session: &str| {
+        client
+            .list()
+            .unwrap()
+            .panes
+            .into_iter()
+            .filter(|pane| pane.key == session)
+            .map(|pane| pane.argv)
             .collect::<Vec<_>>()
     };
+    let client = panes(&world);
 
     // No launch files: the peer's builder refuses, and nothing is rebuilt.
     let (status, body) = resume("resume-1");
@@ -1256,7 +1292,7 @@ fn board_resumes_a_peer_agent_with_its_first_launch_flags() {
             .contains("is missing, so the run's launch cannot be repeated"),
         "{body}"
     );
-    assert!(typed().is_empty(), "{:?}", typed());
+    assert!(started(&client, &session).is_empty());
     assert!(!scratch_root.join(&run).exists());
 
     // The run's first launch, as its spawn wrote it on the peer.
@@ -1288,17 +1324,14 @@ fn board_resumes_a_peer_agent_with_its_first_launch_flags() {
     let first = std::fs::read_to_string(&first.script).unwrap();
 
     // The bind the resumed Claude's SessionStart hook writes.
-    let started = {
+    let hook = {
         let store = world.peer.open();
-        let (log, session) = (log.clone(), session.clone());
+        let client = panes(&world);
+        let session = session.clone();
         std::thread::spawn(move || {
             let deadline = Instant::now() + WAIT;
             while Instant::now() < deadline {
-                let calls = std::fs::read_to_string(&log).unwrap_or_default();
-                if calls
-                    .lines()
-                    .any(|call| call.starts_with("pane send-text w2:p1"))
-                {
+                if !started(&client, &session).is_empty() {
                     store
                         .conn()
                         .execute(
@@ -1314,14 +1347,17 @@ fn board_resumes_a_peer_agent_with_its_first_launch_flags() {
         })
     };
     let (status, body) = resume("resume-2");
-    started.join().unwrap();
+    hook.join().unwrap();
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["host"], LABEL);
     let script = scratch.join(format!("resume-{session}.sh"));
     assert_eq!(
-        typed(),
-        [format!("pane send-text w2:p1 sh '{}'", script.display())],
-        "the peer typed its resume script"
+        started(&client, &session),
+        [vec![
+            tiller_panes::env::SHELL.to_owned(),
+            script.to_str().unwrap().to_owned(),
+        ]],
+        "the peer's holder runs its resume script"
     );
     let resumed = std::fs::read_to_string(&script).unwrap();
     let (flags, rest) = launch_words(&resumed);
@@ -1346,7 +1382,7 @@ fn board_resumes_a_peer_agent_with_its_first_launch_flags() {
 #[test]
 fn board_pauses_resumes_and_relaunches_a_peer_run() {
     let mut world = World::start();
-    let (session, log) = peer_builder(&mut world);
+    let (_holder, session, _pane, log) = peer_builder(&mut world);
     // The run's worktree is on the peer's disk.
     let worktree = log.parent().unwrap().join("worktree");
     std::fs::create_dir_all(&worktree).unwrap();
@@ -1403,7 +1439,7 @@ fn board_pauses_resumes_and_relaunches_a_peer_run() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(paused(), None);
 
-    // The peer's herdr shows Claude in the run's pane, so the resume
+    // The peer's holder shows Claude in the run's pane, so the resume
     // leaves it alone.
     let (status, body) = world.post(
         &agent("resume"),

@@ -394,7 +394,6 @@ mod tests {
     fn the_host_keys_are_settable_and_the_secret_is_not() {
         for key in [
             "attach.terminal",
-            "herdr.terminal",
             "stop_hook_mode",
             "federation.accept",
             "memory.remote",
@@ -414,7 +413,7 @@ mod tests {
             "owner_guard",
             "intake_source",
             "learning",
-            "herdr",
+            "attach",
             "checkouts.a.b",
             "",
         ] {
@@ -423,7 +422,11 @@ mod tests {
         // A host key is not a start setting: `check` holds the start rules only.
         let base = config(None, None, &[]);
         let run = |key: &str| check(&base, Path::new(HOMES), Path::new(SCRATCH), key, "x");
-        assert!(run("herdr.terminal").unwrap_err().contains("not a setting"));
+        assert!(
+            run("attach.terminal")
+                .unwrap_err()
+                .contains("not a setting")
+        );
         assert!(
             run("owner_guard.decider_key")
                 .unwrap_err()

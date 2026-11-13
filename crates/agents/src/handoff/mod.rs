@@ -6,7 +6,7 @@
 //! with each id resolved and every fact that moved since it was written
 //! marked. [`signal_compactions`] is the breakpoint signal. Clearing a
 //! session is never a Tiller action: the daemon types only a wake-up line,
-//! `herdr` is denied to the orchestrator, and the note it receives tells it
+//! `tiller attach` is denied to the orchestrator, and the note it receives tells it
 //! to hand the owner the word, not to run it.
 
 mod away;

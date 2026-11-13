@@ -572,6 +572,21 @@ impl<'a> Replay<'a> {
             run,
             RunOutcome::Cancelled,
         )?;
+        // The stub agent exits, as a cancelled one does, so cleanup finds
+        // its pane no longer running.
+        let panes: Vec<String> = list::<tiller_core::domain::Session>(
+            self.sandbox.store.conn(),
+            "run_id = ?1 AND pane_id IS NOT NULL",
+            &[&run.id],
+        )?
+        .into_iter()
+        .filter_map(|session| session.pane_id)
+        .collect();
+        for pane in panes {
+            self.sandbox
+                .holder
+                .exit(&tiller_panes::PaneId::from(pane.as_str()), Some(0), None);
+        }
         let (store, world) = self.sandbox.world();
         let cleaned = match spawn::cleanup(store, &owner, &world, run) {
             Ok(applied) => json!({

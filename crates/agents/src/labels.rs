@@ -1,7 +1,6 @@
 //! The label a holder pane carries in `meta.label` (`terminal-holder.md`
 //! 4.4): what the switcher, `tiller attach` and the board show for it. It
-//! replaces herdr's workspace label, without the tree glyph, since the
-//! holder keeps no sidebar order.
+//! has no tree glyph, since the holder keeps no sidebar order.
 
 use tiller_core::domain::RunRole;
 

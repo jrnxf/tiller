@@ -1,8 +1,8 @@
 //! The `Panes` and `Live` traits (`terminal-holder.md` 4.2): what the
 //! daemon asks of the holder.
 //!
-//! The traits follow the holder, not herdr. They have no workspaces, tabs,
-//! layout or ordering. A pane is a child process with a key, metadata and a
+//! The traits follow the holder. They have no workspaces, tabs, layout or
+//! ordering. A pane is a child process with a key, metadata and a
 //! screen.
 
 use std::time::Duration;

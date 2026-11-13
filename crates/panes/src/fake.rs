@@ -327,6 +327,45 @@ impl FakePanes {
         self.world().leases.get(pane).cloned().unwrap_or_default()
     }
 
+    /// Puts a running pane with id `pane` in the holder, as a holder that
+    /// already runs it lists it. The id need not be one `spawn` makes.
+    pub fn add(&self, pane: &PaneId, key: &str, meta: Meta) -> Pane {
+        let mut world = self.world();
+        let record = Pane {
+            pane: pane.clone(),
+            num: world.next_num,
+            key: key.to_owned(),
+            pid: world.next_pid,
+            argv: vec!["/bin/claude".into()],
+            cwd: "/home/user".into(),
+            started_at: Timestamp::now(),
+            state: PaneState::Running,
+            exit: None,
+            cols: DEFAULT_SIZE.cols,
+            rows: DEFAULT_SIZE.rows,
+            meta,
+            title: String::new(),
+            last_output_at: None,
+            attach_clients: 0,
+            subscribers: 0,
+        };
+        world.next_num += 1;
+        world.next_pid += 1;
+        world.panes.retain(|p| p.pane != *pane);
+        world.panes.push(record.clone());
+        record
+    }
+
+    /// Drops `pane` from the holder at once, as a holder that never ran it
+    /// would list it. False when no pane has that id.
+    pub fn remove(&self, pane: &PaneId) -> bool {
+        let mut world = self.world();
+        let before = world.panes.len();
+        world.panes.retain(|p| p.pane != *pane);
+        world.screens.remove(pane);
+        world.panes.len() != before
+    }
+
     /// Ends a running pane's child, as the holder's reaper records it.
     /// Returns false when no running pane has that id.
     pub fn exit(&self, pane: &PaneId, code: Option<i32>, signal: Option<i32>) -> bool {

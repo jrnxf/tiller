@@ -1,5 +1,5 @@
 ---
-source: crates/herdr/tests/composer_snapshots.rs
+source: crates/panes/tests/composer_snapshots.rs
 expression: "classify(& fixture(\"trust-dialog\"))"
 ---
 Dialog

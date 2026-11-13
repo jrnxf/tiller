@@ -21,9 +21,8 @@ use tiller_agents::land::{DaemonLock, LandError};
 use tiller_core::domain::Boundary;
 use tiller_core::state::projects::Init;
 use tiller_core::{Actor, Ctx, Store, Timestamp};
-use tiller_herdr::client::Cli;
-use tiller_herdr::front::Terminal;
-use tiller_herdr::poller::Registry;
+use tiller_panes::open::Terminal;
+use tiller_poll::Registry;
 use tokio::sync::watch;
 
 use crate::api::{self, AppState, Inner};
@@ -69,9 +68,8 @@ pub struct Config {
     pub port: u16,
     /// Extra `Host` values the board answers on (`Inner::allowed_hosts`).
     pub allowed_hosts: Vec<String>,
-    pub herdr: Cli,
-    /// The terminal app "Open in herdr" brings to the front
-    /// (`[herdr] terminal`); none means a focus only.
+    /// The terminal app Open in terminal opens an agent's pane in
+    /// (`[attach] terminal`); none refuses the open.
     pub terminal: Option<Arc<dyn Terminal>>,
     pub quota: Vec<OsString>,
     /// `lavish-axi`: the review page tool whose annotations reach workers.
@@ -88,11 +86,11 @@ pub struct Config {
     pub assets: Assets,
     /// The board's Start orchestrator (`tiller orchestrator start`).
     pub orchestrators: Option<Arc<dyn crate::api::OrchestratorStart>>,
-    /// The terminal holder, for the panes of agents that run in it.
-    pub holder: Option<Arc<dyn crate::holder::Holder>>,
+    /// The terminal holder, the only pane backend.
+    pub holder: Arc<dyn crate::holder::Holder>,
     /// The same holder as reconcile's observation source (`terminal-holder.md`
     /// 6.1).
-    pub holder_source: Option<crate::workers::HolderWatch>,
+    pub holder_source: crate::workers::HolderWatch,
 }
 
 /// How a run ended.
@@ -361,11 +359,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
     let registry = Registry::new();
     let tool_versions = Arc::new(Mutex::new(Value::Null));
     let tools = Tools {
-        herdr: config.herdr.clone(),
-        holder: config
-            .holder
-            .clone()
-            .map(|holder| -> Arc<dyn tiller_panes::Panes> { holder }),
+        holder: Arc::clone(&config.holder) as Arc<dyn tiller_panes::Panes>,
         holder_source: config.holder_source.clone(),
         quota: config.quota.clone(),
         gh: config.gh.clone(),
@@ -419,14 +413,13 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         stop: stop.clone(),
         pollers: registry,
         peers,
-        herdr: config.herdr,
         terminal: config.terminal,
         started_at,
         tools: tool_versions,
         damage: damage.clone(),
         orchestrators: config.orchestrators,
-        mirrors: crate::mirror::Mirrors::new(&config.home),
-        holder: config.holder,
+        mirrors: crate::mirror::Mirrors::new(),
+        holder: Some(config.holder),
         sessions: crate::auth::Sessions::default(),
         streams: crate::sse::Streams::default(),
         ssh: config.ssh.clone(),
@@ -444,13 +437,6 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
             damage.clone(),
             stop.clone(),
         ));
-    }
-
-    // A daemon that stopped mid-Fit gives those panes back their size.
-    {
-        let fits = state.0.mirrors.fits();
-        let herdr = state.0.herdr.clone();
-        tokio::spawn(async move { fits.restore_left(&herdr).await });
     }
 
     // The panes of sessions in the terminal holder are the holder's; this
