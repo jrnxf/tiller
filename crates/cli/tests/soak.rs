@@ -90,6 +90,10 @@ const RESTORE: Duration = Duration::from_secs(300);
 /// (`BUSY_DEFER_SECS`, 30 s, in `tiller_delivery::outbox`) and the wait.
 const DELIVER: Duration = Duration::from_secs(50);
 
+/// How long a line the daemon typed before an ack can take to reach the
+/// stand-in's log: the delivery settle before Enter.
+const ACK_SETTLE: Duration = Duration::from_millis(500);
+
 /// The scrollback a read takes: all the holder keeps (spec 2.8).
 const WINDOW: u16 = 10_000;
 
@@ -106,7 +110,7 @@ const HOOKS: &[Hook] = &[
     Hook {
         name: "delivery_counts",
         after: "every event, and the end",
-        checks: "every message to the orchestrator so far, the soak's and the daemon's own notes, is `acked` in the outbox after exactly one typed wake line covered it (`tiller inbox` drains a batch), with no line naming a message a take before had acked (the daemon may type a batch's head again while it is unacked); then the next message goes out",
+        checks: "every message to the orchestrator so far, the soak's and the daemon's own notes, is `acked` in the outbox after exactly one typed wake line covered it (`tiller inbox` drains a batch), with no line naming an acked message that reached the log more than a settle after its ack (the daemon may type a batch's head again while it is unacked); then the next message goes out",
     },
     Hook {
         name: "daemon_reconnect",
@@ -539,11 +543,13 @@ struct Logged {
     note: String,
 }
 
-/// A message to the orchestrator: its outbox id, and the submitted line
-/// (by its place in the stand-in's log) whose `tiller inbox` took it.
+/// A message to the orchestrator: its outbox id, the submitted line (by
+/// its place in the stand-in's log) whose `tiller inbox` took it, and how
+/// many lines the log held a settle after that ack returned.
 struct Message {
     id: String,
     acked_by: Option<usize>,
+    typed_before: usize,
 }
 
 struct Soak {
@@ -987,10 +993,10 @@ impl Soak {
     /// does what Claude Code does with each new submitted line: runs it,
     /// `tiller inbox <id>`, which acks that message and drains the rest of
     /// its batch (protocol 3.3). The daemon types a batch's head again when
-    /// a message joins it before the ack, so a line that names a message
-    /// this take acked was typed before the ack and is skipped. A line that
-    /// is not one wake line, or that names a message an earlier take acked,
-    /// is a delivery that typed twice.
+    /// a message joins it before the ack, so a line that names an acked
+    /// message is skipped when the log held it a settle after the ack. A
+    /// line that is not one wake line, or that names an acked message and
+    /// came later, is a delivery that typed twice.
     fn take_submits(&mut self) -> Result<(), String> {
         let ids: Vec<String> = {
             let store = self.world.store();
@@ -1008,24 +1014,27 @@ impl Soak {
         };
         for id in ids {
             if !self.messages.iter().any(|m| m.id == id) {
-                self.messages.push(Message { id, acked_by: None });
+                self.messages.push(Message {
+                    id,
+                    acked_by: None,
+                    typed_before: 0,
+                });
             }
         }
         let submits = self.submits();
-        let first = self.submits_taken;
         for (n, submit) in submits.iter().enumerate().skip(self.submits_taken) {
             let id = submit
                 .strip_prefix("tiller inbox ")
                 .and_then(|rest| rest.split_whitespace().next())
                 .filter(|_| submit.matches("tiller inbox").count() == 1 && !submit.contains('\n'))
                 .ok_or_else(|| format!("a submit is not one wake line: {submit:?}"))?;
-            if let Some(before) = self
-                .messages
-                .iter()
-                .find(|m| m.id == id)
-                .and_then(|m| m.acked_by)
+            if let Some(Message {
+                acked_by: Some(before),
+                typed_before,
+                ..
+            }) = self.messages.iter().find(|m| m.id == id)
             {
-                if before < first {
+                if n >= *typed_before {
                     return Err(format!(
                         "message {id} was typed again after submit {before} took it: {submit:?}"
                     ));
@@ -1042,6 +1051,8 @@ impl Soak {
                         .collect()
                 })
                 .unwrap_or_default();
+            std::thread::sleep(ACK_SETTLE);
+            let typed_before = self.submits().len();
             for id in batch {
                 match self.messages.iter_mut().find(|m| m.id == id) {
                     Some(Message {
@@ -1052,10 +1063,14 @@ impl Soak {
                             "message {id} came back in submit {n} after submit {before}"
                         ));
                     }
-                    Some(message) => message.acked_by = Some(n),
+                    Some(message) => {
+                        message.acked_by = Some(n);
+                        message.typed_before = typed_before;
+                    }
                     None => self.messages.push(Message {
                         id,
                         acked_by: Some(n),
+                        typed_before,
                     }),
                 }
             }
@@ -1065,8 +1080,8 @@ impl Soak {
     }
 
     /// Every message to the orchestrator so far was delivered and taken by
-    /// exactly one submitted line, and no line named a message an earlier
-    /// take had acked. With
+    /// exactly one submitted line, and no line named an acked message
+    /// later than a settle after its ack. With
     /// `next`, sends the next message.
     fn delivery_counts(&mut self, next: bool) -> Result<(), String> {
         let deadline = Instant::now() + DELIVER;
@@ -1122,7 +1137,11 @@ impl Soak {
             ]);
             let id = sent.data()["id"].as_str().unwrap().to_owned();
             self.sent = n;
-            self.messages.push(Message { id, acked_by: None });
+            self.messages.push(Message {
+                id,
+                acked_by: None,
+                typed_before: 0,
+            });
         }
         self.passed("delivery_counts");
         Ok(())
