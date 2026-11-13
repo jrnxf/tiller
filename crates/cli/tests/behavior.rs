@@ -554,7 +554,7 @@ echo '{"ok":true,"data":{"config":{"stop_hook_mode":"off","quota_providers":["cl
     .unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_tiller"))
+    let out = common::tiller(world.dir.path())
         .env("TILLER_HOME", world.home())
         .env("TILLER_SSH", &fake)
         .args(["--json", "config", "diff", "host-b"])
