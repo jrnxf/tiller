@@ -293,12 +293,16 @@ impl Counter {
 /// The `claude` every launch runs: it fires the `SessionStart` hook Claude
 /// Code would, under the Claude session id `claude-<session>`, then becomes
 /// `fake-agent` logging to a file per session. A worker, whose working
-/// directory is under `work/`, runs the counter. With a skip, the first
-/// worker runs a shell counter that skips that number.
+/// directory is under the soak's own `work/`, runs the counter. The match is
+/// on that whole path, as a temporary directory can sit under another
+/// `work/` (a CI runner's is). With a skip, the first worker runs a shell
+/// counter that skips that number.
 fn claude_stub(root: &Path, skip_at: Option<u64>) -> String {
+    let work = std::fs::canonicalize(root).unwrap().join("work");
+    let work = work.display();
     let skip = skip_at.map_or(String::new(), |skip| {
         format!(
-            "  */work/soak-1) i=0; while :; do echo \"count $i\"; i=$((i + 1)); \
+            "  \"{work}\"/soak-1) i=0; while :; do echo \"count $i\"; i=$((i + 1)); \
              [ \"$i\" = {skip} ] && i=$((i + 1)); sleep 0.05; done ;;\n"
         )
     });
@@ -306,7 +310,7 @@ fn claude_stub(root: &Path, skip_at: Option<u64>) -> String {
         "if [ \"$1\" = --version ]; then exec {agent} --version; fi\n\
          printf '{{\"session_id\":\"claude-%s\",\"source\":\"startup\"}}' \"$TILLER_SESSION_ID\" \
          | {TILLER} hook SessionStart >/dev/null 2>>{logs}/hook.err\n\
-         case \"$(pwd)\" in\n{skip}  */work/*) set -- --counter \"$@\" ;;\nesac\n\
+         case \"$(pwd -P)\" in\n{skip}  \"{work}\"/*) set -- --counter \"$@\" ;;\nesac\n\
          exec env FAKE_AGENT_LOG={logs}/\"$TILLER_SESSION_ID\".jsonl {agent} \"$@\"\n",
         agent = fake_agent().display(),
         logs = root.join("fake-agent").display(),
