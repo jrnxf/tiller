@@ -55,6 +55,7 @@ import {
   KIND_LABELS,
   PRIORITIES,
   formatAge,
+  formatAgo,
   formatWhen,
   parseEvidence,
   recommender,
@@ -353,7 +354,7 @@ function DecisionDetail({
         owner={item}
         ctx={ctx}
         chip={chip}
-        when={`asked ${formatWhen(item.opened_at)} - ${formatAge(item.opened_at)} ago`}
+        when={`asked ${formatWhen(item.opened_at)} - ${formatAgo(item.opened_at)}`}
       />
       <h2 className="d-q">
         <Question text={item.question} projects={ctx.projects} />

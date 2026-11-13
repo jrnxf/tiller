@@ -11,7 +11,7 @@ import { askPrefillStore } from "../shell/ask-prefill";
 import { CheckIcon } from "../shell/icons";
 import { ActionFailure } from "./action-failure";
 import { sendMutation } from "./api";
-import { formatAge, formatWhen } from "./format";
+import { formatAgo, formatWhen } from "./format";
 import { ReplyIcon } from "./icons";
 import { useAction } from "./use-action";
 
@@ -28,11 +28,6 @@ export function useReplies(projects: Project[]): { replies: ReplyItem[]; loading
   const replies = results.flatMap((result) => result.data?.replies ?? []);
   replies.sort((a, b) => b.replied_at.localeCompare(a.replied_at));
   return { replies, loading: results.some((result) => result.isPending) };
-}
-
-function ago(iso: string): string {
-  const age = formatAge(iso);
-  return age === "just now" || age === "unknown" ? age : `${age} ago`;
 }
 
 // The project dot and name a reply belongs to, when the list still has it.
@@ -87,7 +82,7 @@ function ReplyRow({
               <span className="sl">/</span>
             </>
           ) : null}
-          replied {ago(reply.replied_at)}
+          replied {formatAgo(reply.replied_at)}
         </span>
       </span>
     </Link>
@@ -183,7 +178,7 @@ export function ReplyDetail({
         </span>
         <ProjectOf reply={reply} projects={projects} sep="sep" />
         <span>
-          replied {formatWhen(reply.replied_at)} - {ago(reply.replied_at)}
+          replied {formatWhen(reply.replied_at)} - {formatAgo(reply.replied_at)}
         </span>
       </div>
       <div className="blk reply-blk">

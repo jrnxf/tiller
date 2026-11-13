@@ -1286,3 +1286,27 @@ test("an undated hold a month old shows under Needs you and never alarms", async
   expect(tile.textContent).toContain("Decision");
   expect(tile.textContent).not.toMatch(/stale/i);
 });
+
+test("a decision opened under a minute ago says just now, with no ago after it", async () => {
+  stubDaemon("default");
+  const { router, queryClient } = await renderInbox();
+  act(() => {
+    queryClient.setQueryData<AttentionResponse>(attentionQuery().queryKey, (attention) =>
+      attention
+        ? {
+            ...attention,
+            items: attention.items.map((item) =>
+              item.id === RETRY ? { ...item, opened_at: "2026-11-02T11:59:40.000Z" } : item,
+            ),
+          }
+        : attention,
+    );
+  });
+
+  await act(async () => {
+    await router.navigate({ to: "/inbox", search: { item: RETRY } });
+  });
+  await screen.findByTestId("current");
+  expect(screen.getByText(/asked .* - just now$/)).toBeTruthy();
+  expect(screen.queryByText(/just now ago/)).toBeNull();
+});
