@@ -8,8 +8,8 @@
 //! come from the manifest its start recorded (`config_hash`), and its
 //! launch files from `<scratch_root>/<session id>`. A session whose launch
 //! files or records are gone or do not parse is refused
-//! ([`launch::write_again`]): nothing rebuilds them, since a rebuild would give the agent a prompt and settings it did
-//! not start with.
+//! ([`launch::write_again`]): nothing rebuilds them, since a rebuild would
+//! give the agent a prompt and settings it did not start with.
 
 use std::path::Path;
 
