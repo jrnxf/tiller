@@ -1,7 +1,6 @@
-//! `tiller daemon`: runs `tiller-daemon` with this host's tools. herdr is the
-//! one `tiller spawn` drives: `spawn.herdr` and `spawn.herdr_socket` from
-//! `config.toml`, read again whenever that file changes. The helper programs can be replaced for tests and labs:
-//! `TILLER_HERDR`, `TILLER_QUOTA_AXI` and `TILLER_SSH` each hold a command
+//! `tiller daemon`: runs `tiller-daemon` with this host's tools and its
+//! terminal holder. The helper programs can be replaced for tests and labs:
+//! `TILLER_QUOTA_AXI` and `TILLER_SSH` each hold a command
 //! line (a program and its leading arguments, split on whitespace), and
 //! `TILLER_GH` names the GitHub CLI program the land loop and the direct-pr
 //! publish run.
@@ -20,11 +19,10 @@ use std::sync::Arc;
 use serde::Deserialize;
 use tiller_daemon::assets::Assets;
 use tiller_daemon::{Config, Ended};
-use tiller_herdr::client::Cli;
-use tiller_herdr::front::{MacApp, Terminal};
+use tiller_panes::open::{MacApp, Terminal};
 
-use crate::cmd::admin::{load_config, load_config_at};
-use crate::cmd::spawn::{BoardStart, herdr_from_config, lavish_from_config};
+use crate::cmd::admin::load_config;
+use crate::cmd::spawn::{BoardStart, lavish_from_config};
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -104,41 +102,6 @@ fn configured_terminal(table: &toml::Table) -> anyhow::Result<Option<MacApp>> {
     }))
 }
 
-/// `initial` made to follow `config.toml`: every herdr call names the
-/// `[spawn]` herdr as the file reads now, so editing `spawn.herdr`,
-/// `spawn.herdr_session` or `spawn.herdr_socket` needs no daemon restart. A
-/// file that no longer parses keeps the last herdr that did (one warning per
-/// edit): the start refuses a bad table, a running daemon must not go blind
-/// on a half-written one. `TILLER_HERDR` still replaces the table.
-fn follow_config(initial: Cli, config: std::path::PathBuf) -> Cli {
-    type Stamp = Option<(std::time::SystemTime, u64)>;
-    let stamp = |path: &std::path::Path| -> Stamp {
-        let meta = std::fs::metadata(path).ok()?;
-        Some((meta.modified().ok()?, meta.len()))
-    };
-    let seen = std::sync::Mutex::new((stamp(&config), initial.clone()));
-    initial.follow(move || {
-        let mut seen = seen
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let now = stamp(&config);
-        if now != seen.0 {
-            seen.0 = now;
-            match load_config_at(&config).and_then(|table| herdr_from_config(&table)) {
-                Ok(herdr) => {
-                    tracing::info!("config.toml changed; driving the herdr it names now");
-                    seen.1 = herdr;
-                }
-                Err(failure) => tracing::warn!(
-                    "config.toml [spawn] cannot be read ({}); keeping the herdr in use",
-                    failure.message
-                ),
-            }
-        }
-        seen.1.clone()
-    })
-}
-
 /// Why this `--db` (or `TILLER_DB`) cannot go to the daemon, or `None` when
 /// there is none or it names the database the daemon opens anyway.
 ///
@@ -205,8 +168,6 @@ pub fn run(args: &Args) -> anyhow::Result<ExitCode> {
         None => anyhow::anyhow!("{}", failure.message),
     };
     let table = load_config(&app).map_err(failed)?;
-    let herdr = herdr_from_config(&table).map_err(failed)?;
-    let herdr = follow_config(herdr, crate::cmd::admin::config_file(&app));
     for key in crate::cmd::doctor::herdr_keys(&table) {
         tracing::warn!(
             key = key.key,
@@ -231,7 +192,6 @@ pub fn run(args: &Args) -> anyhow::Result<ExitCode> {
         home: app.home.clone(),
         port: args.port,
         allowed_hosts: args.allow_hosts.clone(),
-        herdr,
         terminal: terminal.map(|app| Arc::new(app) as _),
         quota: command_line("TILLER_QUOTA_AXI", "quota-axi"),
         lavish,
@@ -239,13 +199,13 @@ pub fn run(args: &Args) -> anyhow::Result<ExitCode> {
         ssh: command_line("TILLER_SSH", "ssh"),
         gh: std::env::var("TILLER_GH").unwrap_or_else(|_| "gh".into()),
         assets: Assets::board(),
-        holder: Some(Arc::clone(&holder) as _),
+        holder: Arc::clone(&holder) as _,
         // The holder re-execs into the binary this daemon was started by
         // (`terminal-holder.md` 6.2).
-        holder_source: Some(tiller_daemon::workers::HolderWatch {
+        holder_source: tiller_daemon::workers::HolderWatch {
             link: holder,
             stable: crate::stable::tiller_path().ok(),
-        }),
+        },
         orchestrators: Some(Arc::new(BoardStart { app })),
     };
     match tiller_daemon::run(config)? {
@@ -273,7 +233,6 @@ pub fn run(args: &Args) -> anyhow::Result<ExitCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tiller_herdr::front::Terminal;
 
     /// `cd ~/.tiller && tiller --db state.db daemon` names the home database:
     /// a bare name resolves against the working directory.
@@ -296,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn no_herdr_table_means_focus_only() {
+    fn no_terminal_key_means_focus_only() {
         assert!(configured_terminal(&table("")).unwrap().is_none());
         assert!(configured_terminal(&table("[herdr]")).unwrap().is_none());
         assert!(
@@ -309,7 +268,7 @@ mod tests {
     /// `[attach] terminal` wins over the `[herdr]` one it replaces, which
     /// still works alone, and `prefix` sits beside it.
     #[test]
-    fn the_attach_terminal_replaces_the_herdr_one() {
+    fn the_attach_terminal_wins_over_the_retired_one() {
         let app = configured_terminal(&table(
             "[attach]\nterminal = \"WezTerm\"\nprefix = \"ctrl-a\"\n[herdr]\nterminal = \"Ghostty\"",
         ))

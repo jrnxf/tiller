@@ -473,8 +473,8 @@ record!(Reply in "replies" {
 });
 
 record!(
-    /// One pane as its holder last reported it: the terminal holder, or
-    /// herdr until the cutover (`holder_instance` null).
+    /// One pane as the terminal holder last reported it. A row written
+    /// before the cutover has a null `holder_instance`.
     Pane in "panes" {
         pane_id: String,
         host_id: String,
@@ -491,18 +491,6 @@ record!(
         gone_at: Option<Timestamp>,
     }
 );
-
-impl Pane {
-    /// The agent herdr names in a herdr pane; `None` for a holder pane.
-    pub fn herdr_agent(&self) -> Option<&str> {
-        self.metadata.get("agent").and_then(Value::as_str)
-    }
-
-    /// herdr's `agent_status` of a herdr pane; `None` for a holder pane.
-    pub fn herdr_status(&self) -> Option<&str> {
-        self.metadata.get("agent_status").and_then(Value::as_str)
-    }
-}
 
 record!(Worktree in "worktrees" {
     path: String,

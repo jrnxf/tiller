@@ -391,7 +391,7 @@ fn show(app: &App, reference: &str) -> Done {
         let session: Option<Session> = tiller_core::state::runs::live_session(conn, &run.id)?;
         run_rows.push(json!({
             "run": run,
-            "name": herdr_name(&card.display_id, run),
+            "name": agent_name(&card.display_id, run),
             "session": session.map(|s| json!({
                 "id": s.id,
                 "activity": s.activity,
@@ -430,8 +430,8 @@ fn show(app: &App, reference: &str) -> Done {
     })))
 }
 
-/// The herdr name of a run: `alpha-42-build`, then `alpha-42-build-2`.
-pub fn herdr_name(display_id: &str, run: &Run) -> String {
+/// The agent name of a run: `alpha-42-build`, then `alpha-42-build-2`.
+pub fn agent_name(display_id: &str, run: &Run) -> String {
     let base = format!("{display_id}-{}", run.role.short_name());
     if run.attempt > 1 {
         format!("{base}-{}", run.attempt)

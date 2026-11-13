@@ -1,5 +1,5 @@
 //! `tiller agent interrupt`, `resume`, `relaunch` and `stop` (T2.5, T4.5): the
-//! herdr half lives in `tiller_agents::control`; this parses the call and
+//! pane half lives in `tiller_agents::control`; this parses the call and
 //! picks the tools. The board's Resume, Relaunch and Stop run the same
 //! `*_run` and `stop_session` the commands do, through the daemon.
 
@@ -18,7 +18,7 @@ use crate::app::{App, Done, Outcome};
 
 #[derive(Args, Debug)]
 pub struct Relaunch {
-    /// The run: a ULID or short form, `<display id> <role>`, or a herdr name like
+    /// The run: a ULID or short form, `<display id> <role>`, or a run name like
     /// alpha-42-build
     pub run: String,
     /// The progress the new session starts from
@@ -63,7 +63,7 @@ pub fn interrupt(app: &App, run: &str) -> Done {
     let applied = control::interrupt(
         &mut store,
         &app.ctx(),
-        &world.routed(),
+        world.holder(),
         &Waits::default(),
         &run,
     )
@@ -76,7 +76,7 @@ pub fn interrupt(app: &App, run: &str) -> Done {
 pub(super) type Warned<T> = Result<(Applied<T>, Option<String>), SpawnError>;
 
 /// `tiller agent resume <run>`: `claude --resume` in the run's worktree; a
-/// live session herdr shows running is left alone.
+/// live session the holder shows running is left alone.
 pub fn resume(app: &App, run: &str) -> Done {
     let tools = Tools::load(app)?;
     let mut store = app.write()?;

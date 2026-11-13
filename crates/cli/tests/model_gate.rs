@@ -1,7 +1,7 @@
 //! The model gate (`terminal-holder.md` 9.1): each Claude Code fixture, fed
 //! into the holder's screen model at 119 columns by its row count and read
 //! back with `screen(visible, ansi)`, gives the composer and the prompt
-//! parser the results H00 froze from herdr's own reads. The assertions use
+//! parser the results H00 froze from the fixtures' first reads. The assertions use
 //! the frozen snapshots themselves, so a changed result fails here and
 //! nothing is rewritten.
 
@@ -13,7 +13,7 @@ use tiller_panes::Size;
 use tiller_panes::composer::classify;
 use tiller_panes::message::{Format, Read};
 
-/// The fixtures' width: herdr read them from a 119-column viewport.
+/// The fixtures' width: they were read from a 119-column viewport.
 const COLS: u16 = 119;
 
 fn fixture(name: &str) -> String {
@@ -42,7 +42,7 @@ macro_rules! gate {
         fn $test() {
             let screen = through_the_model($name);
             insta::with_settings!({
-                snapshot_path => "../../herdr/tests/snapshots",
+                snapshot_path => "../../panes/tests/snapshots",
                 prepend_module_to_snapshot => false,
             }, {
                 insta::assert_debug_snapshot!(

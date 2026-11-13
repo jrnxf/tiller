@@ -10,7 +10,7 @@ use axum::http::StatusCode;
 use serde_json::{Value, json};
 use tiller_core::memory::RULE_SECTION;
 use tiller_core::{Store, Timestamp};
-use tiller_herdr::testing::Fleet;
+use tiller_panes::testing::Fleet;
 
 use super::Watcher;
 use crate::api::tests::{app_with_peers, get, mutation, owner_cookie, send};

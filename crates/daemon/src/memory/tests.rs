@@ -16,7 +16,7 @@ use tiller_core::memory::{self as doc, NOTE_SECTION, RULE_SECTION, document_path
 use tiller_core::state::learning::EvalResult;
 use tiller_core::state::peers::NewPairing;
 use tiller_core::{Actor, Ctx, Error, NewEvent, ids};
-use tiller_herdr::testing::{Fleet, eventually, gone, owner};
+use tiller_panes::testing::{Fleet, eventually, gone, owner};
 
 use super::apply::Repo;
 use super::eval::Evals;

@@ -1,33 +1,55 @@
 //! `tiller run show --tail N` reads the last N lines of the run's live pane
-//! through herdr, without terminal escapes.
+//! through the terminal holder, without terminal escapes.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
 
-use std::os::unix::fs::PermissionsExt;
+use std::collections::BTreeMap;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
-use common::World;
+use common::holder::{WAIT, start_holder};
+use common::{Running, World};
+use tiller_panes::{Format, PaneId, Panes, Read, Spawn};
 
-/// A herdr stand-in that answers `pane read` for `w1:p1` with `screen` and
-/// refuses any other pane.
-fn herdr_showing(world: &World, screen: &str) {
+/// A `tiller holder` in the world's home with one pane that prints `screen`
+/// and waits. Returns the holder and the pane, once the pane shows `last`.
+fn holder_showing(world: &World, screen: &str, last: &str) -> (Running, PaneId) {
+    let (holder, client) = start_holder(world);
     let screen_file = world.dir.path().join("screen.txt");
     std::fs::write(&screen_file, screen).unwrap();
-    let program = world.dir.path().join("herdr");
-    std::fs::write(
-        &program,
-        format!(
-            "#!/bin/sh\n\
-             if [ \"$1 $2 $3\" = 'pane read w1:p1' ]; then cat '{}'; exit 0; fi\n\
-             echo 'pane not found' >&2\nexit 1\n",
-            screen_file.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-    world.set_env("TILLER_HERDR", program.to_str().unwrap());
+    let pane = client
+        .spawn(&Spawn {
+            key: "tail".to_owned(),
+            argv: ["/bin/sh", "-c", "stty -echo; cat \"$0\"; read line"]
+                .map(str::to_owned)
+                .into_iter()
+                .chain([screen_file.display().to_string()])
+                .collect(),
+            cwd: world.dir.path().display().to_string(),
+            env: BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]),
+            size: None,
+            meta: Default::default(),
+        })
+        .unwrap()
+        .pane;
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let text = client
+            .screen(&pane, Read::Visible, Format::Text)
+            .unwrap()
+            .text();
+        if text.contains(last) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the pane never showed {last:?}: {text}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    (holder, pane)
 }
 
 fn bind_pane(db: &Path, run: &str, pane: &str) {
@@ -53,7 +75,6 @@ fn tail_is_the_last_lines_of_the_live_pane_without_escapes() {
     let world = World::initialized();
     let card = card(&world);
     let (run, _) = world.builder_run(&card);
-    bind_pane(&world.db(), &run, "w1:p1");
     let mut screen = String::new();
     for n in 1..=60 {
         screen.push_str(&format!(
@@ -61,7 +82,8 @@ fn tail_is_the_last_lines_of_the_live_pane_without_escapes() {
         ));
     }
     screen.push_str("\n   \n");
-    herdr_showing(&world, &screen);
+    let (_holder, pane) = holder_showing(&world, &screen, "line 60");
+    bind_pane(&world.db(), &run, pane.as_str());
 
     let out = world.must(&["run", "show", &run, "--tail", "5"]);
 
@@ -80,7 +102,7 @@ fn tail_without_a_live_pane_is_unavailable_with_a_reason() {
     let world = World::initialized();
     let card = card(&world);
     let (run, _) = world.builder_run(&card);
-    herdr_showing(&world, "never read\n");
+    let (_holder, _) = holder_showing(&world, "never read\n", "never read");
 
     // The session has no pane yet.
     let out = world.must(&["run", "show", &run, "--tail", "5"]);
@@ -89,8 +111,8 @@ fn tail_without_a_live_pane_is_unavailable_with_a_reason() {
     assert!(tail["lines"].is_null());
     assert_eq!(tail["reason"], "the session has no pane");
 
-    // A pane herdr no longer has.
-    bind_pane(&world.db(), &run, "w1:p9");
+    // A pane the holder does not have.
+    bind_pane(&world.db(), &run, PaneId::generate().as_str());
     let out = world.must(&["run", "show", &run, "--tail", "5"]);
     let tail = &out.data()["pane_tail"];
     assert_eq!(tail["available"], false);
@@ -99,7 +121,7 @@ fn tail_without_a_live_pane_is_unavailable_with_a_reason() {
         tail["reason"]
             .as_str()
             .unwrap()
-            .starts_with("herdr cannot read the pane")
+            .starts_with("the terminal holder cannot read the pane")
     );
 }
 
@@ -108,8 +130,7 @@ fn tail_of_an_ended_run_has_no_live_session() {
     let world = World::initialized();
     let card = card(&world);
     let (run, _) = world.builder_run(&card);
-    bind_pane(&world.db(), &run, "w1:p1");
-    herdr_showing(&world, "text\n");
+    bind_pane(&world.db(), &run, PaneId::generate().as_str());
     rusqlite::Connection::open(world.db())
         .unwrap()
         .execute(
@@ -130,8 +151,7 @@ fn no_tail_flag_leaves_the_pane_unread() {
     let world = World::initialized();
     let card = card(&world);
     let (run, _) = world.builder_run(&card);
-    bind_pane(&world.db(), &run, "w1:p1");
-    herdr_showing(&world, "text\n");
+    bind_pane(&world.db(), &run, PaneId::generate().as_str());
 
     let out = world.must(&["run", "show", &run]);
 

@@ -244,7 +244,7 @@
             }
           },
           "503": {
-            "description": "herdr or the peer is unreachable",
+            "description": "the terminal holder or the peer is unreachable",
             "content": {
               "application/json": {
                 "schema": {
@@ -452,7 +452,7 @@
             }
           },
           "503": {
-            "description": "herdr or the peer is unreachable, or reads and input came faster than 20 a second",
+            "description": "the terminal holder or the peer is unreachable, or reads and input came faster than 20 a second",
             "content": {
               "application/json": {
                 "schema": {
@@ -561,7 +561,7 @@
             }
           },
           "503": {
-            "description": "herdr or the peer is unreachable, or input came faster than 20 a second; nothing was sent",
+            "description": "the terminal holder or the peer is unreachable, or input came faster than 20 a second; nothing was sent",
             "content": {
               "application/json": {
                 "schema": {
@@ -670,7 +670,7 @@
             }
           },
           "503": {
-            "description": "herdr or the peer is unreachable",
+            "description": "the terminal holder or the peer is unreachable",
             "content": {
               "application/json": {
                 "schema": {
@@ -778,7 +778,7 @@
             }
           },
           "503": {
-            "description": "herdr or the peer is unreachable",
+            "description": "the terminal holder or the peer is unreachable",
             "content": {
               "application/json": {
                 "schema": {
@@ -995,7 +995,7 @@
             }
           },
           "503": {
-            "description": "herdr or the peer is unreachable",
+            "description": "the terminal holder or the peer is unreachable",
             "content": {
               "application/json": {
                 "schema": {
@@ -1046,7 +1046,7 @@
         },
         "responses": {
           "200": {
-            "description": "One `TerminalLine` per line: `size`, then `frame`s, and a `size` again for each new PTY size, until `closed` or `unavailable` or the end of the body; `unfit` when the Fit does not reach the pane: herdr would not resize it, a peer is paired with a `read` scope, or a peer's rows hold no pane for the agent yet. A Fit on a pane in this host's own terminal holder is a size lease, and is never `unfit`",
+            "description": "One `TerminalLine` per line: `size`, then `frame`s, and a `size` again for each new PTY size, until `closed` or `unavailable` or the end of the body; `unfit` when the Fit does not reach the pane: a peer is paired with a `read` scope, or a peer's rows hold no pane for the agent yet. A Fit is a size lease in the terminal holder, and is never `unfit` on this host's own panes",
             "content": {
               "application/x-ndjson": {
                 "schema": {
@@ -1105,7 +1105,7 @@
             }
           },
           "503": {
-            "description": "herdr, the terminal holder or the peer is unreachable, or too many terminal views are open",
+            "description": "the terminal holder or the peer is unreachable, or too many terminal views are open",
             "content": {
               "application/json": {
                 "schema": {
@@ -1122,7 +1122,7 @@
         "tags": [
           "mutations"
         ],
-        "summary": "A new board size for the Fit an open stream holds on the agent's pane:\nsent to herdr's control session in place, or the stream's size lease\nmoved in the terminal holder, or over the pane link to a peer's\n(`protocol.md` 7.4, 10.7).",
+        "summary": "A new board size for the Fit an open stream holds on the agent's pane:\nthe stream's size lease moved in the terminal holder, or over the pane\nlink to a peer's\n(`protocol.md` 7.4, 10.7).",
         "operationId": "terminal_fit",
         "parameters": [
           {
@@ -1230,7 +1230,7 @@
         "tags": [
           "mutations"
         ],
-        "summary": "The pane's scrollback, for the board to read back without herdr\n(`protocol.md` 7.4). A POST, as the mirror is: it passes every mutation\ncheck, owner cookie included, though it writes nothing.",
+        "summary": "The pane's scrollback, for the board to read back\n(`protocol.md` 7.4). A POST, as the mirror is: it passes every mutation\ncheck, owner cookie included, though it writes nothing.",
         "operationId": "terminal_history",
         "parameters": [
           {
@@ -1312,7 +1312,7 @@
             }
           },
           "503": {
-            "description": "herdr is unreachable",
+            "description": "the terminal holder is unreachable",
             "content": {
               "application/json": {
                 "schema": {
@@ -1329,7 +1329,7 @@
         "tags": [
           "mutations"
         ],
-        "summary": "Keys or a paste for the agent's pane, through herdr or the terminal\nholder, or over the pane link to a peer's (`protocol.md` 7.4, 10.7).",
+        "summary": "Keys or a paste for the agent's pane, through the terminal holder, or\nover the pane link to a peer's (`protocol.md` 7.4, 10.7).",
         "operationId": "terminal_input",
         "parameters": [
           {
@@ -1409,7 +1409,7 @@
             }
           },
           "503": {
-            "description": "herdr or the peer is unreachable, or input came faster than 20 a second; nothing was sent",
+            "description": "the terminal holder or the peer is unreachable, or input came faster than 20 a second; nothing was sent",
             "content": {
               "application/json": {
                 "schema": {
@@ -1498,7 +1498,7 @@
             }
           },
           "503": {
-            "description": "herdr, the terminal holder or the peer is unreachable, or 4 tail reads are in flight",
+            "description": "the terminal holder or the peer is unreachable, or 4 tail reads are in flight",
             "content": {
               "application/json": {
                 "schema": {
@@ -6219,12 +6219,6 @@
               "null"
             ]
           },
-          "herdr_name": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "host": {
             "type": [
               "string",
@@ -6261,6 +6255,13 @@
           },
           "model": {
             "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The agent's name (`protocol.md` 6.1), such as `alpha-1-build`."
           },
           "pane_id": {
             "type": [
@@ -8295,7 +8296,7 @@
           },
           "source": {
             "type": "string",
-            "description": "`tiller`, `hook`, `herdr`, `transcript`, `liveness`, `status_line` or\n`gh`."
+            "description": "`tiller`, `hook`, `holder`, `transcript`, `liveness`, `status_line`\nor `gh`."
           },
           "text": {
             "type": "string"
@@ -8580,13 +8581,6 @@
               "null"
             ],
             "description": "Why `config.toml` could not be read; the rest is then the defaults."
-          },
-          "herdr_terminal": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "`herdr.terminal`, the key `attach.terminal` replaces; absent when\nunset."
           },
           "learning": {
             "$ref": "#/components/schemas/LearningConfig"
@@ -8874,7 +8868,7 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/LinkState",
-                "description": "A paired peer's link state (`protocol.md` 10.2); absent for this\nhost and for a herdr-only machine."
+                "description": "A paired peer's link state (`protocol.md` 10.2); absent for this\nhost."
               },
               {
                 "type": "null"
@@ -8911,14 +8905,14 @@
               "string",
               "null"
             ],
-            "description": "`herdr_link_down`, `host_asleep`, `poll_failed` or `never_seen`; for a\npaired peer also `peer_link_down`, `peer_refused` or `peer_version`."
+            "description": "`holder_down` for this host while its terminal holder does not answer;\nfor a paired peer `never_seen`, `peer_link_down`, `peer_refused` or\n`peer_version`."
           },
           "version": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The `tiller version` string this host runs, for example\n`0.1.0-pre.17`: this host's own build, or what a paired peer reports\non its own row. Absent for a herdr-only machine and for a peer that\nhas not reported one."
+            "description": "The `tiller version` string this host runs, for example\n`0.1.0-pre.17`: this host's own build, or what a paired peer reports\non its own row. Absent for a peer that has not reported one."
           },
           "view_only": {
             "type": "boolean"
@@ -11717,7 +11711,7 @@
             "items": {
               "type": "string"
             },
-            "description": "The last lines of the run's live herdr pane, at most 200; empty when\nthe run has no live pane or herdr did not answer."
+            "description": "The last lines of the run's live pane, at most 200; empty when the\nrun has no live pane or the terminal holder did not answer."
           },
           "started_at": {
             "type": "string"
@@ -12419,7 +12413,7 @@
       },
       "TerminalFit": {
         "type": "object",
-        "description": "The size the Fit asks herdr to give a pane, in cells.",
+        "description": "The size the Fit asks the terminal holder to give a pane, in cells.",
         "required": [
           "cols",
           "rows"
@@ -12442,7 +12436,7 @@
       },
       "TerminalHistory": {
         "type": "object",
-        "description": "The pane's recent rows as herdr renders them: wrapped at the pane's\nwidth, oldest first, the screen itself last, with their colors as ANSI\nescapes and rows split by `\\n`.",
+        "description": "The pane's recent rows as the terminal holder renders them: wrapped at the pane's\nwidth, oldest first, the screen itself last, with their colors as ANSI\nescapes and rows split by `\\n`.",
         "required": [
           "session_id",
           "text"
@@ -12498,7 +12492,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Keys pressed in order, as `herdr pane send-keys` names them:\n`enter`, `esc`, `ctrl+c`, `left`, `space`, or one character. Up to 64."
+            "description": "Keys pressed in order, as the terminal holder names them:\n`enter`, `esc`, `ctrl+c`, `left`, `space`, or one character. Up to 64."
           },
           "text": {
             "type": [
@@ -12541,7 +12535,7 @@
           },
           {
             "type": "object",
-            "description": "One herdr frame: the ANSI bytes, base64. A `full` frame redraws the\nwhole screen; the frames after it are diffs, `seq` counting up by\none.",
+            "description": "One frame: the ANSI bytes, base64. A `full` frame redraws the\nwhole screen; the frames after it are diffs, `seq` counting up by\none.",
             "required": [
               "seq",
               "full",
@@ -12591,7 +12585,7 @@
           },
           {
             "type": "object",
-            "description": "herdr stopped answering; the stream ends.",
+            "description": "The terminal holder stopped answering; the stream ends.",
             "required": [
               "message",
               "type"
@@ -12610,7 +12604,7 @@
           },
           {
             "type": "object",
-            "description": "herdr would not resize the pane for the Fit, most often because\nanother client controls it. The stream goes on at the pane's own size,\nwith a `size` line next.",
+            "description": "The Fit does not reach the pane: a peer paired with a `read` scope,\nor a peer that has not said which pane the agent is in. The stream\ngoes on at the pane's own size, with a `size` line next.",
             "required": [
               "message",
               "type"
@@ -12638,7 +12632,7 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/TerminalFit",
-                "description": "The board's own size for the pane: herdr resizes the pane to it while\nthe stream is open and back when it ends (Terminal mirror, Fit).\nAbsent means the pane keeps its size and only the picture scales."
+                "description": "The board's own size for the pane: the stream leases the pane at it\nin the terminal holder while it is open (Terminal mirror, Fit).\nAbsent means the pane keeps its size and only the picture scales."
               },
               {
                 "type": "null"
@@ -12687,7 +12681,7 @@
       },
       "TerminalTail": {
         "type": "object",
-        "description": "The pane's visible screen as herdr renders it, one row per line split by\n`\\n`, colors as ANSI escapes, and the pane's size in cells.",
+        "description": "The pane's visible screen as the terminal holder renders it, one row per\nline split by `\\n`, colors as ANSI escapes, and the pane's size in cells.",
         "required": [
           "session_id",
           "cols",

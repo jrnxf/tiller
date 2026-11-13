@@ -18,7 +18,7 @@ use tiller_agents::land::DaemonLock;
 use tiller_core::domain::{DeployResult, Obligation, Project};
 use tiller_core::state::{get, list};
 use tiller_core::{Store, Timestamp};
-use tiller_herdr::poller::{PollError, Source};
+use tiller_poll::{PollError, Source};
 
 pub mod gate;
 

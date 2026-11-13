@@ -63,8 +63,6 @@ impl Agents {
             std::fs::create_dir_all(&dir).unwrap();
             world.must(&["config", "set", key, dir.to_str().unwrap()]);
         }
-        // No herdr runs: a launch or a delivery that reached it would fail.
-        world.set_env("TILLER_HERDR", "/nonexistent/herdr");
         let logs = root.join("fake-agent");
         std::fs::create_dir_all(&logs).unwrap();
         let claude = root.join("claude-stub");

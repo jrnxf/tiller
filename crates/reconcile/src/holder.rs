@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use serde_json::json;
 use tiller_core::domain::{Activity, ObservationSource, PaneState, Session};
-use tiller_core::state::caches::{HolderRecord, HolderSeen, PaneHolder, PaneReading};
+use tiller_core::state::caches::{HolderRecord, HolderSeen, PaneReading};
 use tiller_core::state::runs::NewObservation;
 use tiller_core::state::{get, list};
 use tiller_core::{Actor, Ctx, Store, Timestamp};
@@ -287,8 +287,7 @@ impl HolderSource {
     fn list(&mut self, ctx: &Ctx) -> Result<(), PollError> {
         let listing = self.link.list().map_err(polled)?;
         let rows = readings(&self.store, &listing)?;
-        self.store
-            .cache_panes(ctx, &self.host_id, PaneHolder::Holder, rows)?;
+        self.store.cache_panes(ctx, &self.host_id, rows)?;
         self.panes = listing
             .panes
             .into_iter()

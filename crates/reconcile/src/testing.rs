@@ -670,6 +670,7 @@ pub struct World {
     pub harness: FakeHarness,
     pub config: Config,
     forge_override: Option<Box<dyn Forge>>,
+    scanner_override: Option<Box<dyn Scanner>>,
     reconciler: Option<Reconciler>,
 }
 
@@ -706,6 +707,7 @@ impl World {
             config,
             fleet,
             forge_override: None,
+            scanner_override: None,
             reconciler: None,
         }
     }
@@ -847,7 +849,10 @@ impl World {
             let sources = Sources {
                 holder: Arc::new(self.holder.clone()) as Arc<dyn Link>,
                 probe: Box::new(self.probe.clone()),
-                scanner: Box::new(self.scanner.clone()),
+                scanner: self
+                    .scanner_override
+                    .take()
+                    .unwrap_or_else(|| Box::new(self.scanner.clone())),
                 forge: self
                     .forge_override
                     .take()
@@ -869,6 +874,13 @@ impl World {
     /// engine on.
     pub fn use_forge(&mut self, forge: Box<dyn Forge>) {
         self.forge_override = Some(forge);
+        self.reconciler = None;
+    }
+
+    /// Scans worktrees through `scanner` instead of the fake, from the
+    /// next engine on.
+    pub fn use_scanner(&mut self, scanner: Box<dyn Scanner>) {
+        self.scanner_override = Some(scanner);
         self.reconciler = None;
     }
 

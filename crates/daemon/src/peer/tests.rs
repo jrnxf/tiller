@@ -21,7 +21,7 @@ use tiller_core::state::peers::{
     KeyFile, NewPairing, NewPeerKey, generate_key, key_path, public_key_text, write_key_file,
 };
 use tiller_core::{Store, Timestamp};
-use tiller_herdr::testing::{Fleet, owner};
+use tiller_panes::testing::{Fleet, owner};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{broadcast, watch};
 use tokio::time::Instant;
@@ -32,8 +32,8 @@ use super::pane::{self, PaneInput, PaneKind, PaneOpen, PaneSigner};
 use super::serve::{ServeConfig, own_snapshot, serve};
 use super::{Frame, Hello, HelloKey, Timing, Welcome};
 use crate::api::tests::{
-    Answer, app_with_peers, b64, get, holder_calls, holder_pane, mirror_herdr, mutation, next_line,
-    owner_cookie, send, waiting,
+    Answer, app_with_peers, b64, get, holder_calls, holder_pane, mutation, next_line, owner_cookie,
+    send, waiting,
 };
 use crate::api::{BoardRelaunch, Controlled, OrchestratorStart, StartError};
 use crate::dto::{BoardResponse, ErrorBody, ErrorDetail, LinkState, MutationResponse};
@@ -178,7 +178,6 @@ fn serve_timed(
         home: home.to_owned(),
         from: from.to_owned(),
         timing,
-        herdr: None,
         orchestrators,
         holder: None,
     })
@@ -1123,14 +1122,14 @@ fn a_replayed_hello_is_refused() {
 }
 
 /// A pane request is taken once: the same signed request again is
-/// refused before it reaches herdr.
+/// refused before it reaches the holder.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_replayed_pane_request_is_refused() {
     let mut pair = pair();
-    let session = pair.peer.worker("w2:p1");
-    let scratch = tempfile::tempdir().unwrap();
+    let holder = FakePanes::new();
+    let session = pair.peer.worker(holder_pane(&holder, "s-1").as_str());
     let open = pane_open(&pair, &session, PaneKind::History);
-    let lines = open_pane(&pair, scratch.path(), open.clone(), "").await;
+    let lines = open_pane(&pair, &holder, open.clone(), "").await;
     assert!(
         matches!(
             serde_json::from_str::<Frame>(&lines[0]).unwrap(),
@@ -1138,18 +1137,18 @@ async fn a_replayed_pane_request_is_refused() {
         ),
         "{lines:?}"
     );
-    let calls = std::fs::read_to_string(scratch.path().join("calls")).unwrap_or_default();
+    let calls = holder.calls();
 
-    let lines = open_pane(&pair, scratch.path(), open, "").await;
+    let lines = open_pane(&pair, &holder, open, "").await;
     let frame = serde_json::from_str::<Frame>(&lines[0]).unwrap();
     assert!(
         matches!(&frame, Frame::Refused { reason, .. } if reason == "replayed"),
         "a replayed pane request got {frame:?}"
     );
     assert_eq!(
-        std::fs::read_to_string(scratch.path().join("calls")).unwrap_or_default(),
+        holder.calls(),
         calls,
-        "a replayed pane request reached herdr"
+        "a replayed pane request reached the holder"
     );
 }
 
@@ -1704,7 +1703,6 @@ struct Wire {
     sent: Arc<Mutex<Vec<u8>>>,
     lose_results: Arc<AtomicUsize>,
     starter: Option<Arc<dyn OrchestratorStart>>,
-    herdr: Option<tiller_herdr::client::Cli>,
     holder: Option<Arc<dyn crate::holder::Holder>>,
 }
 
@@ -1715,7 +1713,6 @@ impl Wire {
             sent: Arc::default(),
             lose_results: Arc::default(),
             starter: None,
-            herdr: None,
             holder: None,
         }
     }
@@ -1725,9 +1722,8 @@ impl Wire {
         self
     }
 
-    /// The peer's herdr and terminal holder, which its agent verbs reach.
-    fn with_panes(mut self, herdr: tiller_herdr::client::Cli, holder: &FakePanes) -> Self {
-        self.herdr = Some(herdr);
+    /// The peer's terminal holder, which its agent verbs reach.
+    fn with_panes(mut self, holder: &FakePanes) -> Self {
         self.holder = Some(Arc::new(holder.clone()));
         self
     }
@@ -1739,7 +1735,6 @@ impl Connector for Wire {
             home: self.home.clone(),
             from: target.from.clone(),
             timing: quick(),
-            herdr: self.herdr.clone(),
             orchestrators: self.starter.clone(),
             holder: self.holder.clone(),
         });
@@ -2349,12 +2344,11 @@ fn foreign_project_ask_and_start_refused() {
 // -- watching a peer's pane (`protocol.md` 10.7) --------------------------------------
 
 /// `peer serve` over a socket pair for the link, and `peer pane` over an
-/// in-memory pipe for each watch, on a peer whose herdr is [`mirror_herdr`].
+/// in-memory pipe for each watch, on a peer whose terminal holder is
+/// `holder`.
 struct PaneWire {
     home: PathBuf,
-    herdr: tiller_herdr::client::Cli,
-    /// The peer's terminal holder, for a peer holder pane.
-    holder: Option<Arc<dyn crate::holder::Holder>>,
+    holder: Arc<dyn crate::holder::Holder>,
     /// Pane links dialed.
     dialed: Arc<AtomicUsize>,
 }
@@ -2370,9 +2364,8 @@ impl Connector for PaneWire {
             home: self.home.clone(),
             from: target.from.clone(),
             timing: quick(),
-            herdr: Some(self.herdr.clone()),
             orchestrators: None,
-            holder: self.holder.clone(),
+            holder: Some(Arc::clone(&self.holder)),
         };
         let (board_out, peer_in) = tokio::io::duplex(1 << 20);
         let (peer_out, board_in) = tokio::io::duplex(1 << 20);
@@ -2389,10 +2382,10 @@ impl Connector for PaneWire {
     }
 }
 
-/// A paired board and peer with an agent in pane `w2:p1` on the peer, and
-/// the board's app over live links. Returns the peer's session id.
+/// A paired board and peer with an agent in a pane of `holder` on the
+/// peer, and the board's app over live links. Returns the peer's session id.
 async fn watching(
-    scratch: &Path,
+    holder: &FakePanes,
 ) -> (
     Pair,
     String,
@@ -2401,14 +2394,12 @@ async fn watching(
     Arc<AtomicUsize>,
     watch::Sender<bool>,
 ) {
-    watching_on(scratch, None, |_| {}).await
+    watching_on(holder, |_| {}).await
 }
 
-/// [`watching`] with the agent in a pane of `holder` on the peer, when one
-/// is given, and `prepare` run on the pair before the link starts.
+/// [`watching`] with `prepare` run on the pair before the link starts.
 async fn watching_on(
-    scratch: &Path,
-    holder: Option<&FakePanes>,
+    holder: &FakePanes,
     prepare: impl FnOnce(&Pair),
 ) -> (
     Pair,
@@ -2419,17 +2410,12 @@ async fn watching_on(
     watch::Sender<bool>,
 ) {
     let mut pair = pair();
-    let pane = holder.map_or_else(
-        || "w2:p1".to_owned(),
-        |holder| holder_pane(holder, "s-1").as_str().to_owned(),
-    );
-    let session = pair.peer.worker(&pane);
+    let session = pair.peer.worker(holder_pane(holder, "s-1").as_str());
     prepare(&pair);
     let dialed = Arc::new(AtomicUsize::new(0));
     let wire = PaneWire {
         home: pair.peer.dir.path().to_owned(),
-        herdr: mirror_herdr(scratch),
-        holder: holder.map(|holder| Arc::new(holder.clone()) as Arc<dyn crate::holder::Holder>),
+        holder: Arc::new(holder.clone()),
         dialed: dialed.clone(),
     };
     let (peers, stop) = start(pair.board.dir.path(), wire);
@@ -2444,69 +2430,13 @@ fn pane_path(session: &str, tail: &str) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_peer_pane_streams_to_the_board() {
-    let scratch = tempfile::tempdir().unwrap();
-    let (_pair, session, app, cookie, dialed, _stop) = watching(scratch.path()).await;
-    let response = tower::ServiceExt::oneshot(
-        app.clone(),
-        mutation(
-            "POST",
-            &pane_path(&session, "terminal"),
-            json!({"host": "peer"}),
-            &[("cookie", cookie.as_str())],
-        ),
-    )
-    .await
-    .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let mut body = response.into_body().into_data_stream();
-    let mut pending = String::new();
-    assert_eq!(next_line(&mut body, &mut pending).await["type"], "size");
-    assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
-    assert_eq!(dialed.load(Ordering::SeqCst), 1);
-    // The peer only observed: it never sent a key or text to the pane.
-    let calls = std::fs::read_to_string(scratch.path().join("calls")).unwrap();
-    assert!(calls.contains("terminal session observe"), "{calls}");
-    assert!(
-        !calls.contains("send-keys") && !calls.contains("send-text"),
-        "{calls}"
-    );
-    assert!(!scratch.path().join("controllers").exists());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_peer_pane_history_comes_from_the_peer() {
-    let scratch = tempfile::tempdir().unwrap();
-    let (_pair, session, app, cookie, _dialed, _stop) = watching(scratch.path()).await;
-    let answer = send(
-        &app,
-        mutation(
-            "POST",
-            &pane_path(&session, "terminal/history"),
-            json!({"host": "peer", "lines": 50}),
-            &[("cookie", cookie.as_str())],
-        ),
-    )
-    .await;
-    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
-    let body: Value = serde_json::from_str(&answer.body).unwrap();
-    assert_eq!(body["session_id"], session);
-    assert_eq!(body["text"], "one\n\u{1b}[34mtwo\u{1b}[0m\n");
-    let calls = std::fs::read_to_string(scratch.path().join("calls")).unwrap();
-    assert!(
-        calls.contains("pane read w2:p1 --source recent --lines 50"),
-        "{calls}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn a_pane_link_takes_no_forwarded_verb() {
     // An agent verb goes on the signed sync link as a `mutate` and its
     // reads as a `query` (7.4); a pane link carries neither, only signed
     // keys and the Fit (10.7).
     let mut pair = pair();
-    let session = pair.peer.worker("w2:p1");
-    let scratch = tempfile::tempdir().unwrap();
+    let holder = FakePanes::new();
+    let session = pair.peer.worker(holder_pane(&holder, "s-1").as_str());
     let before = last_seq(&pair.peer);
     let verb = |op, body: Value| {
         let order = Order {
@@ -2539,7 +2469,7 @@ async fn a_pane_link_takes_no_forwarded_verb() {
     }
     let lines = open_pane_lines(
         &pair,
-        scratch.path(),
+        &holder,
         pane_open(&pair, &session, PaneKind::Stream),
         &extra,
     )
@@ -2549,10 +2479,15 @@ async fn a_pane_link_takes_no_forwarded_verb() {
         !lines.iter().any(|line| line.contains(r#""type":"result""#)),
         "{lines:?}"
     );
-    let calls = std::fs::read_to_string(scratch.path().join("calls")).unwrap();
     assert!(
-        !calls.contains("send-keys") && !calls.contains("send-text"),
-        "{calls}"
+        holder_calls(&holder, "keys").is_empty(),
+        "{:?}",
+        holder.calls()
+    );
+    assert!(
+        holder_calls(&holder, "input").is_empty(),
+        "{:?}",
+        holder.calls()
     );
     assert_eq!(last_seq(&pair.peer), before, "a pane link wrote");
     let keys: i64 = pair
@@ -2568,14 +2503,18 @@ async fn a_pane_link_takes_no_forwarded_verb() {
 
 /// [`open_pane`], with every line the peer sends until it is quiet for a
 /// second.
-async fn open_pane_lines(pair: &Pair, scratch: &Path, open: PaneOpen, extra: &str) -> Vec<String> {
+async fn open_pane_lines(
+    pair: &Pair,
+    holder: &FakePanes,
+    open: PaneOpen,
+    extra: &str,
+) -> Vec<String> {
     let config = ServeConfig {
         home: pair.peer.dir.path().to_owned(),
         from: "test-host".into(),
         timing: quick(),
-        herdr: Some(mirror_herdr(scratch)),
         orchestrators: None,
-        holder: None,
+        holder: Some(Arc::new(holder.clone())),
     };
     let (mut board_out, peer_in) = tokio::io::duplex(1 << 16);
     let (peer_out, board_in) = tokio::io::duplex(1 << 16);
@@ -2633,52 +2572,26 @@ async fn act_on_peer(app: &Router, cookie: &str, session: &str, tail: &str, body
     .await
 }
 
-/// The herdr calls that typed into a pane, in order.
-fn typed(scratch: &Path) -> Vec<String> {
-    std::fs::read_to_string(scratch.join("calls"))
-        .unwrap_or_default()
-        .lines()
-        .filter(|call| call.contains("send-keys") || call.contains("send-text"))
-        .map(str::to_owned)
+/// The holder calls that typed into a pane, in order.
+fn typed(holder: &FakePanes) -> Vec<String> {
+    holder
+        .calls()
+        .into_iter()
+        .filter(|call| {
+            ["keys ", "input ", "paste "]
+                .iter()
+                .any(|verb| call.starts_with(verb))
+        })
         .collect()
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn keys_typed_on_the_board_reach_a_peer_pane() {
-    let scratch = tempfile::tempdir().unwrap();
-    let (_pair, session, app, cookie, dialed, _stop) = watching(scratch.path()).await;
-    let mut body = view_peer(&app, &cookie, &session, json!({"host": "peer"})).await;
-    let mut pending = String::new();
-    assert_eq!(next_line(&mut body, &mut pending).await["type"], "size");
-
-    for input in [
-        json!({"host": "peer", "keys": ["l", "s"]}),
-        json!({"host": "peer", "text": "echo hi"}),
-        json!({"host": "peer", "keys": ["enter"]}),
-    ] {
-        let answer = act_on_peer(&app, &cookie, &session, "terminal/input", input).await;
-        assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
-        let sent: MutationResponse = serde_json::from_str(&answer.body).unwrap();
-        assert_eq!(sent.host.as_deref(), Some("peer"));
-        assert_eq!(sent.data["session_id"], session);
-    }
-    // Through the peer's own herdr, on its own pane, in the order typed.
-    let typed = typed(scratch.path());
-    assert_eq!(typed.len(), 3, "{typed:?}");
-    assert!(
-        typed[0].contains("send-keys") && typed[0].ends_with("w2:p1 l s"),
-        "{typed:?}"
-    );
-    assert!(
-        typed[1].contains("send-text") && typed[1].contains("echo hi"),
-        "{typed:?}"
-    );
-    assert!(typed[2].ends_with("w2:p1 enter"), "{typed:?}");
-    assert_eq!(
-        dialed.load(Ordering::SeqCst),
-        1,
-        "the keys rode the open link"
-    );
+/// The holder calls past the spawn of its pane: none when nothing reached it.
+fn reached(holder: &FakePanes) -> Vec<String> {
+    holder
+        .calls()
+        .into_iter()
+        .filter(|call| !call.starts_with("spawn "))
+        .collect()
 }
 
 /// The one pane in the peer's `holder`.
@@ -2700,10 +2613,8 @@ async fn next_size(body: &mut axum::body::BodyDataStream, pending: &mut String) 
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_peer_holder_pane_streams_and_takes_keys_over_the_pane_link() {
-    let scratch = tempfile::tempdir().unwrap();
     let holder = FakePanes::new();
-    let (_pair, session, app, cookie, _dialed, _stop) =
-        watching_on(scratch.path(), Some(&holder), |_| {}).await;
+    let (_pair, session, app, cookie, _dialed, _stop) = watching_on(&holder, |_| {}).await;
     let pane = peer_pane_id(&holder);
     holder.set_screen(&pane, &["$ "]);
     let mut body = view_peer(&app, &cookie, &session, json!({"host": "peer"})).await;
@@ -2745,10 +2656,8 @@ async fn a_peer_holder_pane_streams_and_takes_keys_over_the_pane_link() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_peer_holder_pane_history_comes_over_the_pane_link() {
-    let scratch = tempfile::tempdir().unwrap();
     let holder = FakePanes::new();
-    let (_pair, session, app, cookie, _dialed, _stop) =
-        watching_on(scratch.path(), Some(&holder), |_| {}).await;
+    let (_pair, session, app, cookie, _dialed, _stop) = watching_on(&holder, |_| {}).await;
     let pane = peer_pane_id(&holder);
     holder.set_screen(&pane, &["one", "\u{1b}[34mtwo\u{1b}[0m", "$ "]);
     let answer = act_on_peer(
@@ -2774,10 +2683,8 @@ async fn a_peer_holder_pane_history_comes_over_the_pane_link() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn each_fit_on_a_peer_holder_pane_is_a_lease_and_the_size_falls_back() {
-    let scratch = tempfile::tempdir().unwrap();
     let holder = FakePanes::new();
-    let (_pair, session, app, cookie, _dialed, _stop) =
-        watching_on(scratch.path(), Some(&holder), |_| {}).await;
+    let (_pair, session, app, cookie, _dialed, _stop) = watching_on(&holder, |_| {}).await;
     let pane = peer_pane_id(&holder);
     // An attach client on the peer holds the pane at its window's size.
     let attach = tiller_panes::Live::subscribe(&holder, &pane, Default::default()).unwrap();
@@ -2912,14 +2819,12 @@ fn read_scope(fleet: &Fleet) {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_read_pairing_cannot_type_into_or_fit_a_peer_pane() {
     // A `read` pairing on the board host never sends a key or a Fit.
-    let scratch = tempfile::tempdir().unwrap();
     let holder = FakePanes::new();
-    let (_pair, session, app, cookie, _dialed, _stop) =
-        watching_on(scratch.path(), Some(&holder), |pair| {
-            read_scope(&pair.board);
-            read_scope(&pair.peer);
-        })
-        .await;
+    let (_pair, session, app, cookie, _dialed, _stop) = watching_on(&holder, |pair| {
+        read_scope(&pair.board);
+        read_scope(&pair.peer);
+    })
+    .await;
     // The view opens unfit, at the pane's own size.
     let mut body = view_peer(
         &app,
@@ -2964,8 +2869,8 @@ async fn the_peer_checks_the_act_scope_again() {
     // `read`, and refuses the keys itself. The cut comes before the link
     // starts: a cut while it runs ends the link at once (`serve.rs`), and
     // the board then answers unreachable.
-    let scratch = tempfile::tempdir().unwrap();
-    let (_pair, session, app, cookie, _dialed, _stop) = watching_on(scratch.path(), None, |pair| {
+    let holder = FakePanes::new();
+    let (_pair, session, app, cookie, _dialed, _stop) = watching_on(&holder, |pair| {
         pair.peer
             .open()
             .conn()
@@ -2992,13 +2897,13 @@ async fn the_peer_checks_the_act_scope_again() {
         answer.body
     );
     assert_eq!(error.host.as_deref(), Some("peer"));
-    assert!(typed(scratch.path()).is_empty());
+    assert!(typed(&holder).is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_fleet_caller_cannot_type_into_a_peer_pane() {
-    let scratch = tempfile::tempdir().unwrap();
-    let (_pair, session, app, cookie, _dialed, _stop) = watching(scratch.path()).await;
+    let holder = FakePanes::new();
+    let (_pair, session, app, cookie, _dialed, _stop) = watching(&holder).await;
     // The owner watches, so a stream to type into is open.
     let mut body = view_peer(&app, &cookie, &session, json!({"host": "peer"})).await;
     let mut pending = String::new();
@@ -3027,13 +2932,13 @@ async fn a_fleet_caller_cannot_type_into_a_peer_pane() {
             );
         }
     }
-    assert!(typed(scratch.path()).is_empty());
+    assert!(typed(&holder).is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_ended_session_takes_no_pane_input() {
-    let scratch = tempfile::tempdir().unwrap();
-    let (pair, session, app, cookie, _dialed, _stop) = watching(scratch.path()).await;
+    let holder = FakePanes::new();
+    let (pair, session, app, cookie, _dialed, _stop) = watching(&holder).await;
     let mut body = view_peer(&app, &cookie, &session, json!({"host": "peer"})).await;
     let mut pending = String::new();
     assert_eq!(next_line(&mut body, &mut pending).await["type"], "size");
@@ -3056,13 +2961,13 @@ async fn an_ended_session_takes_no_pane_input() {
     let error = refusal(&answer, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(error.message.contains("has ended"), "{}", answer.body);
     assert_eq!(error.host.as_deref(), Some("peer"));
-    assert!(typed(scratch.path()).is_empty());
+    assert!(typed(&holder).is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pane_input_with_no_open_stream_is_refused_not_dropped() {
-    let scratch = tempfile::tempdir().unwrap();
-    let (_pair, session, app, cookie, dialed, _stop) = watching(scratch.path()).await;
+    let holder = FakePanes::new();
+    let (_pair, session, app, cookie, dialed, _stop) = watching(&holder).await;
     let answer = act_on_peer(
         &app,
         &cookie,
@@ -3092,7 +2997,7 @@ fn pane_signer(pair: &Pair) -> PaneSigner {
 /// `(status, body)`.
 async fn type_on_link(
     pair: &Pair,
-    scratch: &Path,
+    holder: &FakePanes,
     open: &PaneOpen,
     frames: &[Frame],
 ) -> Vec<(u16, Value)> {
@@ -3100,9 +3005,8 @@ async fn type_on_link(
         home: pair.peer.dir.path().to_owned(),
         from: "test-host".into(),
         timing: quick(),
-        herdr: Some(mirror_herdr(scratch)),
         orchestrators: None,
-        holder: None,
+        holder: Some(Arc::new(holder.clone())),
     };
     let (mut board_out, peer_in) = tokio::io::duplex(1 << 16);
     let (peer_out, board_in) = tokio::io::duplex(1 << 16);
@@ -3136,8 +3040,8 @@ async fn type_on_link(
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pane_link_refuses_forged_and_replayed_input() {
     let mut pair = pair();
-    let session = pair.peer.worker("w2:p1");
-    let scratch = tempfile::tempdir().unwrap();
+    let holder = FakePanes::new();
+    let session = pair.peer.worker(holder_pane(&holder, "s-1").as_str());
     let open = pane_open(&pair, &session, PaneKind::Stream);
     let signer = pane_signer(&pair);
     let keys = |seq: u64, keys: &[&str]| {
@@ -3163,7 +3067,7 @@ async fn a_pane_link_refuses_forged_and_replayed_input() {
     elsewhere.sign(&pair.key);
     let frames = [forged, stranger, good.clone(), good, older, elsewhere]
         .map(|frame| Frame::PaneInput(Box::new(frame)));
-    let results = type_on_link(&pair, scratch.path(), &open, &frames).await;
+    let results = type_on_link(&pair, &holder, &open, &frames).await;
     let reasons: Vec<_> = results
         .iter()
         .map(|(status, body)| (*status, body["error"]["reason"].as_str().map(str::to_owned)))
@@ -3180,13 +3084,13 @@ async fn a_pane_link_refuses_forged_and_replayed_input() {
         ],
         "{results:?}"
     );
-    assert_eq!(typed(scratch.path()).len(), 1);
+    assert_eq!(typed(&holder).len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_peer_pane_needs_the_owner_cookie() {
-    let scratch = tempfile::tempdir().unwrap();
-    let (_pair, session, app, _cookie, dialed, _stop) = watching(scratch.path()).await;
+    let holder = FakePanes::new();
+    let (_pair, session, app, _cookie, dialed, _stop) = watching(&holder).await;
     for tail in [
         "terminal",
         "terminal/history",
@@ -3217,12 +3121,11 @@ async fn a_peer_pane_needs_the_owner_cookie() {
         0,
         "a pane link opened unauthenticated"
     );
-    assert!(!scratch.path().join("calls").exists());
+    assert!(reached(&holder).is_empty(), "{:?}", reached(&holder));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_peer_pane_on_a_down_link_says_unreachable() {
-    let scratch = tempfile::tempdir().unwrap();
     let pair = {
         let mut pair = pair();
         pair.peer.worker("w2:p1");
@@ -3236,7 +3139,6 @@ async fn a_peer_pane_on_a_down_link_says_unreachable() {
             up,
         },
     );
-    let _ = scratch;
     let cookie = owner_cookie(pair.board.dir.path());
     let app = app_with_peers(pair.board.dir.path(), peers);
     for tail in ["terminal", "terminal/history"] {
@@ -3257,15 +3159,14 @@ async fn a_peer_pane_on_a_down_link_says_unreachable() {
 }
 
 /// Opens a pane link on the peer's `pane::serve` with `open` and returns
-/// the peer's lines, then the peer's end of herdr's calls.
-async fn open_pane(pair: &Pair, scratch: &Path, open: PaneOpen, extra: &str) -> Vec<String> {
+/// the peer's first line.
+async fn open_pane(pair: &Pair, holder: &FakePanes, open: PaneOpen, extra: &str) -> Vec<String> {
     let config = ServeConfig {
         home: pair.peer.dir.path().to_owned(),
         from: "test-host".into(),
         timing: quick(),
-        herdr: Some(mirror_herdr(scratch)),
         orchestrators: None,
-        holder: None,
+        holder: Some(Arc::new(holder.clone())),
     };
     let (mut board_out, peer_in) = tokio::io::duplex(1 << 16);
     let (peer_out, board_in) = tokio::io::duplex(1 << 16);
@@ -3305,8 +3206,8 @@ fn pane_open(pair: &Pair, session: &str, kind: PaneKind) -> PaneOpen {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_revoke_ends_an_open_pane_stream_at_once() {
     let mut pair = pair();
-    let session = pair.peer.worker("w2:p1");
-    let scratch = tempfile::tempdir().unwrap();
+    let holder = FakePanes::new();
+    let session = pair.peer.worker(holder_pane(&holder, "s-1").as_str());
     let config = ServeConfig {
         home: pair.peer.dir.path().to_owned(),
         from: "test-host".into(),
@@ -3314,9 +3215,8 @@ async fn a_revoke_ends_an_open_pane_stream_at_once() {
             tick: Duration::from_secs(60),
             ..quick()
         },
-        herdr: Some(mirror_herdr(scratch.path())),
         orchestrators: None,
-        holder: None,
+        holder: Some(Arc::new(holder.clone())),
     };
     let (mut board_out, peer_in) = tokio::io::duplex(1 << 16);
     let (peer_out, board_in) = tokio::io::duplex(1 << 16);
@@ -3347,8 +3247,8 @@ async fn a_revoke_ends_an_open_pane_stream_at_once() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pane_link_refuses_what_the_peer_would_refuse() {
     let mut pair = pair();
-    let session = pair.peer.worker("w2:p1");
-    let scratch = tempfile::tempdir().unwrap();
+    let holder = FakePanes::new();
+    let session = pair.peer.worker(holder_pane(&holder, "s-1").as_str());
     let refused = |lines: &[String], reason: &str| {
         let frame: Frame = serde_json::from_str(&lines[0]).unwrap();
         match frame {
@@ -3360,7 +3260,7 @@ async fn a_pane_link_refuses_what_the_peer_would_refuse() {
     // A signature over other fields.
     let mut forged = pane_open(&pair, &session, PaneKind::Stream);
     forged.session = "another".into();
-    let lines = open_pane(&pair, scratch.path(), forged, "").await;
+    let lines = open_pane(&pair, &holder, forged, "").await;
     refused(&lines, "bad_sig");
 
     // A request meant for another host.
@@ -3368,7 +3268,7 @@ async fn a_pane_link_refuses_what_the_peer_would_refuse() {
     elsewhere.peer_host_id = "h-other".into();
     let stranger = generate_key().unwrap();
     elsewhere.sign(&stranger);
-    let lines = open_pane(&pair, scratch.path(), elsewhere, "").await;
+    let lines = open_pane(&pair, &holder, elsewhere, "").await;
     assert!(matches!(
         serde_json::from_str::<Frame>(&lines[0]).unwrap(),
         Frame::Refused { .. }
@@ -3385,7 +3285,7 @@ async fn a_pane_link_refuses_what_the_peer_would_refuse() {
         .unwrap();
     let lines = open_pane(
         &pair,
-        scratch.path(),
+        &holder,
         pane_open(&pair, &session, PaneKind::Stream),
         "",
     )
@@ -3395,16 +3295,17 @@ async fn a_pane_link_refuses_what_the_peer_would_refuse() {
         Frame::Refused { .. }
     ));
     assert!(
-        !scratch.path().join("calls").exists(),
-        "a refused link reached herdr"
+        reached(&holder).is_empty(),
+        "a refused link reached the holder: {:?}",
+        reached(&holder)
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pane_link_takes_no_mutate_and_no_unsigned_keys() {
     let mut pair = pair();
-    let session = pair.peer.worker("w2:p1");
-    let scratch = tempfile::tempdir().unwrap();
+    let holder = FakePanes::new();
+    let session = pair.peer.worker(holder_pane(&holder, "s-1").as_str());
     // After the open, the board host sends a mutate and bare keys: the link
     // reads neither as input, only a signed `pane_input`.
     let card = {
@@ -3418,18 +3319,13 @@ async fn a_pane_link_takes_no_mutate_and_no_unsigned_keys() {
         + "{\"type\":\"keys\",\"keys\":[\"ctrl+c\"]}\n";
     let lines = open_pane(
         &pair,
-        scratch.path(),
+        &holder,
         pane_open(&pair, &session, PaneKind::Stream),
         &extra,
     )
     .await;
     assert!(lines[0].contains(r#""type":"size""#), "{lines:?}");
-    let calls = std::fs::read_to_string(scratch.path().join("calls")).unwrap();
-    assert!(
-        !calls.contains("send-keys") && !calls.contains("send-text"),
-        "{calls}"
-    );
-    assert!(!scratch.path().join("controllers").exists());
+    assert!(typed(&holder).is_empty(), "{:?}", typed(&holder));
     assert_eq!(
         last_seq(&pair.peer),
         before,
@@ -3439,17 +3335,16 @@ async fn a_pane_link_takes_no_mutate_and_no_unsigned_keys() {
 
 #[test]
 fn a_pane_link_refuses_an_open_in_place_of_the_first_frame() {
-    // Any first frame but `pane_open` gets no answer and no herdr call.
+    // Any first frame but `pane_open` gets no answer and no holder call.
     let pair = pair();
-    let scratch = tempfile::tempdir().unwrap();
+    let holder = FakePanes::new();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let config = ServeConfig {
         home: pair.peer.dir.path().to_owned(),
         from: "test-host".into(),
         timing: quick(),
-        herdr: Some(mirror_herdr(scratch.path())),
         orchestrators: None,
-        holder: None,
+        holder: Some(Arc::new(holder.clone())),
     };
     let hello = hello(&pair, None).line().unwrap();
     let mut output = Vec::new();
@@ -3461,7 +3356,7 @@ fn a_pane_link_refuses_an_open_in_place_of_the_first_frame() {
         ))
         .unwrap();
     assert!(output.is_empty());
-    assert!(!scratch.path().join("calls").exists());
+    assert!(holder.calls().is_empty(), "{:?}", holder.calls());
 }
 
 // -- agent verbs on a peer (D20) ------------------------------------------------------
@@ -3567,7 +3462,6 @@ struct PeerAgent {
     sent: Arc<Mutex<Vec<u8>>>,
     /// The next `result` frames lost on the way back.
     lose_results: Arc<AtomicUsize>,
-    _scratch: tempfile::TempDir,
     _stop: watch::Sender<bool>,
 }
 
@@ -3579,11 +3473,10 @@ async fn peer_agent(timing: Timing, prepare: impl FnOnce(&Pair)) -> PeerAgent {
     let pane = holder_pane(&holder, "s-1");
     let session = pair.peer.worker(pane.as_str());
     prepare(&pair);
-    let scratch = tempfile::tempdir().unwrap();
     let starter = Arc::new(AgentStarter::default());
     let wire = Wire::new(pair.peer.dir.path())
         .with_starter(starter.clone())
-        .with_panes(mirror_herdr(scratch.path()), &holder);
+        .with_panes(&holder);
     let (sent, lose_results) = (wire.sent.clone(), wire.lose_results.clone());
     let (peers, stop) = start_timed(pair.board.dir.path(), wire, timing);
     until("the snapshot", || live_with_rows(&peers)).await;
@@ -3599,7 +3492,6 @@ async fn peer_agent(timing: Timing, prepare: impl FnOnce(&Pair)) -> PeerAgent {
         cookie,
         sent,
         lose_results,
-        _scratch: scratch,
         _stop: stop,
     }
 }
@@ -4475,7 +4367,6 @@ fn a_link_that_ends_mid_proof_lets_the_verb_finish() {
         home: pair.peer.dir.path().to_owned(),
         from: "test-host".to_owned(),
         timing: quick(),
-        herdr: None,
         orchestrators: Some(starter.clone()),
         holder: None,
     };

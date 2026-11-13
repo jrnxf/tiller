@@ -3,8 +3,8 @@
 //!
 //! A [`Poller`] owns its source and runs it on one task, so a slow poll
 //! delays the next one instead of overlapping it. A failed poll backs off
-//! 5 s, 15 s, 60 s, then every 5 minutes (a source may cap it, as the local
-//! herdr source does at 15 s), and changes nothing a successful read would:
+//! 5 s, 15 s, 60 s, then every 5 minutes (a source may cap it, as the
+//! holder source does), and changes nothing a successful read would:
 //! absence of evidence is never `gone` (`recovery.md`, principle 3).
 //! [`Registry`] refuses a second poller for a source, serves each poller's
 //! [`Health`] to `/health` and the board, and wakes a waiting poller when the
@@ -36,7 +36,7 @@ pub fn backoff(failures: u32) -> Duration {
 /// Why a poll failed: the source's own error, or the state store's.
 #[derive(Debug, thiserror::Error)]
 pub enum PollError {
-    /// The source could not be read (herdr, the holder, a forge).
+    /// The source could not be read (the holder, a forge).
     #[error(transparent)]
     Source(Box<dyn std::error::Error + Send + Sync + 'static>),
     #[error(transparent)]
@@ -60,7 +60,7 @@ impl PollError {
 
 /// Something a poller reads on a schedule.
 pub trait Source: Send + 'static {
-    /// Unique among the daemon's pollers, such as `herdr:local` or `holder`.
+    /// Unique among the daemon's pollers, such as `holder` or `quota`.
     fn name(&self) -> String;
     fn interval(&self) -> Duration;
     /// The wait after `failures` failed polls in a row.

@@ -77,7 +77,7 @@ pub struct ArtifactAdd {
 
 #[derive(Args, Debug)]
 pub struct ReviewRecord {
-    /// The run: a ULID or short form, `<display id> <role>`, or a herdr name like
+    /// The run: a ULID or short form, `<display id> <role>`, or a run name like
     /// alpha-42-build
     pub run: String,
     /// Who reviewed: code-review, spec-review, no-mistakes or human

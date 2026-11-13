@@ -344,6 +344,7 @@ text_enum!(OutboxState {
 text_enum!(ObservationSource {
     Hook = "hook",
     Transcript = "transcript",
+    // Rows written before the cutover; nothing observes as it now.
     Herdr = "herdr",
     Holder = "holder",
     Liveness = "liveness",
@@ -440,7 +441,7 @@ impl From<RunRole> for Role {
 }
 
 impl RunRole {
-    /// The short role name used in herdr agent names and run addresses
+    /// The short role name used in agent names and run addresses
     /// (`protocol.md` section 6.1).
     pub fn short_name(self) -> &'static str {
         match self {

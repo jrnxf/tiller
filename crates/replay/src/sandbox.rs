@@ -5,9 +5,9 @@
 //! - `git/<project>/`: a bare `origin.git` seeded with one commit, and the
 //!   `checkout` spawn cuts worktrees from;
 //! - `pool/`: the stub pool's worktrees, `runs/`: each run's scratch;
-//! - `herdr.json`: the fake herdr's state and call log.
 //!
-//! Nothing in it names a real remote, a real herdr server or a real pool.
+//! The fake terminal holder keeps its panes and call log in memory. Nothing
+//! in it names a real remote, a real holder or a real pool.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -26,7 +26,7 @@ use tiller_core::state::projects::Init;
 use tiller_core::state::runs::NewOrchestrator;
 use tiller_core::state::{find, get, list};
 use tiller_core::{Actor, Ctx, Store};
-use tiller_herdr::fake::{FakeHerdr, Screen};
+use tiller_panes::{FakePanes, Meta, PaneId};
 use tiller_reconcile::git::GitScanner;
 
 use crate::Error;
@@ -44,7 +44,7 @@ pub struct Sandbox {
     pub home: PathBuf,
     pub store: Store,
     pub config: SpawnConfig,
-    pub herdr: FakeHerdr,
+    pub holder: FakePanes,
     pub pool: StubPool,
     pub scanner: GitScanner,
     /// The `tiller` path written into launch lines; nothing runs it.
@@ -110,7 +110,6 @@ impl Sandbox {
             table.insert("dispatch".into(), dispatch);
         }
         let config = SpawnConfig::from_table(&table)?;
-        let herdr = FakeHerdr::new(root.join("herdr.json"));
         let claude = ClaudeConfig::at(root.join("claude"));
         Ok(Self {
             pool: StubPool::new(root.join("pool")),
@@ -119,7 +118,7 @@ impl Sandbox {
             home,
             store,
             config,
-            herdr,
+            holder: FakePanes::new(),
             scanner: GitScanner::new(),
             scratch,
             claude,
@@ -135,11 +134,10 @@ impl Sandbox {
             return Ok(session.clone());
         }
         self.checkout(project)?;
-        let n = self.sessions.len() + 1;
-        let workspace = format!("o{n}");
-        let pane = format!("{workspace}:p1");
-        self.herdr.add_workspace(&workspace, project);
-        self.herdr.add_pane(&workspace, &pane, Screen::Idle);
+        let pane = PaneId::generate();
+        let meta = Meta::from([("label".to_owned(), project.to_owned())]);
+        self.holder.add(&pane, project, meta);
+        let pane = pane.to_string();
         let started = self.store.session_start(
             &Ctx::new(Actor::Owner),
             NewOrchestrator {
@@ -217,8 +215,7 @@ impl Sandbox {
         let world = World {
             config: &self.config,
             pool: &self.pool,
-            herdr: &self.herdr,
-            panes: None,
+            panes: Some(&self.holder),
             scanner: &self.scanner,
             listeners: &NoListeners,
             tiller: &self.tiller,

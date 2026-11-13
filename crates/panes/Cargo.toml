@@ -33,6 +33,7 @@ toml.workspace = true
 ulid.workspace = true
 
 [dev-dependencies]
+insta.workspace = true
 proptest.workspace = true
 rustix = { workspace = true, features = ["pty"] }
 tempfile.workspace = true

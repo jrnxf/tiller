@@ -10,9 +10,8 @@ use tiller_core::domain::{
 use tiller_core::state::approvals::NewPr;
 use tiller_core::state::publishes::publish;
 use tiller_core::state::{find, get, list, resolve_card, resolve_id};
-use tiller_herdr::client::Herdr;
 
-use super::card::herdr_name;
+use super::card::agent_name;
 use super::{KeyArg, resolve_run, resolve_session};
 use crate::app::{App, Done, Failure, Outcome, body_input, text_input};
 use crate::lisbon;
@@ -32,7 +31,7 @@ pub struct Status {
 pub enum RunCmd {
     /// Pause a run until a date
     Pause {
-        /// The run: a ULID or short form, `<display id> <role>`, or a herdr name like
+        /// The run: a ULID or short form, `<display id> <role>`, or a run name like
         /// alpha-42-build
         run: String,
         /// When the pause ends: 2026-11-07 (09:00 Lisbon), 2026-11-07T14:00 (Lisbon) or an RFC
@@ -45,7 +44,7 @@ pub enum RunCmd {
     },
     /// Show a run
     Show {
-        /// The run: a ULID or short form, `<display id> <role>`, or a herdr name like
+        /// The run: a ULID or short form, `<display id> <role>`, or a run name like
         /// alpha-42-build
         run: String,
         /// Lines of the pane to include, at most 200
@@ -63,7 +62,7 @@ pub enum RunCmd {
     },
     /// Close a run's pane record and return its worktree record
     Clean {
-        /// The run: a ULID or short form, `<display id> <role>`, or a herdr name like
+        /// The run: a ULID or short form, `<display id> <role>`, or a run name like
         /// alpha-42-build
         run: String,
     },
@@ -214,7 +213,7 @@ fn run_row(store: &tiller_core::Store, run: &Run) -> Result<serde_json::Value, F
     let session = tiller_core::state::runs::live_session(store.conn(), &run.id)?;
     Ok(json!({
         "run": run,
-        "name": herdr_name(&card.display_id, run),
+        "name": agent_name(&card.display_id, run),
         "card": card.display_id,
         "session": session,
     }))
@@ -245,7 +244,7 @@ fn show(app: &App, reference: &str, tail: Option<u32>) -> Done {
 }
 
 /// The last `keep` lines of the run's live pane, read the way the board
-/// reads it: the terminal holder for a holder pane, else the local herdr.
+/// reads it: from the terminal holder.
 /// The error is why there is no tail, for the caller to read.
 fn read_tail(
     app: &App,
@@ -282,11 +281,7 @@ fn read_tail(
             host.label
         ));
     }
-    let herdr = super::spawn::configured_herdr(app).map_err(|failure| failure.message.clone())?;
-    herdr
-        .read_visible(&pane)
-        .map(|screen| tiller_daemon::api::pane_tail(&screen, keep))
-        .map_err(|error| format!("herdr cannot read the pane: {error}"))
+    Err("the pane is not in the terminal holder".into())
 }
 
 fn list_runs(app: &App, card: Option<String>, active: bool) -> Done {

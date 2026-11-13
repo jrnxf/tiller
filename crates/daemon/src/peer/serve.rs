@@ -22,7 +22,6 @@ use tiller_core::domain::{HostKind, PeerKey, PeerScope};
 use tiller_core::error::READ_ONLY_MARKER;
 use tiller_core::state::peers::PEER_PROTOCOL;
 use tiller_core::{Store, Timestamp};
-use tiller_herdr::client::Cli;
 
 use super::forward::{self, Mutate};
 use super::nonces;
@@ -60,9 +59,6 @@ pub struct ServeConfig {
     /// `--from`: the board host's label.
     pub from: String,
     pub timing: Timing,
-    /// The local herdr server, for a run's pane tail and the agent verbs on
-    /// its panes; none in tests.
-    pub herdr: Option<Cli>,
     /// Starts an orchestrator for a forwarded start; none refuses it 503.
     pub orchestrators: Option<std::sync::Arc<dyn crate::api::OrchestratorStart>>,
     /// The terminal holder, for a pane link, a tail, a prompt read or an
@@ -99,7 +95,7 @@ pub fn serve(
             server_time: Timestamp::now().to_string(),
         }),
     )?;
-    let mirrors = Arc::new(Mirrors::new(&config.home));
+    let mirrors = Arc::new(Mirrors::new());
     let proofs = Proofs::start(config, &key, &mirrors);
     let mut link = Link {
         store,
@@ -506,9 +502,8 @@ impl Link<'_> {
             }
             Query::Run(id) => {
                 let (mut detail, pane) = views::run_detail(store, &id)?;
-                if let (Some(herdr), Some(target)) = (&self.config.herdr, pane) {
-                    detail.pane_tail =
-                        pane_tail_of(herdr.clone(), self.config.holder.as_deref(), target);
+                if let Some(target) = pane {
+                    detail.pane_tail = pane_tail_of(self.config.holder.as_deref(), target);
                 }
                 serde_json::to_value(detail)
             }
@@ -520,12 +515,7 @@ impl Link<'_> {
                         "the terminal tail reads panes on this machine only",
                     ));
                 }
-                let tail = tail_on(
-                    self.config.herdr.as_ref(),
-                    self.config.holder.as_ref(),
-                    session_id,
-                    &pane,
-                )?;
+                let tail = tail_on(self.config.holder.as_ref(), session_id, &pane)?;
                 serde_json::to_value(tail)
             }
             Query::Prompt(session) => {
@@ -537,13 +527,8 @@ impl Link<'_> {
                         format!("key {} has the read scope: view only pairing", self.key.id),
                     ));
                 }
-                let read = prompt_read_on(
-                    store,
-                    self.config.herdr.as_ref(),
-                    self.config.holder.as_ref(),
-                    &self.mirrors,
-                    &session,
-                )?;
+                let read =
+                    prompt_read_on(store, self.config.holder.as_ref(), &self.mirrors, &session)?;
                 serde_json::to_value(read)
             }
             // `run` hands the checks to `Checks`, off the link thread: they

@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tiller_core::domain::{Card, OutboxKind, Project, Session};
 use tiller_core::ids::HOST_HEALTH_CARD;
 use tiller_core::state::attention::NewAttention;
-use tiller_core::state::caches::{PaneHolder, WorktreeReading, landed_heads};
+use tiller_core::state::caches::{WorktreeReading, landed_heads};
 use tiller_core::state::outbox::{NewMessage, live_orchestrator};
 use tiller_core::state::{find, get, list};
 use tiller_core::{Actor, Ctx, Result, Store, Timestamp};
@@ -234,12 +234,8 @@ impl Reconciler {
         if let Some(listing) = &self.listing {
             let rows = crate::holder::readings(&self.store, listing);
             let cached = rows.and_then(|rows| {
-                self.store.cache_panes(
-                    &self.ctx(now),
-                    &self.config.host_id,
-                    PaneHolder::Holder,
-                    rows,
-                )
+                self.store
+                    .cache_panes(&self.ctx(now), &self.config.host_id, rows)
             });
             if let Err(error) = cached {
                 report.error("holder pane cache", &error);

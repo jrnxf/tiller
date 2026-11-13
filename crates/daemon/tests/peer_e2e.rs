@@ -30,7 +30,7 @@ use tiller_core::state::peers::{
 };
 use tiller_core::store::Actor;
 use tiller_daemon::auth;
-use tiller_herdr::testing::{Fleet, owner};
+use tiller_panes::testing::{Fleet, owner};
 
 const WAIT: Duration = Duration::from_secs(30);
 const ALIAS: &str = "peer-alias";
@@ -75,7 +75,6 @@ impl Daemon {
             .env_clear()
             .env("PATH", "")
             .env("TILLER_HOME", home)
-            .env("TILLER_HERDR", "/nonexistent/herdr")
             .env("TILLER_QUOTA_AXI", "/nonexistent/quota-axi")
             .env("TILLER_LOG", "warn");
         if let Some(ssh) = ssh {
@@ -104,6 +103,40 @@ impl Daemon {
 impl Drop for Daemon {
     fn drop(&mut self) {
         signal("-TERM", self.pid);
+    }
+}
+
+/// A `tiller holder` in `home`, stopped when dropped.
+struct Holder(std::process::Child);
+
+impl Holder {
+    fn start(home: &Path) -> Self {
+        let child = Command::new(tiller())
+            .arg("holder")
+            .env_clear()
+            .env("PATH", "")
+            .env("HOME", home)
+            .env("TILLER_HOME", home)
+            .env("TILLER_LOG", "warn")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let socket = tiller_panes::socket_path(home);
+        until("the holder's socket", || {
+            tiller_panes::HolderClient::connect(&socket, "test")
+                .ok()
+                .map(|_| ())
+        });
+        Self(child)
+    }
+}
+
+impl Drop for Holder {
+    fn drop(&mut self) {
+        signal("-TERM", self.0.id());
+        let _ = self.0.wait();
     }
 }
 
@@ -298,8 +331,7 @@ impl World {
 /// What the board host's daemon runs as `ssh`: it drops the options, takes
 /// the alias and runs the real `tiller peer serve` (or Add a host's `tiller
 /// peer accept --unattended`) for the peer's home, the way sshd would on the
-/// other machine. Its herdr is [`peer_herdr`], which a test writes only when
-/// the peer must start an orchestrator.
+/// other machine.
 fn write_shim(dir: &Path, peer_home: &Path, serve_pid: &Path) -> PathBuf {
     let shim = dir.join("ssh-shim");
     let script = format!(
@@ -317,24 +349,18 @@ shift
 [ "$1" = tiller ] || exit 127
 shift
 echo $$ > "{pid}"
-export HOME="{home}" TILLER_HOME="{home}" TILLER_HERDR="{herdr}"
+export HOME="{home}" TILLER_HOME="{home}"
 export SSH_CONNECTION="192.0.2.1 50000 192.0.2.2 22"
 exec "{tiller}" "$@"
 "#,
         pid = serve_pid.display(),
         home = peer_home.display(),
-        herdr = peer_herdr(peer_home).display(),
         tiller = tiller().display(),
     );
     std::fs::write(&shim, script).unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
     shim
-}
-
-/// The herdr the peer's `peer serve` drives; missing unless a test writes it.
-fn peer_herdr(peer_home: &Path) -> PathBuf {
-    peer_home.join("bin/herdr")
 }
 
 // -- http -------------------------------------------------------------------
@@ -448,7 +474,7 @@ fn count(fleet: &Fleet, sql: &str) -> i64 {
 /// The events `fleet` recorded after `seq`, as `kind by actor`, other than
 /// its daemon's records of the hosts. Those come from the daemon's own
 /// pollers and links, whatever a request does, and land when they land:
-/// the herdr poller's and each link change's `host.changed`, and the first
+/// the holder poller's and each link change's `host.changed`, and the first
 /// reconcile pass's `daemon.started` and host checks, which can come after
 /// the link is live. Every other event counts, whoever wrote it.
 fn written_since(fleet: &Fleet, seq: i64) -> Vec<String> {
@@ -824,16 +850,23 @@ fn board_starts_a_peers_orchestrator_and_asks_it() {
     let old = world.peer.orchestrator_session.clone();
     world.peer.open().session_end(&owner(), &old, "x").unwrap();
 
-    // The peer's start needs its roots and a herdr that opens a workspace.
+    // The peer's start needs its roots, a holder to open the pane in and a
+    // Claude Code that waits on its terminal.
     let lab = world.peer.dir.path().join("lab");
     let checkout = lab.join("checkouts/alpha");
     for dir in [&checkout, &lab.join("pool"), &lab.join("scratch")] {
         std::fs::create_dir_all(dir).unwrap();
     }
+    let claude = lab.join("claude");
+    std::fs::write(&claude, "#!/bin/sh\nread line\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let _holder = Holder::start(world.peer.dir.path());
     std::fs::write(
         world.peer.dir.path().join("config.toml"),
         format!(
-            "[spawn]\npool_root = {:?}\nscratch_root = {:?}\norchestrator_home = {:?}\ncheckouts_root = {:?}\n\n[checkouts]\nalpha = {:?}\n",
+            "[spawn]\nclaude = {:?}\npool_root = {:?}\nscratch_root = {:?}\norchestrator_home = {:?}\ncheckouts_root = {:?}\n\n[checkouts]\nalpha = {:?}\n",
+            claude.to_str().unwrap(),
             lab.join("pool").to_str().unwrap(),
             lab.join("scratch").to_str().unwrap(),
             lab.join("orchestrators").to_str().unwrap(),
@@ -842,26 +875,6 @@ fn board_starts_a_peers_orchestrator_and_asks_it() {
         ),
     )
     .unwrap();
-    let calls = lab.join("herdr.log");
-    let herdr = peer_herdr(world.peer.dir.path());
-    std::fs::create_dir_all(herdr.parent().unwrap()).unwrap();
-    std::fs::write(
-        &herdr,
-        format!(
-            r#"#!/bin/sh
-echo "$*" >> '{calls}'
-case "$1 $2" in
-"workspace create") echo '{{"result":{{"workspace":{{"workspace_id":"w9"}},"root_pane":{{"pane_id":"w9:p1"}}}}}}' ;;
-"api snapshot") echo '{{"result":{{"snapshot":{{"version":"0.9.5","workspaces":[{{"workspace_id":"w9","label":"alpha","number":1}}],"panes":[{{"pane_id":"w9:p1","workspace_id":"w9","agent_status":"unknown"}}]}}}}}}' ;;
-*) echo '{{"result":{{}}}}' ;;
-esac
-"#,
-            calls = calls.display()
-        ),
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&herdr, std::fs::Permissions::from_mode(0o755)).unwrap();
     world.live();
 
     let board_sessions = count(&world.board, "SELECT count(*) FROM sessions");
@@ -899,9 +912,18 @@ esac
         )
         .unwrap();
     assert_eq!(actor, "board@test-host");
-    let log = std::fs::read_to_string(&calls).unwrap();
-    assert!(log.contains("workspace create"), "{log}");
-    assert!(log.contains("pane send-text w9:p1"), "{log}");
+    // The orchestrator runs in a pane of the peer's own holder.
+    let pane: String = world
+        .peer
+        .open()
+        .conn()
+        .query_row(
+            "SELECT pane_id FROM sessions WHERE id = ?1",
+            [&session],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(tiller_core::ids::is_holder_pane(&pane), "{pane}");
 
     // The same key again is the start that landed, not a second one.
     let (status, again) = world.post(
