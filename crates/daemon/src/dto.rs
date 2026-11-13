@@ -801,7 +801,7 @@ pub struct Health {
     /// The merge App key, as `tiller doctor`'s `merge app` line reads it.
     pub merge_app: MergeAppHealth,
     /// Problems that stop nothing, one line each: "holder upgrade refused:
-    /// <reason>" until an upgrade succeeds (`recovery.md` R22).
+    /// <reason>" until it clears (`recovery.md` R22).
     pub warnings: Vec<String>,
 }
 

@@ -8353,7 +8353,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Problems that stop nothing, one line each: \"holder upgrade refused:\n<reason>\" until an upgrade succeeds (`recovery.md` R22)."
+            "description": "Problems that stop nothing, one line each: \"holder upgrade refused:\n<reason>\" until it clears (`recovery.md` R22)."
           }
         }
       },
