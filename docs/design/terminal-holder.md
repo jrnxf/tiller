@@ -695,7 +695,8 @@ Decided:
 - **D11, no `tiller host remove`.** The 11.1 migration refusal named it as a second way out, but the CLI has no such command and no spec defines it. The owner chose to make `tiller peer add` the only way out: the refusal names it alone, and step 2 of 11.3 pairs each saved herdr machine.
 - **D12, a binary check on `tiller attach`.** `tiller` runs outside the role sandbox, so on a host where hooks do not fire the deny rule is the only verb check against an agent that runs `tiller attach` (`authority.md` section 8). The owner chose a refusal in the binary, as `tiller peer serve` has, that still lets a notification click through. Section 5.2 has the rule.
 
-One point is for a later task, recorded here so it is not lost:
+Two points are for a later task or the owner, recorded here so they are not lost:
 - Shorter Enter pacing with bracketed paste (section 4.5), once raw stream fixtures exist.
+- The 60 s wait for a peer agent verb that waits for proof (HR2, `protocol.md` 7.4) is a proposed value. The owner has not confirmed it.
 
 Remote input over the peer link (section 8) has its row: `authority.md` G46 and `protocol.md` 10.7. The other agent verbs for a peer have theirs since D20 (HR2): `authority.md` section 3 and G46, and `protocol.md` 7.4, Agent verbs on a peer.
