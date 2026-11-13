@@ -614,7 +614,7 @@ pub(crate) fn run_end_in(tx: &mut Tx<'_>, run: &str, end: EndRun) -> Result<Run>
 fn relaunch_in(tx: &mut Tx<'_>, run: &str, relaunch: &Relaunch) -> Result<Relaunched> {
     let run = load_run(tx, run)?;
     match tx.actor() {
-        Actor::Owner | Actor::Board => {}
+        Actor::Owner | Actor::Board | Actor::Peer(_) => {}
         Actor::Session(id) if *id == run.supervisor_session_id => {}
         other => {
             return Err(Error::Forbidden(format!(
@@ -1376,7 +1376,7 @@ impl Store {
         self.write(ctx, "run.place", None, |tx| {
             let run = load_run(tx, run)?;
             match tx.actor() {
-                Actor::Owner | Actor::Board | Actor::Daemon => {}
+                Actor::Owner | Actor::Board | Actor::Peer(_) | Actor::Daemon => {}
                 Actor::Session(id) if *id == run.supervisor_session_id => {}
                 other => {
                     return Err(Error::Forbidden(format!(
@@ -1487,7 +1487,7 @@ impl Store {
         self.write(ctx, "run.reconfigure", None, |tx| {
             let run = load_run(tx, run)?;
             match tx.actor() {
-                Actor::Owner | Actor::Board | Actor::Daemon => {}
+                Actor::Owner | Actor::Board | Actor::Peer(_) | Actor::Daemon => {}
                 Actor::Session(id) if *id == run.supervisor_session_id => {}
                 other => {
                     return Err(Error::Forbidden(format!(
@@ -1722,7 +1722,7 @@ impl Store {
                 Some(run) => {
                     let run: Run = get(tx.conn(), "run", run)?;
                     match tx.actor() {
-                        Actor::Owner | Actor::Board | Actor::Daemon => {}
+                        Actor::Owner | Actor::Board | Actor::Peer(_) | Actor::Daemon => {}
                         Actor::Session(id) if *id == run.supervisor_session_id => {}
                         other => {
                             return Err(Error::Forbidden(format!(

@@ -382,6 +382,16 @@ impl ApiError {
         error
     }
 
+    /// A 502 `peer_refused` for an action a `read` pairing does not take:
+    /// nothing goes to the peer (G46).
+    fn read_scope(host: &str) -> Self {
+        Self::peer_refused(
+            "read_scope",
+            format!("{host} is paired with a read scope: view only pairing"),
+        )
+        .host(host)
+    }
+
     /// A 503 `peer_unreachable` for a mutation: refused at once, with
     /// nothing sent or queued (ADR 0003).
     fn unreachable(host: &str) -> Self {
@@ -1850,8 +1860,8 @@ fn stop_or_signed_out(state: &AppState, headers: &HeaderMap) -> watch::Receiver<
 /// serve` applies for a forwarded one, through the same core function.
 pub(crate) struct Mutation {
     op: Op,
-    /// The card, attention item or approval the path names; `None` for a
-    /// new card.
+    /// The card, attention item, approval, project or agent session the
+    /// path names; `None` for a new card.
     target: Option<String>,
     key: String,
     host: Option<String>,
@@ -1875,6 +1885,16 @@ enum Parsed {
     AskNote(AskNote),
     StartOrchestrator(bool),
     RestartStale(Option<Vec<String>>),
+    Withdraw,
+    /// The option to press, on the dialog the screen hash names.
+    PromptAnswer(u8, String),
+    Interrupt,
+    Steer(String),
+    Stop,
+    Pause(Timestamp, String),
+    Unpause,
+    Resume,
+    Relaunch(BoardRelaunch),
 }
 
 impl Mutation {
@@ -2005,6 +2025,73 @@ impl Mutation {
                     request.idempotency_key,
                     request.host,
                     Parsed::RestartStale(request.sessions),
+                )
+            }
+            Op::Withdraw => {
+                let request: WithdrawBody = body(bytes)?;
+                (request.idempotency_key, request.host, Parsed::Withdraw)
+            }
+            Op::PromptAnswer => {
+                // The key is required here, on a forwarded answer only: a
+                // local one types at once and is never retried by key.
+                let request: PromptAnswer = body(bytes)?;
+                (
+                    request.idempotency_key.unwrap_or_default(),
+                    request.host,
+                    Parsed::PromptAnswer(request.option, request.screen),
+                )
+            }
+            Op::Interrupt => {
+                let request: InterruptBody = body(bytes)?;
+                (request.idempotency_key, request.host, Parsed::Interrupt)
+            }
+            Op::Steer => {
+                let request: SteerBody = body(bytes)?;
+                steer_line(&request.text)?;
+                (
+                    request.idempotency_key,
+                    request.host,
+                    Parsed::Steer(request.text),
+                )
+            }
+            Op::Stop | Op::Unpause | Op::Resume => {
+                let request: AgentControlBody = body(bytes)?;
+                let parsed = match op {
+                    Op::Stop => Parsed::Stop,
+                    Op::Unpause => Parsed::Unpause,
+                    _ => Parsed::Resume,
+                };
+                (request.idempotency_key, request.host, parsed)
+            }
+            Op::Pause => {
+                let request: PauseBody = body(bytes)?;
+                let until: Timestamp = request.until.parse()?;
+                if request.reason.trim().is_empty() {
+                    return Err(ApiError::usage("say why the run waits"));
+                }
+                within("the reason", &request.reason, COMMENT_MAX_CHARS)?;
+                (
+                    request.idempotency_key,
+                    request.host,
+                    Parsed::Pause(until, request.reason),
+                )
+            }
+            Op::Relaunch => {
+                let request: RelaunchBody = body(bytes)?;
+                if request.note.trim().is_empty() {
+                    return Err(ApiError::usage(
+                        "write the note the new session starts from",
+                    ));
+                }
+                within("the note", &request.note, COMMENT_MAX_CHARS)?;
+                let relaunch = BoardRelaunch {
+                    note: request.note,
+                    new_attempt: request.new_attempt,
+                };
+                (
+                    request.idempotency_key,
+                    request.host,
+                    Parsed::Relaunch(relaunch),
                 )
             }
         };
@@ -2138,17 +2225,77 @@ impl Mutation {
                 done.outbox_id = outbox_id;
                 Ok(done)
             }
-            // Needs the daemon's starter, so it never reaches the store alone.
-            Parsed::StartOrchestrator(_) | Parsed::RestartStale(_) => Err(Error::Internal(
-                "a start or restart runs through its starter".into(),
+            Parsed::Withdraw => Done::of(store.attention_withdraw_stale(
+                ctx,
+                id,
+                "withdrawn from the board by the owner",
+            )?),
+            Parsed::Steer(text) => {
+                let session = resolve_id(store.conn(), "sessions", "session", id)?;
+                let applied =
+                    store.outbox_send(ctx, Some(key), &session, OutboxKind::Steer, text)?;
+                let outbox_id = Some(applied.value.id.clone());
+                let mut done = Done::of(applied)?;
+                done.outbox_id = outbox_id;
+                Ok(done)
+            }
+            Parsed::Pause(until, reason) => {
+                let (_, run) = session_run(store, id, "pause")?;
+                Done::of(store.run_pause(ctx, &run.id, until, Some(&reason))?)
+            }
+            Parsed::Unpause => {
+                let (_, run) = session_run(store, id, "resume")?;
+                Done::of(store.run_unpause(ctx, &run.id)?)
+            }
+            // Need the daemon's starter or the agent's pane, so they never
+            // reach the store alone.
+            Parsed::StartOrchestrator(_)
+            | Parsed::RestartStale(_)
+            | Parsed::PromptAnswer(..)
+            | Parsed::Interrupt
+            | Parsed::Stop
+            | Parsed::Resume
+            | Parsed::Relaunch(_) => Err(Error::Internal(
+                "a start, a restart or an agent control runs through its starter or its pane"
+                    .into(),
             )),
         }
     }
 
     /// Applies on `store` at once, as `peer serve` does for a verified
     /// frame: the response, or the refusal with what the board needs to
-    /// recover from it. `starter` serves an orchestrator start.
+    /// recover from it. `hands` serve an orchestrator start and the agent
+    /// verbs.
     pub(crate) fn apply_here(
+        self,
+        store: &mut Store,
+        ctx: &Ctx,
+        hands: &Hands<'_>,
+    ) -> Result<MutationResponse, ApiError> {
+        let target = self.target.clone();
+        let id = target.as_deref().unwrap_or_default();
+        let controlled = match self.parsed {
+            Parsed::Interrupt => {
+                return Ok(interrupt_here(store, ctx, &hands.panes()?, id)?.response());
+            }
+            Parsed::PromptAnswer(option, screen) => {
+                return answer_here(store, ctx, hands, id, option, &screen);
+            }
+            Parsed::Stop => stop_here(hands.controls()?, store, ctx, id),
+            Parsed::Resume => resume_here(hands.controls()?, store, ctx, id),
+            Parsed::Relaunch(relaunch) => {
+                relaunch_here(hands.controls()?, store, ctx, id, relaunch)
+            }
+            parsed => return Self { parsed, ..self }.apply_with(store, ctx, hands.starter),
+        };
+        let controlled = controlled.map_err(|error| start_refusal(error, |_| {}))?;
+        let done = Done::of(controlled.applied)?;
+        Ok(done.with_warning(controlled.warning).response())
+    }
+
+    /// [`Mutation::apply_here`] for a mutation that needs no pane: a start
+    /// or a restart through `starter`, or the store alone.
+    fn apply_with(
         self,
         store: &mut Store,
         ctx: &Ctx,
@@ -2227,6 +2374,175 @@ pub(crate) fn start_refusal(error: StartError, suspect: impl FnOnce(&Error)) -> 
             api
         }
     }
+}
+
+/// This machine's panes: herdr's, and the terminal holder's.
+type Panes = Routed<Cli, Arc<dyn tiller_panes::Panes>>;
+
+/// What `peer serve` holds for a forwarded mutation that needs more than
+/// the store: the orchestrator starter, and the panes an agent verb reaches.
+pub(crate) struct Hands<'a> {
+    pub(crate) starter: Option<&'a dyn OrchestratorStart>,
+    pub(crate) herdr: Option<&'a Cli>,
+    pub(crate) holder: Option<&'a Arc<dyn Holder>>,
+    /// The input rate a prompt answer spends, as the board's own does.
+    pub(crate) mirrors: &'a Mirrors,
+}
+
+impl Hands<'_> {
+    fn controls(&self) -> Result<&dyn OrchestratorStart, ApiError> {
+        self.starter
+            .ok_or_else(|| Error::Unavailable("this daemon cannot control agents".into()).into())
+    }
+
+    /// This machine's panes, routed to herdr or the terminal holder.
+    fn panes(&self) -> Result<Panes, ApiError> {
+        Ok(Routed::new(
+            herdr_of(self.herdr)?.clone(),
+            self.holder
+                .cloned()
+                .map(|holder| -> Arc<dyn tiller_panes::Panes> { holder }),
+        ))
+    }
+}
+
+/// herdr, or the refusal for a `peer serve` started without it.
+fn herdr_of(herdr: Option<&Cli>) -> Result<&Cli, ApiError> {
+    herdr.ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            "herdr is unreachable: this daemon has no link to it",
+        )
+    })
+}
+
+/// Escape to a working agent's pane, then the proof its turn ended: the
+/// board's interrupt, on this machine's panes only.
+fn interrupt_here(
+    store: &mut Store,
+    ctx: &Ctx,
+    panes: &Panes,
+    session: &str,
+) -> Result<Done, ApiError> {
+    // The pane calls here reach this machine's panes only, and a pane id
+    // on a remote host may name another agent's pane here.
+    if let (_, _, Some(label)) = pane_target(store, session)? {
+        return Err(remote_pane(
+            &label,
+            "an interrupt reaches panes on this machine only, so nothing was sent",
+        ));
+    }
+    Ok(interrupt_run(store, ctx, panes, session)?)
+}
+
+/// The interrupt of the session's run, through `panes`.
+fn interrupt_run(
+    store: &mut Store,
+    ctx: &Ctx,
+    panes: &Panes,
+    session: &str,
+) -> tiller_core::Result<Done> {
+    let id = resolve_id(store.conn(), "sessions", "session", session)?;
+    let session: Session = get_row(store.conn(), "session", &id)?;
+    let run_id = session.run_id.ok_or_else(|| Error::Refused {
+        entity: "session",
+        id: id.clone(),
+        fact: "it has no run to interrupt; send it a message instead".to_owned(),
+    })?;
+    let run: Run = get_row(store.conn(), "run", &run_id)?;
+    let waits = tiller_agents::control::Waits::default();
+    let done = tiller_agents::control::interrupt(store, ctx, panes, &waits, &run)
+        .map_err(|error| interrupt_refused(&run.id, error))?;
+    Done::of(done)
+}
+
+/// The proven stop of the session's agent, through `starter`.
+fn stop_here(
+    starter: &dyn OrchestratorStart,
+    store: &mut Store,
+    ctx: &Ctx,
+    session: &str,
+) -> Result<Controlled, StartError> {
+    let id = resolve_id(store.conn(), "sessions", "session", session)?;
+    let session: Session = get_row(store.conn(), "session", &id)?;
+    starter.stop_agent(store, ctx, &session)
+}
+
+/// `claude --resume` for the session's run, through `starter`.
+fn resume_here(
+    starter: &dyn OrchestratorStart,
+    store: &mut Store,
+    ctx: &Ctx,
+    session: &str,
+) -> Result<Controlled, StartError> {
+    let (_, run) = session_run(store, session, "resume")?;
+    starter.resume_run(store, ctx, &run)
+}
+
+/// A new session on the session's run, through `starter`.
+fn relaunch_here(
+    starter: &dyn OrchestratorStart,
+    store: &mut Store,
+    ctx: &Ctx,
+    session: &str,
+    relaunch: BoardRelaunch,
+) -> Result<Controlled, StartError> {
+    let (_, run) = session_run(store, session, "relaunch")?;
+    starter.relaunch_run(store, ctx, &run, relaunch)
+}
+
+/// The command a forwarded prompt answer keeps its key under.
+const PROMPT_ANSWER: &str = "agent.prompt_answer";
+
+/// A forwarded prompt answer (`protocol.md` 7.4): the board's answer, on
+/// this host's own screen, typed only on the dialog `screen` names. Its key
+/// is kept once the keys went, so a retry with it types nothing twice and
+/// gets the first answer back. A retry after a crash between the keys and
+/// the key's row finds the dialog gone, so it is `screen_changed` and types
+/// nothing either.
+fn answer_here(
+    store: &mut Store,
+    ctx: &Ctx,
+    hands: &Hands<'_>,
+    session: &str,
+    option: u8,
+    screen: &str,
+) -> Result<MutationResponse, ApiError> {
+    if let Some(data) = store.key_replay::<Value>(ctx, PROMPT_ANSWER)? {
+        let mut response = answered(data);
+        response.replayed = true;
+        return Ok(response);
+    }
+    let (session_id, pane, remote) = pane_target(store, session)?;
+    if let Some(label) = remote {
+        return Err(remote_pane(
+            &label,
+            "a prompt answer reaches panes on this machine only, so nothing was sent",
+        ));
+    }
+    spend_input(hands.mirrors)?;
+    let wait = waiting_of(store, &session_id)?.ok_or_else(screen_changed)?;
+    let dialog = dialog_on(hands.herdr, hands.holder, &pane, &wait)?
+        .filter(|dialog| dialog.prompt.screen == screen)
+        .ok_or_else(screen_changed)?;
+    let keys = dialog
+        .keys(option)
+        .ok_or_else(|| ApiError::usage(format!("the prompt has no option {option}")))?;
+    press(hands.herdr, hands.holder, &pane, &keys)?;
+    let data = answer_data(&session_id, option);
+    store.key_record(ctx, PROMPT_ANSWER, ("session", &session_id), &data)?;
+    // As the board's own answer does: the next answer reads the redrawn
+    // screen.
+    let until = std::time::Instant::now() + DIALOG_LEFT_WAIT;
+    while std::time::Instant::now() + DIALOG_LEFT_EVERY < until {
+        std::thread::sleep(DIALOG_LEFT_EVERY);
+        match dialog_on(hands.herdr, hands.holder, &pane, &wait) {
+            Ok(Some(dialog)) if dialog.prompt.screen == screen => continue,
+            _ => break,
+        }
+    }
+    Ok(answered(data))
 }
 
 /// The head an approval binds now, for a 422 after the head moved.
@@ -2337,11 +2653,7 @@ async fn forward(
         return Err(ApiError::unreachable(host));
     }
     if view.scope != PeerScope::Act {
-        return Err(ApiError::peer_refused(
-            "read_scope",
-            format!("{host} is paired with a read scope: view only pairing"),
-        )
-        .host(host));
+        return Err(ApiError::read_scope(host));
     }
     let mut body: Value = body(bytes)?;
     if let Some(fields) = body.as_object_mut() {
@@ -2370,6 +2682,54 @@ async fn forward(
         }
         Forwarded::Answered(status, body) => Err(ApiError::from((status, body)).host(host)),
     }
+}
+
+/// Forwards an agent verb to the paired peer `host` names, as a signed
+/// `mutate` (`protocol.md` 7.4, Agent verbs on a peer; 10.3); `None` when
+/// the agent is here.
+async fn on_peer(
+    state: &AppState,
+    host: Option<&str>,
+    op: Op,
+    session: &str,
+    bytes: &[u8],
+) -> Result<Option<MutationResponse>, ApiError> {
+    let Some(view) = peer_for(state, host).await? else {
+        return Ok(None);
+    };
+    let mutation = Mutation::parse(op, Some(session.to_owned()), bytes)?;
+    let Json(response) = forward(state, &view, mutation, bytes).await?;
+    Ok(Some(response))
+}
+
+/// A one-shot read of a peer agent's screen, `agents/{session}/{what}`, as
+/// a `query` on the peer link (`protocol.md` 7.4, 10.2); `None` when the
+/// agent is here. `act` says it needs the `act` scope, which the prompt read
+/// does and the tail does not (G46).
+async fn agent_read<T: for<'de> Deserialize<'de>>(
+    state: &AppState,
+    host: Option<&str>,
+    session: &str,
+    what: &str,
+    act: bool,
+) -> Result<Option<T>, ApiError> {
+    let view = match addressed(state, host).await? {
+        Addressed::Here => return Ok(None),
+        Addressed::Peer(view) => view,
+        Addressed::Unlinked(label) => return Err(ApiError::unreachable(&label)),
+    };
+    let label = view.label.as_str();
+    if view.link != LinkState::Live {
+        return Err(ApiError::unreachable(label));
+    }
+    if act && view.scope != PeerScope::Act {
+        return Err(ApiError::read_scope(label));
+    }
+    let path = format!("agents/{session}/{what}");
+    peer_query(state, &view, path, || None)
+        .await
+        .map(Some)
+        .map_err(|error| error.host(label))
 }
 
 /// What a pane link answered with.
@@ -2432,11 +2792,7 @@ async fn peer_act(
         return Err(ApiError::unreachable(label));
     }
     if view.scope != PeerScope::Act {
-        return Err(ApiError::peer_refused(
-            "read_scope",
-            format!("{label} is paired with a read scope: view only pairing"),
-        )
-        .host(label));
+        return Err(ApiError::read_scope(label));
     }
     match state.0.peers.pane_act(&view.host_id, session, act()).await {
         Typed::NoStream => Err(ApiError::new(
@@ -4247,28 +4603,16 @@ async fn answer(
     params(("id" = String, Path)),
     responses((status = 200, body = MutationResponse), (status = 404, body = ErrorBody),
               (status = 422, body = ErrorBody, description = "the question still applies"),
-              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+              (status = 502, body = ErrorBody, description = "`peer_refused`: a read-scope pairing, or the peer refused it"),
+              (status = 503, body = ErrorBody, description = "the peer is unreachable"),
+              (status = 504, body = ErrorBody, description = "`forward_uncertain`: the peer link dropped before the peer answered")))]
 async fn withdraw_attention(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers).await?;
-    let request: WithdrawBody = body(&bytes)?;
-    not_forwarded(&state, request.host.as_deref(), "a withdraw").await?;
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, _| {
-            Done::of(store.attention_withdraw_stale(
-                ctx,
-                &id,
-                "withdrawn from the board by the owner",
-            )?)
-        },
-    )
-    .await
+    submit(&state, &headers, Op::Withdraw, Some(id), &bytes).await
 }
 
 #[utoipa::path(post, path = "/api/v1/approvals/{id}/decide", tag = "mutations", request_body = DecideBody,
@@ -4928,20 +5272,25 @@ async fn waiting_on(
     state: &AppState,
     session_id: String,
 ) -> Result<Option<prompt::Wait>, ApiError> {
-    read(state, move |store| {
-        let session: Session = get_row(store.conn(), "session", &session_id)?;
-        if session.ended_at.is_some() {
-            return Ok(None);
-        }
-        Ok(match session.activity {
-            Activity::WaitingPermission => Some(prompt::Wait::Permission(
-                views::prompt_tool(store, &session.id)?.unwrap_or_default(),
-            )),
-            Activity::WaitingInput => Some(prompt::Wait::Input),
-            _ => None,
-        })
+    read(state, move |store| waiting_of(store, &session_id)).await
+}
+
+/// [`waiting_on`] on an open store, for `peer serve` too.
+pub(crate) fn waiting_of(
+    store: &Store,
+    session_id: &str,
+) -> tiller_core::Result<Option<prompt::Wait>> {
+    let session: Session = get_row(store.conn(), "session", session_id)?;
+    if session.ended_at.is_some() {
+        return Ok(None);
+    }
+    Ok(match session.activity {
+        Activity::WaitingPermission => Some(prompt::Wait::Permission(
+            views::prompt_tool(store, &session.id)?.unwrap_or_default(),
+        )),
+        Activity::WaitingInput => Some(prompt::Wait::Input),
+        _ => None,
     })
-    .await
 }
 
 /// The pane's visible screen, read once, and the dialog on it that `wait`
@@ -4951,24 +5300,85 @@ async fn read_dialog(
     pane: &str,
     wait: prompt::Wait,
 ) -> Result<Option<prompt::Dialog>, ApiError> {
+    let herdr = state.0.herdr.clone();
+    let holder = state.0.holder.clone();
+    let pane = pane.to_owned();
+    tokio::task::spawn_blocking(move || dialog_on(Some(&herdr), holder.as_ref(), &pane, &wait))
+        .await
+        .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
+}
+
+/// [`read_dialog`] on this thread, for `peer serve` too.
+pub(crate) fn dialog_on(
+    herdr: Option<&Cli>,
+    holder: Option<&Arc<dyn Holder>>,
+    pane: &str,
+    wait: &prompt::Wait,
+) -> Result<Option<prompt::Dialog>, ApiError> {
     let screen = if ids::is_holder_pane(pane) {
-        holder_screen(
-            holder_of(state)?,
-            pane,
-            tiller_panes::Read::Visible,
-            tiller_panes::Format::Text,
-        )
-        .await?
-        .text()
+        let id = tiller_panes::PaneId::from(pane);
+        linked(holder.cloned())?
+            .screen(&id, tiller_panes::Read::Visible, tiller_panes::Format::Text)
+            .map_err(|error| holder_error(pane, &error))?
+            .text()
     } else {
-        let herdr = state.0.herdr.clone();
-        let target = pane.to_owned();
-        tokio::task::spawn_blocking(move || herdr.read_visible(&target))
-            .await
-            .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
+        herdr_of(herdr)?
+            .read_visible(pane)
             .map_err(|error| pane_error(pane, &error))?
     };
-    Ok(prompt::read(&screen, &wait))
+    Ok(prompt::read(&screen, wait))
+}
+
+/// Types an answer's keys into the pane, on this thread.
+fn press(
+    herdr: Option<&Cli>,
+    holder: Option<&Arc<dyn Holder>>,
+    pane: &str,
+    keys: &[tiller_panes::Key],
+) -> Result<(), ApiError> {
+    if ids::is_holder_pane(pane) {
+        let id = tiller_panes::PaneId::from(pane);
+        return linked(holder.cloned())?
+            .keys(&id, keys)
+            .map_err(|error| holder_error(pane, &error));
+    }
+    let names: Vec<String> = keys.iter().map(ToString::to_string).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    herdr_of(herdr)?
+        .send_keys(pane, &names)
+        .map_err(|error| pane_error(pane, &error))
+}
+
+/// An answer whose dialog is not on the screen any more.
+fn screen_changed() -> ApiError {
+    ApiError::new(
+        StatusCode::CONFLICT,
+        "screen_changed",
+        "the prompt changed after the buttons were drawn; nothing was sent",
+    )
+    .hint("read the prompt again")
+}
+
+/// What an answer sent, as its response's `data`.
+fn answer_data(session_id: &str, option: u8) -> Value {
+    json!({"session_id": session_id, "sent": {"option": option}})
+}
+
+/// The response to an answer whose keys went.
+fn answered(data: Value) -> MutationResponse {
+    MutationResponse {
+        ok: true,
+        replayed: false,
+        events: Vec::new(),
+        receipt: Receipt {
+            recorded_at: Timestamp::now().to_string(),
+            outbox_id: None,
+            approval_id: None,
+        },
+        data,
+        host: None,
+        warning: None,
+    }
 }
 
 /// One `screen` read of a pane in the terminal holder.
@@ -5017,8 +5427,8 @@ async fn dialog_left(state: &AppState, pane: &str, wait: prompt::Wait, screen: &
     responses((status = 200, body = PromptRead),
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such agent, or its pane closed"),
               (status = 422, body = ErrorBody, description = "`refused`: the agent runs on a remote host"),
-              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
-              (status = 503, body = ErrorBody, description = "herdr is unreachable, or reads and input came faster than 20 a second")))]
+              (status = 502, body = ErrorBody, description = "`peer_refused`: a read-scope pairing, or the peer refused the read"),
+              (status = 503, body = ErrorBody, description = "herdr or the peer is unreachable, or reads and input came faster than 20 a second")))]
 async fn prompt_read(
     State(state): State<AppState>,
     Path(session): Path<String>,
@@ -5027,12 +5437,11 @@ async fn prompt_read(
 ) -> ApiResult<PromptRead> {
     guard(&state, &headers).await?;
     let request: PromptAsk = body(&bytes)?;
-    not_forwarded(
-        &state,
-        request.host.as_deref(),
-        "a prompt read (only keys and the Fit reach a peer pane)",
-    )
-    .await?;
+    if let Some(read) =
+        agent_read(&state, request.host.as_deref(), &session, "prompt", true).await?
+    {
+        return Ok(Json(read));
+    }
     let (session_id, pane) = local_pane(&state, session).await?;
     let (prompt, reason) = match waiting_on(&state, session_id.clone()).await? {
         None => (None, Some(NoPrompt::NotWaiting)),
@@ -5063,8 +5472,9 @@ async fn prompt_read(
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such agent, or its pane closed"),
               (status = 409, body = ErrorBody, description = "`screen_changed`: the agent no longer waits, or the dialog on its screen is not the one `screen` names; nothing was sent"),
               (status = 422, body = ErrorBody, description = "`refused`: the agent runs on a remote host"),
-              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
-              (status = 503, body = ErrorBody, description = "herdr is unreachable, or input came faster than 20 a second; nothing was sent")))]
+              (status = 502, body = ErrorBody, description = "`peer_refused`: a read-scope pairing, or the peer refused the answer"),
+              (status = 503, body = ErrorBody, description = "herdr or the peer is unreachable, or input came faster than 20 a second; nothing was sent"),
+              (status = 504, body = ErrorBody, description = "`forward_uncertain`: the peer link dropped before the peer answered; retry with the same key")))]
 async fn prompt_answer(
     State(state): State<AppState>,
     Path(session): Path<String>,
@@ -5073,68 +5483,42 @@ async fn prompt_answer(
 ) -> ApiResult<MutationResponse> {
     guard(&state, &headers).await?;
     let request: PromptAnswer = body(&bytes)?;
-    not_forwarded(
+    if let Some(answer) = on_peer(
         &state,
         request.host.as_deref(),
-        "a prompt answer (only keys and the Fit reach a peer pane)",
+        Op::PromptAnswer,
+        &session,
+        &bytes,
     )
-    .await?;
+    .await?
+    {
+        return Ok(Json(answer));
+    }
     let (session_id, pane) = local_pane(&state, session).await?;
     spend_input(&state.0.mirrors)?;
     // Two taps on one dialog (two tabs, two devices) take turns: the second
     // reads the screen only after the first one's keys went and the dialog
     // left it, so it finds the screen changed and types nothing.
     let _turn = state.0.mirrors.answer_turn(&session_id).await;
-    let changed = || {
-        ApiError::new(
-            StatusCode::CONFLICT,
-            "screen_changed",
-            "the prompt changed after the buttons were drawn; nothing was sent",
-        )
-        .hint("read the prompt again")
-    };
     let wait = waiting_on(&state, session_id.clone())
         .await?
-        .ok_or_else(changed)?;
+        .ok_or_else(screen_changed)?;
     let dialog = read_dialog(&state, &pane, wait.clone())
         .await?
         .filter(|dialog| dialog.prompt.screen == request.screen)
-        .ok_or_else(changed)?;
+        .ok_or_else(screen_changed)?;
     let option = request.option;
     let keys = dialog
         .keys(option)
         .ok_or_else(|| ApiError::usage(format!("the prompt has no option {option}")))?;
-    if ids::is_holder_pane(&pane) {
-        let id = tiller_panes::PaneId::from(pane.as_str());
-        on_holder(holder_of(&state)?, move |holder| holder.keys(&id, &keys))
-            .await?
-            .map_err(|error| holder_error(&pane, &error))?;
-    } else {
-        let herdr = state.0.herdr.clone();
-        let target = pane.clone();
-        tokio::task::spawn_blocking(move || {
-            let names: Vec<String> = keys.iter().map(ToString::to_string).collect();
-            let names: Vec<&str> = names.iter().map(String::as_str).collect();
-            herdr.send_keys(&target, &names)
-        })
+    let herdr = state.0.herdr.clone();
+    let holder = state.0.holder.clone();
+    let target = pane.clone();
+    tokio::task::spawn_blocking(move || press(Some(&herdr), holder.as_ref(), &target, &keys))
         .await
-        .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
-        .map_err(|error| pane_error(&pane, &error))?;
-    }
+        .map_err(|error| ApiError::from(Error::Internal(error.to_string())))??;
     dialog_left(&state, &pane, wait, &request.screen).await;
-    Ok(Json(MutationResponse {
-        ok: true,
-        replayed: false,
-        events: Vec::new(),
-        receipt: Receipt {
-            recorded_at: Timestamp::now().to_string(),
-            outbox_id: None,
-            approval_id: None,
-        },
-        data: json!({"session_id": session_id, "sent": {"option": option}}),
-        host: None,
-        warning: None,
-    }))
+    Ok(Json(answered(answer_data(&session_id, option))))
 }
 
 /// A new board size for the Fit an open stream holds on the agent's pane:
@@ -5289,8 +5673,8 @@ static TAIL_READS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(MA
     params(("session" = String, Path)),
     responses((status = 200, body = TerminalTail),
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such agent, or its pane closed"),
-              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
-              (status = 503, body = ErrorBody, description = "herdr or the terminal holder is unreachable, or 4 tail reads are in flight")))]
+              (status = 502, body = ErrorBody, description = "`peer_refused`: the peer refused the read"),
+              (status = 503, body = ErrorBody, description = "herdr, the terminal holder or the peer is unreachable, or 4 tail reads are in flight")))]
 async fn terminal_tail(
     State(state): State<AppState>,
     Path(session): Path<String>,
@@ -5299,12 +5683,17 @@ async fn terminal_tail(
 ) -> ApiResult<TerminalTail> {
     guard(&state, &headers).await?;
     let request: TerminalTailAsk = body(&bytes)?;
-    not_forwarded(
+    if let Some(tail) = agent_read(
         &state,
         request.host.as_deref(),
-        "the terminal tail (only keys and the Fit reach a peer pane)",
+        &session,
+        "terminal/tail",
+        false,
     )
-    .await?;
+    .await?
+    {
+        return Ok(Json(tail));
+    }
     let (session_id, pane, remote) = pane_of(&state, session).await?;
     if let Some(label) = remote {
         return Err(remote_pane(
@@ -5312,51 +5701,97 @@ async fn terminal_tail(
             "the terminal tail reads panes on this machine only",
         ));
     }
-    if ids::is_holder_pane(&pane) {
-        let screen = holder_screen(
-            holder_of(&state)?,
-            &pane,
-            tiller_panes::Read::Visible,
-            tiller_panes::Format::Ansi,
-        )
-        .await?;
-        return Ok(Json(TerminalTail {
+    let herdr = state.0.herdr.clone();
+    let holder = state.0.holder.clone();
+    // The read holds its place until herdr answers, even when the board
+    // has gone.
+    let tail = tokio::task::spawn_blocking(move || {
+        tail_on(Some(&herdr), holder.as_ref(), session_id, &pane)
+    })
+    .await
+    .map_err(|error| ApiError::from(Error::Internal(error.to_string())))??;
+    Ok(Json(tail))
+}
+
+/// The pane's visible screen and its size, read once on this thread, for
+/// `peer serve` too.
+pub(crate) fn tail_on(
+    herdr: Option<&Cli>,
+    holder: Option<&Arc<dyn Holder>>,
+    session_id: String,
+    pane: &str,
+) -> Result<TerminalTail, ApiError> {
+    if ids::is_holder_pane(pane) {
+        let id = tiller_panes::PaneId::from(pane);
+        let screen = linked(holder.cloned())?
+            .screen(&id, tiller_panes::Read::Visible, tiller_panes::Format::Ansi)
+            .map_err(|error| holder_error(pane, &error))?;
+        return Ok(TerminalTail {
             session_id,
             cols: screen.cols,
             rows: screen.rows,
             text: screen.text(),
-        }));
+        });
     }
-    let read = TAIL_READS.try_acquire().map_err(|_| {
+    let herdr = herdr_of(herdr)?;
+    let _read = TAIL_READS.try_acquire().map_err(|_| {
         ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "unavailable",
             format!("{MAX_TAIL_READS} tail reads are in flight; the next read tries again"),
         )
     })?;
-    let herdr = state.0.herdr.clone();
-    let target = pane.clone();
-    // The read holds its place until herdr answers, even when the board
-    // has gone.
-    let tail = tokio::task::spawn_blocking(move || {
-        let _read = read;
-        let Some(size) = herdr.terminal_size(&target)? else {
-            return Ok(None);
-        };
-        herdr.read_visible(&target).map(|text| Some((size, text)))
-    })
-    .await
-    .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
-    .map_err(|error| pane_error(&pane, &error))?;
+    let tail = herdr
+        .terminal_size(pane)
+        .and_then(|size| match size {
+            Some(size) => herdr.read_visible(pane).map(|text| Some((size, text))),
+            None => Ok(None),
+        })
+        .map_err(|error| pane_error(pane, &error))?;
     let Some(((cols, rows), text)) = tail else {
-        return Err(pane_gone(&pane));
+        return Err(pane_gone(pane));
     };
-    Ok(Json(TerminalTail {
+    Ok(TerminalTail {
         session_id,
         cols,
         rows,
         text,
-    }))
+    })
+}
+
+/// The dialog on a waiting agent's screen, read once on this thread: the
+/// prompt read of `peer serve`, which spends `mirrors`' input rate as the
+/// board's own read does.
+pub(crate) fn prompt_read_on(
+    store: &Store,
+    herdr: Option<&Cli>,
+    holder: Option<&Arc<dyn Holder>>,
+    mirrors: &Mirrors,
+    session: &str,
+) -> Result<PromptRead, ApiError> {
+    let (session_id, pane, remote) = pane_target(store, session)?;
+    if let Some(label) = remote {
+        return Err(remote_pane(
+            &label,
+            "a prompt read reaches panes on this machine only",
+        ));
+    }
+    let (prompt, reason) = match waiting_of(store, &session_id)? {
+        None => (None, Some(NoPrompt::NotWaiting)),
+        Some(wait) => {
+            spend_input(mirrors)?;
+            match dialog_on(herdr, holder, &pane, &wait)? {
+                Some(dialog) => (Some(dialog.prompt), None),
+                None => (None, Some(NoPrompt::NoDialog)),
+            }
+        }
+    };
+    Ok(PromptRead {
+        session_id,
+        read_at: Timestamp::now().to_string(),
+        prompt,
+        reason,
+    })
 }
 
 /// One line for an agent, typed into its pane when the pane is idle: the
@@ -5367,22 +5802,20 @@ async fn terminal_tail(
               (status = 400, body = ErrorBody, description = "an empty line, a line break, or more than 20,000 characters"),
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
               (status = 422, body = ErrorBody, description = "`refused`: the session has ended"),
-              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+              (status = 502, body = ErrorBody, description = "`peer_refused`: a read-scope pairing, or the peer refused it"),
+              (status = 503, body = ErrorBody, description = "the peer is unreachable"),
+              (status = 504, body = ErrorBody, description = "`forward_uncertain`: the peer link dropped before the peer answered")))]
 async fn steer_agent(
     State(state): State<AppState>,
     Path(session): Path<String>,
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers).await?;
-    let request: SteerBody = body(&bytes)?;
-    not_forwarded(
-        &state,
-        request.host.as_deref(),
-        "a steer (only keys and the Fit reach a peer pane)",
-    )
-    .await?;
-    let text = request.text;
+    submit(&state, &headers, Op::Steer, Some(session), &bytes).await
+}
+
+/// A steer's one line: not empty, no line break, and within the limit.
+fn steer_line(text: &str) -> Result<(), ApiError> {
     if text.trim().is_empty() {
         return Err(ApiError::usage("the message is empty"));
     }
@@ -5391,20 +5824,8 @@ async fn steer_agent(
             "a steer is one line; send each line on its own",
         ));
     }
-    within("the message", &text, STEER_MAX_CHARS)?;
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, key| {
-            let id = resolve_id(store.conn(), "sessions", "session", &session)?;
-            let applied = store.outbox_send(ctx, Some(key), &id, OutboxKind::Steer, text)?;
-            let outbox_id = Some(applied.value.id.clone());
-            let mut done = Done::of(applied)?;
-            done.outbox_id = outbox_id;
-            Ok(done)
-        },
-    )
-    .await
+    within("the message", text, STEER_MAX_CHARS)?;
+    Ok(())
 }
 
 /// Escape to a working agent's pane, and whether its turn ended within
@@ -5415,8 +5836,9 @@ async fn steer_agent(
     responses((status = 200, body = MutationResponse, description = "`data.cancel` is `confirmed` or `unconfirmed`, with `data.evidence`"),
               (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
               (status = 422, body = ErrorBody, description = "`refused`: the agent is not working, has no run, pane or agent, or this key already sent its Escape; nothing was sent"),
-              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
-              (status = 503, body = ErrorBody, description = "herdr is unreachable")))]
+              (status = 502, body = ErrorBody, description = "`peer_refused`: a read-scope pairing, or the peer refused it"),
+              (status = 503, body = ErrorBody, description = "herdr or the peer is unreachable"),
+              (status = 504, body = ErrorBody, description = "`forward_uncertain`: the peer link dropped before the peer answered")))]
 async fn interrupt_agent(
     State(state): State<AppState>,
     Path(session): Path<String>,
@@ -5425,12 +5847,17 @@ async fn interrupt_agent(
 ) -> ApiResult<MutationResponse> {
     guard(&state, &headers).await?;
     let request: InterruptBody = body(&bytes)?;
-    not_forwarded(
+    if let Some(answer) = on_peer(
         &state,
         request.host.as_deref(),
-        "an interrupt (only keys and the Fit reach a peer pane)",
+        Op::Interrupt,
+        &session,
+        &bytes,
     )
-    .await?;
+    .await?
+    {
+        return Ok(Json(answer));
+    }
     // The pane calls here reach this machine's panes only, and a pane id
     // on a remote host may name another agent's pane here.
     if let (_, _, Some(label)) = pane_of(&state, session.clone()).await? {
@@ -5450,20 +5877,7 @@ async fn interrupt_agent(
     mutate(
         &state,
         key(&request.idempotency_key)?,
-        move |store, ctx, _| {
-            let id = resolve_id(store.conn(), "sessions", "session", &session)?;
-            let session: Session = get_row(store.conn(), "session", &id)?;
-            let run_id = session.run_id.ok_or_else(|| Error::Refused {
-                entity: "session",
-                id: id.clone(),
-                fact: "it has no run to interrupt; send it a message instead".to_owned(),
-            })?;
-            let run: Run = get_row(store.conn(), "run", &run_id)?;
-            let waits = tiller_agents::control::Waits::default();
-            let done = tiller_agents::control::interrupt(store, ctx, &herdr, &waits, &run)
-                .map_err(|error| interrupt_refused(&run.id, error))?;
-            Done::of(done)
-        },
+        move |store, ctx, _| interrupt_run(store, ctx, &herdr, &session),
     )
     .await
 }
@@ -5526,8 +5940,9 @@ fn session_run(store: &Store, session: &str, what: &str) -> tiller_core::Result<
     responses((status = 200, body = MutationResponse, description = "`data` is the stop: `session`, `stop_proof`, `cleaned`, `closed_pane`, `warning`"),
               (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
               (status = 422, body = ErrorBody, description = "`refused`: the run is active, the pane holds a draft or a dialog, or the agent runs on another host; nothing was sent"),
-              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
-              (status = 503, body = ErrorBody, description = "herdr is unreachable")))]
+              (status = 502, body = ErrorBody, description = "`peer_refused`: a read-scope pairing, or the peer refused it"),
+              (status = 503, body = ErrorBody, description = "herdr or the peer is unreachable"),
+              (status = 504, body = ErrorBody, description = "`forward_uncertain`: the peer link dropped before the peer answered")))]
 async fn stop_agent(
     State(state): State<AppState>,
     Path(session): Path<String>,
@@ -5536,20 +5951,15 @@ async fn stop_agent(
 ) -> ApiResult<MutationResponse> {
     guard(&state, &headers).await?;
     let request: AgentControlBody = body(&bytes)?;
-    not_forwarded(
-        &state,
-        request.host.as_deref(),
-        "a stop (a peer's agent is stopped on its own host)",
-    )
-    .await?;
+    if let Some(answer) =
+        on_peer(&state, request.host.as_deref(), Op::Stop, &session, &bytes).await?
+    {
+        return Ok(Json(answer));
+    }
     control(
         &state,
         key(&request.idempotency_key)?,
-        move |starter, store, ctx| {
-            let id = resolve_id(store.conn(), "sessions", "session", &session)?;
-            let session: Session = get_row(store.conn(), "session", &id)?;
-            starter.stop_agent(store, ctx, &session)
-        },
+        move |starter, store, ctx| stop_here(starter, store, ctx, &session),
     )
     .await
 }
@@ -5562,36 +5972,16 @@ async fn stop_agent(
               (status = 400, body = ErrorBody, description = "a date that does not parse, or an empty or too long reason"),
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
               (status = 422, body = ErrorBody, description = "`refused`: an orchestrator, an ended run, or a date not in the future"),
-              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+              (status = 502, body = ErrorBody, description = "`peer_refused`: a read-scope pairing, or the peer refused it"),
+              (status = 503, body = ErrorBody, description = "the peer is unreachable"),
+              (status = 504, body = ErrorBody, description = "`forward_uncertain`: the peer link dropped before the peer answered")))]
 async fn pause_agent(
     State(state): State<AppState>,
     Path(session): Path<String>,
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers).await?;
-    let request: PauseBody = body(&bytes)?;
-    not_forwarded(
-        &state,
-        request.host.as_deref(),
-        "a pause (a peer's run is paused on its own host)",
-    )
-    .await?;
-    let until: Timestamp = request.until.parse()?;
-    if request.reason.trim().is_empty() {
-        return Err(ApiError::usage("say why the run waits"));
-    }
-    within("the reason", &request.reason, COMMENT_MAX_CHARS)?;
-    let reason = request.reason;
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, _| {
-            let (_, run) = session_run(store, &session, "pause")?;
-            Done::of(store.run_pause(ctx, &run.id, until, Some(&reason))?)
-        },
-    )
-    .await
+    submit(&state, &headers, Op::Pause, Some(session), &bytes).await
 }
 
 /// Clears the dated pause on the session's run, as a manual resume does:
@@ -5601,30 +5991,16 @@ async fn pause_agent(
     responses((status = 200, body = MutationResponse, description = "`data` is the run"),
               (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
               (status = 422, body = ErrorBody, description = "`refused`: an orchestrator or an ended run"),
-              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+              (status = 502, body = ErrorBody, description = "`peer_refused`: a read-scope pairing, or the peer refused it"),
+              (status = 503, body = ErrorBody, description = "the peer is unreachable"),
+              (status = 504, body = ErrorBody, description = "`forward_uncertain`: the peer link dropped before the peer answered")))]
 async fn unpause_agent(
     State(state): State<AppState>,
     Path(session): Path<String>,
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers).await?;
-    let request: AgentControlBody = body(&bytes)?;
-    not_forwarded(
-        &state,
-        request.host.as_deref(),
-        "a resume (a peer's run is resumed on its own host)",
-    )
-    .await?;
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, _| {
-            let (_, run) = session_run(store, &session, "resume")?;
-            Done::of(store.run_unpause(ctx, &run.id)?)
-        },
-    )
-    .await
+    submit(&state, &headers, Op::Unpause, Some(session), &bytes).await
 }
 
 /// `claude --resume` in the run's worktree for a session whose agent is
@@ -5634,8 +6010,9 @@ async fn unpause_agent(
     responses((status = 200, body = MutationResponse, description = "`data` is the resume: `run`, `session`, `pane_id`, `left_alone`, `started`, `evidence`"),
               (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
               (status = 422, body = ErrorBody, description = "`refused`: an orchestrator, an ended run, no Claude session to resume, or another host"),
-              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
-              (status = 503, body = ErrorBody, description = "herdr is unreachable")))]
+              (status = 502, body = ErrorBody, description = "`peer_refused`: a read-scope pairing, or the peer refused it"),
+              (status = 503, body = ErrorBody, description = "herdr or the peer is unreachable"),
+              (status = 504, body = ErrorBody, description = "`forward_uncertain`: the peer link dropped before the peer answered")))]
 async fn resume_agent(
     State(state): State<AppState>,
     Path(session): Path<String>,
@@ -5644,19 +6021,21 @@ async fn resume_agent(
 ) -> ApiResult<MutationResponse> {
     guard(&state, &headers).await?;
     let request: AgentControlBody = body(&bytes)?;
-    not_forwarded(
+    if let Some(answer) = on_peer(
         &state,
         request.host.as_deref(),
-        "a resume (a peer's agent is resumed on its own host)",
+        Op::Resume,
+        &session,
+        &bytes,
     )
-    .await?;
+    .await?
+    {
+        return Ok(Json(answer));
+    }
     control(
         &state,
         key(&request.idempotency_key)?,
-        move |starter, store, ctx| {
-            let (_, run) = session_run(store, &session, "resume")?;
-            starter.resume_run(store, ctx, &run)
-        },
+        move |starter, store, ctx| resume_here(starter, store, ctx, &session),
     )
     .await
 }
@@ -5669,8 +6048,9 @@ async fn resume_agent(
               (status = 400, body = ErrorBody, description = "an empty or too long note"),
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
               (status = 422, body = ErrorBody, description = "`refused`: an orchestrator, an ended run, a worktree on another branch, a brief that is missing, or a stop that could not be proven; nothing was changed"),
-              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
-              (status = 503, body = ErrorBody, description = "herdr is unreachable")))]
+              (status = 502, body = ErrorBody, description = "`peer_refused`: a read-scope pairing, or the peer refused it"),
+              (status = 503, body = ErrorBody, description = "herdr or the peer is unreachable"),
+              (status = 504, body = ErrorBody, description = "`forward_uncertain`: the peer link dropped before the peer answered")))]
 async fn relaunch_agent(
     State(state): State<AppState>,
     Path(session): Path<String>,
@@ -5679,12 +6059,17 @@ async fn relaunch_agent(
 ) -> ApiResult<MutationResponse> {
     guard(&state, &headers).await?;
     let request: RelaunchBody = body(&bytes)?;
-    not_forwarded(
+    if let Some(answer) = on_peer(
         &state,
         request.host.as_deref(),
-        "a relaunch (a peer's agent is relaunched on its own host)",
+        Op::Relaunch,
+        &session,
+        &bytes,
     )
-    .await?;
+    .await?
+    {
+        return Ok(Json(answer));
+    }
     if request.note.trim().is_empty() {
         return Err(ApiError::usage(
             "write the note the new session starts from",
@@ -5698,10 +6083,7 @@ async fn relaunch_agent(
     control(
         &state,
         key(&request.idempotency_key)?,
-        move |starter, store, ctx| {
-            let (_, run) = session_run(store, &session, "relaunch")?;
-            starter.relaunch_run(store, ctx, &run, relaunch)
-        },
+        move |starter, store, ctx| relaunch_here(starter, store, ctx, &session, relaunch),
     )
     .await
 }
@@ -10809,7 +11191,7 @@ esac"#,
     }
 
     /// Puts `session` on a permission prompt for `tool`, as its hook does.
-    fn waiting(fleet: &Fleet, session: &str, tool: &str) {
+    pub(crate) fn waiting(fleet: &Fleet, session: &str, tool: &str) {
         let store = fleet.open();
         store
             .conn()

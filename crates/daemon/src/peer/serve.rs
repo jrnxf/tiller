@@ -2,7 +2,9 @@
 //! by sshd for the board host's daemon. It reads `hello`, answers `welcome`
 //! or `refused`, then sends a `snapshot` or the replay, every new `events`
 //! row as an `event`, a `beat` every 10 s, and a `result` for each `query`
-//! and each `mutate` (10.3, applied by [`super::forward`]).
+//! and each `mutate` (10.3, applied by [`super::forward`]). A forwarded
+//! agent verb that waits for its proof runs on a thread of its own, so the
+//! link keeps its beats while it waits.
 //!
 //! It serves this host's own records only. It has no client half: it never
 //! opens a link of its own, so a board host that is also some other host's
@@ -10,12 +12,13 @@
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use serde_json::Value;
-use tiller_core::domain::{HostKind, PeerKey};
+use tiller_core::domain::{HostKind, PeerKey, PeerScope};
 use tiller_core::error::READ_ONLY_MARKER;
 use tiller_core::state::peers::PEER_PROTOCOL;
 use tiller_core::{Store, Timestamp};
@@ -24,8 +27,9 @@ use tiller_herdr::client::Cli;
 use super::forward::{self, Mutate};
 use super::nonces;
 use super::{Frame, Hello, PeerQueries, PeerSnapshot, Timing, Welcome, federation_accept};
-use crate::api::{ApiError, pane_tail_of};
+use crate::api::{ApiError, pane_tail_of, pane_target, prompt_read_on, remote_pane, tail_on};
 use crate::dto::{Doctor, ErrorBody, MachinesResponse};
+use crate::mirror::Mirrors;
 use crate::sse::{self, Opening};
 use crate::views::{self, Filter, LocalHealth};
 
@@ -56,12 +60,13 @@ pub struct ServeConfig {
     /// `--from`: the board host's label.
     pub from: String,
     pub timing: Timing,
-    /// The local herdr server, for a run's pane tail; none in tests.
+    /// The local herdr server, for a run's pane tail and the agent verbs on
+    /// its panes; none in tests.
     pub herdr: Option<Cli>,
     /// Starts an orchestrator for a forwarded start; none refuses it 503.
     pub orchestrators: Option<std::sync::Arc<dyn crate::api::OrchestratorStart>>,
-    /// The terminal holder, for a pane link on one of its panes; none
-    /// refuses that view 503.
+    /// The terminal holder, for a pane link, a tail, a prompt read or an
+    /// agent verb on one of its panes; none refuses those 503.
     pub holder: Option<std::sync::Arc<dyn crate::holder::Holder>>,
 }
 
@@ -94,6 +99,8 @@ pub fn serve(
             server_time: Timestamp::now().to_string(),
         }),
     )?;
+    let mirrors = Arc::new(Mirrors::new(&config.home));
+    let proofs = Proofs::start(config, &key, &mirrors);
     let mut link = Link {
         store,
         config,
@@ -101,6 +108,8 @@ pub fn serve(
         cursor: 0,
         data_version: None,
         checks: Checks::default(),
+        mirrors,
+        proofs,
     };
     // A board host with no copy (`last_seq` null) gets a snapshot, as one
     // whose copy is too old or ahead of this database does.
@@ -267,6 +276,10 @@ struct Link<'a> {
     cursor: i64,
     data_version: Option<i64>,
     checks: Checks,
+    /// The input rate the board host's prompt reads and answers spend, as
+    /// this host's own board's do.
+    mirrors: Arc<Mirrors>,
+    proofs: Proofs,
 }
 
 impl Link<'_> {
@@ -309,19 +322,12 @@ impl Link<'_> {
                 }
                 Ok(Frame::Mutate(frame)) => {
                     // The checks run before anything is written; a refusal
-                    // is a 502 `result` and the link stays up.
-                    let (http_status, body) = self.mutate(&frame);
-                    // This link's own write does not move `data_version`.
-                    self.send_events(output, true)?;
-                    send(
-                        output,
-                        &Frame::Result {
-                            id: frame.id,
-                            http_status,
-                            body,
-                        },
-                    )?;
-                    self.recheck(output)?;
+                    // is a 502 `result` and the link stays up. A verb that
+                    // waits for its proof answers below, once it has.
+                    let id = frame.id.clone();
+                    if let Some((http_status, body)) = self.mutate(*frame) {
+                        self.applied(output, id, http_status, body)?;
+                    }
                 }
                 Ok(Frame::Refresh) => {
                     self.send_events(output, true)?;
@@ -336,6 +342,9 @@ impl Link<'_> {
                 self.recheck(output)?;
             }
             self.send_checks(output, true)?;
+            while let Some((id, http_status, body)) = self.proofs.done() {
+                self.applied(output, id, http_status, body)?;
+            }
             self.send_events(output, false)?;
             if beat.elapsed() >= timing.beat {
                 beat = Instant::now();
@@ -373,20 +382,59 @@ impl Link<'_> {
         Ok(())
     }
 
-    /// Verifies a `mutate` (`protocol.md` 10.3 step 3) and applies it.
-    fn mutate(&mut self, frame: &Mutate) -> (u16, Value) {
-        match forward::verify(&self.store, self.config, &self.key, frame, Timestamp::now()) {
+    /// The `result` of an applied `mutate`, after the rows it wrote.
+    fn applied(
+        &mut self,
+        output: &mut impl Write,
+        id: String,
+        http_status: u16,
+        body: Value,
+    ) -> Result<(), ServeError> {
+        // This link's own write does not move `data_version`.
+        self.send_events(output, true)?;
+        send(
+            output,
+            &Frame::Result {
+                id,
+                http_status,
+                body,
+            },
+        )?;
+        self.recheck(output)
+    }
+
+    /// Verifies a `mutate` (`protocol.md` 10.3 step 3) and applies it; `None`
+    /// when it went to [`Proofs`], which answers it once it has its proof.
+    fn mutate(&mut self, frame: Mutate) -> Option<(u16, Value)> {
+        match forward::verify(
+            &self.store,
+            self.config,
+            &self.key,
+            &frame,
+            Timestamp::now(),
+        ) {
             Ok(op) => match std::fs::read_to_string(self.config.home.join(READ_ONLY_MARKER)) {
                 // The daemon found `state.db` damaged (`recovery.md` R10):
                 // a forwarded write is refused as a local one is.
-                Ok(reason) => crate::api::read_only(reason.trim()).into_result(),
-                Err(_) => forward::apply(&mut self.store, self.config, &self.key, frame, op),
+                Ok(reason) => Some(crate::api::read_only(reason.trim()).into_result()),
+                Err(_) if op.waits_for_proof() => {
+                    self.proofs.ask(frame, op);
+                    None
+                }
+                Err(_) => Some(forward::apply(
+                    &mut self.store,
+                    self.config,
+                    &self.key,
+                    &frame,
+                    op,
+                    &self.mirrors,
+                )),
             },
             Err(Denied::Refused(reason, message)) => {
                 tracing::warn!(reason, %message, "forwarded mutation refused");
-                ApiError::peer_refused(reason, message).into_result()
+                Some(ApiError::peer_refused(reason, message).into_result())
             }
-            Err(Denied::Failed(error)) => ApiError::from(error).into_result(),
+            Err(Denied::Failed(error)) => Some(ApiError::from(error).into_result()),
         }
     }
 
@@ -464,6 +512,40 @@ impl Link<'_> {
                 }
                 serde_json::to_value(detail)
             }
+            Query::Tail(session) => {
+                let (session_id, pane, remote) = pane_target(store, &session)?;
+                if let Some(label) = remote {
+                    return Err(remote_pane(
+                        &label,
+                        "the terminal tail reads panes on this machine only",
+                    ));
+                }
+                let tail = tail_on(
+                    self.config.herdr.as_ref(),
+                    self.config.holder.as_ref(),
+                    session_id,
+                    &pane,
+                )?;
+                serde_json::to_value(tail)
+            }
+            Query::Prompt(session) => {
+                // The query rides the link the signed `hello` opened; the
+                // key row was read again just before it (G46).
+                if self.key.scope != PeerScope::Act {
+                    return Err(ApiError::peer_refused(
+                        "read_scope",
+                        format!("key {} has the read scope: view only pairing", self.key.id),
+                    ));
+                }
+                let read = prompt_read_on(
+                    store,
+                    self.config.herdr.as_ref(),
+                    self.config.holder.as_ref(),
+                    &self.mirrors,
+                    &session,
+                )?;
+                serde_json::to_value(read)
+            }
             // `run` hands the checks to `Checks`, off the link thread: they
             // never run here.
             Query::Doctor => {
@@ -530,6 +612,93 @@ impl Checks {
     }
 }
 
+/// The forwarded agent verbs of one link that wait for their proof
+/// (`protocol.md` 7.4, 10.3 step 6): an interrupt, a stop, a resume, a
+/// relaunch and a prompt answer can take seconds. They run on one thread of
+/// their own, in the order they came, each with every check the link
+/// thread made, so the link keeps sending beats and events and answering
+/// other frames while one waits. When the link ends, the verb that started
+/// finishes, for up to [`super::PROOF_WAIT`], before `peer serve` exits;
+/// one that had not started never does, and a retry with its key runs it.
+struct Proofs {
+    asks: Option<mpsc::Sender<(Mutate, forward::Op)>>,
+    answers: mpsc::Receiver<(String, u16, Value)>,
+    closing: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    wait: Duration,
+}
+
+impl Proofs {
+    fn start(config: &ServeConfig, key: &PeerKey, mirrors: &Arc<Mirrors>) -> Self {
+        let (asks, asked) = mpsc::channel::<(Mutate, forward::Op)>();
+        let (answer, answers) = mpsc::channel();
+        let closing = Arc::new(AtomicBool::new(false));
+        let wait = config.timing.proof;
+        let config = config.clone();
+        let key = key.clone();
+        let mirrors = Arc::clone(mirrors);
+        let closed = Arc::clone(&closing);
+        let worker = std::thread::spawn(move || {
+            for (frame, op) in asked {
+                if closed.load(Ordering::SeqCst) {
+                    return;
+                }
+                let (http_status, body) = match Store::open_current(config.home.join("state.db")) {
+                    Ok(mut store) => {
+                        forward::apply(&mut store, &config, &key, &frame, op, &mirrors)
+                    }
+                    Err(error) => ApiError::from(error).into_result(),
+                };
+                if answer.send((frame.id, http_status, body)).is_err() {
+                    return;
+                }
+            }
+        });
+        Self {
+            asks: Some(asks),
+            answers,
+            closing,
+            worker: Some(worker),
+            wait,
+        }
+    }
+
+    fn ask(&self, frame: Mutate, op: forward::Op) {
+        // The thread lives as long as the link; a send fails only if it
+        // panicked, and the board host then gets no answer and a 504.
+        if let Some(asks) = &self.asks {
+            let _ = asks.send((frame, op));
+        }
+    }
+
+    /// A verb that has its proof: the frame's id and its `result`.
+    fn done(&self) -> Option<(String, u16, Value)> {
+        self.answers.try_recv().ok()
+    }
+}
+
+impl Drop for Proofs {
+    fn drop(&mut self) {
+        self.closing.store(true, Ordering::SeqCst);
+        self.asks = None;
+        let deadline = Instant::now() + self.wait;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.answers.recv_timeout(left) {
+                Ok(_) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    tracing::warn!("a forwarded agent verb outlived the link's proof wait");
+                    return;
+                }
+            }
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 /// The checks `tiller doctor` runs, run on this host now, as its own board's
 /// `GET /api/v1/doctor` answers them. Read only: the board host shows them
 /// and can act on none.
@@ -567,6 +736,10 @@ enum Query {
     Timeline(String, Option<i64>),
     Run(String),
     Doctor,
+    /// An agent's tail (`protocol.md` 7.4).
+    Tail(String),
+    /// The dialog on a waiting agent's screen, for an `act` key only (G46).
+    Prompt(String),
 }
 
 fn parse_query(path: &str) -> Result<Query, ApiError> {
@@ -588,14 +761,24 @@ fn parse_query(path: &str) -> Result<Query, ApiError> {
         ["cards", id, "timeline"] => Query::Timeline((*id).to_owned(), before),
         ["runs", id] if before.is_none() => Query::Run((*id).to_owned()),
         ["doctor"] if before.is_none() => Query::Doctor,
+        ["agents", session, "terminal", "tail"] if before.is_none() => {
+            Query::Tail((*session).to_owned())
+        }
+        ["agents", session, "prompt"] if before.is_none() => Query::Prompt((*session).to_owned()),
         _ => {
             return Err(usage(
-                "a query is cards/{id}, cards/{id}/timeline, runs/{id} or doctor",
+                "a query is cards/{id}, cards/{id}/timeline, runs/{id}, doctor, agents/{session}/terminal/tail or agents/{session}/prompt",
             ));
         }
     };
     match &query {
-        Query::Card(id) | Query::Timeline(id, _) | Query::Run(id) if id.is_empty() => {
+        Query::Card(id)
+        | Query::Timeline(id, _)
+        | Query::Run(id)
+        | Query::Tail(id)
+        | Query::Prompt(id)
+            if id.is_empty() =>
+        {
             Err(usage("the query names no id"))
         }
         _ => Ok(query),
@@ -651,7 +834,20 @@ mod tests {
             Some(Query::Run("01JC".into()))
         );
         assert_eq!(parse_query("doctor").ok(), Some(Query::Doctor));
+        assert_eq!(
+            parse_query("agents/01JS/terminal/tail").ok(),
+            Some(Query::Tail("01JS".into()))
+        );
+        assert_eq!(
+            parse_query("agents/01JS/prompt").ok(),
+            Some(Query::Prompt("01JS".into()))
+        );
         for refused in [
+            "agents/01JS/prompt/answer",
+            "agents/01JS/terminal",
+            "agents/01JS/terminal/history",
+            "agents//prompt",
+            "agents/01JS/prompt?before=4",
             "doctor?before=4",
             "doctor/again",
             "cards/alpha-1?host=other",

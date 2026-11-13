@@ -74,7 +74,7 @@ impl Agents {
                 "if [ \"$1\" = --version ]; then exec {agent} --version; fi\n\
                  {{ env; echo --; }} >> {logs}/\"$TILLER_SESSION_ID\".env\n\
                  id=claude-$TILLER_SESSION_ID\n\
-                 if [ \"$1\" = --resume ]; then id=$id-resumed; fi\n\
+                 case \" $* \" in *\" --resume \"*) id=$id-resumed;; esac\n\
                  printf '{{\"session_id\":\"%s\",\"source\":\"startup\"}}' \"$id\" \
                  | {tiller} hook SessionStart >/dev/null 2>&1\n\
                  exec env FAKE_AGENT_LOG={logs}/\"$TILLER_SESSION_ID\".jsonl FAKE_AGENT_BUSY_MS={busy_ms} FAKE_AGENT_FRAME_MS={FRAME_MS} {agent} {args} \"$@\"\n",
@@ -300,6 +300,38 @@ fn shows(client: &HolderClient, pane: &str, text: &str) {
 
 fn has(events: &[Value], event: &str) -> bool {
     events.iter().any(|e| e["event"] == event)
+}
+
+/// The argv `fake-agent` logged with a `start` event.
+fn argv_of(start: &Value) -> Vec<String> {
+    start["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// The launch flags of `argv` with their values, every one of them there.
+fn launch_flags(argv: &[String]) -> Vec<(&'static str, Option<String>)> {
+    [
+        ("--append-system-prompt-file", true),
+        ("--settings", true),
+        ("--permission-mode", true),
+        ("--strict-mcp-config", false),
+        ("--mcp-config", true),
+        ("--model", true),
+        ("--effort", true),
+    ]
+    .into_iter()
+    .map(|(flag, valued)| {
+        let at = argv
+            .iter()
+            .position(|a| a == flag)
+            .unwrap_or_else(|| panic!("no {flag} in {argv:?}"));
+        (flag, valued.then(|| argv[at + 1].clone()))
+    })
+    .collect()
 }
 
 /// Spec 9.2 with `fake-agent`: an interrupt reaches a working turn, a
@@ -587,15 +619,16 @@ fn a_lost_holder_resumes_its_worker_and_notifies_the_owner_once() {
     agents.until(&session, "the resumed start", |events| {
         events.iter().filter(|e| e["event"] == "start").count() == 2
     });
-    let argv = agents.of(&session, "start")[1]["argv"].clone();
-    let argv: Vec<&str> = argv
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|a| a.as_str().unwrap())
-        .collect();
+    let starts = agents.of(&session, "start");
+    let (first_argv, argv) = (argv_of(&starts[0]), argv_of(&starts[1]));
     let at = argv.iter().position(|a| *a == "--resume").unwrap();
     assert_eq!(argv[at + 1], format!("claude-{session}"), "{argv:?}");
+    // The daemon's resume starts the agent with every flag and value of its
+    // first launch: only the start words differ, the first launch's prompt
+    // against `--resume <id>`.
+    assert_eq!(launch_flags(&argv), launch_flags(&first_argv));
+    assert_eq!(at, argv.len() - 2, "{argv:?}");
+    assert_eq!(argv[..at], first_argv[..first_argv.len() - 1], "{argv:?}");
     // The resumed agent gets the Tiller env of its first launch: its hooks
     // find the daemon's home, and the resume binds the same row.
     let envs = agents.envs(&session);
@@ -617,8 +650,8 @@ fn a_lost_holder_resumes_its_worker_and_notifies_the_owner_once() {
         agents.world.user_home().to_str().unwrap(),
         "{resumed:#?}"
     );
-    // A reconcile resume puts `--resume` first, and the stub then binds a new
-    // Claude id: the bind lands only when the hook found the daemon's home.
+    // On a `--resume` the stub binds a new Claude id: the bind lands only
+    // when the hook found the daemon's home.
     let deadline = Instant::now() + WAIT;
     while count(&format!(
         "SELECT count(*) FROM events WHERE kind = 'session.bound' AND entity_id = '{session}' \
@@ -652,13 +685,45 @@ fn a_lost_holder_resumes_its_worker_and_notifies_the_owner_once() {
 
     // A daemon restart on the same new holder notifies nothing again.
     drop(daemon);
-    let (_daemon, _port) = git_only_daemon(&agents.world);
+    let (daemon, _port) = git_only_daemon(&agents.world);
     std::thread::sleep(Duration::from_secs(8));
     assert_eq!(notes(&out).len(), 1, "{:?}", notes(&out));
     assert_eq!(
         count("SELECT count(*) FROM events WHERE kind = 'holder.lost'"),
         1
     );
+
+    // The owner's `tiller agent resume` writes the script the daemon's
+    // resume wrote, byte for byte, but for the Claude id the resumed
+    // session bound since.
+    drop(daemon);
+    let resume_script = root
+        .join("scratch")
+        .join(&run)
+        .join(format!("resume-{session}.sh"));
+    let by_daemon = std::fs::read_to_string(&resume_script).unwrap();
+    let exits = agents.of(&session, "exit").len();
+    shows(&client, &new_pane, "? for shortcuts");
+    submit(&client, &new_pane, "/exit");
+    agents.until(&session, "exit", |events| {
+        events.iter().filter(|e| e["event"] == "exit").count() > exits
+    });
+    agents.world.must(&["agent", "resume", &run]);
+    let by_owner = std::fs::read_to_string(&resume_script).unwrap();
+    assert_eq!(
+        by_owner,
+        by_daemon.replace(
+            &format!("claude-{session}"),
+            &format!("claude-{session}-resumed")
+        )
+    );
+    agents.until(&session, "the owner's resumed start", |events| {
+        events.iter().filter(|e| e["event"] == "start").count() == 3
+    });
+    let owner_argv = argv_of(&agents.of(&session, "start")[2]);
+    let mut expected = argv.clone();
+    expected[at + 1] = format!("claude-{session}-resumed");
+    assert_eq!(owner_argv, expected);
 }
 
 /// Where a 9.2 kill lands.

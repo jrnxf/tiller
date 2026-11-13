@@ -32,8 +32,8 @@ use tiller_panes::{
 use tiller_reconcile::holder::Link;
 use tiller_reconcile::pass::{Config, Reconciler, Sources};
 use tiller_reconcile::sources::{
-    AgentProbe, Cut, Forge, Harness, HolderLauncher, HostReadings, Launched, Launcher, PaneEnv,
-    PrRead, Probe, Readings, Scanner, WorktreeScan,
+    AgentProbe, Cut, Forge, Harness, HolderLauncher, HostReadings, Launched, Launcher, PrRead,
+    Prepare, Probe, Readings, Scanner, WorktreeScan,
 };
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -497,12 +497,9 @@ impl Forge for FakeForge {
     }
 }
 
-/// The daemon's side of a fake launch's pane environment.
-pub fn pane_env() -> PaneEnv {
-    PaneEnv {
-        tiller_home: PathBuf::from("/home/user/.tiller"),
-        claude_config: None,
-    }
+/// The script a fake launch runs for `session`.
+pub fn launch_script(session: &str) -> PathBuf {
+    PathBuf::from(format!("/home/user/runs/resume-{session}.sh"))
 }
 
 /// One launch the fake made.
@@ -520,6 +517,9 @@ struct LauncherWorld {
     closed: Vec<String>,
     notifications: Vec<(String, String)>,
     fail_next: Option<String>,
+    script_next: Option<Prepare>,
+    /// The `--resume` id of each script written and not yet run, by session.
+    prepared: BTreeMap<String, Option<String>>,
     /// The screen a launched pane shows.
     screen: Option<Screen>,
     /// The terminal holder launches spawn in, when the host runs one.
@@ -561,6 +561,18 @@ impl FakeLauncher {
         lock(&self.world).fail_next = Some(error.to_owned());
     }
 
+    /// The next script is refused with `why`, as for a session whose launch
+    /// files are gone.
+    pub fn refuse_next(&self, why: &str) {
+        lock(&self.world).script_next = Some(Prepare::Refused(why.to_owned()));
+    }
+
+    /// The next script fails with `error`, as for a `config.toml` that
+    /// does not parse, which a later pass may find fixed.
+    pub fn fail_script_next(&self, error: &str) {
+        lock(&self.world).script_next = Some(Prepare::Failed(error.to_owned()));
+    }
+
     /// What a launched pane shows (default idle Claude; `Permission` for a
     /// trust prompt; `Shell` for a launch that died at once).
     pub fn launched_screen(&self, screen: Screen) {
@@ -574,19 +586,35 @@ impl FakeLauncher {
 }
 
 impl Launcher for FakeLauncher {
-    fn launch(
+    fn prepare(
         &mut self,
         session: &Session,
-        cwd: &Path,
+        _cwd: &Path,
         resume: Option<&str>,
-    ) -> Result<Launched, String> {
-        if let Some(error) = lock(&self.world).fail_next.take() {
+    ) -> Result<PathBuf, Prepare> {
+        let mut world = lock(&self.world);
+        if let Some(error) = world.script_next.take() {
             return Err(error);
         }
+        world
+            .prepared
+            .insert(session.id.clone(), resume.map(str::to_owned));
+        Ok(launch_script(&session.id))
+    }
+
+    fn launch(&mut self, session: &Session, cwd: &Path, script: &Path) -> Result<Launched, String> {
+        let resume = {
+            let mut world = lock(&self.world);
+            if let Some(error) = world.fail_next.take() {
+                return Err(error);
+            }
+            world.prepared.remove(&session.id).flatten()
+        };
+        let resume = resume.as_deref();
         let holder = lock(&self.world).holder.clone();
         if let Some(holder) = holder {
             let pane_id = holder
-                .spawn(&HolderLauncher::request(&pane_env(), session, cwd, resume))
+                .spawn(&HolderLauncher::request(session, cwd, script))
                 .map_err(|e| e.to_string())?
                 .pane
                 .as_str()
@@ -783,10 +811,9 @@ impl World {
         let record = self.session(&session);
         let pane = holder
             .spawn(&HolderLauncher::request(
-                &pane_env(),
                 &record,
                 Path::new("/home/user/worktrees"),
-                None,
+                &launch_script(&session),
             ))
             .unwrap();
         self.fleet.bind(&session, pane.pane.as_str());

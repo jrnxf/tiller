@@ -39,6 +39,7 @@ pub mod orchestrator;
 pub mod pool;
 pub mod promote;
 pub mod readings;
+pub mod resume;
 pub mod settings;
 pub mod trust;
 
@@ -243,6 +244,17 @@ impl<'a> World<'a> {
     /// stop, resume, relaunch and interrupt reach a session's pane.
     pub fn routed(&self) -> Routed<&'a dyn Herdr, &'a dyn tiller_panes::Panes> {
         Routed::new(self.herdr, self.panes)
+    }
+
+    /// What a resume of a session on this host needs ([`resume::write`]).
+    pub fn resume_host(&self) -> resume::Host<'a> {
+        resume::Host {
+            scratch_root: self.scratch_root,
+            tiller_home: self.tiller_home,
+            claude: &self.config.spawn.claude,
+            claude_config: self.claude_config,
+            review_hosts: &self.config.spawn.review_allowed_hosts,
+        }
     }
 }
 
