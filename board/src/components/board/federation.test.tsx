@@ -187,7 +187,7 @@ test("a live peer's lane has no note, and a read pairing's says it is view only"
   await renderApp("federated");
   expect(within(screen.getByTestId("lane-host-d/gamma")).queryByTestId("peer-note")).toBeNull();
   const note = within(screen.getByTestId("lane-host-f/atlas")).getByTestId("peer-note");
-  expect(note.textContent).toBe("view only pairing.");
+  expect(note.textContent).toBe("host-f is paired view only, so make changes from that host.");
 });
 
 // The Start orchestrator in a lane's header.
@@ -319,7 +319,9 @@ test("a read pairing's card is live but its controls say 'view only pairing'", a
   stubApi("federated");
   await renderApp("federated", `/inbox?item=${ASK_F}`);
   const actions = await screen.findByTestId("card-actions");
-  expect(within(actions).getByTestId("peer-note").textContent).toBe("view only pairing.");
+  expect(within(actions).getByTestId("peer-note").textContent).toBe(
+    "host-f is paired view only, so make changes from that host.",
+  );
   const comment = within(actions).getByLabelText("Comment to the orchestrator") as HTMLInputElement;
   expect(comment.disabled).toBe(true);
   expect(comment.title).toBe("view only pairing");
@@ -461,7 +463,11 @@ test("an ask of a read pairing cannot be answered and says why", async () => {
   const detail = await screen.findByRole("heading", { name: /Which tile size/ });
   expect(detail).toBeTruthy();
   expect(
-    screen.getAllByTestId("peer-note").every((n) => n.textContent === "view only pairing."),
+    screen
+      .getAllByTestId("peer-note")
+      .every(
+        (n) => n.textContent === "host-f is paired view only, so make changes from that host.",
+      ),
   ).toBe(true);
   for (const option of within(screen.getByRole("group", { name: "Answer" })).getAllByRole(
     "button",

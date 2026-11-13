@@ -1,5 +1,5 @@
 import { serverNow } from "../../lib/clock";
-import { asOfText } from "../../lib/peers";
+import { asOfText, VIEW_ONLY_REASON } from "../../lib/peers";
 import type { Owned, Standing } from "../../lib/peers";
 import { ServerIcon } from "../shell/icons";
 import { useTick } from "./ago";
@@ -42,7 +42,9 @@ export function PeerNote({ standing }: { standing: Standing }) {
           {". "}
         </>
       ) : null}
-      {standing.reason}.
+      {standing.reason === VIEW_ONLY_REASON
+        ? `${standing.host} is paired view only, so make changes from that host.`
+        : `${standing.reason}.`}
     </p>
   );
 }

@@ -594,6 +594,7 @@ export function LiveTerminal({
   onTyping,
   onSwitch,
   peer,
+  viewOnly = false,
   full = false,
   strip,
   onClose,
@@ -618,6 +619,9 @@ export function LiveTerminal({
   // The paired peer host the agent runs on. This board host relays its
   // stream, its keys and its Fit.
   peer?: string;
+  // The peer is paired view only: keys need the act scope (terminal-holder.md
+  // section 8), so the screen shows the pane and takes no typing.
+  viewOnly?: boolean;
   // The page is in full screen, and the Agents view pins the stage's card
   // over it. The view decides, so the card and its stage always agree.
   full?: boolean;
@@ -694,6 +698,10 @@ export function LiveTerminal({
   useEffect(() => {
     switchRef.current = onSwitch;
   }, [onSwitch]);
+  const viewOnlyRef = useRef(viewOnly);
+  useEffect(() => {
+    viewOnlyRef.current = viewOnly;
+  }, [viewOnly]);
 
   useEffect(() => {
     let gone = false;
@@ -729,6 +737,12 @@ export function LiveTerminal({
               setSize(next);
             },
             typing: (on) => {
+              // xterm takes focus on a click even with no input, so a view
+              // only screen gives the focus back and never types.
+              if (on && viewOnlyRef.current) {
+                term.blur();
+                return;
+              }
               setTyping(on);
               // Typing goes to the live screen, so the scrollback gives way.
               if (on) closeHistory();
@@ -797,13 +811,13 @@ export function LiveTerminal({
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
-    term.options.disableStdin = !live;
-    if (!live) term.blur();
+    term.options.disableStdin = !live || viewOnly;
+    if (!live || viewOnly) term.blur();
     else if (typeWhenLive.current && term.element) {
       typeWhenLive.current = false;
       term.focus();
     }
-  }, [live]);
+  }, [live, viewOnly]);
 
   useEffect(() => {
     onTyping?.(typing);
@@ -1148,8 +1162,12 @@ export function LiveTerminal({
       <span className="tx">The terminal is open in the expanded view.</span>
     ) : (
       <span className="tx">
-        <PointerIcon />
-        {phone ? "Tap" : "Click"} the screen to type to the agent
+        {viewOnly ? null : <PointerIcon />}
+        {viewOnly
+          ? phone
+            ? "View only"
+            : "View only: keys do not reach the agent"
+          : `${phone ? "Tap" : "Click"} the screen to type to the agent`}
         {peer !== undefined ? (
           <span className="hchip" title={`The agent runs on ${peer}`} data-testid="peer-chip">
             <ServerIcon />

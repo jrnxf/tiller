@@ -570,12 +570,13 @@ test("a holder pane the daemon has not read yet says so, with no 'observed never
   );
 });
 
+// How many times the board has opened an agent's stream.
+const opens = () =>
+  vi.mocked(globalThis.fetch).mock.calls.filter(([input]) => String(input).endsWith("/terminal"))
+    .length;
+
 test("the stage opens its agent's stream once, and a resize or a new font does not open it again", async () => {
   const controls = await renderStage("holder");
-  const opens = () =>
-    vi
-      .mocked(globalThis.fetch)
-      .mock.calls.filter(([input]) => String(input).endsWith("/terminal")).length;
   await waitFor(() => expect(opens()).toBe(1));
   act(() => window.dispatchEvent(new Event("resize")));
   fireEvent.click(controls.getByRole("button", { name: /larger/i }));

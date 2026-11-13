@@ -6,7 +6,7 @@ import type { CSSProperties, KeyboardEvent as KeyEvent, RefObject } from "react"
 import type { AgentRow, Machine, PermissionPrompt, Project } from "../../lib/api-types";
 import { leavePageFullScreen, usePageFullScreen } from "../../lib/fullscreen";
 import { holdInertOutside } from "../../lib/inert";
-import { focusReason, ownerOf, projectKey, shownId } from "../../lib/peers";
+import { VIEW_ONLY_REASON, focusReason, ownerOf, projectKey, shownId } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import {
   agentsQuery,
@@ -653,6 +653,7 @@ function Stage({
       onTyping={onTyping}
       onSwitch={onSwitch}
       peer={peerHost}
+      viewOnly={standing.reason === VIEW_ONLY_REASON}
       full={full}
       strip={
         act ? (

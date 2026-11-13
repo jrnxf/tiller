@@ -1622,8 +1622,12 @@ function handle(
       return { reply: refused(404, "not_found", `no poller reads ${source}`), followUps: [] };
     return { reply: recorded(health, null, null), followUps: [] };
   }
-  if (method === "POST" && /^\/api\/v1\/agents\/[^/]+\/focus$/.test(path)) {
-    return { reply: recorded({}, null, null), followUps: [] };
+  // No `tiller attach` client is open and no terminal app is set, so the
+  // toast gives the command to run by hand.
+  const focus = /^\/api\/v1\/agents\/([^/]+)\/focus$/.exec(path);
+  if (method === "POST" && focus?.[1]) {
+    const opened = { session_id: focus[1], opened: "unseen", terminal: null };
+    return { reply: recorded(opened, null, null), followUps: [] };
   }
   // The permission dialog a waiting agent has up. The first tap finds it
   // changed, to see the board refuse a stale answer; a tap on the new one
