@@ -10,7 +10,7 @@
 //! [`Submission`] is the steppable form, for a caller that serves many panes
 //! and waits once for all of them; [`submit`] is the blocking form for one.
 //! Both drive a [`Target`]: the holder through [`Panes`] (`terminal-holder.md`
-//! 4.5), or herdr through its adapter.
+//! 4.5).
 
 use std::thread;
 use std::time::Duration;

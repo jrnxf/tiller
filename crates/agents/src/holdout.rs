@@ -18,7 +18,7 @@ use tiller_core::domain::{ChangeSet, ChangeSetMember};
 use tiller_core::state::learning::EvalResult;
 use tiller_core::state::list;
 use tiller_core::state::memory::MEMORY_REPO;
-use tiller_herdr::process::{self, Ended, Interrupt};
+use tiller_panes::process::{self, Ended, Interrupt};
 
 /// Runs per case when a case's frontmatter names none (`evals/README.md`).
 pub const DEFAULT_RUNS: u64 = 3;

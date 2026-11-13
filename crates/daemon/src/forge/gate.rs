@@ -29,7 +29,7 @@ use tiller_agents::land::app::{APP_ID_FILE, KEY_FILE};
 use tiller_agents::land::forge::{AppTokens, ForgeError};
 use tiller_core::domain::{Delivery, MergeGate, Project};
 use tiller_core::{Ctx, Store, Timestamp};
-use tiller_herdr::poller::{PollError, Source};
+use tiller_poll::{PollError, Source};
 
 /// How often each project is checked again.
 pub const RECHECK: Duration = Duration::from_secs(60 * 60);

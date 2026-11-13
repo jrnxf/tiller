@@ -33,7 +33,7 @@ use tiller_core::state::approvals::active_away;
 use tiller_core::state::learning::{self, EvalFailure, Learning};
 use tiller_core::state::list;
 use tiller_core::{Actor, Ctx, Error, Store, Timestamp, ids};
-use tiller_herdr::process::Interrupt;
+use tiller_panes::process::Interrupt;
 use utoipa::ToSchema;
 
 use super::dto::{MemoryEvalJob, MemoryEvalPlan, MemoryEvalQuota};

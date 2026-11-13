@@ -12,7 +12,6 @@ mod common;
 use common::*;
 use tiller_core::domain::RunOutcome;
 use tiller_core::state::runs::EndRun;
-use tiller_herdr::fake::Screen;
 use tiller_reconcile::sources::WorktreeScan;
 
 #[derive(Clone, Copy, Debug)]
@@ -106,8 +105,8 @@ fn no_automatic_repair_removes_unlanded_work() {
         }
         match case.pane {
             PaneState::Alive => {}
-            PaneState::Dead => w.herdr.set_screen("w2:p1", Screen::Shell),
-            PaneState::Gone => w.herdr.remove_pane("w2:p1"),
+            PaneState::Dead => w.exit_pane("w2:p1"),
+            PaneState::Gone => w.remove_pane("w2:p1"),
         }
         // Two passes, as the loop would run them, plus a daemon restart.
         w.pass(t0.plus_minutes(1));

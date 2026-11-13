@@ -1,6 +1,6 @@
 //! R12: a worker that is alive but silent, the dated pause that silences
 //! the escalation, the errored session treated as silent, and the T2.6
-//! carry-over: a herdr idle landing mid-turn never hastens an escalation.
+//! carry-over: a screen idle landing mid-turn never hastens an escalation.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
@@ -204,20 +204,20 @@ fn errored_thirty_minutes_is_silent_and_never_retried() {
     assert_eq!(w.session(&worker).activity, Activity::Errored);
 }
 
-/// The T2.6 carry-over. Tool hooks coalesce for 60 s and a herdr idle
-/// replaces a hook working after 30 s, so herdr misreading a 40-minute tool
+/// The T2.6 carry-over. Tool hooks coalesce for 60 s and a screen idle
+/// replaces a hook working after 30 s, so the holder misreading a 40-minute tool
 /// call as idle lands on the session. The engine reads only observation
 /// age: the escalation clock runs from the newest observation of any
 /// source, so the misread cannot start or hasten an escalation, and a fresh
 /// tool hook ends the matter the moment it lands.
 #[test]
-fn herdr_idle_mid_turn_never_hastens_escalation() {
+fn screen_idle_mid_turn_never_hastens_escalation() {
     let mut w = World::new();
     let worker = w.worker("w2:p1");
     w.place();
     let run = w.run_of(&worker);
 
-    // A long tool call starts; 31 s in, herdr reads the pane as idle.
+    // A long tool call starts; 31 s in, the holder reads the pane as idle.
     let start = ago(14);
     w.tool_hook(&worker, "Bash", start);
     let flip = Timestamp::from_millis(start.as_millis() + 31_000).unwrap();
@@ -228,8 +228,8 @@ fn herdr_idle_mid_turn_never_hastens_escalation() {
             NewObservation {
                 session_id: Some(worker.clone()),
                 run_id: Some(run.id.clone()),
-                source: ObservationSource::Herdr,
-                event: "herdr:idle".into(),
+                source: ObservationSource::Holder,
+                event: "holder:idle".into(),
                 verdict: Some(Activity::Idle),
                 observed_at: flip,
                 payload: serde_json::json!({}),
@@ -269,8 +269,8 @@ fn herdr_idle_mid_turn_never_hastens_escalation() {
             NewObservation {
                 session_id: Some(quiet.clone()),
                 run_id: quiet_run,
-                source: ObservationSource::Herdr,
-                event: "herdr:idle".into(),
+                source: ObservationSource::Holder,
+                event: "holder:idle".into(),
                 verdict: Some(Activity::Idle),
                 observed_at: flip,
                 payload: serde_json::json!({}),

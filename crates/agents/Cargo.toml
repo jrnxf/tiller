@@ -19,7 +19,6 @@ sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tiller-core.workspace = true
-tiller-herdr.workspace = true
 tiller-observe.workspace = true
 tiller-panes.workspace = true
 tiller-reconcile.workspace = true
@@ -29,7 +28,6 @@ ureq.workspace = true
 [dev-dependencies]
 rsa.workspace = true
 proptest.workspace = true
-tiller-herdr = { workspace = true, features = ["testing"] }
 tiller-panes = { workspace = true, features = ["testing"] }
 
 [lints]

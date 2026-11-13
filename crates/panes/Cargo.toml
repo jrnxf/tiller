@@ -10,7 +10,7 @@ publish = false
 
 [features]
 # The in-memory `FakePanes` and the test fleet, for other crates' tests.
-testing = ["dep:tempfile", "dep:tiller-core", "rustix/pty", "rustix/termios"]
+testing = ["dep:tempfile", "dep:tiller-core", "rustix/termios"]
 
 # A stand-in for Claude Code, for end-to-end tests of holder panes.
 [[bin]]
@@ -33,8 +33,8 @@ toml.workspace = true
 ulid.workspace = true
 
 [dev-dependencies]
+insta.workspace = true
 proptest.workspace = true
-rustix = { workspace = true, features = ["pty"] }
 tempfile.workspace = true
 tiller-core.workspace = true
 

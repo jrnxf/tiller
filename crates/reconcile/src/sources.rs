@@ -1,12 +1,11 @@
 //! What the engine reads the world through (`recovery.md` section 2,
-//! Sources). Every read is a trait, so the daemon wires the real herdr, git,
+//! Sources). Every read is a trait, so the daemon wires the real holder, git,
 //! forge and process table while tests drive the same passes against fakes
 //! (`crate::testing`).
 //!
 //! Every reader returns `Err` or `None` for "could not tell": the engine
 //! treats that as unknown and changes nothing, never as gone.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,35 +13,21 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tiller_core::domain::{Project, Run, Session};
 use tiller_core::state::approvals::PrFetch;
-use tiller_herdr::client::{Herdr, PaneInfo};
 pub use tiller_observe::liveness::Probe;
 use tiller_panes::{Meta, PaneId, Panes, PanesError, Spawn};
 
-/// Step 3 of the liveness ladder: is the agent process in a pane alive?
+/// Step 3 of the liveness ladder: is the child's process `pid` in a holder
+/// pane alive (`kill(pid, 0)`)?
 pub trait AgentProbe: Send {
-    fn agent(&self, pane: &PaneInfo) -> Probe;
-
-    /// The same step for a terminal holder pane: is the child's process
-    /// `pid` alive (`kill(pid, 0)`)?
     fn process(&self, pid: u32) -> Probe {
         tiller_observe::liveness::process_alive(pid)
     }
 }
 
-/// herdr's own reading: a pane with a recognized agent runs one; a pane
-/// herdr sees as a plain shell has lost it. herdr reads the pane's process,
-/// so this is the "agent status" half of the ladder's step 3.
-pub struct HerdrStatusProbe;
+/// The process table itself.
+pub struct ProcessProbe;
 
-impl AgentProbe for HerdrStatusProbe {
-    fn agent(&self, pane: &PaneInfo) -> Probe {
-        if pane.agent.is_some() {
-            Probe::Alive
-        } else {
-            Probe::Dead
-        }
-    }
-}
+impl AgentProbe for ProcessProbe {}
 
 /// One worktree as a scan found it ("What unlanded means").
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,8 +192,8 @@ pub enum Prepare {
     Failed(String),
 }
 
-/// Starts and stops Claude Code sessions in panes (`session.resume`, R02,
-/// R04 and R21) and closes dead panes (R15).
+/// Starts and stops Claude Code sessions in holder panes (`session.resume`,
+/// R02, R04 and R21) and closes dead panes (R15).
 pub trait Launcher: Send {
     /// Writes the script that starts `claude` for `session` in `cwd`:
     /// `--resume <id>` when `resume` names the Claude session, a fresh
@@ -228,79 +213,6 @@ pub trait Launcher: Send {
     fn notify(&mut self, title: &str, body: &str);
 }
 
-/// A launcher over the herdr adapter: a new workspace in `cwd`, the row
-/// tokens reported so the pane names its session before anything else reads
-/// it, and `sh <script>` typed as one line. Closing a pane needs a herdr
-/// call the adapter does not expose yet, so `close` is injected.
-pub struct HerdrLauncher<H: Herdr> {
-    herdr: H,
-    scripts: ScriptWriter,
-    close: PaneCloser,
-}
-
-/// Closes one pane by id; the daemon wires the herdr call.
-pub type PaneCloser = Box<dyn FnMut(&str) -> Result<(), String> + Send>;
-
-impl<H: Herdr + Send> HerdrLauncher<H> {
-    pub fn new(
-        herdr: H,
-        scripts: ScriptWriter,
-        close: impl FnMut(&str) -> Result<(), String> + Send + 'static,
-    ) -> Self {
-        Self {
-            herdr,
-            scripts,
-            close: Box::new(close),
-        }
-    }
-}
-
-impl<H: Herdr + Send> Launcher for HerdrLauncher<H> {
-    fn prepare(
-        &mut self,
-        session: &Session,
-        cwd: &Path,
-        resume: Option<&str>,
-    ) -> Result<PathBuf, Prepare> {
-        (self.scripts)(session, cwd, resume)
-    }
-
-    fn launch(&mut self, session: &Session, cwd: &Path, script: &Path) -> Result<Launched, String> {
-        let label = format!("{} resuming", session.project_id);
-        let created = self
-            .herdr
-            .create_workspace(&label, Some(cwd))
-            .map_err(|e| e.to_string())?;
-        let tokens = BTreeMap::from([
-            ("session".to_owned(), session.id.clone()),
-            ("project".to_owned(), session.project_id.clone()),
-        ]);
-        self.herdr
-            .report_tokens(&created.pane_id, &tokens)
-            .map_err(|e| e.to_string())?;
-        // The script sets the session's environment, which the pane's
-        // shell does not have.
-        let line = format!("sh {}", quote(&script.to_string_lossy()));
-        self.herdr
-            .send_text(&created.pane_id, &line)
-            .and_then(|()| self.herdr.send_enter(&created.pane_id))
-            .map_err(|e| e.to_string())?;
-        Ok(Launched {
-            pane_id: created.pane_id,
-        })
-    }
-
-    fn close_pane(&mut self, pane_id: &str) -> Result<(), String> {
-        (self.close)(pane_id)
-    }
-
-    fn notify(&mut self, title: &str, body: &str) {
-        if let Err(error) = self.herdr.notify(title, body) {
-            tracing::warn!(%error, "herdr notification failed");
-        }
-    }
-}
-
 /// How long a closed holder pane's child has between `hup` and `kill`.
 pub const HOLDER_CLOSE_GRACE: Duration = Duration::from_secs(3);
 
@@ -311,12 +223,10 @@ pub type Notifier = Box<dyn FnMut(&str, &str) + Send>;
 /// `spawn` keyed by the session, whose child runs the resume script
 /// through `/bin/sh` in `cwd`, with the session named in the pane's `meta`.
 /// A spawn for a key the holder already runs returns that pane, so a second
-/// try starts nothing. A herdr pane left from before the cutover is closed
-/// through `close`.
+/// try starts nothing.
 pub struct HolderLauncher {
     holder: Arc<dyn Panes>,
     scripts: ScriptWriter,
-    close: PaneCloser,
     notify: Notifier,
 }
 
@@ -324,13 +234,11 @@ impl HolderLauncher {
     pub fn new(
         holder: Arc<dyn Panes>,
         scripts: ScriptWriter,
-        close: impl FnMut(&str) -> Result<(), String> + Send + 'static,
         notify: impl FnMut(&str, &str) + Send + 'static,
     ) -> Self {
         Self {
             holder,
             scripts,
-            close: Box::new(close),
             notify: Box::new(notify),
         }
     }
@@ -365,11 +273,6 @@ impl HolderLauncher {
     }
 }
 
-/// `text` as one `sh` word.
-fn quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "'\\''"))
-}
-
 impl Launcher for HolderLauncher {
     fn prepare(
         &mut self,
@@ -393,9 +296,6 @@ impl Launcher for HolderLauncher {
     /// `close`, which sends `hup` and then `kill` after the grace, then
     /// `forget`. A pane that has exited or is gone is only forgotten.
     fn close_pane(&mut self, pane_id: &str) -> Result<(), String> {
-        if !tiller_core::ids::is_holder_pane(pane_id) {
-            return (self.close)(pane_id);
-        }
         let pane = PaneId::from(pane_id);
         match self.holder.close(&pane, HOLDER_CLOSE_GRACE) {
             Ok(_) | Err(PanesError::NotFound(_) | PanesError::Exited(_)) => {}

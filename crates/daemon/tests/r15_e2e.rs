@@ -3,8 +3,8 @@
 //! keeps one with uncommitted, untracked or unlanded work.
 //!
 //! The worktrees are real: a git checkout named in `config.toml`
-//! `[checkouts]` and three worktrees of it, one per ended run. herdr is a
-//! script that serves a snapshot where the runs' panes are gone, and the
+//! `[checkouts]` and three worktrees of it, one per ended run. A `tiller holder`
+//! in the fleet's home holds each run's pane with its agent exited, and the
 //! `[spawn] treehouse` is a script that logs each call it gets.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -19,7 +19,8 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tiller_core::domain::RunOutcome;
 use tiller_core::state::runs::EndRun;
-use tiller_herdr::testing::{Fleet, owner};
+use tiller_panes::testing::{Fleet, owner};
+use tiller_panes::{PaneId, PaneState, Panes, Spawn};
 
 const WAIT: Duration = Duration::from_secs(60);
 
@@ -91,7 +92,7 @@ struct Daemon {
 }
 
 impl Daemon {
-    fn start(home: &Path, herdr: &Path, path: &Path) -> Self {
+    fn start(home: &Path, path: &Path) -> Self {
         let out = home.join("daemon.out");
         let pid_file = home.join("daemon.pid");
         let status = Command::new("/bin/sh")
@@ -106,7 +107,6 @@ impl Daemon {
             .env_clear()
             .env("PATH", path)
             .env("TILLER_HOME", home)
-            .env("TILLER_HERDR", herdr)
             .env("TILLER_QUOTA_AXI", "/nonexistent/quota-axi")
             .env("TILLER_LOG", "warn")
             .status()
@@ -159,6 +159,43 @@ impl Drop for Daemon {
     }
 }
 
+/// A `tiller holder` in `home`, stopped when dropped: its listing is what
+/// shows the runs' panes are gone.
+struct Holder(std::process::Child);
+
+impl Holder {
+    fn start(home: &Path) -> Self {
+        let child = Command::new(tiller())
+            .arg("holder")
+            .env_clear()
+            .env("PATH", "")
+            .env("HOME", home)
+            .env("TILLER_HOME", home)
+            .env("TILLER_LOG", "warn")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let socket = tiller_panes::socket_path(home);
+        until("the holder's socket", || {
+            tiller_panes::HolderClient::connect(&socket, "test")
+                .ok()
+                .map(|_| ())
+        });
+        Self(child)
+    }
+}
+
+impl Drop for Holder {
+    fn drop(&mut self) {
+        let _ = Command::new("kill")
+            .args(["-TERM", &self.0.id().to_string()])
+            .status();
+        let _ = self.0.wait();
+    }
+}
+
 fn cleaned(fleet: &Fleet, run: &str) -> bool {
     fleet
         .open()
@@ -182,16 +219,41 @@ fn daemon_returns_an_ended_runs_empty_worktree_and_keeps_the_rest() {
     git(&checkout, &["config", "user.name", "Dev"]);
     commit(&checkout, "base.txt", "base");
 
-    // Three builder runs, each in its own worktree, all ended.
+    // Three builder runs, each in its own worktree, all ended. Each run's
+    // pane is in the holder, its agent exited.
+    let _holder = Holder::start(fleet.dir.path());
+    let panes =
+        tiller_panes::HolderClient::connect(tiller_panes::socket_path(fleet.dir.path()), "test")
+            .unwrap();
     let mut runs = Vec::new();
-    for (pane, name) in [("w2:p1", "empty"), ("w4:p1", "dirty"), ("w5:p1", "ahead")] {
-        let session = fleet.worker(pane);
+    for name in ["empty", "dirty", "ahead"] {
+        let session = fleet.worker(PaneId::generate().as_str());
         let run = fleet
             .workers
             .iter()
             .find(|(s, _, _)| *s == session)
             .map(|(_, run, _)| run.clone())
             .unwrap();
+        let pane = panes
+            .spawn(&Spawn {
+                key: session.clone(),
+                argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
+                cwd: lab.path().to_string_lossy().into_owned(),
+                env: Default::default(),
+                size: None,
+                meta: [("session", session.as_str()), ("run", run.as_str())]
+                    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                    .into(),
+            })
+            .unwrap()
+            .pane;
+        fleet.bind(&session, pane.as_str());
+        until("the run's agent to exit", || {
+            panes
+                .get(&pane)
+                .unwrap()
+                .filter(|pane| pane.state == PaneState::Exited)
+        });
         let worktree = lab.path().join("pool").join(name);
         let branch = format!("tiller/{name}");
         git(
@@ -235,37 +297,6 @@ fn daemon_returns_an_ended_runs_empty_worktree_and_keeps_the_rest() {
     git(&ahead.1, &["config", "user.name", "Dev"]);
     commit(&ahead.1, "feature.txt", "feature");
 
-    // herdr shows the orchestrator at work and each worker pane back at a
-    // shell prompt: the runs' agents have exited.
-    let mut workspaces =
-        vec![serde_json::json!({"workspace_id": "w1", "label": "alpha", "number": 1})];
-    let mut panes = vec![serde_json::json!({
-        "pane_id": fleet.orchestrator_pane, "workspace_id": "w1",
-        "agent": "claude", "agent_status": "idle",
-    })];
-    for (number, (_, _, pane)) in fleet.workers.iter().enumerate() {
-        let workspace = pane.split(':').next().unwrap();
-        workspaces.push(
-            serde_json::json!({"workspace_id": workspace, "label": "claude", "number": number + 2}),
-        );
-        panes.push(serde_json::json!({"pane_id": pane, "workspace_id": workspace, "agent_status": "unknown"}));
-    }
-    let snapshot = serde_json::json!({"result": {"snapshot": {
-        "version": "0.9.5", "workspaces": workspaces, "panes": panes,
-    }}});
-    let herdr = lab.path().join("herdr");
-    script(
-        &herdr,
-        &format!(
-            r#"echo "$*" >> '{calls}'
-case "$1 $2" in
-"api snapshot") echo '{snapshot}' ;;
-*) echo '{{"result":{{}}}}' ;;
-esac"#,
-            calls = lab.path().join("herdr.log").display(),
-            snapshot = snapshot
-        ),
-    );
     let log = lab.path().join("treehouse.log");
     let treehouse = lab.path().join("treehouse");
     script(&treehouse, &format!("echo \"$*\" >> '{}'", log.display()));
@@ -279,7 +310,7 @@ esac"#,
     )
     .unwrap();
 
-    let daemon = Daemon::start(fleet.dir.path(), &herdr, &git_dir(lab.path()));
+    let daemon = Daemon::start(fleet.dir.path(), &git_dir(lab.path()));
     let calls = || {
         std::fs::read_to_string(&log)
             .unwrap_or_default()
@@ -287,7 +318,7 @@ esac"#,
             .map(str::to_owned)
             .collect::<Vec<_>>()
     };
-    // A pass may need more than one go (a pane probe, a slow herdr), so
+    // A pass may need more than one go (a pane probe, a holder starting), so
     // wait for the return itself, then for one more pass.
     until("the empty run's return", || {
         (cleaned(&fleet, &empty.0) && !calls().is_empty()).then_some(())

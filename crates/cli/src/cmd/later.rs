@@ -1,5 +1,5 @@
 //! `tiller orchestrator` and `tiller agent`: commands whose work happens
-//! outside `state.db`, in herdr panes. `orchestrator start` and
+//! outside `state.db`, in terminal holder panes. `orchestrator start` and
 //! `agent focus` run in `spawn.rs`; `agent relaunch`, `resume`,
 //! `interrupt` and `stop` in `control.rs`.
 
@@ -9,7 +9,7 @@ use crate::app::{App, Done};
 
 #[derive(Subcommand, Debug)]
 pub enum OrchestratorCmd {
-    /// Open the project's herdr workspace and launch its orchestrator
+    /// Launch the project's orchestrator in a terminal holder pane
     Start {
         /// The project's id (its slug, like alpha)
         project: String,
@@ -26,7 +26,7 @@ pub enum AgentCmd {
     Relaunch(super::control::Relaunch),
     /// Resume the run's Claude session in its worktree
     Resume {
-        /// The run: a ULID or short form, `<display id> <role>`, or a herdr name like
+        /// The run: a ULID or short form, `<display id> <role>`, or a run name like
         /// alpha-42-build
         run: String,
     },
@@ -34,7 +34,7 @@ pub enum AgentCmd {
     /// reaches whatever the agent does next, so it refuses unless the
     /// session is working
     Interrupt {
-        /// The run: a ULID or short form, `<display id> <role>`, or a herdr name like
+        /// The run: a ULID or short form, `<display id> <role>`, or a run name like
         /// alpha-42-build
         run: String,
     },
@@ -45,7 +45,7 @@ pub enum AgentCmd {
         /// A session (a ULID or its short form), or a run, which means its live session
         target: String,
     },
-    /// Focus the agent's pane in herdr
+    /// Focus the agent's pane in the attach clients of the terminal holder
     Focus {
         /// A session (a ULID or its short form), or a run, which means its live session
         target: String,

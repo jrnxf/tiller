@@ -13,7 +13,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use tiller_core::domain::forge::{self, Forge};
-use tiller_herdr::process::{self, Ended};
+use tiller_panes::process::{self, Ended};
 
 /// How long a clone may take before it is stopped.
 pub const CLONE_LIMIT: Duration = Duration::from_secs(10 * 60);
@@ -322,7 +322,7 @@ fn claim_folder(path: &Path) -> Result<Undo, CheckoutError> {
 
 /// Waits for the clone of `remote`, polling every 100 ms. Past `limit`, or
 /// when waiting fails, git and every helper in its process group are
-/// stopped (`tiller_herdr::process`), and the error says why.
+/// stopped (`tiller_panes::process`), and the error says why.
 fn finish(
     child: &mut std::process::Child,
     limit: Duration,

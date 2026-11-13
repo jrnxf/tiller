@@ -11,11 +11,10 @@ use tiller_core::domain::{Project, Run, Session};
 use tiller_core::state::deletion::{Deletion, LiveAgent};
 use tiller_core::state::get;
 use tiller_core::{Actor, Applied, Ctx, Error, Store, Timestamp};
-use tiller_herdr::client::Herdr;
-use tiller_herdr::layout;
 
 use super::{STOPPED, Waits, stop, stop_orchestrator};
-use crate::spawn::{Result, SpawnError, local_host, relayout};
+use crate::pane::Holder;
+use crate::spawn::{Result, SpawnError, local_host};
 
 /// One agent a project delete or retire stopped.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -65,7 +64,7 @@ pub struct ProjectRetired {
 pub fn delete_project(
     store: &mut Store,
     ctx: &Ctx,
-    herdr: &dyn Herdr,
+    holder: Holder<'_>,
     waits: &Waits,
     project_id: &str,
 ) -> Result<Applied<ProjectDeleted>> {
@@ -98,7 +97,7 @@ pub fn delete_project(
     let reason = format!("deleting project {project_id}");
     // The stops' events are the project's, so the delete removes them: only
     // its tombstone is left to report.
-    let (agents, _) = stop_project_agents(store, ctx, herdr, waits, project_id, &reason)?;
+    let (agents, _) = stop_project_agents(store, ctx, holder, waits, project_id, &reason)?;
     // The delete records its own time, after the stops it waited on.
     let ctx = Ctx {
         now: Timestamp::now(),
@@ -123,7 +122,7 @@ pub fn delete_project(
 pub fn retire_project(
     store: &mut Store,
     ctx: &Ctx,
-    herdr: &dyn Herdr,
+    holder: Holder<'_>,
     waits: &Waits,
     project_id: &str,
     stop_agents: bool,
@@ -151,7 +150,7 @@ pub fn retire_project(
         (agents, Vec::new())
     } else if stop_agents && !preview.agents.is_empty() {
         let reason = format!("retiring project {project_id}");
-        stop_project_agents(store, ctx, herdr, waits, project_id, &reason)?
+        stop_project_agents(store, ctx, holder, waits, project_id, &reason)?
     } else {
         (AgentsStopped::default(), Vec::new())
     };
@@ -179,7 +178,7 @@ pub fn retire_project(
 fn stop_project_agents(
     store: &mut Store,
     ctx: &Ctx,
-    herdr: &dyn Herdr,
+    holder: Holder<'_>,
     waits: &Waits,
     project_id: &str,
     reason: &str,
@@ -191,7 +190,7 @@ fn stop_project_agents(
             remote.describe()
         )));
     }
-    let host = local_host(store)?;
+    local_host(store)?;
     let mut done = AgentsStopped::default();
     let mut events = Vec::new();
     let mut cancelled = BTreeSet::new();
@@ -203,10 +202,10 @@ fn stop_project_agents(
             let session: Session = get(store.conn(), "session", id)?;
             if session.ended_at.is_none() {
                 let stopped = if session.run_id.is_none() {
-                    stop_orchestrator(store, &step(), herdr, waits, &session, STOPPED)
+                    stop_orchestrator(store, &step(), holder, waits, &session, STOPPED)
                         .map(|stopped| (stopped.proof, stopped.warning, stopped.events))
                 } else {
-                    stop_worker(store, &step(), herdr, waits, &session)
+                    stop_worker(store, &step(), holder, waits, &session)
                 };
                 match stopped {
                     Ok((proof, warning, ended)) => {
@@ -217,7 +216,7 @@ fn stop_project_agents(
                     Err(SpawnError::State(error)) => {
                         return Err(midway(error, &agent, &done, project_id));
                     }
-                    // Any other failure, herdr's included, is a stop that
+                    // Any other failure, the holder's included, is a stop that
                     // did not happen: refused with the agent named.
                     Err(error) => {
                         return Err(SpawnError::Refused(refusal(
@@ -244,24 +243,6 @@ fn stop_project_agents(
         }
         done.stopped.push(StoppedAgent { agent, stop_proof });
     }
-    if done
-        .stopped
-        .iter()
-        .any(|stopped| stopped.stop_proof.is_some())
-    {
-        // Panes closed: the rows are ended, so a layout left undone is a
-        // warning.
-        match layout::bindings(store.conn(), &host) {
-            Ok(bindings) => {
-                if let Err(e) = relayout(herdr, &bindings) {
-                    done.warnings.push(e);
-                }
-            }
-            Err(e) => done
-                .warnings
-                .push(format!("the panes were not relabelled: {e}")),
-        }
-    }
     Ok((done, events))
 }
 
@@ -270,14 +251,14 @@ fn stop_project_agents(
 fn stop_worker(
     store: &mut Store,
     ctx: &Ctx,
-    herdr: &dyn Herdr,
+    holder: Holder<'_>,
     waits: &Waits,
     session: &Session,
 ) -> Result<(String, Option<String>, Vec<i64>)> {
-    let (proof, pane) = stop(store, herdr, waits, session)?;
+    let (proof, pane) = stop(store, holder, waits, session)?;
     let events = store.session_end(ctx, &session.id, STOPPED)?.events;
     let warning = pane.and_then(|pane| {
-        herdr.close_pane(&pane).err().map(|e| {
+        holder.close_pane(&pane).err().map(|e| {
             format!(
                 "the stopped session {} ({proof}) left pane {pane} open: {e}",
                 session.id

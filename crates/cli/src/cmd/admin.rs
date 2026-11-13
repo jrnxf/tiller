@@ -17,11 +17,10 @@ use tiller_core::domain::{Boundary, Delivery, HostKind, Project, Stage};
 use tiller_core::state::deletion::{DeletionPreview, LiveAgent};
 use tiller_core::state::get;
 use tiller_core::state::projects::{HostEdit, Init, NewProject, ProjectEdit};
-use tiller_herdr::client::Cli;
 
 use super::clearable;
 use super::review::checkout_head;
-use super::spawn::{configured_herdr, failure};
+use super::spawn::{Tools, failure};
 use crate::app::{App, Done, Failure, Outcome};
 use tiller_core::state::stop_hook::{STOP_HOOK_DAYS, intake_stats};
 
@@ -383,7 +382,7 @@ fn project_delete(app: &App, store: &mut Store, args: ProjectDelete) -> Done {
             return Err(failure);
         }
     }
-    let herdr = stop_herdr(app, &preview.agents)?;
+    let tools = stop_tools(app, &preview.agents)?;
     // Read before the delete, so a config.toml that does not parse turns into
     // a warning on a delete that happened, not a failure after it.
     let warning = match load_config(app) {
@@ -398,8 +397,14 @@ fn project_delete(app: &App, store: &mut Store, args: ProjectDelete) -> Done {
             failure.message, args.id
         )),
     };
-    let applied = control::delete_project(store, &app.ctx(), &herdr, &Waits::default(), &args.id)
-        .map_err(failure)?;
+    let applied = control::delete_project(
+        store,
+        &app.ctx(),
+        holder(&tools),
+        &Waits::default(),
+        &args.id,
+    )
+    .map_err(failure)?;
     let warnings: Vec<String> = applied
         .value
         .agents
@@ -425,10 +430,16 @@ fn checkout_of<'a>(config: &'a toml::Table, project: &str) -> Option<&'a str> {
 /// running.
 fn project_retire(app: &App, store: &mut Store, args: ProjectRetire) -> Done {
     if args.stop_agents {
-        let herdr = stop_herdr(app, &store.project_retire_preview(&args.id)?.agents)?;
-        let applied =
-            control::retire_project(store, &app.ctx(), &herdr, &Waits::default(), &args.id, true)
-                .map_err(failure)?;
+        let tools = stop_tools(app, &store.project_retire_preview(&args.id)?.agents)?;
+        let applied = control::retire_project(
+            store,
+            &app.ctx(),
+            holder(&tools),
+            &Waits::default(),
+            &args.id,
+            true,
+        )
+        .map_err(failure)?;
         let warnings = &applied.value.agents.warnings;
         let warning = (!warnings.is_empty()).then(|| warnings.join("; "));
         return Ok(Outcome::applied(applied).with_warning(warning));
@@ -443,13 +454,21 @@ fn project_retire(app: &App, store: &mut Store, args: ProjectRetire) -> Done {
     Ok(Outcome::applied(applied).with_warning(warning))
 }
 
-/// The herdr the stops drive: never driven when nothing runs, so a config
+/// The tools the stops drive: never loaded when nothing runs, so a config
 /// that does not load fails only a command that has agents to stop.
-fn stop_herdr(app: &App, agents: &[LiveAgent]) -> Result<Cli, Failure> {
-    match configured_herdr(app) {
-        Ok(herdr) => Ok(herdr),
-        Err(_) if agents.is_empty() => Ok(Cli::local()),
+fn stop_tools(app: &App, agents: &[LiveAgent]) -> Result<Option<Tools>, Failure> {
+    match Tools::load(app) {
+        Ok(tools) => Ok(Some(tools)),
+        Err(_) if agents.is_empty() => Ok(None),
         Err(failure) => Err(failure),
+    }
+}
+
+/// The holder the stops reach: none when no tools loaded, as nothing runs.
+fn holder(tools: &Option<Tools>) -> tiller_agents::pane::Holder<'_> {
+    match tools {
+        Some(tools) => tools.holder(),
+        None => tiller_agents::pane::Holder::new(None),
     }
 }
 

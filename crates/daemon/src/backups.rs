@@ -349,7 +349,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode, header};
     use serde_json::{Value, json};
-    use tiller_herdr::testing::Fleet;
+    use tiller_panes::testing::Fleet;
 
     use crate::api::tests::{Fixture, HOST, app_with, mutation, owner_cookie, send};
     use crate::assets::Assets;

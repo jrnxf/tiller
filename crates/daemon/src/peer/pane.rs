@@ -11,7 +11,7 @@
 //! the signature, `ts`, this host, the `act` scope, and that the session
 //! is still running on this host. Each gets one `result` line between the
 //! mirror's lines. A pane is typed into through this host's own input
-//! path, the holder's or herdr's, and nothing else on the link writes:
+//! path, the terminal holder's, and nothing else on the link writes:
 //! tail, prompt answers, steer and the other agent verbs have no frame.
 //! The owner's cookie is checked on the board host before any of it is
 //! dialed.
@@ -37,8 +37,8 @@ use super::nonces;
 use super::serve::{Denied, ServeConfig, ServeError, current_key, refused, skew_ms};
 use super::{Frame, HelloKey};
 use crate::api::{
-    ApiError, fit_sent, holder_error, holder_history, input_sent, pane_error, pane_gone,
-    pane_target, remote_pane, terminal_keys, type_into,
+    ApiError, fit_sent, holder_error, holder_history, input_sent, pane_target, remote_pane,
+    terminal_keys, type_into,
 };
 use crate::dto::{TerminalFit, TerminalHistory};
 use crate::holder;
@@ -85,9 +85,8 @@ pub struct PaneOpen {
     /// Scrollback rows for [`PaneKind::History`], 1 to 1000.
     pub lines: Option<u16>,
     /// The board's size for a [`PaneKind::Stream`]: the pane is fitted to
-    /// it while the stream runs, as a lease on a holder pane, or with its
-    /// size given back after on a herdr pane. Absent, the pane keeps its
-    /// size. Asking for one needs the `act` scope.
+    /// it while the stream runs, as a lease on the holder pane. Absent, the
+    /// pane keeps its size. Asking for one needs the `act` scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fit: Option<TerminalFit>,
     pub ts: String,
@@ -604,16 +603,7 @@ async fn history(
             mirror::MAX_HISTORY
         )));
     }
-    let text = if ids::is_holder_pane(&pane) {
-        holder_history(holder(config)?, &pane, lines).await?
-    } else {
-        let herdr = herdr(config)?;
-        let target = pane.clone();
-        tokio::task::spawn_blocking(move || herdr.read_recent(&target, lines))
-            .await
-            .map_err(|error| ApiError::from(tiller_core::Error::Internal(error.to_string())))?
-            .map_err(|error| pane_error(&pane, &error))?
-    };
+    let text = holder_history(holder(config)?, &pane, lines).await?;
     serde_json::to_value(TerminalHistory { session_id, text })
         .map_err(|error| ApiError::from(tiller_core::Error::from(error)))
 }
@@ -624,16 +614,6 @@ fn holder(config: &ServeConfig) -> Result<Arc<dyn crate::holder::Holder>, ApiErr
             StatusCode::SERVICE_UNAVAILABLE,
             "unavailable",
             "the terminal holder is unreachable: this peer has no link to it",
-        )
-    })
-}
-
-fn herdr(config: &ServeConfig) -> Result<tiller_herdr::client::Cli, ApiError> {
-    config.herdr.clone().ok_or_else(|| {
-        ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "unavailable",
-            "herdr is unreachable: this peer has no herdr configured",
         )
     })
 }
@@ -651,7 +631,7 @@ async fn stream(
     input: tokio::io::Lines<impl AsyncBufRead + Send + Unpin + 'static>,
     output: &mut (impl AsyncWrite + Send + Unpin),
 ) -> Result<(), ServeError> {
-    let mirrors = Arc::new(Mirrors::new(&config.home));
+    let mirrors = Arc::new(Mirrors::new());
     let (stop_tx, stop) = watch::channel(false);
     let stop_tx = Arc::new(stop_tx);
     let body = match view(config, open, &pane, &mirrors, stop.clone()).await {
@@ -852,14 +832,7 @@ impl Typist {
     ) -> Result<Value, ApiError> {
         self.check(store, last, &frame.header())?;
         let input = terminal_keys(frame.keys.clone(), frame.text.clone())?;
-        let sent = type_into(
-            &self.mirrors,
-            self.config.herdr.clone(),
-            self.config.holder.clone(),
-            &self.pane,
-            input,
-        )
-        .await?;
+        let sent = type_into(&self.mirrors, self.config.holder.clone(), &self.pane, input).await?;
         to_value(input_sent(&self.session_id, sent))
     }
 
@@ -887,10 +860,9 @@ fn to_value(response: impl Serialize) -> Result<Value, ApiError> {
     serde_json::to_value(response).map_err(|error| ApiError::from(tiller_core::Error::from(error)))
 }
 
-/// The pane's mirror body: herdr's observe stream, or the holder's
-/// subscription for a pane in the terminal holder, fitted to the board when
-/// the open asked for it. One `closed` line for a holder pane whose child
-/// has exited.
+/// The pane's mirror body: the holder's subscription, fitted to the board
+/// when the open asked for it. One `closed` line for a pane whose child has
+/// exited.
 async fn view(
     config: &ServeConfig,
     open: &PaneOpen,
@@ -913,49 +885,29 @@ async fn view(
             ),
         )
     })?;
-    if ids::is_holder_pane(pane) {
-        let holder = holder(config)?;
-        let id = tiller_panes::PaneId::from(pane);
-        let lister = Arc::clone(&holder);
-        let listing = tokio::task::spawn_blocking(move || lister.list())
-            .await
-            .map_err(|error| ApiError::from(tiller_core::Error::Internal(error.to_string())))?
-            .map_err(|error| holder_error(pane, &error))?;
-        return match holder::running(&listing, &id) {
-            Ok(_) => Ok(crate::holder_mirror::stream(
-                holder,
-                id,
-                fit,
-                mirrors.leases(),
-                stop,
-                viewer,
-            )),
-            Err(tiller_panes::PanesError::Exited(_)) => {
-                let exit = listing.panes.iter().find(|found| found.pane == id);
-                Ok(crate::holder_mirror::closed(holder::exit_reason(
-                    exit.and_then(|found| found.exit.as_ref()),
-                )))
-            }
-            Err(error) => Err(holder_error(pane, &error)),
-        };
-    }
-    let herdr = herdr(config)?;
-    let (reader, asked) = (herdr.clone(), pane.to_owned());
-    let terminal = tokio::task::spawn_blocking(move || reader.terminal(&asked))
+    let holder = holder(config)?;
+    let id = tiller_panes::PaneId::from(pane);
+    let lister = Arc::clone(&holder);
+    let listing = tokio::task::spawn_blocking(move || lister.list())
         .await
-        .map_err(|error| ApiError::from(tiller_core::Error::Internal(error.to_string())))?;
-    match terminal {
-        Ok(Some(terminal)) => Ok(mirror::stream(
-            herdr,
-            pane.to_owned(),
-            terminal,
+        .map_err(|error| ApiError::from(tiller_core::Error::Internal(error.to_string())))?
+        .map_err(|error| holder_error(pane, &error))?;
+    match holder::running(&listing, &id) {
+        Ok(_) => Ok(crate::holder_mirror::stream(
+            holder,
+            id,
             fit,
-            mirrors.fits(),
+            mirrors.leases(),
             stop,
             viewer,
         )),
-        Ok(None) => Err(pane_gone(pane)),
-        Err(error) => Err(pane_error(pane, &error)),
+        Err(tiller_panes::PanesError::Exited(_)) => {
+            let exit = listing.panes.iter().find(|found| found.pane == id);
+            Ok(crate::holder_mirror::closed(holder::exit_reason(
+                exit.and_then(|found| found.exit.as_ref()),
+            )))
+        }
+        Err(error) => Err(holder_error(pane, &error)),
     }
 }
 

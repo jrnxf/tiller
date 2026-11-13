@@ -1,6 +1,6 @@
 //! The launch form (`authority.md` section 7, layer 1): the files a run's
-//! session starts from, written into its scratch directory, and the one
-//! line spawn types into the new pane.
+//! session starts from, written into its scratch directory, and the
+//! script the new pane runs.
 //!
 //! The role body, the approved memory and the brief go into one file
 //! passed with `--append-system-prompt-file`, so the brief and the memory
@@ -133,7 +133,7 @@ pub enum Start<'a> {
     Plain,
 }
 
-/// The files written for a launch, and the line that starts it.
+/// The files written for a launch, and the script that starts it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Launch {
     pub prompt: PathBuf,
@@ -145,8 +145,6 @@ pub struct Launch {
     /// The parts behind the hash: `role`, `settings`, `mcp`, `model`,
     /// `effort`, `tiller`, `claude` and `memory`.
     pub manifest: Value,
-    /// What spawn types into the pane, followed by Enter.
-    pub line: String,
     /// Set when the role's declared permission mode is not the one launched
     /// (auto mode is unavailable); spawn shows it in its output.
     pub mode_note: Option<String>,
@@ -557,14 +555,13 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
     fs::set_permissions(spec.scratch, fs::Permissions::from_mode(0o700))?;
 
     let dir = spec.scratch;
-    let mut launch = Launch {
+    let launch = Launch {
         prompt: dir.join("prompt.md"),
         settings: dir.join("settings.json"),
         mcp: dir.join("mcp.json"),
         script: dir.join("launch.sh"),
         config_hash: rendered.config_hash,
         manifest: rendered.manifest,
-        line: String::new(),
         mode_note: rendered.mode_note,
     };
     write_new(&launch.prompt, rendered.prompt.as_bytes(), 0o600)?;
@@ -593,7 +590,6 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
     write_new(&launch.script, text.as_bytes(), 0o700)?;
     // Last, so a launch refused for any other reason records nothing.
     trust::record(spec.claude_config, spec.worktree)?;
-    launch.line = format!("sh {}", sh_quote(&launch.script.to_string_lossy()));
     Ok(launch)
 }
 
@@ -646,14 +642,13 @@ pub fn write_refreshed(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
     }
     let rendered = render(spec)?;
     let dir = spec.scratch;
-    let mut launch = Launch {
+    let launch = Launch {
         prompt: dir.join("prompt.md"),
         settings: dir.join("settings.json"),
         mcp: dir.join("mcp.json"),
         script: dir.join(format!("relaunch-{}.sh", spec.session_id)),
         config_hash: rendered.config_hash,
         manifest: rendered.manifest,
-        line: String::new(),
         mode_note: rendered.mode_note,
     };
     replace(&launch.prompt, rendered.prompt.as_bytes(), 0o600)?;
@@ -680,7 +675,6 @@ pub fn write_refreshed(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
     preflight(&text, &command, &launch)?;
     replace(&launch.script, text.as_bytes(), 0o700)?;
     trust::record(spec.claude_config, spec.worktree)?;
-    launch.line = format!("sh {}", sh_quote(&launch.script.to_string_lossy()));
     Ok(launch)
 }
 
@@ -689,12 +683,12 @@ pub fn write_refreshed(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
 /// reuses unchanged: the run's brief and hash stay what they were. The
 /// script is named for the session and how it starts
 /// (`relaunch-<session>.sh`, `resume-<session>.sh`) and replaces only an
-/// earlier script of that same name. Returns the launch, whose line a
-/// herdr pane takes typed and whose script a holder pane runs.
+/// earlier script of that same name. Returns the launch, whose script a
+/// holder pane runs.
 pub fn write_again(spec: &AgainSpec<'_>, start: Start<'_>) -> Result<Launch, SpawnError> {
     absolute("the worktree", spec.worktree)?;
     absolute("the scratch directory", spec.scratch)?;
-    let mut launch = Launch {
+    let launch = Launch {
         prompt: spec.scratch.join("prompt.md"),
         settings: spec.scratch.join("settings.json"),
         mcp: spec.scratch.join("mcp.json"),
@@ -704,7 +698,6 @@ pub fn write_again(spec: &AgainSpec<'_>, start: Start<'_>) -> Result<Launch, Spa
         }),
         config_hash: String::new(),
         manifest: Value::Null,
-        line: String::new(),
         mode_note: None,
     };
     let refused = |file: &Path, what: &str| {
@@ -769,7 +762,6 @@ pub fn write_again(spec: &AgainSpec<'_>, start: Start<'_>) -> Result<Launch, Spa
     write_new(&partial, text.as_bytes(), 0o700)?;
     fs::rename(&partial, &launch.script)?;
     trust::record(spec.claude_config, spec.worktree)?;
-    launch.line = format!("sh {}", sh_quote(&launch.script.to_string_lossy()));
     Ok(launch)
 }
 
@@ -834,7 +826,6 @@ mod tests {
             script: "/home/user/run/launch.sh".into(),
             config_hash: String::new(),
             manifest: Value::Null,
-            line: String::new(),
             mode_note: None,
         };
         script(
@@ -893,7 +884,6 @@ mod tests {
             script: dir.join("launch.sh"),
             config_hash: String::new(),
             manifest: Value::Null,
-            line: String::new(),
             mode_note: None,
         }
     }

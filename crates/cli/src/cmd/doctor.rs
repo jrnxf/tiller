@@ -1,5 +1,6 @@
 //! `tiller doctor` (P43, T2.8): the host's health checks, read only. It
-//! reports the versions of the tools Tiller drives, whether herdr answers,
+//! reports the versions of the tools Tiller drives, whether the terminal
+//! holder answers,
 //! whether the packaged hook registration is whole, the stored `merge_gate`
 //! of every project and whether `config.toml` is newer than its last
 //! `config.changed` event, who owns the host (the owner marker and whether a
@@ -8,7 +9,7 @@
 //! the error's `current`.
 //!
 //! The tools are found the way the daemon and spawn find them:
-//! `TILLER_HERDR`, `TILLER_QUOTA_AXI` and `TILLER_GH` first, then the
+//! `TILLER_QUOTA_AXI` and `TILLER_GH` first, then the
 //! `[spawn]` tables of `config.toml`, then the bare program name.
 //!
 //! The probes run at the same time, and the report waits for them at most
@@ -26,14 +27,13 @@ use tiller_agents::roles::Role;
 use tiller_agents::spawn::config::SpawnConfig;
 use tiller_core::Timestamp;
 use tiller_daemon::dto::{CheckStatus, DoctorCheck, DoctorGate, DoctorReport};
-use tiller_herdr::client::{Cli, Herdr};
 use tiller_holder::lock::{live_pid, lock_path};
 use tiller_observe::hooks::{EVENTS, Handler};
 use tiller_panes::{HolderClient, run_dir, socket_path};
 use tiller_reconcile::tools::{self, PROBE_TIMEOUT, read_version, version_parts};
 
 use super::admin::{config_file, load_config};
-use super::spawn::{herdr_program, words};
+use super::spawn::words;
 use crate::app::{App, Done, Failure, Outcome};
 use crate::daemon::env_command;
 
@@ -65,28 +65,6 @@ fn tool(name: &str, required: bool, program: &[OsString]) -> Check {
             Check::new(name, required, Status::Ok, "answers --version").version(Some(version))
         }
         Err(error) => Check::missing(name, required, error),
-    }
-}
-
-/// herdr must answer a snapshot, which also reports the server's version.
-fn herdr(program: Vec<OsString>) -> Check {
-    match Cli::local()
-        .program(program)
-        .timeout(PROBE_TIMEOUT)
-        .snapshot()
-    {
-        Ok(snapshot) => Check::new(
-            "herdr",
-            true,
-            Status::Ok,
-            format!(
-                "reachable, {} workspaces and {} panes",
-                snapshot.workspaces.len(),
-                snapshot.panes.len()
-            ),
-        )
-        .version(snapshot.version),
-        Err(error) => Check::missing("herdr", true, error.to_string()),
     }
 }
 
@@ -326,8 +304,7 @@ fn merge_app(home: &Path) -> Check {
 }
 
 /// `[notify] command`, the owner's notification hook (`terminal-holder.md`
-/// 7). Optional: with none set, notifications are off once herdr is gone,
-/// and herdr shows them until then.
+/// 7). Optional: with none set, notifications are off.
 fn notify(table: Option<&toml::Table>) -> Check {
     const NAME: &str = "notify";
     let argv: Vec<&str> = table
@@ -347,7 +324,7 @@ fn notify(table: Option<&toml::Table>) -> Check {
             NAME,
             false,
             Status::Warn,
-            "owner notifications are off: no [notify] command is set (herdr shows them until the cutover)",
+            "owner notifications are off: no [notify] command is set",
         ),
     }
 }
@@ -911,10 +888,6 @@ pub fn report(app: &App) -> Report {
 
     probes.tool("git", true, vec!["git".into()]);
     probes.tool("treehouse", true, words(&spawn.treehouse));
-    let program = herdr_program(spawn);
-    probes.one(Check::missing("herdr", true, late()), move || {
-        herdr(program)
-    });
     let program = [OsString::from(&spawn.claude)];
     probes.one(Check::missing("claude", true, late()), move || {
         claude(&program)

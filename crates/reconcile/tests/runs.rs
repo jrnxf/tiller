@@ -147,7 +147,7 @@ fn cut_is_recorded_only_from_harness_evidence() {
     w.observe(&silent, tiller_core::domain::Activity::Working, ago(45));
     let t0 = now();
     w.pass(t0);
-    w.herdr.remove_pane("w2:p1");
+    w.remove_pane("w2:p1");
     w.pass(t0.plus_minutes(1));
     for session in [&dead, &silent] {
         let run = w.run_of(session);

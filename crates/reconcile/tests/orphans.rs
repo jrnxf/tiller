@@ -6,7 +6,6 @@ mod common;
 use common::*;
 use tiller_core::domain::{AttentionKind, Finish, RunOutcome};
 use tiller_core::state::runs::EndRun;
-use tiller_herdr::fake::Screen;
 
 /// R15: a pane whose run has ended but whose agent is alive is never
 /// closed; the orchestrator is asked, and the developer half an hour later.
@@ -34,7 +33,10 @@ fn alive_pane_without_run_is_never_closed() {
         w.launcher.closed().is_empty(),
         "a live agent is never closed"
     );
-    assert!(w.herdr.fake_pane("w2:p1").screen == Screen::Idle);
+    assert_eq!(
+        w.pane("w2:p1").state,
+        tiller_panes::message::PaneState::Running
+    );
     let notes = w.notes();
     let stop = format!("stop its agent with tiller agent stop {worker}");
     assert!(notes.iter().any(|n| n.body.contains(&stop)), "{notes:?}");
@@ -103,7 +105,7 @@ fn dead_pane_of_ended_run_is_closed_and_clean_worktree_returned() {
         )
         .unwrap();
     // The agent exited; a shell prompt sits in the pane.
-    w.herdr.set_screen("w2:p1", Screen::Shell);
+    w.exit_pane("w2:p1");
     let report = w.pass(t0.plus_minutes(1));
     assert!(report.did("R15 pane w2:p1 closed"), "{report:?}");
     assert_eq!(w.launcher.closed(), vec!["w2:p1".to_owned()]);
@@ -144,7 +146,7 @@ fn dead_pane_of_ended_run_is_closed_and_clean_worktree_returned() {
             },
         )
         .unwrap();
-    v.herdr.set_screen("w2:p1", Screen::Shell);
+    v.exit_pane("w2:p1");
     let report = v.pass(t0.plus_minutes(1));
     assert!(!report.did("returned"), "{report:?}");
     assert!(!v.event_kinds().contains(&"run.cleaned".to_owned()));
@@ -177,7 +179,7 @@ fn refused_return_goes_to_the_developer() {
             },
         )
         .unwrap();
-    w.herdr.set_screen("w2:p1", Screen::Shell);
+    w.exit_pane("w2:p1");
     let report = w.pass(t0.plus_minutes(1));
     assert!(report.did("return failed: recovery item"), "{report:?}");
     assert!(
@@ -262,10 +264,7 @@ fn alive_pane_naming_only_its_run_names_its_session() {
             },
         )
         .unwrap();
-    w.herdr.set_tokens(
-        "w2:p1",
-        std::collections::BTreeMap::from([("run".to_owned(), run.id.clone())]),
-    );
+    w.set_meta("w2:p1", &[("run", &run.id)], &["session"]);
     w.pass(t0.plus_minutes(1));
     let stop = format!("stop its agent with tiller agent stop {worker}");
     let notes = w.notes();
@@ -273,9 +272,9 @@ fn alive_pane_naming_only_its_run_names_its_session() {
 }
 
 /// R15: a run can end with work its PR has not landed yet. The agent exits
-/// first, so the pane loses its session before it closes; once the work
-/// lands, the closed pane is still found by its `run` token and the clean
-/// worktree is returned.
+/// first, so its pane is an exited one before it closes; once the work
+/// lands, the closed pane's run is still found and the clean worktree is
+/// returned.
 #[test]
 fn worktree_clean_after_the_pane_closed_is_returned() {
     let mut w = World::new();
@@ -298,18 +297,14 @@ fn worktree_clean_after_the_pane_closed_is_returned() {
             },
         )
         .unwrap();
-    // The agent exits: its session ends while the pane still shows a shell.
+    // The agent exits: its session ends while the pane stays, exited.
     w.store_mut()
         .session_end(&daemon(), &worker, "prompt_input_exit")
         .unwrap();
-    w.herdr.set_screen("w2:p1", Screen::Shell);
-    w.pass(t0.plus_minutes(1));
-    assert_eq!(
-        w.count("SELECT count(*) FROM panes WHERE pane_id = 'w2:p1' AND session_id IS NULL"),
-        1,
-        "the pane row no longer names the ended session"
-    );
-    w.herdr.remove_pane("w2:p1");
+    w.exit_pane("w2:p1");
+    let report = w.pass(t0.plus_minutes(1));
+    assert!(!report.did("returned"), "unlanded work stays: {report:?}");
+    w.remove_pane("w2:p1");
     let report = w.pass(t0.plus_minutes(2));
     assert!(!report.did("returned"), "unlanded work stays: {report:?}");
 
@@ -357,7 +352,7 @@ fn worktree_of_an_ended_run_with_a_successor_is_kept() {
             rusqlite::params![next, t0.plus_minutes(1), run.id],
         )
         .unwrap();
-    w.herdr.set_screen("w2:p1", Screen::Shell);
+    w.exit_pane("w2:p1");
     let report = w.pass(t0.plus_minutes(2));
     assert!(
         !report.did("returned"),

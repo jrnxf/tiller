@@ -39,8 +39,8 @@ pub fn is_ulid(text: &str) -> bool {
 }
 
 /// True when `pane` is a terminal holder pane id: `p` and a ULID
-/// (`terminal-holder.md` 2.4). Any other pane id is herdr's (`w2:p1`). A
-/// session's stored pane id alone says which of the two runs its pane.
+/// (`terminal-holder.md` 2.4). Any other pane id was stored before the
+/// cutover and names no pane the holder has.
 pub fn is_holder_pane(pane: &str) -> bool {
     pane.strip_prefix('p').is_some_and(is_ulid)
 }
@@ -107,8 +107,8 @@ mod tests {
     #[test]
     fn a_holder_pane_id_is_p_and_a_ulid() {
         assert!(is_holder_pane(&format!("p{}", new_ulid())));
-        for herdr in ["w2:p1", "p1", "p", "", "w1:p01ARZ3NDEKTSV4RRFFQ69G5FAV"] {
-            assert!(!is_holder_pane(herdr), "{herdr}");
+        for other in ["w2:p1", "p1", "p", "", "w1:p01ARZ3NDEKTSV4RRFFQ69G5FAV"] {
+            assert!(!is_holder_pane(other), "{other}");
         }
         assert!(!is_holder_pane(&new_ulid()));
     }

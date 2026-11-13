@@ -229,7 +229,8 @@ pub struct AgentRow {
     pub activity: String,
     pub activity_observed_at: Option<String>,
     pub last_status_line: Option<String>,
-    pub herdr_name: Option<String>,
+    /// The agent's name (`protocol.md` 6.1), such as `alpha-1-build`.
+    pub name: Option<String>,
     pub card_id: Option<String>,
     pub host_id: String,
     #[schema(no_recursion)]
@@ -303,8 +304,8 @@ pub struct AgentsResponse {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct EventLine {
     pub at: String,
-    /// `tiller`, `hook`, `herdr`, `transcript`, `liveness`, `status_line` or
-    /// `gh`.
+    /// `tiller`, `hook`, `holder`, `transcript`, `liveness`, `status_line`
+    /// or `gh`.
     pub source: String,
     pub text: String,
     /// `warn` or `bad`, for a line the page colors.
@@ -322,8 +323,8 @@ pub struct RunDetail {
     pub started_at: String,
     pub ended_at: Option<String>,
     pub events: Vec<EventLine>,
-    /// The last lines of the run's live herdr pane, at most 200; empty when
-    /// the run has no live pane or herdr did not answer.
+    /// The last lines of the run's live pane, at most 200; empty when the
+    /// run has no live pane or the terminal holder did not answer.
     pub pane_tail: Vec<String>,
 }
 
@@ -523,17 +524,17 @@ pub struct Machine {
     pub capacity: Option<i64>,
     pub free_slots: Option<i64>,
     pub last_seen_at: Option<String>,
-    /// `herdr_link_down`, `host_asleep`, `poll_failed` or `never_seen`; for a
-    /// paired peer also `peer_link_down`, `peer_refused` or `peer_version`.
+    /// `holder_down` for this host while its terminal holder does not answer;
+    /// for a paired peer `never_seen`, `peer_link_down`, `peer_refused` or
+    /// `peer_version`.
     pub stale_reason: Option<String>,
     /// The `tiller version` string this host runs, for example
     /// `0.1.0-pre.17`: this host's own build, or what a paired peer reports
-    /// on its own row. Absent for a herdr-only machine and for a peer that
-    /// has not reported one.
+    /// on its own row. Absent for a peer that has not reported one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     /// A paired peer's link state (`protocol.md` 10.2); absent for this
-    /// host and for a herdr-only machine.
+    /// host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<LinkState>,
     /// `read` or `act`, for a paired peer.
@@ -1537,9 +1538,6 @@ pub struct HostConfig {
     /// `attach.terminal`; absent when unset, so Open in terminal only
     /// focuses.
     pub attach_terminal: Option<String>,
-    /// `herdr.terminal`, the key `attach.terminal` replaces; absent when
-    /// unset.
-    pub herdr_terminal: Option<String>,
     /// `stop_hook_mode`: `off`, `observe` or `block-once`. An unset or
     /// unknown value reads as `observe`.
     pub stop_hook_mode: String,
@@ -2087,14 +2085,14 @@ pub struct TerminalOpen {
     /// 7.4).
     #[serde(default)]
     pub host: Option<String>,
-    /// The board's own size for the pane: herdr resizes the pane to it while
-    /// the stream is open and back when it ends (Terminal mirror, Fit).
+    /// The board's own size for the pane: the stream leases the pane at it
+    /// in the terminal holder while it is open (Terminal mirror, Fit).
     /// Absent means the pane keeps its size and only the picture scales.
     #[serde(default)]
     pub fit: Option<TerminalFit>,
 }
 
-/// The size the Fit asks herdr to give a pane, in cells.
+/// The size the Fit asks the terminal holder to give a pane, in cells.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TerminalFit {
@@ -2132,7 +2130,7 @@ pub struct TerminalHistoryAsk {
     pub host: Option<String>,
 }
 
-/// The pane's recent rows as herdr renders them: wrapped at the pane's
+/// The pane's recent rows as the terminal holder renders them: wrapped at the pane's
 /// width, oldest first, the screen itself last, with their colors as ANSI
 /// escapes and rows split by `\n`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -2151,8 +2149,8 @@ pub struct TerminalTailAsk {
     pub host: Option<String>,
 }
 
-/// The pane's visible screen as herdr renders it, one row per line split by
-/// `\n`, colors as ANSI escapes, and the pane's size in cells.
+/// The pane's visible screen as the terminal holder renders it, one row per
+/// line split by `\n`, colors as ANSI escapes, and the pane's size in cells.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct TerminalTail {
     pub session_id: String,
@@ -2166,7 +2164,7 @@ pub struct TerminalTail {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TerminalInput {
-    /// Keys pressed in order, as `herdr pane send-keys` names them:
+    /// Keys pressed in order, as the terminal holder names them:
     /// `enter`, `esc`, `ctrl+c`, `left`, `space`, or one character. Up to 64.
     #[serde(default)]
     pub keys: Option<Vec<String>>,
@@ -2272,17 +2270,17 @@ pub enum TerminalLine {
     /// The pane's size in cells. It opens the stream and comes again when
     /// the pane is resized; a full frame follows it.
     Size { cols: u16, rows: u16 },
-    /// One herdr frame: the ANSI bytes, base64. A `full` frame redraws the
+    /// One frame: the ANSI bytes, base64. A `full` frame redraws the
     /// whole screen; the frames after it are diffs, `seq` counting up by
     /// one.
     Frame { seq: u64, full: bool, bytes: String },
     /// The pane closed; the stream ends.
     Closed { reason: Option<String> },
-    /// herdr stopped answering; the stream ends.
+    /// The terminal holder stopped answering; the stream ends.
     Unavailable { message: String },
-    /// herdr would not resize the pane for the Fit, most often because
-    /// another client controls it. The stream goes on at the pane's own size,
-    /// with a `size` line next.
+    /// The Fit does not reach the pane: a peer paired with a `read` scope,
+    /// or a peer that has not said which pane the agent is in. The stream
+    /// goes on at the pane's own size, with a `size` line next.
     Unfit { message: String },
 }
 

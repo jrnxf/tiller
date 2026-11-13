@@ -3,7 +3,7 @@
 //! compares what it did with what Firstmate did.
 //!
 //! A replay builds a sandbox (a temporary Tiller home with the bundle
-//! imported, a git origin per project and the fake herdr), then for each
+//! imported, a git origin per project and the fake terminal holder), then for each
 //! ask: runs the real `UserPromptSubmit` hook, hands the turn to an
 //! [`Orchestrator`], applies its decisions through the same core and spawn
 //! functions the CLI calls, ends each stubbed run, and runs the real `Stop`

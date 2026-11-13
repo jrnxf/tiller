@@ -48,10 +48,8 @@ use tiller_core::state::projects::meta;
 use tiller_core::state::stop_hook;
 use tiller_core::state::{get as get_row, resolve_id};
 use tiller_core::{Actor, Applied, Ctx, Error, Store, Timestamp, ids};
-use tiller_herdr::client::{Cli, Herdr, HerdrError};
-use tiller_herdr::front::{OpenError, PROBE_TIMEOUT, Terminal, Wait, open_agent};
-use tiller_herdr::poller::Registry;
-use tiller_herdr::routed::Routed;
+use tiller_panes::open::Terminal;
+use tiller_poll::Registry;
 use tokio::sync::watch;
 
 use crate::assets::{self, Assets};
@@ -90,10 +88,8 @@ pub struct Inner {
     pub pollers: Registry,
     /// Every paired peer's link (`protocol.md` 10.2).
     pub peers: Arc<Peers>,
-    /// The local herdr server, for focus and pane tails.
-    pub herdr: Cli,
-    /// The terminal app "Open in herdr" brings to the front, from
-    /// `[herdr] terminal`; none means a focus only.
+    /// The terminal app Open in terminal opens an agent's pane in, from
+    /// `[attach] terminal`; none refuses the open.
     pub terminal: Option<Arc<dyn Terminal>>,
     pub started_at: Timestamp,
     /// Tool versions, filled in once after start.
@@ -1350,11 +1346,9 @@ async fn run(
     }
     let (mut detail, pane) = read(&state, move |store| views::run_detail(store, &id)).await?;
     if let Some(target) = pane {
-        let herdr = state.0.herdr.clone();
         let holder = state.0.holder.clone();
         if let Ok(tail) =
-            tokio::task::spawn_blocking(move || pane_tail_of(herdr, holder.as_deref(), target))
-                .await
+            tokio::task::spawn_blocking(move || pane_tail_of(holder.as_deref(), target)).await
         {
             detail.pane_tail = tail;
         }
@@ -1362,27 +1356,16 @@ async fn run(
     Ok(Json(detail))
 }
 
-/// A pane's tail read through herdr, or the terminal holder for a holder
-/// pane (its visible screen), or nothing when neither can read it. It
-/// blocks.
-pub(crate) fn pane_tail_of(
-    herdr: Cli,
-    holder: Option<&dyn Holder>,
-    target: PaneTarget,
-) -> Vec<String> {
-    if ids::is_holder_pane(&target.pane) {
-        let Some(holder) = holder else {
-            return Vec::new();
-        };
-        let id = tiller_panes::PaneId::from(target.pane.as_str());
-        return holder
-            .screen(&id, tiller_panes::Read::Visible, tiller_panes::Format::Text)
-            .map(|screen| pane_tail(&screen.text(), PANE_TAIL))
-            .unwrap_or_default();
-    }
-    herdr
-        .read_visible(&target.pane)
-        .map(|screen| pane_tail(&screen, PANE_TAIL))
+/// A pane's tail: its visible screen in the terminal holder, or nothing
+/// when the holder cannot read it. It blocks.
+pub(crate) fn pane_tail_of(holder: Option<&dyn Holder>, target: PaneTarget) -> Vec<String> {
+    let Some(holder) = holder else {
+        return Vec::new();
+    };
+    let id = tiller_panes::PaneId::from(target.pane.as_str());
+    holder
+        .screen(&id, tiller_panes::Read::Visible, tiller_panes::Format::Text)
+        .map(|screen| pane_tail(&screen.text(), PANE_TAIL))
         .unwrap_or_default()
 }
 
@@ -1650,7 +1633,7 @@ async fn run_poller(
         return Err(no_poller(source).into());
     }
     let deadline = tokio::time::Instant::now() + POLL_NOW_WAIT;
-    let polled = |health: &tiller_herdr::poller::Health| {
+    let polled = |health: &tiller_poll::Health| {
         health
             .last_attempt_at
             .is_some_and(|at| at.as_millis() >= asked.as_millis())
@@ -2276,7 +2259,7 @@ impl Mutation {
         let id = target.as_deref().unwrap_or_default();
         let controlled = match self.parsed {
             Parsed::Interrupt => {
-                return Ok(interrupt_here(store, ctx, &hands.panes()?, id)?.response());
+                return Ok(interrupt_here(store, ctx, hands.panes(), id)?.response());
             }
             Parsed::PromptAnswer(option, screen) => {
                 return answer_here(store, ctx, hands, id, option, &screen);
@@ -2376,14 +2359,10 @@ pub(crate) fn start_refusal(error: StartError, suspect: impl FnOnce(&Error)) -> 
     }
 }
 
-/// This machine's panes: herdr's, and the terminal holder's.
-type Panes = Routed<Cli, Arc<dyn tiller_panes::Panes>>;
-
 /// What `peer serve` holds for a forwarded mutation that needs more than
 /// the store: the orchestrator starter, and the panes an agent verb reaches.
 pub(crate) struct Hands<'a> {
     pub(crate) starter: Option<&'a dyn OrchestratorStart>,
-    pub(crate) herdr: Option<&'a Cli>,
     pub(crate) holder: Option<&'a Arc<dyn Holder>>,
     /// The input rate a prompt answer spends, as the board's own does.
     pub(crate) mirrors: &'a Mirrors,
@@ -2395,26 +2374,13 @@ impl Hands<'_> {
             .ok_or_else(|| Error::Unavailable("this daemon cannot control agents".into()).into())
     }
 
-    /// This machine's panes, routed to herdr or the terminal holder.
-    fn panes(&self) -> Result<Panes, ApiError> {
-        Ok(Routed::new(
-            herdr_of(self.herdr)?.clone(),
+    /// This machine's panes: the terminal holder's.
+    fn panes(&self) -> tiller_agents::pane::Holder<'_> {
+        tiller_agents::pane::Holder::new(
             self.holder
-                .cloned()
-                .map(|holder| -> Arc<dyn tiller_panes::Panes> { holder }),
-        ))
-    }
-}
-
-/// herdr, or the refusal for a `peer serve` started without it.
-fn herdr_of(herdr: Option<&Cli>) -> Result<&Cli, ApiError> {
-    herdr.ok_or_else(|| {
-        ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "unavailable",
-            "herdr is unreachable: this daemon has no link to it",
+                .map(|holder| -> &dyn tiller_panes::Panes { holder.as_ref() }),
         )
-    })
+    }
 }
 
 /// Escape to a working agent's pane, then the proof its turn ended: the
@@ -2422,7 +2388,7 @@ fn herdr_of(herdr: Option<&Cli>) -> Result<&Cli, ApiError> {
 fn interrupt_here(
     store: &mut Store,
     ctx: &Ctx,
-    panes: &Panes,
+    panes: tiller_agents::pane::Holder<'_>,
     session: &str,
 ) -> Result<Done, ApiError> {
     // The pane calls here reach this machine's panes only, and a pane id
@@ -2440,7 +2406,7 @@ fn interrupt_here(
 fn interrupt_run(
     store: &mut Store,
     ctx: &Ctx,
-    panes: &Panes,
+    panes: tiller_agents::pane::Holder<'_>,
     session: &str,
 ) -> tiller_core::Result<Done> {
     let id = resolve_id(store.conn(), "sessions", "session", session)?;
@@ -2523,13 +2489,13 @@ fn answer_here(
     }
     spend_input(hands.mirrors)?;
     let wait = waiting_of(store, &session_id)?.ok_or_else(screen_changed)?;
-    let dialog = dialog_on(hands.herdr, hands.holder, &pane, &wait)?
+    let dialog = dialog_on(hands.holder, &pane, &wait)?
         .filter(|dialog| dialog.prompt.screen == screen)
         .ok_or_else(screen_changed)?;
     let keys = dialog
         .keys(option)
         .ok_or_else(|| ApiError::usage(format!("the prompt has no option {option}")))?;
-    press(hands.herdr, hands.holder, &pane, &keys)?;
+    press(hands.holder, &pane, &keys)?;
     let data = answer_data(&session_id, option);
     store.key_record(ctx, PROMPT_ANSWER, ("session", &session_id), &data)?;
     // As the board's own answer does: the next answer reads the redrawn
@@ -2537,7 +2503,7 @@ fn answer_here(
     let until = std::time::Instant::now() + DIALOG_LEFT_WAIT;
     while std::time::Instant::now() + DIALOG_LEFT_EVERY < until {
         std::thread::sleep(DIALOG_LEFT_EVERY);
-        match dialog_on(hands.herdr, hands.holder, &pane, &wait) {
+        match dialog_on(hands.holder, &pane, &wait) {
             Ok(Some(dialog)) if dialog.prompt.screen == screen => continue,
             _ => break,
         }
@@ -3175,14 +3141,15 @@ async fn delete_project(
     if request.confirm.trim() != id {
         return Err(ApiError::usage(format!("type {id} to delete the project")));
     }
-    let herdr = state.0.herdr.clone();
+    let holder = state.0.holder.clone();
     mutate(
         &state,
         key(&request.idempotency_key)?,
         move |store, ctx, _| {
             let waits = tiller_agents::control::Waits::default();
-            let deleted = tiller_agents::control::delete_project(store, ctx, &herdr, &waits, &id)
-                .map_err(|error| stopped_or(&id, error))?;
+            let deleted =
+                tiller_agents::control::delete_project(store, ctx, panes(&holder), &waits, &id)
+                    .map_err(|error| stopped_or(&id, error))?;
             Done::of(deleted)
         },
     )
@@ -4075,7 +4042,6 @@ fn host_config_of(home: &std::path::Path, boundary: Option<String>) -> HostConfi
         };
     HostConfig {
         attach_terminal: text(host_config::ATTACH_TERMINAL),
-        herdr_terminal: text(host_config::HERDR_TERMINAL),
         stop_hook_mode: text(host_config::STOP_HOOK_MODE)
             .filter(|mode| host_config::STOP_HOOK_MODES.contains(&mode.as_str()))
             .unwrap_or_else(|| "observe".to_owned()),
@@ -4455,7 +4421,7 @@ async fn retire_project(
     guard(&state, &headers).await?;
     let request: RetireProject = body(&bytes)?;
     not_forwarded(&state, request.host.as_deref(), "a project retire").await?;
-    let herdr = state.0.herdr.clone();
+    let holder = state.0.holder.clone();
     let stop_agents = request.stop_agents;
     mutate(
         &state,
@@ -4465,7 +4431,7 @@ async fn retire_project(
             let retired = tiller_agents::control::retire_project(
                 store,
                 ctx,
-                &herdr,
+                panes(&holder),
                 &waits,
                 &id,
                 stop_agents,
@@ -4793,43 +4759,13 @@ pub(crate) fn remote_pane(label: &str, what: &str) -> ApiError {
     .hint(&format!("open it on {label} through its peer link"))
 }
 
-/// herdr's answer to a pane call, as the board API's error.
-pub(crate) fn pane_error(pane: &str, error: &HerdrError) -> ApiError {
-    match error {
-        HerdrError::Api { code, .. } if code == "pane_not_found" => pane_gone(pane),
-        HerdrError::NotFound { .. } => pane_gone(pane),
-        HerdrError::Api { code, message, .. } if code == "invalid_key" => {
-            ApiError::usage(format!("herdr refused a key: {message}"))
-        }
-        error => ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "unavailable",
-            error.to_string(),
-        ),
-    }
-}
-
-pub(crate) fn pane_gone(pane: &str) -> ApiError {
-    let mut error = ApiError::new(
-        StatusCode::NOT_FOUND,
-        "not_found",
-        format!("herdr has no pane {pane}; the agent's pane closed"),
-    );
-    error.body.error.entity = Some("pane".to_owned());
-    error.body.error.id = Some(pane.to_owned());
-    error
-}
-
-/// Where the peer's rows put an agent's pane, which says what a Fit on it
-/// is: a lease in the peer's terminal holder, or a turn on a herdr pane.
+/// Whether the peer's rows put an agent in a pane, which a Fit leases in
+/// the peer's terminal holder.
 #[derive(Debug, PartialEq, Eq)]
 enum PeerPane {
     Holder,
-    Herdr,
-    /// The peer's rows hold no pane for the session yet, so neither
-    /// answer is safe: a turn on a holder pane refuses a second view its
-    /// lease, and a lease on a herdr pane lets two views give one pane
-    /// back.
+    /// The peer's rows hold no pane for the session yet, so a Fit has no
+    /// pane to lease.
     Unknown,
 }
 
@@ -4848,8 +4784,7 @@ fn peer_pane_kind(view: &PeerView, session: &str) -> PeerPane {
         .and_then(|queries| find(&queries.agents.orchestrators, session))
         .and_then(|row| row.pane_id.as_deref());
     match pane {
-        Some(pane) if ids::is_holder_pane(pane) => PeerPane::Holder,
-        Some(_) => PeerPane::Herdr,
+        Some(_) => PeerPane::Holder,
         None => PeerPane::Unknown,
     }
 }
@@ -4860,12 +4795,12 @@ fn peer_pane_kind(view: &PeerView, session: &str) -> PeerPane {
 #[utoipa::path(post, path = "/api/v1/agents/{session}/terminal", tag = "mutations", request_body = TerminalOpen,
     params(("session" = String, Path)),
     responses((status = 200, content_type = "application/x-ndjson", body = TerminalLine,
-               description = "One `TerminalLine` per line: `size`, then `frame`s, and a `size` again for each new PTY size, until `closed` or `unavailable` or the end of the body; `unfit` when the Fit does not reach the pane: herdr would not resize it, a peer is paired with a `read` scope, or a peer's rows hold no pane for the agent yet. A Fit on a pane in this host's own terminal holder is a size lease, and is never `unfit`"),
+               description = "One `TerminalLine` per line: `size`, then `frame`s, and a `size` again for each new PTY size, until `closed` or `unavailable` or the end of the body; `unfit` when the Fit does not reach the pane: a peer is paired with a `read` scope, or a peer's rows hold no pane for the agent yet. A Fit is a size lease in the terminal holder, and is never `unfit` on this host's own panes"),
               (status = 400, body = ErrorBody, description = "a `fit` outside 20 to 500 cols by 5 to 200 rows"),
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such agent, or its pane closed"),
               (status = 422, body = ErrorBody, description = "`refused`: the agent runs on a remote host"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: the peer refused the pane link"),
-              (status = 503, body = ErrorBody, description = "herdr, the terminal holder or the peer is unreachable, or too many terminal views are open")))]
+              (status = 503, body = ErrorBody, description = "the terminal holder or the peer is unreachable, or too many terminal views are open")))]
 async fn terminal(
     State(state): State<AppState>,
     Path(session): Path<String>,
@@ -4891,12 +4826,10 @@ async fn terminal(
     let to = addressed(&state, request.host.as_deref()).await?;
     let held = if to.is_peer() { Some(viewer()?) } else { None };
     // A peer's Fit sizes the pane on the peer only with an `act` pairing.
-    // On a pane in the peer's terminal holder each view's Fit is a lease of
-    // its own; on a herdr pane it takes its turn here, one per pane as on
-    // this host's own panes. The peer's rows say which it is, and a view
-    // opened before they hold the agent's pane opens with no Fit rather
-    // than take the other kind's answer.
-    let (mut peer_fit, mut turn, mut unfit) = (None, None, None);
+    // Each view's Fit is a lease of its own in the peer's terminal holder.
+    // A view opened before the peer's rows hold the agent's pane opens
+    // with no Fit.
+    let (mut peer_fit, mut unfit) = (None, None);
     if let (Addressed::Peer(view), Some((cols, rows))) = (&to, fit) {
         if view.scope != PeerScope::Act {
             unfit = Some(format!(
@@ -4906,23 +4839,6 @@ async fn terminal(
         } else {
             match peer_pane_kind(view, &session) {
                 PeerPane::Holder => peer_fit = Some(TerminalFit { cols, rows }),
-                PeerPane::Herdr => {
-                    if let Some(held) = state
-                        .0
-                        .mirrors
-                        .fits()
-                        .turn(&format!("peer:{}/{session}", view.host_id))
-                        .await
-                    {
-                        turn = Some(held);
-                        peer_fit = Some(TerminalFit { cols, rows });
-                    } else {
-                        unfit = Some(
-                            "another view holds a Fit on this pane, or is still giving it back"
-                                .to_owned(),
-                        );
-                    }
-                }
                 PeerPane::Unknown => {
                     unfit = Some(format!(
                         "{} has not said which pane this agent is in; the view shows the pane at its own size",
@@ -4961,7 +4877,6 @@ async fn terminal(
             stop_or_signed_out(&state, &headers),
             held,
             peer_fit.is_some(),
-            turn.take(),
             unfit.take(),
         );
         return Ok((
@@ -4975,47 +4890,18 @@ async fn terminal(
     }
     let (_, pane) = local_pane(&state, session).await?;
     let viewer = viewer()?;
-    if ids::is_holder_pane(&pane) {
-        return holder_terminal(&state, &headers, pane, fit, viewer).await;
-    }
-    let herdr = state.0.herdr.clone();
-    let asked = pane.clone();
-    let terminal = tokio::task::spawn_blocking(move || herdr.terminal(&asked))
-        .await
-        .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?;
-    let terminal = match terminal {
-        Ok(Some(terminal)) => terminal,
-        Ok(None) => return Err(pane_gone(&pane)),
-        Err(error) => return Err(pane_error(&pane, &error)),
-    };
-    let body = mirror::stream(
-        state.0.herdr.clone(),
-        pane,
-        terminal,
-        fit,
-        state.0.mirrors.fits(),
-        stop_or_signed_out(&state, &headers),
-        viewer,
-    );
-    Ok((
-        [
-            (header::CONTENT_TYPE, "application/x-ndjson"),
-            (header::CACHE_CONTROL, "no-store"),
-        ],
-        body,
-    )
-        .into_response())
+    holder_terminal(&state, &headers, pane, fit, viewer).await
 }
 
-/// Keys or a paste for the agent's pane, through herdr or the terminal
-/// holder, or over the pane link to a peer's (`protocol.md` 7.4, 10.7).
+/// Keys or a paste for the agent's pane, through the terminal holder, or
+/// over the pane link to a peer's (`protocol.md` 7.4, 10.7).
 #[utoipa::path(post, path = "/api/v1/agents/{session}/terminal/input", tag = "mutations", request_body = TerminalInput,
     params(("session" = String, Path)),
     responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody),
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
               (status = 422, body = ErrorBody, description = "`refused`: the agent runs on a remote host, its session ended, or no open stream shows a peer's pane"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: a read-scope pairing, or the peer refused the signed input"),
-              (status = 503, body = ErrorBody, description = "herdr or the peer is unreachable, or input came faster than 20 a second; nothing was sent"),
+              (status = 503, body = ErrorBody, description = "the terminal holder or the peer is unreachable, or input came faster than 20 a second; nothing was sent"),
               (status = 504, body = ErrorBody, description = "`forward_uncertain`: the peer link dropped before the peer answered; the input may have reached the pane")))]
 async fn terminal_input(
     State(state): State<AppState>,
@@ -5035,14 +4921,7 @@ async fn terminal_input(
         return Ok(Json(answer));
     }
     let (session_id, pane) = local_pane(&state, session).await?;
-    let sent = type_into(
-        &state.0.mirrors,
-        Some(state.0.herdr.clone()),
-        state.0.holder.clone(),
-        &pane,
-        input,
-    )
-    .await?;
+    let sent = type_into(&state.0.mirrors, state.0.holder.clone(), &pane, input).await?;
     Ok(Json(input_sent(&session_id, sent)))
 }
 
@@ -5060,42 +4939,16 @@ pub(crate) fn terminal_keys(
     .map_err(ApiError::usage)
 }
 
-/// Types keys (`Ok`) or a paste (`Err`) into `pane` on this machine: the
-/// holder's pane through the holder, any other through herdr, each input
-/// spending one of the mirror's budget. What was sent, for the answer.
+/// Types keys (`Ok`) or a paste (`Err`) into `pane` on this machine,
+/// through the terminal holder, each input spending one of the mirror's
+/// budget. What was sent, for the answer.
 pub(crate) async fn type_into(
     mirrors: &Mirrors,
-    herdr: Option<Cli>,
     holder: Option<Arc<dyn Holder>>,
     pane: &str,
     input: Result<Vec<String>, String>,
 ) -> Result<Value, ApiError> {
-    if ids::is_holder_pane(pane) {
-        return holder_input(mirrors, holder, pane, input).await;
-    }
-    let herdr = herdr.ok_or_else(|| {
-        ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "unavailable",
-            "herdr is unreachable: no herdr is configured",
-        )
-    })?;
-    spend_input(mirrors)?;
-    let target = pane.to_owned();
-    tokio::task::spawn_blocking(move || match input {
-        Ok(keys) => {
-            let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
-            herdr
-                .send_keys(&target, &keys)
-                .map(|()| json!({"keys": keys.len()}))
-        }
-        Err(text) => herdr
-            .send_text(&target, &text)
-            .map(|()| json!({"text": text.len()})),
-    })
-    .await
-    .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
-    .map_err(|error| pane_error(pane, &error))
+    holder_input(mirrors, holder, pane, input).await
 }
 
 /// The answer to an input that reached the pane.
@@ -5113,6 +4966,16 @@ pub(crate) fn input_sent(session_id: &str, sent: Value) -> MutationResponse {
         host: None,
         warning: None,
     }
+}
+
+/// The terminal holder as the agent controls reach it: a daemon started
+/// without one finds every pane unreachable.
+fn panes(holder: &Option<Arc<dyn Holder>>) -> tiller_agents::pane::Holder<'_> {
+    tiller_agents::pane::Holder::new(
+        holder
+            .as_deref()
+            .map(|holder| -> &dyn tiller_panes::Panes { holder }),
+    )
 }
 
 /// The terminal holder, or the refusal for a daemon started without one.
@@ -5300,53 +5163,37 @@ async fn read_dialog(
     pane: &str,
     wait: prompt::Wait,
 ) -> Result<Option<prompt::Dialog>, ApiError> {
-    let herdr = state.0.herdr.clone();
     let holder = state.0.holder.clone();
     let pane = pane.to_owned();
-    tokio::task::spawn_blocking(move || dialog_on(Some(&herdr), holder.as_ref(), &pane, &wait))
+    tokio::task::spawn_blocking(move || dialog_on(holder.as_ref(), &pane, &wait))
         .await
         .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
 }
 
 /// [`read_dialog`] on this thread, for `peer serve` too.
 pub(crate) fn dialog_on(
-    herdr: Option<&Cli>,
     holder: Option<&Arc<dyn Holder>>,
     pane: &str,
     wait: &prompt::Wait,
 ) -> Result<Option<prompt::Dialog>, ApiError> {
-    let screen = if ids::is_holder_pane(pane) {
-        let id = tiller_panes::PaneId::from(pane);
-        linked(holder.cloned())?
-            .screen(&id, tiller_panes::Read::Visible, tiller_panes::Format::Text)
-            .map_err(|error| holder_error(pane, &error))?
-            .text()
-    } else {
-        herdr_of(herdr)?
-            .read_visible(pane)
-            .map_err(|error| pane_error(pane, &error))?
-    };
+    let id = tiller_panes::PaneId::from(pane);
+    let screen = linked(holder.cloned())?
+        .screen(&id, tiller_panes::Read::Visible, tiller_panes::Format::Text)
+        .map_err(|error| holder_error(pane, &error))?
+        .text();
     Ok(prompt::read(&screen, wait))
 }
 
 /// Types an answer's keys into the pane, on this thread.
 fn press(
-    herdr: Option<&Cli>,
     holder: Option<&Arc<dyn Holder>>,
     pane: &str,
     keys: &[tiller_panes::Key],
 ) -> Result<(), ApiError> {
-    if ids::is_holder_pane(pane) {
-        let id = tiller_panes::PaneId::from(pane);
-        return linked(holder.cloned())?
-            .keys(&id, keys)
-            .map_err(|error| holder_error(pane, &error));
-    }
-    let names: Vec<String> = keys.iter().map(ToString::to_string).collect();
-    let names: Vec<&str> = names.iter().map(String::as_str).collect();
-    herdr_of(herdr)?
-        .send_keys(pane, &names)
-        .map_err(|error| pane_error(pane, &error))
+    let id = tiller_panes::PaneId::from(pane);
+    linked(holder.cloned())?
+        .keys(&id, keys)
+        .map_err(|error| holder_error(pane, &error))
 }
 
 /// An answer whose dialog is not on the screen any more.
@@ -5428,7 +5275,7 @@ async fn dialog_left(state: &AppState, pane: &str, wait: prompt::Wait, screen: &
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such agent, or its pane closed"),
               (status = 422, body = ErrorBody, description = "`refused`: the agent runs on a remote host"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: a read-scope pairing, or the peer refused the read"),
-              (status = 503, body = ErrorBody, description = "herdr or the peer is unreachable, or reads and input came faster than 20 a second")))]
+              (status = 503, body = ErrorBody, description = "the terminal holder or the peer is unreachable, or reads and input came faster than 20 a second")))]
 async fn prompt_read(
     State(state): State<AppState>,
     Path(session): Path<String>,
@@ -5473,7 +5320,7 @@ async fn prompt_read(
               (status = 409, body = ErrorBody, description = "`screen_changed`: the agent no longer waits, or the dialog on its screen is not the one `screen` names; nothing was sent"),
               (status = 422, body = ErrorBody, description = "`refused`: the agent runs on a remote host"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: a read-scope pairing, or the peer refused the answer"),
-              (status = 503, body = ErrorBody, description = "herdr or the peer is unreachable, or input came faster than 20 a second; nothing was sent"),
+              (status = 503, body = ErrorBody, description = "the terminal holder or the peer is unreachable, or input came faster than 20 a second; nothing was sent"),
               (status = 504, body = ErrorBody, description = "`forward_uncertain`: the peer link dropped before the peer answered; retry with the same key")))]
 async fn prompt_answer(
     State(state): State<AppState>,
@@ -5511,10 +5358,9 @@ async fn prompt_answer(
     let keys = dialog
         .keys(option)
         .ok_or_else(|| ApiError::usage(format!("the prompt has no option {option}")))?;
-    let herdr = state.0.herdr.clone();
     let holder = state.0.holder.clone();
     let target = pane.clone();
-    tokio::task::spawn_blocking(move || press(Some(&herdr), holder.as_ref(), &target, &keys))
+    tokio::task::spawn_blocking(move || press(holder.as_ref(), &target, &keys))
         .await
         .map_err(|error| ApiError::from(Error::Internal(error.to_string())))??;
     dialog_left(&state, &pane, wait, &request.screen).await;
@@ -5522,8 +5368,8 @@ async fn prompt_answer(
 }
 
 /// A new board size for the Fit an open stream holds on the agent's pane:
-/// sent to herdr's control session in place, or the stream's size lease
-/// moved in the terminal holder, or over the pane link to a peer's
+/// the stream's size lease moved in the terminal holder, or over the pane
+/// link to a peer's
 /// (`protocol.md` 7.4, 10.7).
 #[utoipa::path(post, path = "/api/v1/agents/{session}/terminal/fit", tag = "mutations", request_body = TerminalRefit,
     params(("session" = String, Path)),
@@ -5596,7 +5442,7 @@ pub(crate) async fn holder_history(
     Ok(screen.text())
 }
 
-/// The pane's scrollback, for the board to read back without herdr
+/// The pane's scrollback, for the board to read back
 /// (`protocol.md` 7.4). A POST, as the mirror is: it passes every mutation
 /// check, owner cookie included, though it writes nothing.
 #[utoipa::path(post, path = "/api/v1/agents/{session}/terminal/history", tag = "mutations", request_body = TerminalHistoryAsk,
@@ -5605,7 +5451,7 @@ pub(crate) async fn holder_history(
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such agent, or its pane closed"),
               (status = 422, body = ErrorBody, description = "`refused`: the agent runs on a remote host"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
-              (status = 503, body = ErrorBody, description = "herdr is unreachable")))]
+              (status = 503, body = ErrorBody, description = "the terminal holder is unreachable")))]
 async fn terminal_history(
     State(state): State<AppState>,
     Path(session): Path<String>,
@@ -5648,21 +5494,11 @@ async fn terminal_history(
         return Ok(Json(history));
     }
     let (session_id, pane) = local_pane(&state, session).await?;
-    if ids::is_holder_pane(&pane) {
-        let text = holder_history(holder_of(&state)?, &pane, lines).await?;
-        return Ok(Json(TerminalHistory { session_id, text }));
-    }
-    let herdr = state.0.herdr.clone();
-    let target = pane.clone();
-    let text = tokio::task::spawn_blocking(move || herdr.read_recent(&target, lines))
-        .await
-        .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
-        .map_err(|error| pane_error(&pane, &error))?;
+    let text = holder_history(holder_of(&state)?, &pane, lines).await?;
     Ok(Json(TerminalHistory { session_id, text }))
 }
 
-/// Tail reads in flight at once: each makes two herdr calls, so a busy
-/// board never stacks them up.
+/// Tail reads in flight at once, so a busy board never stacks them up.
 const MAX_TAIL_READS: usize = 4;
 static TAIL_READS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(MAX_TAIL_READS);
 
@@ -5674,7 +5510,7 @@ static TAIL_READS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(MA
     responses((status = 200, body = TerminalTail),
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such agent, or its pane closed"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: the peer refused the read"),
-              (status = 503, body = ErrorBody, description = "herdr, the terminal holder or the peer is unreachable, or 4 tail reads are in flight")))]
+              (status = 503, body = ErrorBody, description = "the terminal holder or the peer is unreachable, or 4 tail reads are in flight")))]
 async fn terminal_tail(
     State(state): State<AppState>,
     Path(session): Path<String>,
@@ -5701,39 +5537,23 @@ async fn terminal_tail(
             "the terminal tail reads panes on this machine only",
         ));
     }
-    let herdr = state.0.herdr.clone();
     let holder = state.0.holder.clone();
-    // The read holds its place until herdr answers, even when the board
-    // has gone.
-    let tail = tokio::task::spawn_blocking(move || {
-        tail_on(Some(&herdr), holder.as_ref(), session_id, &pane)
-    })
-    .await
-    .map_err(|error| ApiError::from(Error::Internal(error.to_string())))??;
+    // The read holds its place until the holder answers, even when the
+    // board has gone.
+    let tail = tokio::task::spawn_blocking(move || tail_on(holder.as_ref(), session_id, &pane))
+        .await
+        .map_err(|error| ApiError::from(Error::Internal(error.to_string())))??;
     Ok(Json(tail))
 }
 
 /// The pane's visible screen and its size, read once on this thread, for
 /// `peer serve` too.
 pub(crate) fn tail_on(
-    herdr: Option<&Cli>,
     holder: Option<&Arc<dyn Holder>>,
     session_id: String,
     pane: &str,
 ) -> Result<TerminalTail, ApiError> {
-    if ids::is_holder_pane(pane) {
-        let id = tiller_panes::PaneId::from(pane);
-        let screen = linked(holder.cloned())?
-            .screen(&id, tiller_panes::Read::Visible, tiller_panes::Format::Ansi)
-            .map_err(|error| holder_error(pane, &error))?;
-        return Ok(TerminalTail {
-            session_id,
-            cols: screen.cols,
-            rows: screen.rows,
-            text: screen.text(),
-        });
-    }
-    let herdr = herdr_of(herdr)?;
+    let holder = linked(holder.cloned())?;
     let _read = TAIL_READS.try_acquire().map_err(|_| {
         ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -5741,21 +5561,15 @@ pub(crate) fn tail_on(
             format!("{MAX_TAIL_READS} tail reads are in flight; the next read tries again"),
         )
     })?;
-    let tail = herdr
-        .terminal_size(pane)
-        .and_then(|size| match size {
-            Some(size) => herdr.read_visible(pane).map(|text| Some((size, text))),
-            None => Ok(None),
-        })
-        .map_err(|error| pane_error(pane, &error))?;
-    let Some(((cols, rows), text)) = tail else {
-        return Err(pane_gone(pane));
-    };
+    let id = tiller_panes::PaneId::from(pane);
+    let screen = holder
+        .screen(&id, tiller_panes::Read::Visible, tiller_panes::Format::Ansi)
+        .map_err(|error| holder_error(pane, &error))?;
     Ok(TerminalTail {
         session_id,
-        cols,
-        rows,
-        text,
+        cols: screen.cols,
+        rows: screen.rows,
+        text: screen.text(),
     })
 }
 
@@ -5764,7 +5578,6 @@ pub(crate) fn tail_on(
 /// board's own read does.
 pub(crate) fn prompt_read_on(
     store: &Store,
-    herdr: Option<&Cli>,
     holder: Option<&Arc<dyn Holder>>,
     mirrors: &Mirrors,
     session: &str,
@@ -5780,7 +5593,7 @@ pub(crate) fn prompt_read_on(
         None => (None, Some(NoPrompt::NotWaiting)),
         Some(wait) => {
             spend_input(mirrors)?;
-            match dialog_on(herdr, holder, &pane, &wait)? {
+            match dialog_on(holder, &pane, &wait)? {
                 Some(dialog) => (Some(dialog.prompt), None),
                 None => (None, Some(NoPrompt::NoDialog)),
             }
@@ -5837,7 +5650,7 @@ fn steer_line(text: &str) -> Result<(), ApiError> {
               (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
               (status = 422, body = ErrorBody, description = "`refused`: the agent is not working, has no run, pane or agent, or this key already sent its Escape; nothing was sent"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: a read-scope pairing, or the peer refused it"),
-              (status = 503, body = ErrorBody, description = "herdr or the peer is unreachable"),
+              (status = 503, body = ErrorBody, description = "the terminal holder or the peer is unreachable"),
               (status = 504, body = ErrorBody, description = "`forward_uncertain`: the peer link dropped before the peer answered")))]
 async fn interrupt_agent(
     State(state): State<AppState>,
@@ -5866,18 +5679,11 @@ async fn interrupt_agent(
             "an interrupt reaches panes on this machine only, so nothing was sent",
         ));
     }
-    let herdr = Routed::new(
-        state.0.herdr.clone(),
-        state
-            .0
-            .holder
-            .clone()
-            .map(|holder| -> Arc<dyn tiller_panes::Panes> { holder }),
-    );
+    let holder = state.0.holder.clone();
     mutate(
         &state,
         key(&request.idempotency_key)?,
-        move |store, ctx, _| interrupt_run(store, ctx, &herdr, &session),
+        move |store, ctx, _| interrupt_run(store, ctx, panes(&holder), &session),
     )
     .await
 }
@@ -5941,7 +5747,7 @@ fn session_run(store: &Store, session: &str, what: &str) -> tiller_core::Result<
               (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
               (status = 422, body = ErrorBody, description = "`refused`: the run is active, the pane holds a draft or a dialog, or the agent runs on another host; nothing was sent"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: a read-scope pairing, or the peer refused it"),
-              (status = 503, body = ErrorBody, description = "herdr or the peer is unreachable"),
+              (status = 503, body = ErrorBody, description = "the terminal holder or the peer is unreachable"),
               (status = 504, body = ErrorBody, description = "`forward_uncertain`: the peer link dropped before the peer answered")))]
 async fn stop_agent(
     State(state): State<AppState>,
@@ -6011,7 +5817,7 @@ async fn unpause_agent(
               (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
               (status = 422, body = ErrorBody, description = "`refused`: an orchestrator, an ended run, no Claude session to resume, or another host"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: a read-scope pairing, or the peer refused it"),
-              (status = 503, body = ErrorBody, description = "herdr or the peer is unreachable"),
+              (status = 503, body = ErrorBody, description = "the terminal holder or the peer is unreachable"),
               (status = 504, body = ErrorBody, description = "`forward_uncertain`: the peer link dropped before the peer answered")))]
 async fn resume_agent(
     State(state): State<AppState>,
@@ -6049,7 +5855,7 @@ async fn resume_agent(
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
               (status = 422, body = ErrorBody, description = "`refused`: an orchestrator, an ended run, a worktree on another branch, a brief that is missing, or a stop that could not be proven; nothing was changed"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: a read-scope pairing, or the peer refused it"),
-              (status = 503, body = ErrorBody, description = "herdr or the peer is unreachable"),
+              (status = 503, body = ErrorBody, description = "the terminal holder or the peer is unreachable"),
               (status = 504, body = ErrorBody, description = "`forward_uncertain`: the peer link dropped before the peer answered")))]
 async fn relaunch_agent(
     State(state): State<AppState>,
@@ -6135,13 +5941,16 @@ async fn focus_held(
     }))
 }
 
-/// An interrupt's failure as the store's errors: herdr out of reach is 503,
-/// and any other precondition a refusal naming the run.
+/// An interrupt's failure as the store's errors: the terminal holder out of
+/// reach is 503, and any other precondition a refusal naming the run.
 fn interrupt_refused(run: &str, error: tiller_agents::spawn::SpawnError) -> Error {
     use tiller_agents::spawn::SpawnError;
     match error {
         SpawnError::State(error) => error,
-        SpawnError::Herdr(error) => Error::Unavailable(format!("herdr: {error}; nothing was sent")),
+        SpawnError::Panes(
+            error @ (tiller_panes::PanesError::Unreachable(_)
+            | tiller_panes::PanesError::Version { .. }),
+        ) => Error::Unavailable(format!("{error}; nothing was sent")),
         other => Error::Refused {
             entity: "run",
             id: run.to_owned(),
@@ -6174,51 +5983,7 @@ async fn focus(
             "a focus reaches panes on this machine only",
         ));
     }
-    if ids::is_holder_pane(&pane) {
-        return focus_held(&state, session_id, pane).await;
-    }
-    let herdr = state.0.herdr.clone();
-    let screen = state.0.herdr.clone().timeout(PROBE_TIMEOUT);
-    let terminal = state.0.terminal.clone();
-    let app = terminal.as_ref().map(|terminal| terminal.name().to_owned());
-    let opened = tokio::task::spawn_blocking(move || {
-        open_agent(&screen, terminal.as_deref(), Wait::default(), || {
-            herdr.focus_agent(&pane)
-        })
-    })
-    .await;
-    let data = match opened {
-        Ok(Ok(opened)) => json!({"session_id": session_id, "opened": opened, "terminal": app}),
-        Ok(Err(OpenError::Herdr(error))) => {
-            return Err(ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "unavailable",
-                format!("herdr did not focus the agent: {error}"),
-            ));
-        }
-        // The focus landed, so this is no failed request: the answer says
-        // what went wrong with the window.
-        Ok(Err(error)) => json!({
-            "session_id": session_id,
-            "opened": "failed",
-            "terminal": app,
-            "problem": error.to_string(),
-        }),
-        Err(error) => return Err(Error::Internal(error.to_string()).into()),
-    };
-    Ok(Json(MutationResponse {
-        ok: true,
-        replayed: false,
-        events: Vec::new(),
-        receipt: Receipt {
-            recorded_at: Timestamp::now().to_string(),
-            outbox_id: None,
-            approval_id: None,
-        },
-        data,
-        host: None,
-        warning: None,
-    }))
+    focus_held(&state, session_id, pane).await
 }
 
 // -- login and the app shell --------------------------------------------------------
@@ -6487,7 +6252,7 @@ pub(crate) mod tests {
     use super::*;
     use axum::body::to_bytes;
     use rust_embed::RustEmbed;
-    use tiller_herdr::testing::{Fleet, at};
+    use tiller_panes::testing::{Fleet, at};
     use tower::ServiceExt;
 
     #[derive(RustEmbed)]
@@ -6507,7 +6272,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn app_with(home: &std::path::Path, assets: Assets, damage: Damage) -> Router {
-        app_full(home, assets, damage, Peers::idle(), Cli::local(), None)
+        app_full(home, assets, damage, Peers::idle(), None)
     }
 
     /// The board API with these peer links.
@@ -6517,7 +6282,6 @@ pub(crate) mod tests {
             Assets::of::<Fixture>(),
             Damage::default(),
             peers,
-            Cli::local(),
             None,
         )
     }
@@ -6527,18 +6291,9 @@ pub(crate) mod tests {
         assets: Assets,
         damage: Damage,
         peers: Arc<Peers>,
-        herdr: Cli,
         terminal: Option<Arc<dyn Terminal>>,
     ) -> Router {
-        app_ssh(
-            home,
-            assets,
-            damage,
-            peers,
-            herdr,
-            terminal,
-            vec!["ssh".into()],
-        )
+        app_ssh(home, assets, damage, peers, terminal, vec!["ssh".into()])
     }
 
     /// The board API whose Add a host runs `ssh`.
@@ -6547,7 +6302,6 @@ pub(crate) mod tests {
         assets: Assets,
         damage: Damage,
         peers: Arc<Peers>,
-        herdr: Cli,
         terminal: Option<Arc<dyn Terminal>>,
         ssh: Vec<OsString>,
     ) -> Router {
@@ -6556,7 +6310,6 @@ pub(crate) mod tests {
             assets,
             damage,
             peers,
-            herdr,
             terminal,
             ssh,
             memory::eval::Evals::default(),
@@ -6571,7 +6324,6 @@ pub(crate) mod tests {
             Assets::of::<Fixture>(),
             Damage::default(),
             Peers::idle(),
-            Cli::local(),
             None,
             vec!["ssh".into()],
             evals,
@@ -6584,14 +6336,11 @@ pub(crate) mod tests {
         assets: Assets,
         damage: Damage,
         peers: Arc<Peers>,
-        herdr: Cli,
         terminal: Option<Arc<dyn Terminal>>,
         ssh: Vec<OsString>,
         evals: memory::eval::Evals,
     ) -> Router {
-        app_holding(
-            home, assets, damage, peers, herdr, terminal, ssh, evals, None,
-        )
+        app_holding(home, assets, damage, peers, terminal, ssh, evals, None)
     }
 
     /// The board API with `holder` as its terminal holder.
@@ -6611,7 +6360,6 @@ pub(crate) mod tests {
             Assets::of::<Fixture>(),
             Damage::default(),
             Peers::idle(),
-            Cli::local(),
             terminal,
             vec!["ssh".into()],
             memory::eval::Evals::default(),
@@ -6625,7 +6373,6 @@ pub(crate) mod tests {
         assets: Assets,
         damage: Damage,
         peers: Arc<Peers>,
-        herdr: Cli,
         terminal: Option<Arc<dyn Terminal>>,
         ssh: Vec<OsString>,
         evals: memory::eval::Evals,
@@ -6642,13 +6389,12 @@ pub(crate) mod tests {
             stop,
             pollers: Registry::new(),
             peers,
-            herdr,
             terminal,
             started_at: Timestamp::now(),
             tools: Arc::new(Mutex::new(Value::Null)),
             damage,
             orchestrators: None,
-            mirrors: Mirrors::new(home),
+            mirrors: Mirrors::new(),
             holder,
             sessions: auth::Sessions::default(),
             streams: sse::Streams::default(),
@@ -9255,7 +9001,6 @@ pub(crate) mod tests {
             Assets::of::<Fixture>(),
             Damage::default(),
             Peers::idle(),
-            Cli::local(),
             None,
             ssh,
         )
@@ -9925,14 +9670,12 @@ pub(crate) mod tests {
             )
             .unwrap();
         let home = fleet.dir.path();
-        // A herdr that fails every call: no stop can be proven.
-        let herdr = Cli::local().program(vec!["sh".into(), "-c".into(), "exit 1".into()]);
+        // No terminal holder answers: no stop can be proven.
         let app = app_full(
             home,
             Assets::of::<Fixture>(),
             Damage::default(),
             Peers::idle(),
-            herdr,
             None,
         );
         let cookie = owner_cookie(home);
@@ -10022,25 +9765,6 @@ pub(crate) mod tests {
         assert_eq!(alpha, 1);
     }
 
-    /// A herdr that logs each call and answers the attach probe from a
-    /// file the fake terminal app creates when it opens.
-    fn scripted_herdr(dir: &std::path::Path) -> Cli {
-        let script = format!(
-            r#"echo "$*" >> '{dir}/calls'
-case "$*" in *"terminal title clear"*)
-  if [ -e '{dir}/attached' ]; then r=cleared; else r=no_foreground_client; fi
-  printf '{{"result":{{"type":"client_window_title","reason":"%s"}}}}\n' "$r";;
-esac"#,
-            dir = dir.display()
-        );
-        Cli::local().program(vec![
-            "sh".into(),
-            "-c".into(),
-            script.into(),
-            "herdr".into(),
-        ])
-    }
-
     /// A terminal app that records what it was asked and attaches a client
     /// when it opens.
     struct ScriptedApp(std::path::PathBuf);
@@ -10081,9 +9805,8 @@ esac"#,
     }
 
     #[tokio::test]
-    async fn focus_says_what_it_did_on_this_machine() {
+    async fn focus_on_a_remote_agent_runs_nothing_on_this_machine() {
         let mut fleet = Fleet::new();
-        let local = fleet.worker("w2:p1");
         let remote = fleet.worker("w3:p1");
         fleet
             .open()
@@ -10093,80 +9816,15 @@ esac"#,
                  UPDATE sessions SET host_id = 'h-r' WHERE id = '{remote}'"
             ))
             .unwrap();
-        let cookie = owner_cookie(fleet.dir.path());
-        let scratch = tempfile::tempdir().unwrap();
-        let dir = scratch.path();
-        let app = |terminal: Option<Arc<dyn Terminal>>| {
-            app_full(
-                fleet.dir.path(),
-                Assets::of::<Fixture>(),
-                Damage::default(),
-                Peers::idle(),
-                scripted_herdr(dir),
-                terminal,
-            )
-        };
-        let focus = |app: Router, session: String, key: &'static str| {
-            let cookie = cookie.clone();
-            async move {
-                let answer = send(
-                    &app,
-                    mutation(
-                        "POST",
-                        &format!("/api/v1/agents/{session}/focus"),
-                        json!({"idempotency_key": key}),
-                        &[("cookie", cookie.as_str())],
-                    ),
-                )
-                .await;
-                assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
-                let body: Value = serde_json::from_str(&answer.body).unwrap();
-                body["data"].clone()
-            }
-        };
-        let calls = || std::fs::read_to_string(dir.join("calls")).unwrap_or_default();
-        let app_did = || std::fs::read_to_string(dir.join("app")).unwrap_or_default();
-        let ghostty = || Some(Arc::new(ScriptedApp(dir.to_owned())) as Arc<dyn Terminal>);
-
-        // No terminal configured and no client: focused, but nothing shows it.
-        let data = focus(app(None), local.clone(), "k-1").await;
-        assert_eq!(data["opened"], "unseen");
-        assert_eq!(data["terminal"], Value::Null);
-        assert!(calls().contains("agent focus w2:p1"), "{}", calls());
-
-        // No client: the app opens on herdr, then the focus lands again.
-        let data = focus(app(ghostty()), local.clone(), "k-2").await;
-        assert_eq!(data["opened"], "launched");
-        assert_eq!(data["terminal"], "Ghostty");
-        // The program words, the bare `sh` resolved to a full path.
-        assert!(app_did().starts_with("open /"), "{}", app_did());
-        assert!(app_did().ends_with("esac herdr"), "{}", app_did());
-
-        // A client is attached: the app comes to the front.
-        let data = focus(app(ghostty()), local.clone(), "k-3").await;
-        assert_eq!(data["opened"], "raised");
-        assert_eq!(app_did(), "raise");
-
-        // The app will not open: the focus still landed, so the answer is
-        // 200 and names the problem.
-        let data = focus(app(Some(Arc::new(MissingApp))), local.clone(), "k-5").await;
-        assert_eq!(data["opened"], "failed");
-        assert_eq!(
-            data["problem"],
-            "Ghostty did not open: Unable to find application named 'Ghostty'"
-        );
-
-        // A remote agent: its pane is not this machine's, so nothing runs
-        // (saved herdr machines went with schema 20).
-        std::fs::remove_file(dir.join("calls")).unwrap();
-        let answer = send(
-            &app(None),
-            mutation(
-                "POST",
-                &format!("/api/v1/agents/{remote}/focus"),
-                json!({"idempotency_key": "k-4"}),
-                &[("cookie", cookie.as_str())],
-            ),
+        let holder = tiller_panes::FakePanes::new();
+        let home = fleet.dir.path();
+        let app = holder_app(home, &holder);
+        let answer = holder_post(
+            &app,
+            home,
+            &remote,
+            "focus",
+            json!({"idempotency_key": "k-4"}),
         )
         .await;
         assert_eq!(
@@ -10180,93 +9838,7 @@ esac"#,
             "{}",
             answer.body
         );
-        assert_eq!(calls(), "", "no herdr call for a remote pane");
-    }
-
-    /// A herdr for the terminal mirror: it logs each call, gives the pane
-    /// the size in `{dir}/size` (`cols rows`), and observes by recording
-    /// its pid, writing one frame and sleeping as that same process. The
-    /// frame is full unless `{dir}/full` says `false`. Its control logs what
-    /// it reads and answers a resize with a full frame, and a read gives two
-    /// rows of scrollback.
-    pub(crate) fn mirror_herdr(dir: &std::path::Path) -> Cli {
-        let script = format!(
-            r#"echo "$*" >> '{dir}/calls'
-case "$*" in
-*"pane read"*)
-  [ -e '{dir}/slow' ] && sleep 0.3
-  [ -e '{dir}/hang' ] && sleep 2
-  if [ -e '{dir}/screen' ]; then cat '{dir}/screen'; else printf 'one\n\033[34mtwo\033[0m\n'; fi;;
-*"pane send-keys"*)
-  mv '{dir}/hang-after-keys' '{dir}/hang' 2>/dev/null
-  mv '{dir}/after-keys' '{dir}/screen' 2>/dev/null || true;;
-*"pane layout"*)
-  read cols rows < '{dir}/size'
-  for pane; do :; done
-  [ -e '{dir}/gone' ] && pane=gone
-  printf '{{"result":{{"layout":{{"panes":[{{"pane_id":"%s","rect":{{"width":%s,"height":%s}}}}]}}}}}}\n' "$pane" "$cols" "$rows";;
-*"pane process-info"*)
-  [ -e '{dir}/shell' ] || exit 1
-  printf '{{"result":{{"process_info":{{"shell_pid":%s}}}}}}\n' "$(cat '{dir}/shell')";;
-*"terminal session observe"*)
-  echo $$ >> '{dir}/observers'
-  full=$(cat '{dir}/full' 2>/dev/null || echo true)
-  printf '{{"type":"terminal.frame","seq":1,"full":%s,"width":80,"height":24,"bytes":"aGk="}}\n' "$full"
-  exec sleep 30;;
-*"terminal session control"*)
-  echo $$ >> '{dir}/controllers'
-  if [ -e '{dir}/refuse' ]; then
-    echo 'herdr: terminal attach failed: terminal w2:p1 already has an attached client; retry with --takeover' >&2
-    exit 1
-  fi
-  printf '{{"type":"terminal.frame","seq":1,"full":true,"width":100,"height":30,"bytes":"aGk="}}\n'
-  while read -r line; do
-    printf '%s\n' "$line" >> '{dir}/control-in'
-    case "$line" in *terminal.resize*)
-      printf '{{"type":"terminal.frame","seq":1,"full":true,"width":0,"height":0,"bytes":"aGk="}}\n';;
-    esac
-  done;;
-esac"#,
-            dir = dir.display()
-        );
-        std::fs::write(dir.join("size"), "80 24\n").unwrap();
-        Cli::local().program(vec![
-            "sh".into(),
-            "-c".into(),
-            script.into(),
-            "herdr".into(),
-        ])
-    }
-
-    fn mirror_app(fleet: &Fleet, dir: &std::path::Path) -> Router {
-        app_full(
-            fleet.dir.path(),
-            Assets::of::<Fixture>(),
-            Damage::default(),
-            Peers::idle(),
-            mirror_herdr(dir),
-            None,
-        )
-    }
-
-    fn alive(pid: &str) -> bool {
-        std::process::Command::new("kill")
-            .args(["-0", pid])
-            .stderr(std::process::Stdio::null())
-            .status()
-            .unwrap()
-            .success()
-    }
-
-    /// Waits up to 5 seconds for `pid` to exit.
-    async fn gone(pid: &str) -> bool {
-        for _ in 0..100 {
-            if !alive(pid) {
-                return true;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        false
+        assert!(holder.calls().is_empty(), "{:?}", holder.calls());
     }
 
     /// The next NDJSON line of a streaming body.
@@ -10292,10 +9864,10 @@ esac"#,
     #[tokio::test]
     async fn the_terminal_mirror_refuses_all_but_the_owner() {
         let mut fleet = Fleet::new();
-        let session = fleet.worker("w2:p1");
-        let scratch = tempfile::tempdir().unwrap();
-        let dir = scratch.path();
-        let app = mirror_app(&fleet, dir);
+        let holder = tiller_panes::FakePanes::new();
+        let pane = holder_pane(&holder, "s-1");
+        let session = fleet.worker(pane.as_str());
+        let app = holder_app(fleet.dir.path(), &holder);
         let cookie = owner_cookie(fleet.dir.path());
         let stream = format!("/api/v1/agents/{session}/terminal");
         let input = format!("/api/v1/agents/{session}/terminal/input");
@@ -10342,74 +9914,13 @@ esac"#,
                 );
             }
         }
-        // Nothing reached herdr.
-        assert!(!dir.join("calls").exists());
-
-        // The owner's keys and pastes reach the pane, in order and verbatim.
-        let sent = send(
-            &app,
-            mutation(
-                "POST",
-                &input,
-                json!({"keys": ["-", "ctrl+c", "enter"]}),
-                &[cookie_header],
-            ),
-        )
-        .await;
-        assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
-        let pasted = send(
-            &app,
-            mutation("POST", &input, json!({"text": "-rf x"}), &[cookie_header]),
-        )
-        .await;
-        assert_eq!(pasted.status, StatusCode::OK, "{}", pasted.body);
-        let both = send(
-            &app,
-            mutation(
-                "POST",
-                &input,
-                json!({"keys": ["a"], "text": "b"}),
-                &[cookie_header],
-            ),
-        )
-        .await;
-        assert_eq!(both.status, StatusCode::BAD_REQUEST, "{}", both.body);
-        let calls = std::fs::read_to_string(dir.join("calls")).unwrap();
-        assert_eq!(
-            calls.lines().collect::<Vec<_>>(),
-            [
-                "pane send-keys w2:p1 - ctrl+c enter",
-                // A paste that starts with a dash presses it, so herdr
-                // never reads the text as a flag.
-                "pane send-keys w2:p1 -",
-                "pane send-text w2:p1 rf x"
-            ]
-        );
-
-        // The owner reads the pane's scrollback, colors kept; a size herdr
-        // would not read is refused before it is asked.
-        let read = send(
-            &app,
-            mutation("POST", &history, json!({}), &[cookie_header]),
-        )
-        .await;
-        assert_eq!(read.status, StatusCode::OK, "{}", read.body);
-        let read: Value = serde_json::from_str(&read.body).unwrap();
-        assert_eq!(read["session_id"], session);
-        assert_eq!(read["text"], "one\n\u{1b}[34mtwo\u{1b}[0m\n");
-        for lines in [0, 1001] {
-            let answer = send(
-                &app,
-                mutation("POST", &history, json!({"lines": lines}), &[cookie_header]),
-            )
-            .await;
-            assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{}", answer.body);
-        }
-        let calls = std::fs::read_to_string(dir.join("calls")).unwrap();
-        assert_eq!(
-            calls.lines().last(),
-            Some("pane read w2:p1 --source recent --lines 1000 --format ansi")
-        );
+        // Nothing reached the pane.
+        let reached: Vec<String> = holder
+            .calls()
+            .into_iter()
+            .filter(|call| !call.starts_with("spawn "))
+            .collect();
+        assert!(reached.is_empty(), "{reached:?}");
 
         // At an allowed host, the owner's keys come from its https origin.
         let remote = send(
@@ -10427,8 +9938,10 @@ esac"#,
         )
         .await;
         assert_eq!(remote.status, StatusCode::OK, "{}", remote.body);
-        let calls = std::fs::read_to_string(dir.join("calls")).unwrap();
-        assert_eq!(calls.lines().last(), Some("pane send-keys w2:p1 enter"));
+        assert_eq!(
+            holder_calls(&holder, "keys"),
+            [format!("keys {pane} enter")]
+        );
     }
 
     /// A plain shell in the fake holder, as a spawn starts it.
@@ -10668,7 +10181,8 @@ esac"#,
         holder.set_unreachable(true);
         let line = view.next().await;
         assert_eq!(line["type"], "unavailable", "{line}");
-        // The watch ending races the update stream's error; either line is right.
+        // The stream and the size watch fail together: either can wake
+        // the view first.
         assert!(
             line["message"].as_str().is_some_and(|message| {
                 message.contains("went down") || message.contains("ended the view's watch")
@@ -11086,7 +10600,7 @@ esac"#,
     }
 
     #[tokio::test]
-    async fn a_holder_that_does_not_answer_or_has_no_pane_is_not_a_herdr_error() {
+    async fn a_holder_that_does_not_answer_or_has_no_pane_says_so() {
         let mut fleet = Fleet::new();
         let holder = tiller_panes::FakePanes::new();
         let missing = tiller_panes::PaneId::generate();
@@ -11214,25 +10728,17 @@ esac"#,
     #[tokio::test]
     async fn a_prompt_answer_presses_its_digit_only_on_the_dialog_it_was_drawn_from() {
         let mut fleet = Fleet::new();
-        let session = fleet.worker("w2:p1");
-        let scratch = tempfile::tempdir().unwrap();
-        let dir = scratch.path();
-        let app = mirror_app(&fleet, dir);
+        let holder = tiller_panes::FakePanes::new();
+        let pane = holder_pane(&holder, "s-1");
+        let session = fleet.worker(pane.as_str());
+        let app = holder_app(fleet.dir.path(), &holder);
         let cookie = owner_cookie(fleet.dir.path());
         let owner = [("cookie", cookie.as_str())];
         let read = format!("/api/v1/agents/{session}/prompt");
         let answer = format!("/api/v1/agents/{session}/prompt/answer");
         let press = |screen: &str, option: u8| json!({"option": option, "screen": screen});
-        let calls = || std::fs::read_to_string(dir.join("calls")).unwrap_or_default();
-        // The keys sent, in order: an answer also reads the screen after it
-        // sent them, for the dialog to leave.
-        let keys = || {
-            calls()
-                .lines()
-                .filter(|line| line.contains("send-keys"))
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        };
+        // The keys sent, in order.
+        let keys = || holder_calls(&holder, "keys");
 
         // Both pass every mirror guard.
         for (path, body) in [(&read, json!({})), (&answer, press("x", 1))] {
@@ -11251,11 +10757,12 @@ esac"#,
         assert_eq!(idle["prompt"], Value::Null);
         let late = send(&app, mutation("POST", &answer, press("x", 1), &owner)).await;
         assert_eq!(late.status, StatusCode::CONFLICT, "{}", late.body);
-        assert_eq!(calls(), "");
+        assert!(holder_calls(&holder, "screen").is_empty());
+        assert!(keys().is_empty());
 
         waiting(&fleet, &session, "Bash");
         let bash = include_str!("../../panes/tests/fixtures/claude/permission-dialog.ansi");
-        std::fs::write(dir.join("screen"), bash).unwrap();
+        holder.set_screen(&pane, &bash.lines().collect::<Vec<_>>());
         let shown = send(&app, mutation("POST", &read, json!({}), &owner)).await;
         assert_eq!(shown.status, StatusCode::OK, "{}", shown.body);
         let shown: Value = serde_json::from_str(&shown.body).unwrap();
@@ -11279,17 +10786,14 @@ esac"#,
             "{}",
             unoffered.body
         );
-        assert!(!calls().contains("send-keys"), "{}", calls());
+        assert!(keys().is_empty(), "{:?}", keys());
 
         // The matching dialog gets the digit alone, with no Enter.
         let sent = send(&app, mutation("POST", &answer, press(screen, 4), &owner)).await;
         assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
         let sent: Value = serde_json::from_str(&sent.body).unwrap();
         assert_eq!(sent["data"]["sent"]["option"], 4);
-        assert_eq!(
-            keys().last().map(String::as_str),
-            Some("pane send-keys w2:p1 4")
-        );
+        assert_eq!(keys().last(), Some(&format!("keys {pane} 4")));
 
         // A parallel tool call observed after the dialog opened leaves the
         // tool it asks about alone.
@@ -11308,7 +10812,7 @@ esac"#,
 
         // A dialog for another tool than the hook named is none.
         let edit = include_str!("../tests/fixtures/prompt/edit.txt");
-        std::fs::write(dir.join("screen"), edit).unwrap();
+        holder.set_screen(&pane, &edit.lines().collect::<Vec<_>>());
         let other = send(&app, mutation("POST", &read, json!({}), &owner)).await;
         let other: Value = serde_json::from_str(&other.body).unwrap();
         assert_eq!(other["reason"], "no_dialog");
@@ -11317,29 +10821,21 @@ esac"#,
     #[tokio::test]
     async fn a_trust_dialog_answer_presses_the_arrow_keys_to_its_row_then_enter() {
         let mut fleet = Fleet::new();
-        let session = fleet.worker("w2:p1");
-        let scratch = tempfile::tempdir().unwrap();
-        let dir = scratch.path();
-        let app = mirror_app(&fleet, dir);
+        let holder = tiller_panes::FakePanes::new();
+        let pane = holder_pane(&holder, "s-1");
+        let session = fleet.worker(pane.as_str());
+        let app = holder_app(fleet.dir.path(), &holder);
         let cookie = owner_cookie(fleet.dir.path());
         let owner = [("cookie", cookie.as_str())];
         let read = format!("/api/v1/agents/{session}/prompt");
         let answer = format!("/api/v1/agents/{session}/prompt/answer");
         let press = |screen: &str, option: u8| json!({"option": option, "screen": screen});
-        let calls = || std::fs::read_to_string(dir.join("calls")).unwrap_or_default();
-        // The keys sent, in order: an answer also reads the screen after it
-        // sent them, for the dialog to leave.
-        let keys = || {
-            calls()
-                .lines()
-                .filter(|line| line.contains("send-keys"))
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        };
+        // The keys sent, in order.
+        let keys = || holder_calls(&holder, "keys");
         let trust = include_str!("../../panes/tests/fixtures/claude/trust-dialog.ansi");
-        std::fs::write(dir.join("screen"), trust).unwrap();
+        holder.set_screen(&pane, &trust.lines().collect::<Vec<_>>());
 
-        // No hook asks for the dialog: herdr sees the agent blocked, and the
+        // No hook asks for the dialog: the composer shows the agent blocked, and the
         // session waits for an answer.
         fleet
             .open()
@@ -11371,21 +10867,15 @@ esac"#,
             "{}",
             unoffered.body
         );
-        assert!(!calls().contains("send-keys"), "{}", calls());
+        assert!(keys().is_empty(), "{:?}", keys());
 
         // The cursor is on No, exit: Yes is one row down, then Enter, in one call.
         let sent = send(&app, mutation("POST", &answer, press(screen, 2), &owner)).await;
         assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
-        assert_eq!(
-            keys().last().map(String::as_str),
-            Some("pane send-keys w2:p1 down enter")
-        );
+        assert_eq!(keys().last(), Some(&format!("keys {pane} down enter")));
         let sent = send(&app, mutation("POST", &answer, press(screen, 1), &owner)).await;
         assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
-        assert_eq!(
-            keys().last().map(String::as_str),
-            Some("pane send-keys w2:p1 enter")
-        );
+        assert_eq!(keys().last(), Some(&format!("keys {pane} enter")));
 
         // A permission wait never reads the trust dialog.
         waiting(&fleet, &session, "Bash");
@@ -11399,16 +10889,16 @@ esac"#,
     #[tokio::test]
     async fn an_answer_waits_for_its_dialog_to_leave_no_longer_than_its_bound() {
         let mut fleet = Fleet::new();
-        let session = fleet.worker("w2:p1");
-        let scratch = tempfile::tempdir().unwrap();
-        let dir = scratch.path();
-        let app = mirror_app(&fleet, dir);
+        let holder = tiller_panes::FakePanes::new();
+        let pane = holder_pane(&holder, "s-1");
+        let session = fleet.worker(pane.as_str());
+        let app = holder_app(fleet.dir.path(), &holder);
         let cookie = owner_cookie(fleet.dir.path());
         let owner = [("cookie", cookie.as_str())];
         let read = format!("/api/v1/agents/{session}/prompt");
         let answer = format!("/api/v1/agents/{session}/prompt/answer");
         let trust = include_str!("../../panes/tests/fixtures/claude/trust-dialog.ansi");
-        std::fs::write(dir.join("screen"), trust).unwrap();
+        holder.set_screen(&pane, &trust.lines().collect::<Vec<_>>());
         fleet
             .open()
             .conn()
@@ -11422,8 +10912,7 @@ esac"#,
         let shown: Value = serde_json::from_str(&shown.body).unwrap();
         let screen = shown["prompt"]["screen"].as_str().unwrap().to_owned();
 
-        // Once the keys went, every screen read hangs.
-        std::fs::write(dir.join("hang-after-keys"), "").unwrap();
+        // The dialog never leaves the screen.
         let started = std::time::Instant::now();
         let sent = send(
             &app,
@@ -11446,17 +10935,17 @@ esac"#,
     #[tokio::test]
     async fn two_answers_to_one_dialog_take_turns_and_only_the_first_types() {
         let mut fleet = Fleet::new();
-        let session = fleet.worker("w2:p1");
-        let scratch = tempfile::tempdir().unwrap();
-        let dir = scratch.path();
-        let app = mirror_app(&fleet, dir);
+        let holder = tiller_panes::FakePanes::new();
+        let pane = holder_pane(&holder, "s-1");
+        let session = fleet.worker(pane.as_str());
+        let app = holder_app(fleet.dir.path(), &holder);
         let cookie = owner_cookie(fleet.dir.path());
         let owner = [("cookie", cookie.as_str())];
         let read = format!("/api/v1/agents/{session}/prompt");
         let answer = format!("/api/v1/agents/{session}/prompt/answer");
-        let calls = || std::fs::read_to_string(dir.join("calls")).unwrap_or_default();
+        let keys = || holder_calls(&holder, "keys");
         let trust = include_str!("../../panes/tests/fixtures/claude/trust-dialog.ansi");
-        std::fs::write(dir.join("screen"), trust).unwrap();
+        holder.set_screen(&pane, &trust.lines().collect::<Vec<_>>());
         fleet
             .open()
             .conn()
@@ -11470,11 +10959,21 @@ esac"#,
         let shown: Value = serde_json::from_str(&shown.body).unwrap();
         let screen = shown["prompt"]["screen"].as_str().unwrap().to_owned();
 
-        // The agent redraws once it reads the keys. Each screen read takes a
-        // while, so two answers that did not take turns would both read the
-        // dialog before either typed.
-        std::fs::write(dir.join("after-keys"), "Working on it\n").unwrap();
-        std::fs::write(dir.join("slow"), "").unwrap();
+        // The agent redraws once it reads the keys, so an answer that did
+        // not wait its turn would read the dialog and type again.
+        let redraw = std::thread::spawn({
+            let holder = holder.clone();
+            let pane = pane.clone();
+            move || {
+                for _ in 0..500 {
+                    if !holder_calls(&holder, "keys").is_empty() {
+                        holder.set_screen(&pane, &["Working on it"]);
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        });
         let tap = || {
             send(
                 &app,
@@ -11496,7 +10995,8 @@ esac"#,
             first.body,
             second.body
         );
-        assert_eq!(calls().matches("send-keys").count(), 1, "{}", calls());
+        redraw.join().unwrap();
+        assert_eq!(keys().len(), 1, "{:?}", keys());
     }
 
     #[tokio::test]
@@ -11506,14 +11006,14 @@ esac"#,
         let orchestrator = fleet.orchestrator_session.clone();
         let store = fleet.open();
         // A tool call and a turn end are the agent's output; the owner's
-        // prompt, a notification, herdr's poll and the transcript after them
+        // prompt, a notification, the holder's screen read and the transcript after them
         // are not.
         for (n, (source, event)) in [
             ("hook", "PreToolUse"),
             ("hook", "Stop"),
             ("hook", "UserPromptSubmit"),
             ("hook", "Notification:idle_prompt"),
-            ("herdr", "herdr:working"),
+            ("holder", "holder:working"),
             ("transcript", "transcript:turn_end"),
         ]
         .into_iter()
@@ -11612,13 +11112,12 @@ esac"#,
             stop,
             pollers,
             peers: Peers::idle(),
-            herdr: Cli::local(),
             terminal: None,
             started_at: Timestamp::now(),
             tools: Arc::new(Mutex::new(Value::Null)),
             damage: Damage::default(),
             orchestrators: starter,
-            mirrors: Mirrors::new(home),
+            mirrors: Mirrors::new(),
             holder: None,
             sessions: auth::Sessions::default(),
             streams: sse::Streams::default(),
@@ -11790,6 +11289,8 @@ esac"#,
             "owner_guard.endpoint",
             "intake_source",
             "learning",
+            // The key `attach.terminal` replaced.
+            "herdr.terminal",
         ] {
             let answer = send(&app, set(setting, "x")).await;
             assert_eq!(
@@ -11804,7 +11305,6 @@ esac"#,
 
         // A value its reader would refuse changes nothing.
         for (setting, value) in [
-            ("herdr.terminal", ""),
             ("attach.terminal", ""),
             ("stop_hook_mode", "block once"),
             ("federation.accept", "yes"),
@@ -11851,7 +11351,6 @@ esac"#,
         for (setting, value) in [
             ("stop_hook_mode", "off"),
             ("stop_hook_mode", "observe"),
-            ("herdr.terminal", "Ghostty"),
             ("federation.accept", "false"),
             ("memory.remote", "git@example.com:team/memory.git"),
             ("learning.sample_every", "3"),
@@ -11871,7 +11370,6 @@ esac"#,
         assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
         let table: toml::Table = std::fs::read_to_string(&config).unwrap().parse().unwrap();
         assert_eq!(table["stop_hook_mode"].as_str(), Some("observe"));
-        assert_eq!(table["herdr"]["terminal"].as_str(), Some("Ghostty"));
         assert_eq!(table["attach"]["terminal"].as_str(), Some("WezTerm"));
         assert_eq!(table["federation"]["accept"].as_bool(), Some(false));
         assert_eq!(table["learning"]["sample_every"].as_integer(), Some(3));
@@ -11892,11 +11390,11 @@ esac"#,
                 .map(Result::unwrap)
                 .collect()
         };
-        assert_eq!(events.len(), 11, "{events:?}");
+        assert_eq!(events.len(), 10, "{events:?}");
         assert_eq!(events[0].0, "stop_hook_mode");
         assert!(events[0].1.contains("\"off\""), "{}", events[0].1);
-        assert_eq!(events[3].0, "federation.accept");
-        assert!(events[3].1.contains("false"), "{}", events[3].1);
+        assert_eq!(events[2].0, "federation.accept");
+        assert!(events[2].1.contains("false"), "{}", events[2].1);
         assert!(!events.iter().any(|(_, payload)| payload.contains("<set>")));
 
         // The same value again records nothing.
@@ -11908,7 +11406,6 @@ esac"#,
         let read: Value =
             serde_json::from_str(&get(&app, "/api/v1/host-config").await.body).unwrap();
         assert_eq!(read["stop_hook_mode"], "observe", "{read}");
-        assert_eq!(read["herdr_terminal"], "Ghostty", "{read}");
         assert_eq!(read["attach_terminal"], "WezTerm", "{read}");
         assert_eq!(read["accept_peers"], false, "{read}");
         assert_eq!(
@@ -12010,16 +11507,16 @@ esac"#,
     /// A source that always fails, so it waits 5 s after its first poll.
     struct Failing;
 
-    impl tiller_herdr::poller::Source for Failing {
+    impl tiller_poll::Source for Failing {
         fn name(&self) -> String {
             "ci".to_owned()
         }
         fn interval(&self) -> std::time::Duration {
             std::time::Duration::from_secs(60)
         }
-        fn poll(&mut self, _now: Timestamp) -> Result<(), tiller_herdr::poller::PollError> {
-            Err(tiller_herdr::poller::PollError::from(
-                HerdrError::Unreachable("checks are not read".into()),
+        fn poll(&mut self, _now: Timestamp) -> Result<(), tiller_poll::PollError> {
+            Err(tiller_poll::PollError::from_source(
+                tiller_panes::PanesError::Unreachable("checks are not read".into()),
             ))
         }
     }
@@ -12392,42 +11889,24 @@ esac"#,
         assert_eq!(queued, "board");
     }
 
-    /// A herdr whose one Claude pane, `w2:p1`, shows the agent status in
-    /// `{dir}/status`; it logs each call.
-    fn agent_herdr(dir: &std::path::Path) -> Cli {
-        let script = format!(
-            r#"echo "$*" >> '{dir}/calls'
-case "$*" in
-*"pane get"*)
-  printf '{{"result":{{"pane":{{"pane_id":"w2:p1","workspace_id":"w2","agent":"claude","agent_status":"%s"}}}}}}\n' "$(cat '{dir}/status')";;
-esac"#,
-            dir = dir.display()
-        );
-        Cli::local().program(vec![
-            "sh".into(),
-            "-c".into(),
-            script.into(),
-            "herdr".into(),
-        ])
+    /// The board API on a fake holder with one plain pane, the worker's.
+    fn agent_app(
+        fleet: &mut Fleet,
+        holder: &tiller_panes::FakePanes,
+    ) -> (Router, String, tiller_panes::PaneId) {
+        let pane = holder_pane(holder, "s-1");
+        let session = fleet.worker(pane.as_str());
+        (holder_app(fleet.dir.path(), holder), session, pane)
     }
 
-    fn agent_app(fleet: &Fleet, dir: &std::path::Path) -> Router {
-        app_full(
-            fleet.dir.path(),
-            Assets::of::<Fixture>(),
-            Damage::default(),
-            Peers::idle(),
-            agent_herdr(dir),
-            None,
-        )
-    }
-
-    fn herdr_calls(dir: &std::path::Path) -> Vec<String> {
-        std::fs::read_to_string(dir.join("calls"))
-            .unwrap_or_default()
-            .lines()
-            .map(str::to_owned)
-            .collect()
+    /// Claude's screen, mid-turn or idle at an empty composer.
+    fn agent_screen(holder: &tiller_panes::FakePanes, pane: &tiller_panes::PaneId, working: bool) {
+        let screen = if working {
+            include_str!("../../panes/tests/fixtures/claude/working.ansi")
+        } else {
+            include_str!("../../panes/tests/fixtures/claude/empty.ansi")
+        };
+        holder.set_screen(pane, &screen.lines().collect::<Vec<_>>());
     }
 
     /// The message bar's steer is `tiller send --kind steer`: one queued
@@ -12435,9 +11914,8 @@ esac"#,
     #[tokio::test]
     async fn a_steer_queues_one_line_for_the_agent() {
         let mut fleet = Fleet::new();
-        let session = fleet.worker("w2:p1");
-        let scratch = tempfile::tempdir().unwrap();
-        let app = agent_app(&fleet, scratch.path());
+        let holder = tiller_panes::FakePanes::new();
+        let (app, session, _) = agent_app(&mut fleet, &holder);
         let cookie = owner_cookie(fleet.dir.path());
         let path = format!("/api/v1/agents/{session}/steer");
         let body = json!({"idempotency_key": "k-steer", "text": "Stop after the lint fix"});
@@ -12489,7 +11967,8 @@ esac"#,
         assert_eq!(card, Some(run_card));
         // Nothing is typed now: the daemon's delivery loop types it when
         // the pane is idle.
-        assert!(herdr_calls(scratch.path()).is_empty());
+        assert!(holder_calls(&holder, "input").is_empty());
+        assert!(holder_calls(&holder, "keys").is_empty());
 
         // A retry replays; a second line is a second message.
         let again = send(&app, mutation("POST", &path, body, &[("cookie", &cookie)])).await;
@@ -12517,10 +11996,8 @@ esac"#,
     #[tokio::test]
     async fn an_interrupt_sends_one_escape_to_a_working_agent() {
         let mut fleet = Fleet::new();
-        let session = fleet.worker("w2:p1");
-        let scratch = tempfile::tempdir().unwrap();
-        let dir = scratch.path().to_owned();
-        let app = agent_app(&fleet, &dir);
+        let holder = tiller_panes::FakePanes::new();
+        let (app, session, pane) = agent_app(&mut fleet, &holder);
         let cookie = owner_cookie(fleet.dir.path());
         let path = format!("/api/v1/agents/{session}/interrupt");
         let body = json!({"idempotency_key": "k-int"});
@@ -12528,7 +12005,7 @@ esac"#,
         let refused = send(&app, mutation("POST", &path, body.clone(), &[])).await;
         assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
 
-        std::fs::write(dir.join("status"), "idle").unwrap();
+        agent_screen(&holder, &pane, false);
         let idle = send(
             &app,
             mutation("POST", &path, body.clone(), &[("cookie", &cookie)]),
@@ -12541,18 +12018,16 @@ esac"#,
             idle.body
         );
         assert!(idle.body.contains("is not working"), "{}", idle.body);
-        assert!(!herdr_calls(&dir).iter().any(|c| c.contains("send-keys")));
+        assert!(holder_calls(&holder, "keys").is_empty());
 
         // The turn ends after the Escape, as Claude's Stop hook reports.
-        std::fs::write(dir.join("status"), "working").unwrap();
+        agent_screen(&holder, &pane, true);
         let mut hook_store = fleet.open();
-        let (watch, hooked) = (dir.clone(), session.clone());
+        let (watch, hooked) = (holder.clone(), session.clone());
+        let escape = format!("keys {pane} esc");
         let claude = std::thread::spawn(move || {
             for _ in 0..500 {
-                if herdr_calls(&watch)
-                    .iter()
-                    .any(|c| c == "pane send-keys w2:p1 esc")
-                {
+                if holder_calls(&watch, "keys").contains(&escape) {
                     hook_store
                         .observation_record(
                             &Ctx::new(Actor::Hook),
@@ -12594,11 +12069,7 @@ esac"#,
             retry.body
         );
         assert!(retry.body.contains("sent already"), "{}", retry.body);
-        let escapes = herdr_calls(&dir)
-            .iter()
-            .filter(|c| c.contains("send-keys"))
-            .count();
-        assert_eq!(escapes, 1);
+        assert_eq!(holder_calls(&holder, "keys"), [format!("keys {pane} esc")]);
     }
 
     #[tokio::test]
@@ -12613,9 +12084,8 @@ esac"#,
                  UPDATE sessions SET host_id = 'h-r' WHERE id = '{remote}'"
             ))
             .unwrap();
-        let scratch = tempfile::tempdir().unwrap();
-        std::fs::write(scratch.path().join("status"), "working").unwrap();
-        let app = agent_app(&fleet, scratch.path());
+        let holder = tiller_panes::FakePanes::new();
+        let app = holder_app(fleet.dir.path(), &holder);
         let cookie = owner_cookie(fleet.dir.path());
         let cases = [
             (remote.clone(), "the remote host remote-a"),
@@ -12633,11 +12103,7 @@ esac"#,
             );
             assert!(answer.body.contains(why), "{}", answer.body);
         }
-        assert!(
-            !herdr_calls(scratch.path())
-                .iter()
-                .any(|c| c.contains("send-keys"))
-        );
+        assert!(holder_calls(&holder, "keys").is_empty());
     }
 
     #[tokio::test]
@@ -12669,8 +12135,8 @@ esac"#,
                  UPDATE sessions SET host_id = 'h-r' WHERE id = '{remote}'"
             ))
             .unwrap();
-        let scratch = tempfile::tempdir().unwrap();
-        let app = mirror_app(&fleet, scratch.path());
+        let holder = tiller_panes::FakePanes::new();
+        let app = holder_app(fleet.dir.path(), &holder);
         let cookie = owner_cookie(fleet.dir.path());
         for (path, body) in [
             (format!("/api/v1/agents/{remote}/terminal"), json!({})),
@@ -12701,10 +12167,9 @@ esac"#,
             );
             assert!(answer.body.contains("\"refused\""), "{}", answer.body);
         }
-        assert!(!scratch.path().join("calls").exists());
+        assert!(holder.calls().is_empty(), "{:?}", holder.calls());
 
-        // Nor a tail: saved herdr machines went with schema 20, and a peer's
-        // pane is read through its peer link.
+        // Nor a tail: a peer's pane is read through its peer link.
         let tail = format!("/api/v1/agents/{remote}/terminal/tail");
         let read = send(
             &app,
@@ -12722,74 +12187,7 @@ esac"#,
             "{}",
             read.body
         );
-        assert!(!scratch.path().join("calls").exists());
-    }
-
-    #[tokio::test]
-    async fn the_observe_process_ends_with_its_viewer_and_restarts_on_a_resize() {
-        let mut fleet = Fleet::new();
-        let session = fleet.worker("w2:p1");
-        let scratch = tempfile::tempdir().unwrap();
-        let dir = scratch.path();
-        let app = mirror_app(&fleet, dir);
-        let cookie = owner_cookie(fleet.dir.path());
-        let observers = || {
-            std::fs::read_to_string(dir.join("observers"))
-                .unwrap_or_default()
-                .lines()
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        };
-        let response = app
-            .clone()
-            .oneshot(mutation(
-                "POST",
-                &format!("/api/v1/agents/{session}/terminal"),
-                json!({}),
-                &[("cookie", &cookie)],
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers()[header::CONTENT_TYPE],
-            "application/x-ndjson"
-        );
-        let mut body = response.into_body().into_data_stream();
-        let mut pending = String::new();
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "size", "cols": 80, "rows": 24})
-        );
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "frame", "seq": 1, "full": true, "bytes": "aGk="})
-        );
-        let first = observers();
-        assert_eq!(first.len(), 1);
-        assert!(alive(&first[0]));
-        let calls = std::fs::read_to_string(dir.join("calls")).unwrap();
-        assert!(
-            calls.contains("terminal session observe w2:p1 --cols 80 --rows 24"),
-            "{calls}"
-        );
-
-        // The pane is resized: the old observe is killed, a new one runs at
-        // the new size and starts with a full frame.
-        std::fs::write(dir.join("size"), "120 36\n").unwrap();
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "size", "cols": 120, "rows": 36})
-        );
-        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
-        assert!(gone(&first[0]).await, "the first observe outlived its size");
-        let second = observers();
-        assert_eq!(second.len(), 2);
-        assert!(alive(&second[1]));
-
-        // The viewer leaves: its observe is killed.
-        drop(body);
-        assert!(gone(&second[1]).await, "the observe outlived its viewer");
+        assert!(holder.calls().is_empty(), "{:?}", holder.calls());
     }
 
     /// At an allowed host, signing out ends an open mirror of the pane, not
@@ -12798,10 +12196,10 @@ esac"#,
     async fn signing_out_ends_an_open_terminal_mirror() {
         use futures_util::StreamExt;
         let mut fleet = Fleet::new();
-        let session = fleet.worker("w2:p1");
-        let scratch = tempfile::tempdir().unwrap();
-        let dir = scratch.path();
-        let app = mirror_app(&fleet, dir);
+        let holder = tiller_panes::FakePanes::new();
+        let pane = holder_pane(&holder, "s-1");
+        let session = fleet.worker(pane.as_str());
+        let app = holder_app(fleet.dir.path(), &holder);
         let host = "board.example.com";
         let cookie = owner_cookie(fleet.dir.path());
         let headers = [
@@ -12821,7 +12219,6 @@ esac"#,
         let mut pending = String::new();
         assert_eq!(next_line(&mut body, &mut pending).await["type"], "size");
         assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
-        let observer = std::fs::read_to_string(dir.join("observers")).unwrap();
 
         let out = sign_out(&app, host, &cookie).await;
         assert_eq!(out.status, StatusCode::OK, "{}", out.body);
@@ -12832,338 +12229,6 @@ esac"#,
         })
         .await;
         assert!(ended.is_ok(), "the mirror outlived the sign-out");
-        assert!(
-            gone(observer.trim()).await,
-            "the observe outlived the sign-out"
-        );
-    }
-
-    /// herdr lays its tabs out at 120 by 40 with no client attached, while
-    /// each pane's PTY keeps the size the last client gave it. The mirror
-    /// draws at the PTY's size, so no row of the agent's screen is cut off,
-    /// and a Fit gives the pane back at it.
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn the_mirror_draws_at_the_panes_pty_size_not_herdrs_headless_layout() {
-        let mut fleet = Fleet::new();
-        let session = fleet.worker("w2:p1");
-        let scratch = tempfile::tempdir().unwrap();
-        let dir = scratch.path();
-        let app = mirror_app(&fleet, dir);
-        std::fs::write(dir.join("size"), "120 40\n").unwrap();
-        let pty = tiller_herdr::testing::Pty::new(120, 43);
-        std::fs::write(dir.join("shell"), pty.shell_pid().to_string()).unwrap();
-        let cookie = owner_cookie(fleet.dir.path());
-        let fits = fleet.dir.path().join("mirror-fits.json");
-        let held = || std::fs::read_to_string(&fits).ok();
-        let open = |request: Value| {
-            mutation(
-                "POST",
-                &format!("/api/v1/agents/{session}/terminal"),
-                request,
-                &[("cookie", &cookie)],
-            )
-        };
-
-        let response = app.clone().oneshot(open(json!({}))).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let mut body = response.into_body().into_data_stream();
-        let mut pending = String::new();
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "size", "cols": 120, "rows": 43})
-        );
-        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
-        let calls = std::fs::read_to_string(dir.join("calls")).unwrap();
-        assert!(
-            calls.contains("terminal session observe w2:p1 --cols 120 --rows 43"),
-            "{calls}"
-        );
-        // A herdr client resizes the PTY and the layout stays: the mirror
-        // follows the PTY.
-        pty.resize(150, 50);
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "size", "cols": 150, "rows": 50})
-        );
-        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
-        drop(body);
-
-        let response = app
-            .clone()
-            .oneshot(open(json!({"fit": {"cols": 100, "rows": 30}})))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let mut body = response.into_body().into_data_stream();
-        let mut pending = String::new();
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "size", "cols": 100, "rows": 30})
-        );
-        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
-        assert_eq!(held().as_deref(), Some(r#"{"w2:p1":[150,50]}"#));
-        // A size read passes with the layout where it was: the size to give
-        // back is still the PTY's.
-        let reads = || {
-            std::fs::read_to_string(dir.join("calls"))
-                .unwrap()
-                .matches("pane layout --pane w2:p1")
-                .count()
-        };
-        let (before, deadline) = (
-            reads(),
-            std::time::Instant::now() + std::time::Duration::from_secs(10),
-        );
-        while reads() == before {
-            assert!(std::time::Instant::now() < deadline, "no size read came");
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        assert_eq!(held().as_deref(), Some(r#"{"w2:p1":[150,50]}"#));
-        let control = std::fs::read_to_string(dir.join("controllers")).unwrap();
-        drop(body);
-        assert!(
-            gone(control.trim()).await,
-            "the control outlived its viewer"
-        );
-        assert_eq!(
-            std::fs::read_to_string(dir.join("control-in")).unwrap(),
-            "{\"type\":\"terminal.resize\",\"cols\":150,\"rows\":50}\n{\"type\":\"terminal.release\"}\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_observe_that_never_sends_a_full_frame_gives_up() {
-        let mut fleet = Fleet::new();
-        let session = fleet.worker("w2:p1");
-        let scratch = tempfile::tempdir().unwrap();
-        let dir = scratch.path();
-        std::fs::write(dir.join("full"), "false\n").unwrap();
-        let app = mirror_app(&fleet, dir);
-        let cookie = owner_cookie(fleet.dir.path());
-        let response = app
-            .oneshot(mutation(
-                "POST",
-                &format!("/api/v1/agents/{session}/terminal"),
-                json!({}),
-                &[("cookie", &cookie)],
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let mut body = response.into_body().into_data_stream();
-        let mut pending = String::new();
-        // Each try says the size, and none sends a frame on.
-        for _ in 0..3 {
-            assert_eq!(next_line(&mut body, &mut pending).await["type"], "size");
-        }
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "unavailable", "message": "herdr observe never sent a full frame"})
-        );
-        let observers = std::fs::read_to_string(dir.join("observers")).unwrap();
-        let observers: Vec<_> = observers.lines().collect();
-        assert_eq!(observers.len(), 3);
-        for pid in observers {
-            assert!(gone(pid).await, "an observe outlived its try");
-        }
-    }
-
-    /// Waits up to 6 seconds for `ready` to hold.
-    async fn until(mut ready: impl FnMut() -> bool) -> bool {
-        for _ in 0..120 {
-            if ready() {
-                return true;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        false
-    }
-
-    #[tokio::test]
-    async fn a_fit_resizes_the_pane_and_gives_it_back_when_the_viewer_leaves() {
-        let mut fleet = Fleet::new();
-        let session = fleet.worker("w2:p1");
-        let scratch = tempfile::tempdir().unwrap();
-        let dir = scratch.path();
-        let app = mirror_app(&fleet, dir);
-        let cookie = owner_cookie(fleet.dir.path());
-        let fits = fleet.dir.path().join("mirror-fits.json");
-        let held = || std::fs::read_to_string(&fits).ok();
-        let response = app
-            .clone()
-            .oneshot(mutation(
-                "POST",
-                &format!("/api/v1/agents/{session}/terminal"),
-                json!({"fit": {"cols": 100, "rows": 30}}),
-                &[("cookie", &cookie)],
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let mut body = response.into_body().into_data_stream();
-        let mut pending = String::new();
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "size", "cols": 100, "rows": 30})
-        );
-        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
-        let calls = std::fs::read_to_string(dir.join("calls")).unwrap();
-        assert!(
-            calls.contains("terminal session control w2:p1 --cols 100 --rows 30"),
-            "{calls}"
-        );
-        assert!(!calls.contains("--takeover"), "{calls}");
-        // The size to give back is on disk while herdr holds the Fit.
-        assert_eq!(held().as_deref(), Some(r#"{"w2:p1":[80,24]}"#));
-
-        // The board changes size: the same control resizes the pane in
-        // place, and the stream says the new size before its full frame.
-        let refit = format!("/api/v1/agents/{session}/terminal/fit");
-        let refitted = send(
-            &app,
-            mutation(
-                "POST",
-                &refit,
-                json!({"cols": 110, "rows": 32}),
-                &[("cookie", &cookie)],
-            ),
-        )
-        .await;
-        assert_eq!(refitted.status, StatusCode::OK, "{}", refitted.body);
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "size", "cols": 110, "rows": 32})
-        );
-        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
-        let control = std::fs::read_to_string(dir.join("controllers")).unwrap();
-        assert_eq!(control.lines().count(), 1, "the refit ran a second control");
-
-        // The owner changes herdr's layout meanwhile: the pane goes back to
-        // the new size, and the Fit holds on.
-        std::fs::write(dir.join("size"), "90 28\n").unwrap();
-        assert!(until(|| held().as_deref() == Some(r#"{"w2:p1":[90,28]}"#)).await);
-
-        drop(body);
-        assert!(
-            gone(control.trim()).await,
-            "the control outlived its viewer"
-        );
-        assert_eq!(
-            std::fs::read_to_string(dir.join("control-in")).unwrap(),
-            "{\"type\":\"terminal.resize\",\"cols\":110,\"rows\":32}\n\
-             {\"type\":\"terminal.resize\",\"cols\":90,\"rows\":28}\n{\"type\":\"terminal.release\"}\n"
-        );
-        assert!(until(|| held().is_none()).await, "the Fit was not let go");
-
-        // With the stream gone no Fit holds the pane, so a refit is refused.
-        let late = send(
-            &app,
-            mutation(
-                "POST",
-                &refit,
-                json!({"cols": 110, "rows": 32}),
-                &[("cookie", &cookie)],
-            ),
-        )
-        .await;
-        assert_eq!(
-            late.status,
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "{}",
-            late.body
-        );
-    }
-
-    #[tokio::test]
-    async fn a_fit_herdr_refuses_goes_on_at_the_panes_own_size() {
-        let mut fleet = Fleet::new();
-        let session = fleet.worker("w2:p1");
-        let scratch = tempfile::tempdir().unwrap();
-        let dir = scratch.path();
-        std::fs::write(dir.join("refuse"), "").unwrap();
-        let app = mirror_app(&fleet, dir);
-        let cookie = owner_cookie(fleet.dir.path());
-        let path = format!("/api/v1/agents/{session}/terminal");
-        let tiny = send(
-            &app,
-            mutation(
-                "POST",
-                &path,
-                json!({"fit": {"cols": 10, "rows": 30}}),
-                &[("cookie", &cookie)],
-            ),
-        )
-        .await;
-        assert_eq!(tiny.status, StatusCode::BAD_REQUEST, "{}", tiny.body);
-        let response = app
-            .oneshot(mutation(
-                "POST",
-                &path,
-                json!({"fit": {"cols": 100, "rows": 30}}),
-                &[("cookie", &cookie)],
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let mut body = response.into_body().into_data_stream();
-        let mut pending = String::new();
-        assert_eq!(next_line(&mut body, &mut pending).await["type"], "size");
-        let unfit = next_line(&mut body, &mut pending).await;
-        assert_eq!(unfit["type"], "unfit");
-        assert!(
-            unfit["message"]
-                .as_str()
-                .unwrap()
-                .contains("already has an attached client"),
-            "{unfit}"
-        );
-        assert_eq!(
-            next_line(&mut body, &mut pending).await,
-            json!({"type": "size", "cols": 80, "rows": 24})
-        );
-        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
-        assert!(!fleet.dir.path().join("mirror-fits.json").exists());
-    }
-
-    #[tokio::test]
-    async fn a_daemon_that_stopped_mid_fit_gives_the_pane_back_when_it_starts() {
-        let home = tempfile::tempdir().unwrap();
-        let scratch = tempfile::tempdir().unwrap();
-        let dir = scratch.path();
-        let fits = home.path().join("mirror-fits.json");
-        std::fs::write(&fits, r#"{"w2:p1":[80,24]}"#).unwrap();
-        let mirrors = Mirrors::new(home.path());
-        let herdr = mirror_herdr(dir);
-        // herdr's layout is not the pane's size (it lays tabs out at 120 by
-        // 40 with no client attached): the pane goes back to the size it had
-        // before the Fit.
-        std::fs::write(dir.join("size"), "120 40\n").unwrap();
-        mirrors.fits().restore_left(&herdr).await;
-        let calls = std::fs::read_to_string(dir.join("calls")).unwrap();
-        assert!(
-            calls.contains("terminal session control w2:p1 --cols 80 --rows 24"),
-            "{calls}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(dir.join("control-in")).unwrap(),
-            "{\"type\":\"terminal.resize\",\"cols\":80,\"rows\":24}\n{\"type\":\"terminal.release\"}\n"
-        );
-        assert!(!fits.exists());
-        assert!(mirrors.fits().held().is_empty());
-
-        // A pane herdr no longer has is dropped with nothing to give back.
-        std::fs::write(&fits, r#"{"w2:p1":[80,24]}"#).unwrap();
-        std::fs::write(dir.join("gone"), "").unwrap();
-        let mirrors = Mirrors::new(home.path());
-        mirrors.fits().restore_left(&herdr).await;
-        let after = std::fs::read_to_string(dir.join("calls")).unwrap();
-        assert_eq!(
-            after.matches("terminal session control").count(),
-            1,
-            "{after}"
-        );
-        assert!(!fits.exists());
     }
 
     #[test]
@@ -14354,8 +13419,8 @@ esac"#,
     }
 
     /// A Fit on a peer's pane needs the pane's kind, and the peer's rows
-    /// are where this host has it: a holder pane's Fit is a lease, a herdr
-    /// pane's takes a turn, and rows without the agent's pane say neither.
+    /// are where this host has it: a holder pane's Fit is a lease, and rows
+    /// without the agent's pane say none.
     #[test]
     fn a_peer_fit_reads_the_pane_kind_from_the_peer_rows() {
         use crate::peer::PeerQueries;
@@ -14367,7 +13432,7 @@ esac"#,
                 activity: "working".to_owned(),
                 activity_observed_at: None,
                 last_status_line: None,
-                herdr_name: None,
+                name: None,
                 card_id: None,
                 host_id: "h-peer".to_owned(),
                 workers,
@@ -14411,9 +13476,6 @@ esac"#,
         let holder = view(rows(Some(work.as_str())));
         assert_eq!(peer_pane_kind(&holder, "s-work"), PeerPane::Holder);
         assert_eq!(peer_pane_kind(&holder, "s-lead"), PeerPane::Holder);
-        // A herdr pane id is herdr's own `window:pane`.
-        let herdr = view(rows(Some("w2:p1")));
-        assert_eq!(peer_pane_kind(&herdr, "s-work"), PeerPane::Herdr);
         // The agent's row holds no pane, the rows hold no such agent, and
         // no snapshot has arrived: none of the three may be guessed.
         assert_eq!(
