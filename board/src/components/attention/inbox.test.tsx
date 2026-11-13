@@ -962,6 +962,45 @@ test("a peer answer the peer did not confirm says so, and a retry carries the sa
   expect(calls[1]?.body.idempotency_key).toBe(calls[0]?.body.idempotency_key);
 });
 
+// Sets host-d's link, as a peer that stops answering goes lagging.
+function peerLink(queryClient: QueryClient, link: "live" | "lagging") {
+  queryClient.setQueryData<MachinesResponse>(machinesQuery().queryKey, (machines) =>
+    machines
+      ? {
+          ...machines,
+          machines: machines.machines.map((machine) =>
+            machine.label === "host-d" ? { ...machine, link } : machine,
+          ),
+        }
+      : machines,
+  );
+}
+
+test("a peer that lags while an answer is out keeps the strip, says the answer is unconfirmed, and a retry carries the same key", async () => {
+  stubDaemon("federated", true);
+  replies.push({
+    status: 504,
+    body: {
+      ok: false,
+      error: { code: "forward_uncertain", message: "host-d did not answer within 60 seconds" },
+    },
+  });
+  const { queryClient } = await renderInbox("federated", PEER_PROMPT);
+  fireEvent.click(await screen.findByRole("button", { name: "Answer 1: Yes" }));
+  await flush();
+  act(() => peerLink(queryClient, "lagging"));
+  await flush();
+  expect(screen.queryByText(/The board cannot answer it here/)).toBeNull();
+  await act(async () => release?.());
+  expect(await screen.findByText(/Sent, not confirmed\./)).toBeTruthy();
+  act(() => peerLink(queryClient, "live"));
+  fireEvent.click(await screen.findByRole("button", { name: "Answer 1: Yes" }));
+  await flush();
+  await act(async () => release?.());
+  expect(calls).toHaveLength(2);
+  expect(calls[1]?.body.idempotency_key).toBe(calls[0]?.body.idempotency_key);
+});
+
 test("a permission prompt on a peer paired read-only says to answer it from that host", async () => {
   stubDaemon("federated");
   await renderInbox("federated", PEER_PROMPT, readOnlyPeer);

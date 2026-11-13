@@ -25,7 +25,7 @@ import { quietFor } from "./activity";
 import { Ago, Lasting, useTick } from "./ago";
 import { agentGroups, findLine, nextNeeding, stepLine } from "./agents-model";
 import type { AgentGroup, AgentLine } from "./agents-model";
-import { AnswerStrip } from "./answer-strip";
+import { AnswerStrip, useAnswerOpen } from "./answer-strip";
 import { EmptyScope } from "./board-view";
 import { formatAge, formatLisbonMoment } from "./format";
 import { FOCUS_TOOLTIP, attachCommand, useOpenInTerminal, useOpenKey } from "./terminal-open";
@@ -587,6 +587,8 @@ function Stage({
   // A peer's agent takes the same controls, forwarded to the peer, while the
   // link is live and the pairing has the act scope (protocol.md 7.4, D20).
   const act = standing.canAct;
+  // An answer the peer has not confirmed keeps the strip up while it lags.
+  const answering = useAnswerOpen(peerHost, agent.session_id);
   const state = runStateOf(agent, activity);
   const orchestrator = agent.role === "orchestrator";
   // The loader reads every listed agent's run, so this is already cached.
@@ -656,7 +658,7 @@ function Stage({
       viewOnly={standing.reason === VIEW_ONLY_REASON}
       full={full}
       strip={
-        act ? (
+        act || answering ? (
           <AnswerStrip
             key={agent.session_id}
             sessionId={agent.session_id}

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 
 import type { PromptDialog, PromptRead } from "../../lib/api-types";
@@ -66,6 +66,34 @@ function tryAgain(failures: number, error: Error): boolean {
   return status === null || (status >= 500 && status !== 502);
 }
 
+// Forwarded answers the peer has not confirmed, by host and session: one in
+// flight, or one a 503 or 504 left open. They outlive the strip, so a view
+// that would hide it while its peer lags keeps it up, and the same tap after
+// it carries the same key, so it is typed once.
+const openAnswers = new Map<string, { tap: string; key: string }>();
+const listeners = new Set<() => void>();
+
+function openKey(host: string, sessionId: string): string {
+  return `${host}\n${sessionId}`;
+}
+
+function setOpen(id: string, answer: { tap: string; key: string } | null) {
+  if (answer) openAnswers.set(id, answer);
+  else openAnswers.delete(id);
+  for (const listener of listeners) listener();
+}
+
+// True while a peer's agent has an answer the peer has not confirmed.
+export function useAnswerOpen(host: string | undefined, sessionId: string): boolean {
+  return useSyncExternalStore(
+    (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    () => (host ? openAnswers.has(openKey(host, sessionId)) : false),
+  );
+}
+
 // The waiting agent, for the question "No, exit" asks first: its name, and
 // its card and run for the facts.
 export interface StripAgent {
@@ -115,9 +143,6 @@ export function AnswerStrip({
   // later observation of the same wait (the screen verdict seeing the dialog
   // after the hook did) keeps it; a later one after an answer went is the next wait.
   const [wait, setWait] = useState<string | null>(null);
-  // A forwarded answer's key, kept for the same tap after a 504 so a retry is
-  // typed once.
-  const pending = useRef<{ tap: string; key: string } | null>(null);
   const answered = answer?.kind === "sent" && answer.at === wait && answer.seen !== observedAt;
   const next =
     waiting && observedAt !== null ? (wait === null || answered ? observedAt : wait) : null;
@@ -156,15 +181,18 @@ export function AnswerStrip({
     const digit = shown.layout === "permission";
     setAnswer({ kind: "sending", at, n });
     const same = `${shown.screen}:${n}`;
-    const key = pending.current?.tap === same ? pending.current.key : ulid();
-    pending.current = null;
+    const id = host ? openKey(host, sessionId) : null;
+    const before = id ? openAnswers.get(id) : undefined;
+    const key = before?.tap === same ? before.key : ulid();
+    if (id) setOpen(id, { tap: same, key });
     const sent = await readPane(`${promptPath(sessionId)}/answer`, undefined, {
       option: n,
       screen: shown.screen,
       ...(host ? { host, idempotency_key: key } : {}),
     });
+    // A 503 never reached the peer: the answer stays open, under its key.
+    if (id && (sent.ok || (sent.status !== 503 && sent.status !== 504))) setOpen(id, null);
     if (host && !sent.ok && sent.status === 504) {
-      pending.current = { tap: same, key };
       setAnswer({ kind: "refused", at, detail: unconfirmed(host), unsure: true });
       return;
     }

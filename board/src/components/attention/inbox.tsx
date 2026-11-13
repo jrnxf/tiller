@@ -28,7 +28,7 @@ import { dialogWaits, scopeTest, scopedProjects } from "../../lib/scope";
 import { useStore } from "../../lib/store";
 import { CheckIcon } from "../shell/icons";
 import { Ago } from "../board/ago";
-import { AnswerStrip } from "../board/answer-strip";
+import { AnswerStrip, useAnswerOpen } from "../board/answer-strip";
 import { HostChip } from "../board/host-chip";
 import { ShieldIcon } from "../board/icons";
 import { useAmbiguousIds, useStanding, useNamedProjects } from "../board/peer-state";
@@ -426,6 +426,8 @@ function PermissionDetail({ prompt, ctx }: { prompt: PermissionPrompt; ctx: Cont
   const owner = ctx.cards.get(prompt.card_id) ?? prompt;
   const peer = ownerOf(owner);
   const standing = useStanding(owner);
+  // An answer the peer has not confirmed keeps the strip up while it lags.
+  const answering = useAnswerOpen(peer, prompt.session_id);
   const name = agentName(agent);
   const chip = (
     <span className="lab sm warn">
@@ -463,7 +465,7 @@ function PermissionDetail({ prompt, ctx }: { prompt: PermissionPrompt; ctx: Cont
         <TerminalMenu sessionId={prompt.session_id} off={focusReason(peer)} />
       </div>
       <h2 className="d-q">Allow {prompt.tool}?</h2>
-      {peer && !standing.canAct ? (
+      {peer && !standing.canAct && !answering ? (
         <>
           <p className="d-ctx">{offPeer(name, "a permission dialog", peer, standing.reason)}</p>
           {asking}
@@ -562,6 +564,7 @@ function DialogDetail({ agent, ctx }: { agent: AgentRow; ctx: Context }) {
   const peer = ownerOf(owner);
   const off = focusReason(peer);
   const standing = useStanding(owner);
+  const answering = useAnswerOpen(peer, agent.session_id);
   const ambiguous = useAmbiguousIds();
   const name = agentName(agent);
   const since = agent.state_since ?? agent.activity_observed_at;
@@ -629,7 +632,7 @@ function DialogDetail({ agent, ctx }: { agent: AgentRow; ctx: Context }) {
   return (
     <>
       <BackLink />
-      {peer && !standing.canAct ? (
+      {peer && !standing.canAct && !answering ? (
         unknown
       ) : (
         <AnswerStrip
