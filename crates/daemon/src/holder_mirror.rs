@@ -316,17 +316,13 @@ async fn view(
         Ok(view) => view,
         Err(error) => return unavailable(tx, &error),
     };
-    // The repaint comes first, with the pane's size. A `resized` the watch
-    // read before it is no newer, so it is passed over: the two come on
-    // connections of their own, and the board must not see an older size
-    // after the repaint's.
+    // The repaint comes first, with the pane's size.
     let first = tokio::select! {
         update = view.updates.recv() => update,
         () = stopping(&mut stop) => return,
         () = tx.closed() => return,
     };
     let Some(first) = first else { return };
-    view.sizes.mark_unchanged();
     // With a watch, every new size comes from its `resized` events, the
     // Fit's own too, in the holder's order. Without one, the answers to
     // the Fit's resizes are all the view hears of a size.
