@@ -111,6 +111,24 @@ impl Holder {
         Updates { rx, handle }
     }
 
+    /// A subscription that reads every update and keeps none, for a test
+    /// that needs a reader and times the wall clock: a queue of 200 MiB in
+    /// the test process takes cores and memory the timing measures.
+    fn drain(&self, pane: &Pane) -> StreamHandle {
+        let mut subscription = self
+            .client
+            .subscribe(
+                &pane.pane,
+                Subscribe {
+                    sync: SyncMode::Pass,
+                },
+            )
+            .unwrap();
+        let handle = subscription.handle();
+        std::thread::spawn(move || while let Ok(Some(_)) = subscription.recv() {});
+        handle
+    }
+
     fn log(&self) -> String {
         std::fs::read_to_string(&self.log).unwrap_or_default()
     }
@@ -554,6 +572,15 @@ fn screen_until(
     }
 }
 
+/// Waits for the shell's prompt on a row of its own: the terminal echoes
+/// input typed before the shell prints it, and the shell's output then
+/// lands on the prompt's row.
+fn prompt(holder: &Holder, pane: &Pane) -> Vec<String> {
+    screen_until(holder, pane, "the prompt", |seen| {
+        seen == "$" || seen == "#"
+    })
+}
+
 /// Reads the pane's visible text until a row is `row`.
 fn shows(holder: &Holder, pane: &Pane, row: &str) -> Vec<String> {
     screen_until(holder, pane, row, |seen| seen == row)
@@ -585,6 +612,7 @@ fn get_and_screen_read_a_pane_in_text_ansi_and_with_its_scrollback() {
             .is_none()
     );
 
+    prompt(&holder, &pane);
     holder
         .client
         .input(&pane.pane, "printf '\\033[31mred\\033[0m %s\\n' $((6*7))\n")
@@ -605,6 +633,7 @@ fn get_and_screen_read_a_pane_in_text_ansi_and_with_its_scrollback() {
     assert_eq!(ansi.rows_text.len(), 40);
 
     // 60 more lines scroll the first ones off the 40-row screen.
+    prompt(&holder, &pane);
     holder
         .client
         .input(
@@ -1275,9 +1304,12 @@ fn every_query_is_answered_once_on_the_pty_and_never_reaches_a_subscriber() {
 fn a_buffering_subscriber_gets_a_synchronized_frame_whole_or_at_its_deadline() {
     let world = World::new();
     let holder = Holder::start(&world);
+    // The first frame's end waits for the test, not for a sleep: a sleep
+    // shorter than the 150 ms deadline still lost to a slow runner. The
+    // second frame outlives its deadline on purpose.
     let script = concat!(
-        "stty -echo; head -c 1 >/dev/null;",
-        "printf '\\033[?2026hone'; sleep 0.1; printf 'two\\033[?2026l';",
+        "stty -echo; read go;",
+        "printf '\\033[?2026hone'; read go; printf 'two\\033[?2026l';",
         "printf '\\033[?2026hthree'; sleep 1; printf 'four\\033[?2026l';",
         "exec cat"
     );
@@ -1290,6 +1322,10 @@ fn a_buffering_subscriber_gets_a_synchronized_frame_whole_or_at_its_deadline() {
             Update::Repaint { .. }
         ));
     }
+    holder.client.input(&pane.pane, "g\n").unwrap();
+    // The passing subscriber has the start of the frame, so the frame is
+    // open in the holder: its end comes a round trip later.
+    let mut passed_reads = output_until(&passed, &holder, "one");
     holder.client.input(&pane.pane, "g\n").unwrap();
     let frame = b"\x1b[?2026honetwo\x1b[?2026l";
     let reads = output_until(&buffered, &holder, "four");
@@ -1305,9 +1341,15 @@ fn a_buffering_subscriber_gets_a_synchronized_frame_whole_or_at_its_deadline() {
         "the frame was held past its deadline"
     );
     // A passing subscriber gets the bytes as they come, markers and all.
-    let reads = output_until(&passed, &holder, "four");
-    assert!(!reads.iter().any(|read| holds(read, frame)), "{reads:?}");
-    assert!(holds(&reads.concat(), b"\x1b[?2026hthree"), "{reads:?}");
+    passed_reads.extend(output_until(&passed, &holder, "four"));
+    assert!(
+        !passed_reads.iter().any(|read| holds(read, frame)),
+        "{passed_reads:?}"
+    );
+    assert!(
+        holds(&passed_reads.concat(), b"\x1b[?2026hthree"),
+        "{passed_reads:?}"
+    );
 }
 
 /// A raw connection's subscription to `pane`, up to its repaint's bytes.
@@ -1581,7 +1623,7 @@ fn a_flood_keeps_the_holders_memory_bound_and_every_ping_fast() {
     let pane = holder.spawn(&world, &["/bin/sh", "-c", script]);
     let mut stalled = raw_connection(&holder);
     raw_subscribe(&mut stalled, &pane);
-    let reading = holder.updates(&pane);
+    let reading = holder.drain(&pane);
     let pid = holder.running.id();
     let before = rss_kib(pid);
     holder.client.input(&pane.pane, "g\n").unwrap();
@@ -1605,7 +1647,7 @@ fn a_flood_keeps_the_holders_memory_bound_and_every_ping_fast() {
     eprintln!(
         "flood: {took:?}, {pings} pings, slowest {slowest:?}, rss {before} KiB to {peak} KiB"
     );
-    drop(reading);
+    reading.end();
     // The app writes as fast as the holder takes it.
     assert!(
         took < Duration::from_secs(10),
