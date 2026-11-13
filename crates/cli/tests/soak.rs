@@ -106,7 +106,7 @@ const HOOKS: &[Hook] = &[
     Hook {
         name: "delivery_counts",
         after: "every event, and the end",
-        checks: "every message to the orchestrator so far, the soak's and the daemon's own notes, is `acked` in the outbox after exactly one typed wake line covered it (`tiller inbox` drains a batch), with no line typed twice; then the next message goes out",
+        checks: "every message to the orchestrator so far, the soak's and the daemon's own notes, is `acked` in the outbox after exactly one typed wake line covered it (`tiller inbox` drains a batch), with no line naming a message a take before had acked (the daemon may type a batch's head again while it is unacked); then the next message goes out",
     },
     Hook {
         name: "daemon_reconnect",
@@ -562,6 +562,8 @@ struct Soak {
     submits_taken: usize,
     /// The holder instance, as the last event left it.
     instance: String,
+    /// The instance the last holder kill took down.
+    killed: Option<String>,
     upgrades: usize,
     restarts: usize,
     kills: usize,
@@ -611,6 +613,7 @@ impl Soak {
             sent: 0,
             submits_taken: 0,
             instance,
+            killed: None,
             upgrades: 0,
             restarts: 0,
             kills: 0,
@@ -927,7 +930,7 @@ impl Soak {
         if !listing.panes.is_empty() {
             return Err("a new holder instance holds panes".into());
         }
-        self.instance = listing.instance;
+        self.killed = Some(std::mem::replace(&mut self.instance, listing.instance));
         self.kills += 1;
         for counter in &mut self.counters {
             counter.epoch += 1;
@@ -983,8 +986,11 @@ impl Soak {
     /// daemon sends some of its own: a note when a worker starts), then
     /// does what Claude Code does with each new submitted line: runs it,
     /// `tiller inbox <id>`, which acks that message and drains the rest of
-    /// its batch (protocol 3.3). A line that is not one wake line, or that
-    /// names a message already taken, is a delivery that typed twice.
+    /// its batch (protocol 3.3). The daemon types a batch's head again when
+    /// a message joins it before the ack, so a line that names a message
+    /// this take acked was typed before the ack and is skipped. A line that
+    /// is not one wake line, or that names a message an earlier take acked,
+    /// is a delivery that typed twice.
     fn take_submits(&mut self) -> Result<(), String> {
         let ids: Vec<String> = {
             let store = self.world.store();
@@ -1006,21 +1012,26 @@ impl Soak {
             }
         }
         let submits = self.submits();
+        let first = self.submits_taken;
         for (n, submit) in submits.iter().enumerate().skip(self.submits_taken) {
             let id = submit
                 .strip_prefix("tiller inbox ")
                 .and_then(|rest| rest.split_whitespace().next())
                 .filter(|_| submit.matches("tiller inbox").count() == 1 && !submit.contains('\n'))
                 .ok_or_else(|| format!("a submit is not one wake line: {submit:?}"))?;
-            if let Some(taken) = self
+            if let Some(before) = self
                 .messages
                 .iter()
-                .find(|m| m.id == id && m.acked_by.is_some())
+                .find(|m| m.id == id)
+                .and_then(|m| m.acked_by)
             {
-                return Err(format!(
-                    "message {id} was typed again after submit {} took it: {submit:?}",
-                    taken.acked_by.unwrap_or_default()
-                ));
+                if before < first {
+                    return Err(format!(
+                        "message {id} was typed again after submit {before} took it: {submit:?}"
+                    ));
+                }
+                self.submits_taken = n + 1;
+                continue;
             }
             let read = self.world.must_as(&self.orchestrator, &["inbox", id]);
             let batch: Vec<String> = read.data()["messages"]
@@ -1054,7 +1065,8 @@ impl Soak {
     }
 
     /// Every message to the orchestrator so far was delivered and taken by
-    /// exactly one submitted line, and no line was typed twice. With
+    /// exactly one submitted line, and no line named a message an earlier
+    /// take had acked. With
     /// `next`, sends the next message.
     fn delivery_counts(&mut self, next: bool) -> Result<(), String> {
         let deadline = Instant::now() + DELIVER;
@@ -1252,12 +1264,11 @@ impl Soak {
         }
         let payload = &lost[0]["payload"];
         if payload["instance"] != self.instance.as_str()
-            || payload["previous"].is_null()
-            || payload["previous"] == self.instance.as_str()
+            || payload["previous"].as_str() != self.killed.as_deref()
         {
             return Err(format!(
-                "holder.lost names {payload}, the new instance is {} (meta was {previous:?})",
-                self.instance
+                "holder.lost names {payload}, the kill went from {:?} to {} (meta was {previous:?})",
+                self.killed, self.instance
             ));
         }
         self.same_instance()?;

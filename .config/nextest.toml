@@ -33,9 +33,10 @@ filter = 'binary(soak)'
 test-group = "wall-clock"
 threads-required = "num-test-threads"
 
-# Three agent checks race the wall clock: the counter's ticks are gated on
+# Four agent checks race the wall clock: the counter's ticks are gated on
 # a stall under a second, the kill before Enter lands inside the
-# half-second settle, and the output-quiet guard paces a recording's frames.
+# half-second settle, the output-quiet guard paces a recording's frames,
+# and a pane that never stops printing paces its output on the clock.
 # They run alone and check their group the same way.
 [[profile.default.overrides]]
 filter = 'binary(holder_agents) & (test(twenty_daemon_restarts_leave_no_gap_in_a_counter) | test(a_daemon_killed_between_a_typed_line_and_its_enter_submits_it_once) | test(a_message_waits_out_a_reply_that_streams_with_an_empty_composer) | test(a_message_waits_for_a_pane_that_never_stops_printing))'
