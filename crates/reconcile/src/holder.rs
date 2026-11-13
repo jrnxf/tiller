@@ -466,7 +466,8 @@ impl HolderSource {
 
     /// R22's trigger: at the first connect and after each `config.changed`,
     /// a holder that runs another binary than the stable profile path is
-    /// asked to upgrade, once.
+    /// asked to upgrade, once. A holder on the stable binary clears a
+    /// refusal left from before.
     fn check_upgrade(&mut self, ctx: &Ctx) -> Result<(), PollError> {
         let changed = self.store.config_changed_at()?;
         if self.upgrade_checked == Some(changed) {
@@ -483,6 +484,7 @@ impl HolderSource {
             return Ok(());
         };
         if running == stable {
+            self.store.host_health(ctx, UPGRADE_CHECK, None)?;
             return Ok(());
         }
         match self.link.upgrade(&stable) {

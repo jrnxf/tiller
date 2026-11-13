@@ -256,6 +256,33 @@ fn a_refused_upgrade_is_a_health_warning() {
     assert_eq!(link.upgrades().len(), 2, "it runs the stable binary now");
 }
 
+/// A refusal does not outlive its cause: once the holder restarts from the
+/// stable binary, the next check clears the warning without asking.
+#[test]
+fn a_refused_upgrade_clears_once_the_holder_runs_the_stable_binary() {
+    let mut w = World::new();
+    let link = w.use_holder();
+    let stable = w.fleet.dir.path().join("stable-tiller");
+    std::fs::write(&stable, "").unwrap();
+    let stable = std::fs::canonicalize(stable).unwrap();
+    link.refuse_upgrades(Some("pane p1 is mid-subscribe"));
+    let mut first = poller(&w, &link, Some(stable.clone()));
+    first.poll_once(at(0));
+    assert!(w.store().host_degraded(UPGRADE_CHECK).unwrap().is_some());
+
+    link.restart();
+    link.set_binary(Some(&stable));
+    let mut second = poller(&w, &link, Some(stable.clone()));
+    second.poll_once(at(10));
+    assert!(second.source().connected());
+    assert_eq!(
+        link.upgrades(),
+        std::slice::from_ref(&stable),
+        "not asked again"
+    );
+    assert_eq!(w.store().host_degraded(UPGRADE_CHECK).unwrap(), None);
+}
+
 /// A holder that already runs the stable binary, or one whose binary
 /// cannot be read, is never asked.
 #[test]
