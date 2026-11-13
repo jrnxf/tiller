@@ -6,7 +6,6 @@
 use rusqlite::{Connection, OptionalExtension};
 use tiller_core::Timestamp;
 use tiller_core::domain::{Activity, Session};
-use tiller_herdr::client::{PaneInfo, Snapshot};
 use tiller_panes::message::{Listing, PaneState as HolderPaneState};
 
 use crate::sources::{AgentProbe, Probe};
@@ -15,8 +14,8 @@ use crate::thresholds::Thresholds;
 /// Why a session is dead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Death {
-    /// A successful snapshot lacks the pane, or the pane names another
-    /// session.
+    /// A successful `list` lacks the pane, or the pane names another
+    /// session, and its recorded pid runs no process.
     PaneGone,
     /// The pane is there but no agent process runs in it.
     AgentDead,
@@ -41,7 +40,7 @@ pub enum Verdict {
     /// No observation past the threshold, but the agent process is alive
     /// (R12).
     Silent,
-    /// Confirmed by a successful snapshot (R02, R03).
+    /// Confirmed by a successful `list` (R02, R03).
     Dead(Death),
     /// A source failed; nothing happens until the next pass.
     Unknown,
@@ -97,18 +96,6 @@ pub fn errored_long(session: &Session, thresholds: &Thresholds, now: Timestamp) 
             .is_some_and(|at| at.plus_minutes(thresholds.errored_silent) <= now)
 }
 
-/// The pane the records bind the session to, when the snapshot has it and
-/// it does not name another session. A pane with no `session` token is
-/// trusted: R18 re-reports tokens after a herdr restart.
-pub fn bound_pane<'a>(snapshot: &'a Snapshot, session: &Session) -> Option<&'a PaneInfo> {
-    let pane_id = session.pane_id.as_deref()?;
-    let pane = snapshot.pane(pane_id)?;
-    match pane.tokens.get("session") {
-        Some(named) if *named != session.id => None,
-        _ => Some(pane),
-    }
-}
-
 /// The terminal holder's side of one session's ladder: this pass's
 /// successful `list` of the recorded instance, and the pid the `panes`
 /// cache last recorded for the session's pane.
@@ -118,58 +105,30 @@ pub struct HolderReading<'a> {
     pub recorded_pid: Option<u32>,
 }
 
-/// Climbs the ladder for one live session.
+/// Climbs the ladder for one live session (`recovery.md` section 2 and
+/// R18).
 ///
-/// `effective` is the view's word; `snapshot` is this pass's successful herdr
-/// read and `holder` its successful terminal holder `list`, each `None` when
-/// it failed. A session that is not stale and whose pane is present is alive
-/// without any probe. A session with no pane yet (a spawn that has not
+/// `effective` is the view's word and `holder` this pass's successful
+/// terminal holder `list`, `None` when it failed. Step 2 is the holder's
+/// `list` and the pane's key, step 3 the pane's state, then the child's pid
+/// when the session reads stale. A pane the list lacks, or that names
+/// another session, is gone once the recorded pid runs no process
+/// (`kill(pid, 0)`). A session with no pane yet (a spawn that has not
 /// bound) is unknown: the spawn path owns it.
 pub fn climb(
     session: &Session,
     effective: &str,
     errored_long: bool,
-    snapshot: Option<&Snapshot>,
     holder: Option<HolderReading<'_>>,
     probe: &dyn AgentProbe,
 ) -> Verdict {
     let Some(pane_id) = session.pane_id.as_deref() else {
         return Verdict::Unknown;
     };
-    let stale = effective == "stale" || errored_long;
-    if tiller_core::ids::is_holder_pane(pane_id) {
-        return match holder {
-            Some(holder) => climb_holder(session, pane_id, stale, holder, probe),
-            None => Verdict::Unknown,
-        };
-    }
-    let Some(snapshot) = snapshot else {
+    let Some(holder) = holder else {
         return Verdict::Unknown;
     };
-    let pane = bound_pane(snapshot, session);
-    match pane {
-        None => Verdict::Dead(Death::PaneGone),
-        Some(_) if !stale => Verdict::Alive,
-        Some(pane) => match probe.agent(pane) {
-            Probe::Alive => Verdict::Silent,
-            Probe::Dead => Verdict::Dead(Death::AgentDead),
-            Probe::Unknown => Verdict::Unknown,
-        },
-    }
-}
-
-/// The ladder for a pane in the terminal holder (`recovery.md` section 2
-/// and R18): step 2 is the holder's `list` and the pane's key, step 3 the
-/// pane's state, then the child's pid when the session reads stale. A pane
-/// the list lacks, or that names another session, is gone once the
-/// recorded pid runs no process (`kill(pid, 0)`).
-fn climb_holder(
-    session: &Session,
-    pane_id: &str,
-    stale: bool,
-    holder: HolderReading<'_>,
-    probe: &dyn AgentProbe,
-) -> Verdict {
+    let stale = effective == "stale" || errored_long;
     let pane = holder
         .listing
         .panes
@@ -212,10 +171,6 @@ mod tests {
     struct Fixed(Probe);
 
     impl AgentProbe for Fixed {
-        fn agent(&self, _pane: &PaneInfo) -> Probe {
-            self.0
-        }
-
         fn process(&self, _pid: u32) -> Probe {
             self.0
         }
@@ -246,103 +201,12 @@ mod tests {
         }
     }
 
-    fn snapshot(panes: &[(&str, Option<&str>)]) -> Snapshot {
-        Snapshot {
-            version: None,
-            workspaces: Vec::new(),
-            panes: panes
-                .iter()
-                .map(|(id, named)| PaneInfo {
-                    pane_id: (*id).to_owned(),
-                    workspace_id: "w".into(),
-                    agent: Some("claude".into()),
-                    agent_status: Some("idle".into()),
-                    tokens: named
-                        .map(|s| BTreeMap::from([("session".to_owned(), s.to_owned())]))
-                        .unwrap_or_default(),
-                })
-                .collect(),
-        }
-    }
-
-    #[test]
-    fn a_failed_snapshot_is_unknown_whatever_the_records_say() {
-        let s = session(Some("p1"));
-        assert_eq!(
-            climb(&s, "stale", false, None, None, &Fixed(Probe::Dead)),
-            Verdict::Unknown
-        );
-    }
-
-    #[test]
-    fn a_missing_pane_is_dead_even_when_not_stale() {
-        let s = session(Some("p1"));
-        let snap = snapshot(&[("p2", None)]);
-        assert_eq!(
-            climb(
-                &s,
-                "working",
-                false,
-                Some(&snap),
-                None,
-                &Fixed(Probe::Alive)
-            ),
-            Verdict::Dead(Death::PaneGone)
-        );
-    }
-
-    #[test]
-    fn a_pane_naming_another_session_counts_as_gone() {
-        let s = session(Some("p1"));
-        let snap = snapshot(&[("p1", Some("S9"))]);
-        assert_eq!(
-            climb(
-                &s,
-                "working",
-                false,
-                Some(&snap),
-                None,
-                &Fixed(Probe::Alive)
-            ),
-            Verdict::Dead(Death::PaneGone)
-        );
-    }
-
-    #[test]
-    fn stale_with_a_live_agent_is_silent_and_a_dead_agent_is_dead() {
-        let s = session(Some("p1"));
-        let snap = snapshot(&[("p1", Some("S1"))]);
-        assert_eq!(
-            climb(&s, "stale", false, Some(&snap), None, &Fixed(Probe::Alive)),
-            Verdict::Silent
-        );
-        assert_eq!(
-            climb(&s, "stale", false, Some(&snap), None, &Fixed(Probe::Dead)),
-            Verdict::Dead(Death::AgentDead)
-        );
-        assert_eq!(
-            climb(
-                &s,
-                "stale",
-                false,
-                Some(&snap),
-                None,
-                &Fixed(Probe::Unknown)
-            ),
-            Verdict::Unknown
-        );
-        assert_eq!(
-            climb(&s, "idle", false, Some(&snap), None, &Fixed(Probe::Dead)),
-            Verdict::Alive
-        );
-    }
-
     #[test]
     fn a_session_with_no_pane_is_unknown() {
         let s = session(None);
-        let snap = snapshot(&[]);
+        let list = listing(&[]);
         assert_eq!(
-            climb(&s, "stale", false, Some(&snap), None, &Fixed(Probe::Dead)),
+            climb(&s, "stale", false, reading(&list, None), &Fixed(Probe::Dead)),
             Verdict::Unknown
         );
     }
@@ -391,10 +255,9 @@ mod tests {
     fn a_holder_pane_with_no_list_is_unknown_not_gone() {
         let pane = holder_pane();
         let s = session(Some(&pane));
-        let snap = snapshot(&[("w1:p1", None)]);
         for effective in ["working", "stale"] {
             assert_eq!(
-                climb(&s, effective, true, Some(&snap), None, &Fixed(Probe::Dead)),
+                climb(&s, effective, true, None, &Fixed(Probe::Dead)),
                 Verdict::Unknown
             );
         }
@@ -410,7 +273,6 @@ mod tests {
                 &s,
                 "working",
                 false,
-                None,
                 reading(&list, None),
                 &Fixed(Probe::Dead)
             ),
@@ -427,7 +289,6 @@ mod tests {
                     &s,
                     "stale",
                     false,
-                    None,
                     reading(&list, None),
                     &Fixed(probe)
                 ),
@@ -449,7 +310,6 @@ mod tests {
                     &s,
                     effective,
                     false,
-                    None,
                     reading(&list, Some(1)),
                     &Fixed(Probe::Alive)
                 ),
@@ -472,7 +332,6 @@ mod tests {
                     &s,
                     "working",
                     false,
-                    None,
                     reading(list, Some(7)),
                     &Fixed(Probe::Dead)
                 ),
@@ -483,7 +342,6 @@ mod tests {
                     &s,
                     "working",
                     false,
-                    None,
                     reading(list, Some(7)),
                     &Fixed(Probe::Alive)
                 ),
@@ -494,7 +352,6 @@ mod tests {
                     &s,
                     "stale",
                     false,
-                    None,
                     reading(list, Some(7)),
                     &Fixed(Probe::Alive)
                 ),
@@ -505,7 +362,6 @@ mod tests {
                     &s,
                     "working",
                     false,
-                    None,
                     reading(list, Some(7)),
                     &Fixed(Probe::Unknown)
                 ),
@@ -516,7 +372,6 @@ mod tests {
                     &s,
                     "working",
                     false,
-                    None,
                     reading(list, None),
                     &Fixed(Probe::Alive)
                 ),

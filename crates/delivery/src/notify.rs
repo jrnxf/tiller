@@ -14,8 +14,7 @@
 //! old database does not announce its backlog.
 //!
 //! The send goes through [`Notify`]: the owner's `[notify] command`
-//! ([`Command`], `terminal-holder.md` 7), or herdr's notification until the
-//! cutover drops herdr ([`ViaHerdr`]).
+//! ([`Command`], `terminal-holder.md` 7).
 
 use std::collections::BTreeMap;
 use std::io::{Read as _, Write as _};
@@ -30,8 +29,7 @@ use tiller_core::state::attention::stale;
 use tiller_core::state::outbox::live_orchestrator;
 use tiller_core::state::{get, list};
 use tiller_core::{Actor, Ctx, Store, Timestamp};
-use tiller_herdr::client::Herdr;
-use tiller_herdr::poller::{PollError, Source};
+use tiller_poll::{PollError, Source};
 
 /// How long after it opens an attention item still counts as new.
 pub const NEW_MINUTES: i64 = 60;
@@ -73,17 +71,6 @@ pub struct Note {
 /// and the card timeline show.
 pub trait Notify {
     fn notify(&self, note: &Note) -> Result<(), String>;
-}
-
-/// herdr's own notification, the path before the cutover.
-pub struct ViaHerdr<H>(pub H);
-
-impl<H: Herdr> Notify for ViaHerdr<H> {
-    fn notify(&self, note: &Note) -> Result<(), String> {
-        self.0
-            .notify(&note.title, &note.message)
-            .map_err(|error| error.to_string())
-    }
 }
 
 /// The owner's `[notify] command`: the note goes to its stdin as a Claude

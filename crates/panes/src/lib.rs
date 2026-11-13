@@ -26,6 +26,8 @@ pub mod submit;
 #[cfg(any(test, feature = "testing"))]
 pub mod fake;
 #[cfg(any(test, feature = "testing"))]
+pub mod fake_claude;
+#[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
 pub use client::{HolderClient, Upgrade};
@@ -41,3 +43,5 @@ pub use paths::{run_dir, socket_path};
 
 #[cfg(any(test, feature = "testing"))]
 pub use fake::FakePanes;
+#[cfg(any(test, feature = "testing"))]
+pub use fake_claude::FakeClaude;

@@ -1,18 +1,46 @@
 //! Owner notifications (`protocol.md` 3.4, P36): a file-backed `state.db`, the
-//! real notifier and a fake herdr that records what it was asked to show.
+//! real notifier and a fake that records what it was asked to show.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use tiller_core::domain::{Attention, AttentionKind};
 use tiller_core::state::attention::NewAttention;
 use tiller_core::state::list;
-use tiller_delivery::notify::{Command, NEW_MINUTES, Note, Notifier, Notify as _, ViaHerdr};
-use tiller_herdr::fake::FakeHerdr;
-use tiller_herdr::testing::{Fleet, at, owner};
+use std::sync::{Arc, Mutex};
+
+use tiller_delivery::notify::{Command, NEW_MINUTES, Note, Notifier, Notify};
+use tiller_panes::testing::{Fleet, at, owner};
+
+/// A notifier that records each note it was asked to send, and refuses
+/// them all once told to.
+#[derive(Clone, Default)]
+struct Shown {
+    notes: Arc<Mutex<Vec<String>>>,
+    refuse: Arc<Mutex<bool>>,
+}
+
+impl Shown {
+    fn refuse(&self) {
+        *self.refuse.lock().unwrap() = true;
+    }
+}
+
+impl Notify for Shown {
+    fn notify(&self, note: &Note) -> Result<(), String> {
+        if *self.refuse.lock().unwrap() {
+            return Err("notify refused by the fake".to_owned());
+        }
+        self.notes
+            .lock()
+            .unwrap()
+            .push(format!("notify {} {}", note.title, note.message));
+        Ok(())
+    }
+}
 
 struct World {
     fleet: Fleet,
-    herdr: FakeHerdr,
-    notifier: Notifier<ViaHerdr<FakeHerdr>>,
+    shown: Shown,
+    notifier: Notifier<Shown>,
     card: String,
 }
 
@@ -20,17 +48,16 @@ impl World {
     fn new() -> Self {
         let mut fleet = Fleet::new();
         fleet.worker("w2:p1");
-        let herdr = FakeHerdr::new(fleet.dir.path().join("herdr.json"));
-        fleet.place(&herdr);
+        let shown = Shown::default();
         let card = fleet.workers[0].1.clone();
         let card: String =
             tiller_core::state::get::<tiller_core::domain::Run>(fleet.store.conn(), "run", &card)
                 .unwrap()
                 .card_id;
         Self {
-            notifier: Notifier::new(fleet.open(), ViaHerdr(herdr.clone())),
+            notifier: Notifier::new(fleet.open(), shown.clone()),
             fleet,
-            herdr,
+            shown,
             card,
         }
     }
@@ -54,11 +81,7 @@ impl World {
     }
 
     fn shown(&self) -> Vec<String> {
-        self.herdr
-            .calls()
-            .into_iter()
-            .filter(|call| call.starts_with("notify"))
-            .collect()
+        self.shown.notes.lock().unwrap().clone()
     }
 }
 
@@ -77,7 +100,7 @@ fn new_attention_item_notifies_once() {
 
     // A second pass, and a fresh notifier as after a daemon restart, stay quiet.
     assert!(w.notifier.pass(at(5)).unwrap().notified.is_empty());
-    let mut restarted = Notifier::new(w.fleet.open(), ViaHerdr(w.herdr.clone()));
+    let mut restarted = Notifier::new(w.fleet.open(), w.shown.clone());
     assert!(restarted.pass(at(6)).unwrap().notified.is_empty());
     assert_eq!(w.shown().len(), 2);
 
@@ -140,7 +163,7 @@ fn kinds(w: &World, item: &str) -> Vec<String> {
 #[test]
 fn a_refused_send_is_recorded_once_and_never_retried() {
     let mut w = World::new();
-    w.herdr.refuse("notify");
+    w.shown.refuse();
     let item = w.open(AttentionKind::Decision, "Raise capacity?", 2);
 
     let report = w.notifier.pass(at(4)).unwrap();
@@ -168,7 +191,7 @@ fn a_refused_send_is_recorded_once_and_never_retried() {
     assert!(error.contains("refused by the fake"), "{error}");
 
     // At most once: a second pass and a restart neither send nor record again.
-    let mut restarted = Notifier::new(w.fleet.open(), ViaHerdr(w.herdr.clone()));
+    let mut restarted = Notifier::new(w.fleet.open(), w.shown.clone());
     assert!(w.notifier.pass(at(5)).unwrap().failed.is_empty());
     assert!(restarted.pass(at(6)).unwrap().failed.is_empty());
     assert_eq!(kinds(&w, &item.id).len(), 3);
@@ -193,7 +216,7 @@ fn a_sent_notification_writes_its_outcome_once() {
 
     // At most once: a second pass and a restart write nothing more, and a
     // late outcome call applies nothing on an item that has its outcome.
-    let mut restarted = Notifier::new(w.fleet.open(), ViaHerdr(w.herdr.clone()));
+    let mut restarted = Notifier::new(w.fleet.open(), w.shown.clone());
     assert!(w.notifier.pass(at(5)).unwrap().notified.is_empty());
     assert!(restarted.pass(at(6)).unwrap().notified.is_empty());
     let ctx = tiller_core::Ctx::at(tiller_core::Actor::Daemon, at(7));

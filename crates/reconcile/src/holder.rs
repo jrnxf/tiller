@@ -3,10 +3,9 @@
 //!
 //! [`HolderSource`] is a `tiller_poll` source. It connects with `hello`,
 //! records the `welcome` against `meta.holder_instance`, starts a `watch`
-//! and runs `list` into the `panes` cache. Events then replace herdr's
-//! 2-second snapshot: each `quiet` reads the pane's visible screen and
-//! classifies it, and a `list` runs every 30 s as a check and after each
-//! reconnect.
+//! and runs `list` into the `panes` cache. Events drive it: each `quiet`
+//! reads the pane's visible screen and classifies it, and a `list` runs
+//! every 30 s as a check and after each reconnect.
 //!
 //! A holder that does not answer is unknown, never gone: the poll fails,
 //! backs off 5 s and then 15 s, and after three failures marks the host

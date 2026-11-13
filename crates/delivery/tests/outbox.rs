@@ -1,72 +1,113 @@
-//! End-to-end delivery: a file-backed `state.db`, the real delivery pass and
-//! herdr poller, and a fake herdr server whose panes draw Claude Code's
-//! screens (`protocol.md` 3.3, `recovery.md` R06 and R09).
+//! End-to-end delivery: a file-backed `state.db`, the real delivery pass,
+//! and a fake holder whose panes draw Claude Code's screens (`protocol.md`
+//! 3.3, `recovery.md` R06 and R09).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use serde_json::json;
 use tiller_core::domain::{
-    Attention, AttentionKind, Card, CardKind, Effort, OutboxKind, OutboxMessage, OutboxState,
-    RunOutcome, RunRole, StatusState,
+    Activity, Attention, AttentionKind, Card, CardKind, Effort, ObservationSource, OutboxKind,
+    OutboxMessage, OutboxState, RunOutcome, RunRole, StatusState,
 };
 use tiller_core::state::cards::NewCard;
 use tiller_core::state::outbox::NewMessage;
-use tiller_core::state::runs::{Bind, EndRun, NewOrchestrator, NewRun, Relaunch, SpawnChecks};
+use tiller_core::state::runs::{
+    Bind, EndRun, NewObservation, NewOrchestrator, NewRun, Relaunch, SpawnChecks,
+};
 use tiller_core::state::{get, list};
 use tiller_core::{Actor, Ctx, Store, Timestamp};
 use tiller_delivery::outbox::{
     BUSY_DEFER_SECS, Deliverer, Pacing, RINGS_MINUTES, Report, SUBMIT_PASSES, SUBMIT_PRESSES,
 };
-use tiller_herdr::client::Herdr;
-use tiller_herdr::fake::{FakeHerdr, PAUSE_ENV, Screen};
-use tiller_herdr::poller::{HerdrSource, Registry};
-use tiller_herdr::testing::{Fleet, at, owner};
+use tiller_panes::fake_claude::{FakeClaude, PAUSE_ENV, Screen};
+use tiller_panes::testing::{Fleet, at, owner};
+use tiller_panes::{Exit, Format, Key, Listing, Meta, Pane, PaneId, Panes, Read, Signal, Spawn};
 
 const CHILD_ENV: &str = "TILLER_DELIVERY_CHILD";
 
-/// A fleet with one worker in pane `w2:p1`, laid out in a fake herdr and
-/// polled once so every pane carries its row tokens.
+/// A fleet with one worker in pane `w2:p1`, laid out in a fake holder, its
+/// screens read once into activity observations.
 struct World {
     fleet: Fleet,
-    herdr: FakeHerdr,
+    panes: FakeClaude,
     worker: String,
-    deliverer: Deliverer<FakeHerdr>,
+    deliverer: Deliverer,
+    /// The screen each pane last showed the stand-in poll.
+    seen: HashMap<String, Option<Screen>>,
 }
 
 impl World {
     fn new() -> Self {
         let mut fleet = Fleet::new();
         let worker = fleet.worker("w2:p1");
-        let herdr = FakeHerdr::new(fleet.dir.path().join("herdr.json"));
-        fleet.place(&herdr);
-        let world = Self {
-            deliverer: Deliverer::new(fleet.open(), herdr.clone(), &fleet.host).pacing(Pacing {
-                settle: Duration::ZERO,
-                recheck: Duration::ZERO,
-            }),
+        let panes = FakeClaude::new(fleet.dir.path().join("holder.json"));
+        fleet.place(&panes);
+        let mut world = Self {
+            deliverer: Deliverer::new(fleet.open(), Arc::new(panes.clone()), &fleet.host)
+                .pacing(Pacing {
+                    settle: Duration::ZERO,
+                    recheck: Duration::ZERO,
+                }),
             fleet,
-            herdr,
+            panes,
             worker,
+            seen: HashMap::new(),
         };
         world.poll(at(0));
         world
     }
 
-    /// One herdr poll: the pane cache, activity observations, tokens and
-    /// layout.
-    fn poll(&self, now: Timestamp) {
-        let registry = Registry::new();
-        let mut poller = registry
-            .register(HerdrSource::local(
-                self.herdr.clone(),
-                self.fleet.open(),
-                &self.fleet.host,
-            ))
-            .unwrap();
-        poller.poll_once(now);
-        assert_eq!(poller.health().consecutive_failures, 0);
+    /// What the holder source records from each bound pane's screen: one
+    /// observation when the screen changes, and `pane_gone` once when the
+    /// pane is gone or exited.
+    fn poll(&mut self, now: Timestamp) {
+        let mut bound = vec![(
+            self.fleet.orchestrator_session.clone(),
+            None,
+            self.fleet.orchestrator_pane.clone(),
+        )];
+        for (session, run, pane) in &self.fleet.workers {
+            bound.push((session.clone(), Some(run.clone()), pane.clone()));
+        }
+        let ctx = Ctx::at(Actor::Daemon, now);
+        for (session, run, pane) in bound {
+            let screen = self
+                .panes
+                .panes()
+                .into_iter()
+                .find(|p| p.pane.pane.as_str() == pane && p.running())
+                .map(|p| p.screen);
+            if self.seen.get(&pane) == Some(&screen) {
+                continue;
+            }
+            self.seen.insert(pane.clone(), screen);
+            let (event, verdict) = match screen {
+                None => ("pane_gone", Activity::Ended),
+                Some(Screen::Idle) => ("holder:idle", Activity::Idle),
+                Some(Screen::Working) => ("holder:working", Activity::Working),
+                Some(Screen::Permission) => ("holder:blocked", Activity::WaitingInput),
+            };
+            self.fleet
+                .store
+                .observation_record(
+                    &ctx,
+                    NewObservation {
+                        session_id: Some(session),
+                        run_id: run,
+                        source: ObservationSource::Holder,
+                        event: event.to_owned(),
+                        verdict: Some(verdict),
+                        observed_at: now,
+                        payload: json!({ "pane_id": pane }),
+                    },
+                )
+                .unwrap();
+        }
     }
 
     fn send(&mut self, key: Option<&str>, kind: OutboxKind, now: Timestamp) -> OutboxMessage {
@@ -106,15 +147,15 @@ impl World {
     }
 
     fn submitted(&self) -> Vec<String> {
-        self.herdr.fake_pane("w2:p1").submitted
+        self.panes.fake_pane("w2:p1").submitted
     }
 
     fn typed(&self) -> usize {
-        self.calls("send_text")
+        self.calls("input")
     }
 
     fn calls(&self, prefix: &str) -> usize {
-        self.herdr
+        self.panes
             .calls()
             .iter()
             .filter(|c| c.starts_with(prefix))
@@ -143,7 +184,7 @@ fn idle_pane_gets_one_wake_line_naming_the_message() {
     assert_eq!(delivered.delivered_at, Some(at(2)));
     assert_eq!(delivered.next_attempt_at, Some(at(2).plus_minutes(2)));
     assert!(
-        !w.herdr
+        !w.panes
             .calls()
             .iter()
             .any(|c| c.contains("rebase onto main")),
@@ -158,15 +199,15 @@ fn idle_pane_gets_one_wake_line_naming_the_message() {
 fn enter_read_as_a_newline_is_pressed_again_until_the_line_submits() {
     let mut w = World::new();
     let message = w.send(None, OutboxKind::Steer, at(1));
-    w.herdr.enter_as_newline("w2:p1", 2);
+    w.panes.enter_as_newline("w2:p1", 2);
     let report = w.pass(at(2));
     assert_eq!(report.rung, std::slice::from_ref(&message.id));
     assert_eq!(w.typed(), 1);
-    assert_eq!(w.calls("send_enter"), 3);
+    assert_eq!(w.calls("keys"), 3);
     let submitted = w.submitted();
     assert_eq!(submitted.len(), 1);
     assert_eq!(submitted[0].trim_end(), line(&message, &w.card()));
-    assert_eq!(w.herdr.fake_pane("w2:p1").composer, "");
+    assert_eq!(w.panes.fake_pane("w2:p1").composer, "");
     assert_eq!(w.message(&message.id).state, OutboxState::Delivered);
 }
 
@@ -174,7 +215,7 @@ fn enter_read_as_a_newline_is_pressed_again_until_the_line_submits() {
 fn a_line_enter_never_submits_stays_pending_and_is_finished_not_retyped() {
     let mut w = World::new();
     let message = w.send(None, OutboxKind::Steer, at(1));
-    w.herdr.enter_as_newline("w2:p1", SUBMIT_PRESSES + 1);
+    w.panes.enter_as_newline("w2:p1", SUBMIT_PRESSES + 1);
     let report = w.pass(at(2));
     assert!(report.rung.is_empty());
     assert_eq!(
@@ -205,18 +246,18 @@ fn a_line_enter_never_submits_stays_pending_and_is_finished_not_retyped() {
 fn a_line_that_never_submits_is_left_like_held_text_after_three_passes() {
     let mut w = World::new();
     let message = w.send(None, OutboxKind::Steer, at(1));
-    w.herdr.enter_as_newline("w2:p1", 100);
+    w.panes.enter_as_newline("w2:p1", 100);
     let mut now = 2;
     for _ in 0..SUBMIT_PASSES {
         let report = w.pass(at(now));
         assert_eq!(report.deferred[0].1, "wake line typed but not submitted");
         now += 30;
     }
-    let pressed = w.calls("send_enter");
+    let pressed = w.calls("keys");
     assert_eq!(pressed, (SUBMIT_PASSES * SUBMIT_PRESSES) as usize);
     let report = w.pass(at(now));
     assert_eq!(report.deferred[0].1, "composer holds text");
-    assert_eq!(w.calls("send_enter"), pressed, "no more Enters");
+    assert_eq!(w.calls("keys"), pressed, "no more Enters");
     assert_eq!(w.typed(), 1);
     assert_eq!(w.message(&message.id).state, OutboxState::Pending);
 }
@@ -227,19 +268,19 @@ fn a_wrapped_wake_line_is_finished_but_a_draft_starting_with_one_is_not() {
     let message = w.send(None, OutboxKind::Steer, at(1));
     // A crash after typing left the line, wrapped across two rows.
     let wrapped = line(&message, &w.card()).replacen(" # ", "\n# ", 1);
-    w.herdr.type_draft("w2:p1", &wrapped);
+    w.panes.type_draft("w2:p1", &wrapped);
     assert_eq!(w.pass(at(2)).rung, std::slice::from_ref(&message.id));
     assert_eq!(w.typed(), 0);
     assert_eq!(w.submitted().len(), 1);
 
     let second = w.send(None, OutboxKind::Steer, at(3));
     let draft = format!("{} and also rebase first", line(&second, &w.card()));
-    w.herdr.type_draft("w2:p1", &draft);
+    w.panes.type_draft("w2:p1", &draft);
     let report = w.pass(at(4));
     assert_eq!(report.deferred[0].1, "composer holds text");
-    assert_eq!(w.herdr.fake_pane("w2:p1").composer, draft);
+    assert_eq!(w.panes.fake_pane("w2:p1").composer, draft);
     assert_eq!(
-        w.calls("send_enter"),
+        w.calls("keys"),
         1,
         "the owner's draft is never submitted"
     );
@@ -253,13 +294,8 @@ fn a_pane_that_never_submits_does_not_delay_another() {
     let mut fleet = Fleet::new();
     let stuck_session = fleet.worker("w2:p1");
     let healthy_session = fleet.worker("w4:p1");
-    let herdr = FakeHerdr::new(fleet.dir.path().join("herdr.json"));
-    fleet.place(&herdr);
-    let registry = Registry::new();
-    let mut poller = registry
-        .register(HerdrSource::local(herdr.clone(), fleet.open(), &fleet.host))
-        .unwrap();
-    poller.poll_once(at(0));
+    let panes = FakeClaude::new(fleet.dir.path().join("holder.json"));
+    fleet.place(&panes);
 
     let mut ids = Vec::new();
     for (session, run) in [
@@ -286,17 +322,18 @@ fn a_pane_that_never_submits_does_not_delay_another() {
             .value;
         ids.push(message.id);
     }
-    herdr.enter_as_newline("w2:p1", 100);
+    panes.enter_as_newline("w2:p1", 100);
 
-    let mut deliverer = Deliverer::new(fleet.open(), herdr.clone(), &fleet.host).pacing(Pacing {
-        settle: Duration::ZERO,
-        recheck: Duration::ZERO,
-    });
+    let mut deliverer = Deliverer::new(fleet.open(), Arc::new(panes.clone()), &fleet.host)
+        .pacing(Pacing {
+            settle: Duration::ZERO,
+            recheck: Duration::ZERO,
+        });
     let report = deliverer.pass(at(2)).unwrap();
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     assert_eq!(report.rung, [ids[1].clone()], "{report:?}");
 
-    let calls = herdr.calls();
+    let calls = panes.calls();
     let position = |prefix: &str, last: bool| {
         let mut found = calls
             .iter()
@@ -310,11 +347,11 @@ fn a_pane_that_never_submits_does_not_delay_another() {
         .map(|(i, _)| i)
     };
     assert!(
-        position("send_text w4:p1", false) < position("send_enter w2:p1", false),
+        position("input w4:p1", false) < position("keys w2:p1 enter", false),
         "every line is typed before the first pane is pressed: {calls:?}"
     );
-    let healthy_done = position("send_enter w4:p1", true).unwrap();
-    let stuck_last = position("send_enter w2:p1", true).unwrap();
+    let healthy_done = position("keys w4:p1 enter", true).unwrap();
+    let stuck_last = position("keys w2:p1 enter", true).unwrap();
     assert!(
         healthy_done < stuck_last,
         "the healthy pane is finished while the stuck one is still pressed: {calls:?}"
@@ -344,7 +381,7 @@ fn one_line_per_batch_names_the_oldest() {
 fn a_deferral_is_recorded_under_its_own_label() {
     let mut w = World::new();
     let message = w.send(None, OutboxKind::Steer, at(1));
-    w.herdr.set_screen("w2:p1", Screen::Working);
+    w.panes.set_screen("w2:p1", Screen::Working);
     w.poll(at(2));
     w.pass(at(3));
     let txn: String = w
@@ -428,7 +465,7 @@ fn busy_pane_and_dialog_defer_not_fail() {
     let mut w = World::new();
     let message = w.send(None, OutboxKind::Steer, at(1));
 
-    w.herdr.set_screen("w2:p1", Screen::Working);
+    w.panes.set_screen("w2:p1", Screen::Working);
     w.poll(at(2));
     let report = w.pass(at(3));
     assert_eq!(report.deferred, [(message.id.clone(), "busy".to_owned())]);
@@ -440,10 +477,10 @@ fn busy_pane_and_dialog_defer_not_fail() {
         "not due again before 30 s"
     );
 
-    w.herdr.set_screen("w2:p1", Screen::Permission);
+    w.panes.set_screen("w2:p1", Screen::Permission);
     w.poll(at(34));
     let report = w.pass(at(35));
-    assert_eq!(report.deferred[0].1, "waiting on a prompt");
+    assert_eq!(report.deferred[0].1, "dialog showing");
     assert_eq!(w.message(&message.id).next_attempt_at, Some(at(95)));
     assert_eq!(
         w.typed(),
@@ -452,7 +489,7 @@ fn busy_pane_and_dialog_defer_not_fail() {
     );
     assert_eq!(w.message(&message.id).state, OutboxState::Pending);
 
-    w.herdr.set_screen("w2:p1", Screen::Idle);
+    w.panes.set_screen("w2:p1", Screen::Idle);
     w.poll(at(100));
     let report = w.pass(at(101));
     assert_eq!(report.rung, std::slice::from_ref(&message.id));
@@ -465,15 +502,15 @@ fn owner_draft_and_unreadable_screens_are_never_typed_into() {
     let mut w = World::new();
     let message = w.send(None, OutboxKind::Steer, at(1));
 
-    w.herdr.type_draft("w2:p1", "half typed thought");
+    w.panes.type_draft("w2:p1", "half typed thought");
     let report = w.pass(at(2));
     assert_eq!(report.deferred[0].1, "composer holds text");
-    assert_eq!(w.herdr.fake_pane("w2:p1").composer, "half typed thought");
+    assert_eq!(w.panes.fake_pane("w2:p1").composer, "half typed thought");
 
-    // Claude exited: a bare shell prompt is never an empty composer.
-    w.herdr.set_screen("w2:p1", Screen::Shell);
+    // Claude exited: an exited pane is never typed into.
+    w.panes.exit("w2:p1", 0);
     let report = w.pass(at(40));
-    assert_eq!(report.deferred[0].1, "composer unreadable");
+    assert_eq!(report.deferred[0].1, "pane is gone");
     assert_eq!(w.typed(), 0);
     assert_eq!(w.message(&message.id).state, OutboxState::Pending);
 }
@@ -482,7 +519,7 @@ fn owner_draft_and_unreadable_screens_are_never_typed_into() {
 fn composer_held_for_ten_minutes_is_reported_like_a_missed_doorbell() {
     let mut w = World::new();
     let message = w.send(None, OutboxKind::Steer, at(1));
-    w.herdr
+    w.panes
         .type_draft("w2:p1", "draft the owner walked away from");
     w.pass(at(2));
     for n in 1..=20 {
@@ -497,7 +534,7 @@ fn composer_held_for_ten_minutes_is_reported_like_a_missed_doorbell() {
     assert_eq!(notes.len(), 1, "one note, however many passes");
     assert!(notes[0].body.contains(tiller_core::ids::short(&message.id)));
     assert_eq!(
-        w.herdr.fake_pane("w2:p1").composer,
+        w.panes.fake_pane("w2:p1").composer,
         "draft the owner walked away from"
     );
 }
@@ -506,21 +543,19 @@ fn composer_held_for_ten_minutes_is_reported_like_a_missed_doorbell() {
 fn pane_naming_another_session_is_never_typed_into() {
     let mut w = World::new();
     let message = w.send(None, OutboxKind::Steer, at(1));
-    let mut tokens = w.herdr.fake_pane("w2:p1").tokens;
-    tokens.insert("session".into(), w.fleet.orchestrator_session.clone());
-    w.herdr.set_tokens("w2:p1", tokens);
+    // The holder keys pane w2:p1 by another session.
+    w.panes.remove_pane("w2:p1");
+    w.panes
+        .add_pane("w2:p1", &w.fleet.orchestrator_session.clone(), Screen::Idle);
     let report = w.pass(at(2));
     assert!(report.deferred[0].1.contains("hosts session"));
-
-    w.herdr.set_tokens("w2:p1", Default::default());
-    let report = w.pass(at(40));
-    assert!(report.deferred[0].1.contains("does not name its session"));
     assert_eq!(w.typed(), 0);
     assert_eq!(w.message(&message.id).state, OutboxState::Pending);
 
-    // The next herdr poll re-reports the tokens; the line goes out.
-    w.poll(at(70));
-    assert_eq!(w.pass(at(71)).rung, std::slice::from_ref(&message.id));
+    // The pane keyed by the worker's session takes the line.
+    w.panes.remove_pane("w2:p1");
+    w.panes.add_pane("w2:p1", &w.worker.clone(), Screen::Idle);
+    assert_eq!(w.pass(at(40)).rung, std::slice::from_ref(&message.id));
 }
 
 #[test]
@@ -529,9 +564,9 @@ fn idle_pane_with_unread_message_is_rung_again() {
     let message = w.send(None, OutboxKind::Steer, at(1));
     w.pass(at(2));
     // The worker took the line, worked, and went idle without running it.
-    w.herdr.set_screen("w2:p1", Screen::Working);
+    w.panes.set_screen("w2:p1", Screen::Working);
     w.poll(at(10));
-    w.herdr.set_screen("w2:p1", Screen::Idle);
+    w.panes.set_screen("w2:p1", Screen::Idle);
     w.poll(at(20));
 
     assert!(w.pass(at(60)).rung.is_empty(), "not before two minutes");
@@ -557,7 +592,7 @@ fn idle_pane_with_unread_message_is_rung_again() {
     );
 
     // Mid-turn when the next ring is due: it waits for idle.
-    w.herdr.set_screen("w2:p1", Screen::Working);
+    w.panes.set_screen("w2:p1", Screen::Working);
     w.poll(at(300));
     let report = w.pass(at(302));
     assert!(report.rung.is_empty());
@@ -566,7 +601,7 @@ fn idle_pane_with_unread_message_is_rung_again() {
     // Acked: no more rings.
     let ctx = Ctx::at(Actor::Session(w.worker.clone()), at(310));
     w.fleet.store.outbox_ack(&ctx, &message.id).unwrap();
-    w.herdr.set_screen("w2:p1", Screen::Idle);
+    w.panes.set_screen("w2:p1", Screen::Idle);
     w.poll(at(311));
     assert!(w.pass(at(4000)).rung.is_empty());
     assert_eq!(w.submitted().len(), 2);
@@ -605,7 +640,7 @@ fn message_to_dead_session_is_retargeted_to_successor() {
     let message = w.send(None, OutboxKind::Steer, at(1));
 
     // The pane is gone: deliveries wait, they never fail.
-    w.herdr.remove_pane("w2:p1");
+    w.panes.remove_pane("w2:p1");
     w.poll(at(2));
     let report = w.pass(at(3));
     assert_eq!(report.deferred[0].1, "pane is gone");
@@ -641,8 +676,7 @@ fn message_to_dead_session_is_retargeted_to_successor() {
         .value
         .session
         .id;
-    w.herdr.add_workspace("w4", "claude");
-    w.herdr.add_pane("w4", "w4:p1", Screen::Idle);
+    w.panes.add_pane("w4:p1", &successor, Screen::Idle);
     w.fleet
         .store
         .run_bind_session(
@@ -668,7 +702,7 @@ fn message_to_dead_session_is_retargeted_to_successor() {
     let report = w.pass(at(71));
     assert_eq!(report.rung, std::slice::from_ref(&message.id));
     assert_eq!(
-        w.herdr.fake_pane("w4:p1").submitted,
+        w.panes.fake_pane("w4:p1").submitted,
         [line(&message, &w.card())]
     );
     // The successor's doorbell starts at its own first ring.
@@ -749,8 +783,9 @@ fn duplicate_send_is_acked_once() {
     let again = w.send(Some("steer:alpha-1:1"), OutboxKind::Steer, at(2));
     assert_eq!(first.id, again.id, "a retried enqueue is the same message");
 
-    // The daemon dies after herdr took the line and before it recorded it.
-    let mut child = child_pass(&w, "send_enter.after:1", at(3));
+    // The daemon dies after the holder took the line and before it recorded
+    // it.
+    let mut child = child_pass(&w, "keys.after:1", at(3));
     wait_and_kill(&mut child, &w.fleet.dir.path().join("paused"));
     assert_eq!(w.message(&first.id).state, OutboxState::Pending);
     assert_eq!(w.submitted().len(), 1);
@@ -799,11 +834,11 @@ fn crash_between_store_and_send_delivers_once() {
     // next pass sends it.
     let mut w = World::new();
     let message = w.send(None, OutboxKind::Steer, at(1));
-    let mut child = child_pass(&w, "send_text:1", at(2));
+    let mut child = child_pass(&w, "input:1", at(2));
     wait_and_kill(&mut child, &w.fleet.dir.path().join("paused"));
     assert_eq!(w.message(&message.id).state, OutboxState::Pending);
     assert_eq!(w.typed(), 0);
-    assert_eq!(w.herdr.fake_pane("w2:p1").composer, "");
+    assert_eq!(w.panes.fake_pane("w2:p1").composer, "");
     assert_eq!(w.pass(at(3)).rung, std::slice::from_ref(&message.id));
     assert_eq!(w.submitted(), [line(&message, &w.card())]);
     assert_eq!(w.typed(), 1);
@@ -812,11 +847,11 @@ fn crash_between_store_and_send_delivers_once() {
     // finds its own line in the composer and only presses Enter.
     let mut w = World::new();
     let message = w.send(None, OutboxKind::Steer, at(1));
-    let mut child = child_pass(&w, "send_text.after:1", at(2));
+    let mut child = child_pass(&w, "input.after:1", at(2));
     wait_and_kill(&mut child, &w.fleet.dir.path().join("paused"));
     assert_eq!(w.message(&message.id).state, OutboxState::Pending);
     assert_eq!(
-        w.herdr.fake_pane("w2:p1").composer,
+        w.panes.fake_pane("w2:p1").composer,
         line(&message, &w.card())
     );
     assert_eq!(w.pass(at(3)).rung, std::slice::from_ref(&message.id));
@@ -845,7 +880,7 @@ fn child_pass(w: &World, pause: &str, now: Timestamp) -> Child {
             format!(
                 "{}|{}|{}|{}",
                 w.fleet.db.display(),
-                w.herdr.path().display(),
+                w.panes.path().display(),
                 w.fleet.host,
                 now.as_millis()
             ),
@@ -882,37 +917,40 @@ fn child_delivery_pass() {
     };
     let parts: Vec<&str> = spec.split('|').collect();
     let store = Store::open(parts[0]).unwrap();
-    let herdr = FakeHerdr::open(parts[1]);
+    let panes = FakeClaude::open(parts[1]);
     let now = Timestamp::from_millis(parts[3].parse().unwrap()).unwrap();
-    Deliverer::new(store, herdr, parts[2]).pass(now).unwrap();
+    Deliverer::new(store, Arc::new(panes), parts[2])
+        .pass(now)
+        .unwrap();
 }
 
 #[test]
-fn herdr_down_defers_and_never_fails() {
+fn holder_down_defers_and_never_fails() {
     let mut w = World::new();
     let message = w.send(None, OutboxKind::Answer, at(1));
-    w.herdr.set_unreachable(true);
+    w.panes.set_unreachable(true);
     for n in 0..10 {
         let report = w.pass(at(2 + 31 * n));
         assert!(report.failed.is_empty());
     }
     assert_eq!(w.message(&message.id).state, OutboxState::Pending);
-    w.herdr.set_unreachable(false);
+    w.panes.set_unreachable(false);
     assert_eq!(w.pass(at(400)).rung, std::slice::from_ref(&message.id));
-    let _ = w.herdr.snapshot().unwrap();
 }
 
 #[test]
 fn held_timer_restarts_once_the_composer_stops_holding_text() {
     let mut w = World::new();
     let message = w.send(None, OutboxKind::Steer, at(1));
-    w.herdr.type_draft("w2:p1", "a draft");
+    w.panes.type_draft("w2:p1", "a draft");
     w.pass(at(2));
-    // Claude exits and comes back with the draft still in the composer:
-    // the draft has been held only since then.
-    w.herdr.set_screen("w2:p1", Screen::Shell);
+    // A turn hides the composer, and it comes back with the draft still in
+    // it: the draft has been held only since then.
+    w.panes.set_screen("w2:p1", Screen::Working);
+    w.poll(at(299));
     w.pass(at(300));
-    w.herdr.set_screen("w2:p1", Screen::Idle);
+    w.panes.set_screen("w2:p1", Screen::Idle);
+    w.poll(at(301));
     let notes = |w: &World| -> usize {
         list::<OutboxMessage>(
             w.fleet.store.conn(),
@@ -933,68 +971,63 @@ fn held_timer_restarts_once_the_composer_stops_holding_text() {
     assert_eq!(w.message(&message.id).state, OutboxState::Pending);
 }
 
-/// herdr as the real one behaves when the target's `UserPromptSubmit` hook
-/// acks the batch before `send-keys Enter` returns.
+/// The holder as it behaves when the target's `UserPromptSubmit` hook acks
+/// the batch before the Enter returns.
 struct AckOnSubmit {
-    inner: FakeHerdr,
-    store: std::cell::RefCell<Store>,
+    inner: FakeClaude,
+    store: Mutex<Store>,
     session: String,
     message: String,
 }
 
-impl Herdr for AckOnSubmit {
-    fn snapshot(&self) -> tiller_herdr::client::Result<tiller_herdr::client::Snapshot> {
-        self.inner.snapshot()
+impl Panes for AckOnSubmit {
+    fn spawn(&self, req: &Spawn) -> tiller_panes::Result<Pane> {
+        self.inner.spawn(req)
     }
-    fn pane(
+    fn list(&self) -> tiller_panes::Result<Listing> {
+        self.inner.list()
+    }
+    fn get(&self, pane: &PaneId) -> tiller_panes::Result<Option<Pane>> {
+        self.inner.get(pane)
+    }
+    fn screen(
         &self,
-        id: &str,
-    ) -> tiller_herdr::client::Result<Option<tiller_herdr::client::PaneInfo>> {
-        self.inner.pane(id)
+        pane: &PaneId,
+        read: Read,
+        format: Format,
+    ) -> tiller_panes::Result<tiller_panes::Screen> {
+        self.inner.screen(pane, read, format)
     }
-    fn read_visible(&self, id: &str) -> tiller_herdr::client::Result<String> {
-        self.inner.read_visible(id)
+    fn input(&self, pane: &PaneId, text: &str) -> tiller_panes::Result<()> {
+        self.inner.input(pane, text)
     }
-    fn send_text(&self, id: &str, text: &str) -> tiller_herdr::client::Result<()> {
-        self.inner.send_text(id, text)
+    fn paste(&self, pane: &PaneId, text: &str) -> tiller_panes::Result<()> {
+        self.inner.paste(pane, text)
     }
-    fn send_enter(&self, id: &str) -> tiller_herdr::client::Result<()> {
-        self.inner.send_enter(id)?;
+    fn keys(&self, pane: &PaneId, keys: &[Key]) -> tiller_panes::Result<()> {
+        self.inner.keys(pane, keys)?;
         let ctx = Ctx::at(Actor::Session(self.session.clone()), at(2));
         self.store
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .outbox_ack(&ctx, &self.message)
             .unwrap();
         Ok(())
     }
-    fn send_escape(&self, id: &str) -> tiller_herdr::client::Result<()> {
-        self.inner.send_escape(id)
+    fn set_meta(&self, pane: &PaneId, set: &Meta, remove: &[&str]) -> tiller_panes::Result<Pane> {
+        Panes::set_meta(&self.inner, pane, set, remove)
     }
-    fn report_tokens(
-        &self,
-        id: &str,
-        tokens: &std::collections::BTreeMap<String, String>,
-    ) -> tiller_herdr::client::Result<()> {
-        self.inner.report_tokens(id, tokens)
+    fn signal(&self, pane: &PaneId, signal: Signal) -> tiller_panes::Result<()> {
+        self.inner.signal(pane, signal)
     }
-    fn create_workspace(
-        &self,
-        label: &str,
-        cwd: Option<&Path>,
-    ) -> tiller_herdr::client::Result<tiller_herdr::client::Created> {
-        self.inner.create_workspace(label, cwd)
+    fn close(&self, pane: &PaneId, grace: Duration) -> tiller_panes::Result<Exit> {
+        self.inner.close(pane, grace)
     }
-    fn rename_workspace(&self, id: &str, label: &str) -> tiller_herdr::client::Result<()> {
-        self.inner.rename_workspace(id, label)
+    fn forget(&self, pane: &PaneId) -> tiller_panes::Result<()> {
+        self.inner.forget(pane)
     }
-    fn move_workspace(&self, id: &str, index: usize) -> tiller_herdr::client::Result<()> {
-        self.inner.move_workspace(id, index)
-    }
-    fn close_pane(&self, id: &str) -> tiller_herdr::client::Result<()> {
-        self.inner.close_pane(id)
-    }
-    fn notify(&self, title: &str, body: &str) -> tiller_herdr::client::Result<()> {
-        self.inner.notify(title, body)
+    fn switch(&self, pane: &PaneId) -> tiller_panes::Result<usize> {
+        self.inner.switch(pane)
     }
 }
 
@@ -1002,13 +1035,13 @@ impl Herdr for AckOnSubmit {
 fn an_ack_that_beats_the_delivery_record_is_not_an_error() {
     let mut w = World::new();
     let message = w.send(None, OutboxKind::Steer, at(1));
-    let herdr = AckOnSubmit {
-        inner: w.herdr.clone(),
-        store: std::cell::RefCell::new(w.fleet.open()),
+    let panes = AckOnSubmit {
+        inner: w.panes.clone(),
+        store: Mutex::new(w.fleet.open()),
         session: w.worker.clone(),
         message: message.id.clone(),
     };
-    let mut deliverer = Deliverer::new(w.fleet.open(), herdr, &w.fleet.host);
+    let mut deliverer = Deliverer::new(w.fleet.open(), Arc::new(panes), &w.fleet.host);
     let report = deliverer.pass(at(2)).unwrap();
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     assert_eq!(report.rung, std::slice::from_ref(&message.id));
@@ -1135,13 +1168,13 @@ fn a_remote_lane_is_left_to_its_own_tiller() {
             .unwrap()
     };
     let before = events(&w);
-    let calls = w.herdr.calls().len();
+    let calls = w.panes.calls().len();
     for n in 0..20 {
         let report = w.pass(at(2 + 2 * n));
         assert!(report.rung.is_empty() && report.deferred.is_empty() && report.failed.is_empty());
     }
     assert_eq!(events(&w), before, "nothing written for a remote lane");
-    assert_eq!(w.herdr.calls().len(), calls, "herdr never asked");
+    assert_eq!(w.panes.calls().len(), calls, "the holder is never asked");
     assert_eq!(w.message(&message.id).state, OutboxState::Pending);
 }
 
@@ -1181,7 +1214,7 @@ fn status_change_types_one_wake_line_into_the_orchestrator_pane() {
 
         let report = w.pass(at(2));
         assert_eq!(report.rung, std::slice::from_ref(&wakes[0].id), "{state}");
-        let typed = w.herdr.fake_pane("w1:p1").submitted;
+        let typed = w.panes.fake_pane("w1:p1").submitted;
         assert_eq!(typed, [line(&wakes[0], &w.card())], "{state}");
         assert!(
             w.submitted().is_empty(),
@@ -1197,7 +1230,7 @@ fn status_change_types_one_wake_line_into_the_orchestrator_pane() {
 fn wake_waits_for_a_working_orchestrator_then_lands_once() {
     let mut w = World::new();
     let run = w.run();
-    w.herdr.set_screen("w1:p1", Screen::Working);
+    w.panes.set_screen("w1:p1", Screen::Working);
     w.fleet
         .store
         .run_status(
@@ -1210,14 +1243,14 @@ fn wake_waits_for_a_working_orchestrator_then_lands_once() {
     w.poll(at(2));
     let report = w.pass(at(3));
     assert!(report.rung.is_empty(), "nothing typed over a working turn");
-    assert!(w.herdr.fake_pane("w1:p1").submitted.is_empty());
+    assert!(w.panes.fake_pane("w1:p1").submitted.is_empty());
 
-    w.herdr.set_screen("w1:p1", Screen::Idle);
+    w.panes.set_screen("w1:p1", Screen::Idle);
     w.poll(at(4));
     let report = w.pass(at(300));
     assert_eq!(report.rung.len(), 1);
-    assert_eq!(w.herdr.fake_pane("w1:p1").submitted.len(), 1);
+    assert_eq!(w.panes.fake_pane("w1:p1").submitted.len(), 1);
     let report = w.pass(at(301));
     assert!(report.rung.is_empty(), "one line, not one per pass");
-    assert_eq!(w.herdr.fake_pane("w1:p1").submitted.len(), 1);
+    assert_eq!(w.panes.fake_pane("w1:p1").submitted.len(), 1);
 }

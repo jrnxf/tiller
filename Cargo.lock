@@ -1986,7 +1986,8 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tiller-core",
- "tiller-herdr",
+ "tiller-panes",
+ "tiller-poll",
  "tracing",
 ]
 
@@ -2083,7 +2084,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tiller-core",
- "tiller-herdr",
  "tiller-observe",
  "tiller-panes",
  "tiller-poll",

@@ -213,8 +213,8 @@ impl Programs {
 }
 
 /// Reads the tools Health lists (P43) that answer `--version`: `gh-axi`,
-/// `quota-axi`, git, the `no-mistakes` CLI and its daemon. herdr reports its
-/// version in its snapshot, so the caller adds it. `process_args` reads a
+/// `quota-axi`, git, the `no-mistakes` CLI and its daemon. The holder reports
+/// its version in its `welcome`, so the caller adds it. `process_args` reads a
 /// pid's command line, as `ps -o args= -p <pid>` prints it.
 pub fn read_all(programs: &Programs, process_args: impl Fn(u32) -> Option<String>) -> Versions {
     let version = |program: &[OsString]| read_version(program).ok();
@@ -261,7 +261,7 @@ mod tests {
     fn versions_compare_by_number() {
         assert_eq!(version_parts(OLD), vec![1, 84, 0]);
         assert!(version_parts(CLI) > version_parts(OLD));
-        assert_eq!(version_parts("herdr 0.9.5"), vec![0, 9, 5]);
+        assert_eq!(version_parts("holder 0.9.5"), vec![0, 9, 5]);
         assert!(version_parts("no digits here").is_empty());
     }
 

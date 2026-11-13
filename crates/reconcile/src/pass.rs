@@ -17,9 +17,8 @@ use tiller_core::state::caches::{PaneHolder, WorktreeReading, landed_heads};
 use tiller_core::state::outbox::{NewMessage, live_orchestrator};
 use tiller_core::state::{find, get, list};
 use tiller_core::{Actor, Ctx, Result, Store, Timestamp};
-use tiller_herdr::client::{Herdr, Snapshot};
-use tiller_herdr::layout;
 use tiller_panes::message::Listing;
+use tiller_panes::{Format, PaneId, Read};
 
 use crate::holder::Link;
 use crate::recovery::sessions::Restore;
@@ -62,9 +61,8 @@ impl Config {
 
 /// The world the engine reads through (`crate::sources`).
 pub struct Sources {
-    pub herdr: Box<dyn Herdr + Send>,
-    /// The local terminal holder, when this host runs one.
-    pub holder: Option<Arc<dyn Link>>,
+    /// The local terminal holder: the only pane backend.
+    pub holder: Arc<dyn Link>,
     pub probe: Box<dyn AgentProbe>,
     pub scanner: Box<dyn Scanner>,
     pub forge: Box<dyn Forge>,
@@ -79,8 +77,8 @@ pub struct Sources {
 pub struct Report {
     /// The owner marker names another system: nothing was written (R20).
     pub read_only: bool,
-    /// This pass had a successful herdr snapshot.
-    pub snapshot_ok: bool,
+    /// This pass had a successful holder `list`.
+    pub listing_ok: bool,
     /// Repairs, one line each.
     pub repairs: Vec<String>,
     /// Errors from single repairs; the pass went on past each.
@@ -136,9 +134,7 @@ pub struct Reconciler {
     /// Passes refused by the owner marker since the last full pass, so the
     /// flip back runs a full pass (R20).
     pub(crate) was_read_only: bool,
-    /// This pass's herdr snapshot, terminal holder `list` and worktree
-    /// scans.
-    pub(crate) snapshot: Option<Snapshot>,
+    /// This pass's terminal holder `list` and worktree scans.
     pub(crate) listing: Option<Listing>,
     pub(crate) scans: HashMap<PathBuf, WorktreeScan>,
     /// Pass keys another actor stored first that this engine has reported,
@@ -163,7 +159,6 @@ impl Reconciler {
             last_scan: None,
             last_launch: None,
             was_read_only: false,
-            snapshot: None,
             listing: None,
             scans: HashMap::new(),
             planted: HashMap::new(),
@@ -213,24 +208,14 @@ impl Reconciler {
             return Ok(());
         }
         let flipped_back = std::mem::take(&mut self.was_read_only);
-        self.snapshot = match self.sources.herdr.snapshot() {
-            Ok(snapshot) => Some(snapshot),
+        self.listing = match self.sources.holder.list() {
+            Ok(listing) => Some(listing),
             Err(error) => {
-                tracing::debug!(%error, "herdr snapshot failed; the ladder stops at unknown");
+                tracing::debug!(%error, "holder list failed; the ladder stops at unknown");
                 None
             }
         };
-        report.snapshot_ok = self.snapshot.is_some();
-        self.listing = match &self.sources.holder {
-            Some(holder) => match holder.list() {
-                Ok(listing) => Some(listing),
-                Err(error) => {
-                    tracing::debug!(%error, "holder list failed; the ladder stops at unknown");
-                    None
-                }
-            },
-            None => None,
-        };
+        report.listing_ok = self.listing.is_some();
         self.scans.clear();
 
         // Step 1: startup, once.
@@ -245,23 +230,6 @@ impl Reconciler {
             report.repair(
                 "R20 owner marker names tiller again: full pass with live evidence rebound",
             );
-        }
-        if let Some(snapshot) = self.snapshot.clone() {
-            // The pane cache the pass reads is the one it just saw.
-            match layout::bindings(self.store.conn(), &self.config.host_id) {
-                Ok(bindings) => {
-                    let readings = tiller_herdr::poller::readings(&snapshot, &bindings);
-                    if let Err(error) = self.store.cache_panes(
-                        &self.ctx(now),
-                        &self.config.host_id,
-                        PaneHolder::Herdr,
-                        readings,
-                    ) {
-                        report.error("pane cache", &error);
-                    }
-                }
-                Err(error) => report.error("pane bindings", &error),
-            }
         }
         if let Some(listing) = &self.listing {
             let rows = crate::holder::readings(&self.store, listing);
@@ -347,21 +315,6 @@ impl Reconciler {
         self.gates(now, report);
         // Step 7, delivery, is the delivery poller's pass (`tiller_delivery`),
         // which runs every two seconds beside this loop and owns R09.
-        // Step 8: layout.
-        if let Some(snapshot) = &self.snapshot {
-            match layout::bindings(self.store.conn(), &self.config.host_id) {
-                Ok(bindings) => {
-                    match layout::repair(self.sources.herdr.as_ref(), snapshot, &bindings) {
-                        Ok(repair) if repair.changed() => {
-                            report.repair(format!("R18 layout repaired: {repair:?}"));
-                        }
-                        Ok(_) => {}
-                        Err(error) => report.error("layout", &error),
-                    }
-                }
-                Err(error) => report.error("layout bindings", &error),
-            }
-        }
         Ok(())
     }
 
@@ -718,9 +671,14 @@ impl Reconciler {
 
     /// The bounded pane tail a note carries (P22): the last 40 visible lines.
     pub(crate) fn pane_tail(&self, pane_id: &str) -> String {
-        match self.sources.herdr.read_visible(pane_id) {
+        let screen = self
+            .sources
+            .holder
+            .screen(&PaneId::from(pane_id), Read::Visible, Format::Text);
+        match screen {
             Ok(screen) => {
-                let lines: Vec<&str> = screen.lines().collect();
+                let text = screen.text();
+                let lines: Vec<&str> = text.lines().collect();
                 let start = lines.len().saturating_sub(40);
                 lines[start..].join("\n")
             }

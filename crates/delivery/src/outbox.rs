@@ -4,14 +4,15 @@
 //! `outbox.enqueue` has already committed every message this pass sees, so a
 //! crash anywhere in here leaves rows the next pass picks up. The body is
 //! never typed: the only line that reaches a pane is
-//! `tiller inbox <id> # <kind> <card>`, and only after the pane's herdr
-//! metadata names the target session and its composer reads as empty. A
+//! `tiller inbox <id> # <kind> <card>`, and only after the holder's pane
+//! is keyed by the target session and its composer reads as empty. A
 //! message is `delivered` only once its line has left the composer: the pass
 //! waits a moment between the line and Enter, reads the composer back, and
 //! presses Enter again while the line is still there. A line typed but not
 //! submitted is finished with Enter, never typed again.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
@@ -25,10 +26,10 @@ use tiller_core::state::outbox::{NewMessage, live_orchestrator};
 use tiller_core::state::runs::live_session;
 use tiller_core::state::{find, get, list};
 use tiller_core::{Actor, Ctx, Store, Timestamp};
-use tiller_herdr::client::Herdr;
-use tiller_herdr::composer::{Composer, SETTLE, classify};
-use tiller_herdr::poller::{PollError, Source};
-use tiller_herdr::submit::{Submission, Submit};
+use tiller_panes::composer::{Composer, SETTLE, classify};
+use tiller_panes::submit::Submission;
+use tiller_panes::{Format, PaneId, PaneState, Panes, PanesError, Read};
+use tiller_poll::{PollError, Source};
 
 /// How long a busy pane, or one whose composer holds text or cannot be read,
 /// waits before the next try.
@@ -49,7 +50,10 @@ pub const ANSWER_MINUTES: i64 = 60;
 
 /// How many times one pass presses Enter on a wake-up line that stays in
 /// the composer.
-pub use tiller_herdr::submit::{PRESSES as SUBMIT_PRESSES, Pacing};
+pub use tiller_panes::submit::{PRESSES as SUBMIT_PRESSES, Pacing};
+
+/// How a typed line's submit went.
+type Submit = tiller_panes::submit::Submit<PanesError>;
 /// How many passes press Enter on a wake-up line that stays in the
 /// composer; after them it is left like someone's text.
 pub const SUBMIT_PASSES: u32 = 3;
@@ -196,9 +200,9 @@ struct Flight {
 }
 
 /// The daemon's delivery loop for the local host.
-pub struct Deliverer<H: Herdr> {
+pub struct Deliverer {
     store: Store,
-    herdr: H,
+    panes: Arc<dyn Panes>,
     host_id: String,
     pacing: Pacing,
     /// When each message's composer was first seen holding someone's text.
@@ -212,11 +216,11 @@ pub struct Deliverer<H: Herdr> {
     quiet_until: HashMap<String, Timestamp>,
 }
 
-impl<H: Herdr> Deliverer<H> {
-    pub fn new(store: Store, herdr: H, host_id: impl Into<String>) -> Self {
+impl Deliverer {
+    pub fn new(store: Store, panes: Arc<dyn Panes>, host_id: impl Into<String>) -> Self {
         Self {
             store,
-            herdr,
+            panes,
             host_id: host_id.into(),
             pacing: Pacing::default(),
             held_since: HashMap::new(),
@@ -282,7 +286,7 @@ impl<H: Herdr> Deliverer<H> {
         }
         let mut active = Vec::with_capacity(flights.len());
         for flight in flights {
-            match Submission::begin(&self.herdr, &flight.pane_id) {
+            match Submission::begin(&*self.panes, &flight.pane_id) {
                 Ok(submission) => active.push((flight, submission)),
                 Err(error) => self.settle(ctx, flight, Submit::Failed(error), report),
             }
@@ -300,7 +304,7 @@ impl<H: Herdr> Deliverer<H> {
                             continue;
                         }
                     };
-                match submission.check(&self.herdr, acked, |c| holds_line(c, &flight.lines)) {
+                match submission.check(&*self.panes, acked, |c| holds_line(c, &flight.lines)) {
                     Some(done) => self.settle(ctx, flight, done, report),
                     None => waiting.push((flight, submission)),
                 }
@@ -535,39 +539,28 @@ impl<H: Herdr> Deliverer<H> {
         let Some(pane_id) = session.pane_id.clone() else {
             return Ok(Err(Defer::new(BUSY_DEFER_SECS, "session has no pane yet")));
         };
-        let pane = match self.herdr.pane(&pane_id) {
-            Ok(Some(pane)) => pane,
-            Ok(None) => return Ok(Err(Defer::new(BUSY_DEFER_SECS, "pane is gone"))),
+        let id = PaneId::from(pane_id.as_str());
+        let pane = match self.panes.get(&id) {
+            Ok(Some(pane)) if pane.state == PaneState::Running => pane,
+            Ok(_) => return Ok(Err(Defer::new(BUSY_DEFER_SECS, "pane is gone"))),
             Err(error) => return Ok(Err(Defer::new(BUSY_DEFER_SECS, error.to_string()))),
         };
-        // The target check: never type into a pane that does not say it
-        // hosts this session.
-        match pane.tokens.get("session") {
-            Some(named) if *named == session.id => {}
-            Some(named) => {
-                return Ok(Err(Defer::new(
-                    BUSY_DEFER_SECS,
-                    format!("pane {pane_id} hosts session {named}"),
-                )));
-            }
-            None => {
-                return Ok(Err(Defer::new(
-                    BUSY_DEFER_SECS,
-                    format!("pane {pane_id} does not name its session"),
-                )));
-            }
+        // The target check: never type into a pane the holder does not key
+        // by this session.
+        if pane.key != session.id {
+            return Ok(Err(Defer::new(
+                BUSY_DEFER_SECS,
+                format!("pane {pane_id} hosts session {}", pane.key),
+            )));
         }
-        if session.activity == Activity::WaitingPermission
-            || pane.agent_status.as_deref() == Some("blocked")
-        {
+        if session.activity == Activity::WaitingPermission {
             return Ok(Err(Defer::new(DIALOG_DEFER_SECS, "waiting on a prompt")));
         }
-        if session.activity == Activity::Working || pane.agent_status.as_deref() == Some("working")
-        {
+        if session.activity == Activity::Working {
             return Ok(Err(Defer::new(BUSY_DEFER_SECS, "busy")));
         }
-        let screen = match self.herdr.read_visible(&pane_id) {
-            Ok(screen) => screen,
+        let screen = match self.panes.screen(&id, Read::Visible, Format::Ansi) {
+            Ok(screen) => screen.text(),
             Err(error) => return Ok(Err(Defer::new(BUSY_DEFER_SECS, error.to_string()))),
         };
         // Every line a pass may have typed for this batch.
@@ -589,22 +582,17 @@ impl<H: Herdr> Deliverer<H> {
                 // A streaming answer can draw an empty composer between
                 // chunks: empty counts only once the pane has printed
                 // nothing for a settle time.
-                match self.herdr.quiet_for(&pane_id) {
-                    Ok(Some(quiet)) if quiet < SETTLE => {
-                        return Ok(Err(Defer::new(PRINTING_DEFER_SECS, "pane still printing")));
-                    }
-                    Ok(_) => {}
-                    Err(error) => return Ok(Err(Defer::new(BUSY_DEFER_SECS, error.to_string()))),
+                if pane.quiet_for().is_some_and(|quiet| quiet < SETTLE) {
+                    return Ok(Err(Defer::new(PRINTING_DEFER_SECS, "pane still printing")));
                 }
-                if let Err(error) = self.herdr.send_text(&pane_id, &lines[0]) {
+                if let Err(error) = self.panes.input(&id, &lines[0]) {
                     return Ok(Err(Defer::new(BUSY_DEFER_SECS, error.to_string())));
                 }
                 true
             }
-            composer @ Composer::Holds(_) if !stuck && holds_line(&composer, &lines) => !matches!(
-                self.herdr.quiet_for(&pane_id),
-                Ok(Some(quiet)) if quiet >= self.pacing.settle
-            ),
+            composer @ Composer::Holds(_) if !stuck && holds_line(&composer, &lines) => !pane
+                .quiet_for()
+                .is_some_and(|quiet| quiet >= self.pacing.settle),
             Composer::Holds(_) => return Ok(Err(Defer::held(HELD))),
             Composer::Busy => return Ok(Err(Defer::new(BUSY_DEFER_SECS, "busy"))),
             Composer::Dialog => return Ok(Err(Defer::new(DIALOG_DEFER_SECS, "dialog showing"))),
@@ -825,7 +813,7 @@ impl<H: Herdr> Deliverer<H> {
 }
 
 /// The delivery loop as a poller: one pass every two seconds.
-impl<H: Herdr + Send + 'static> Source for Deliverer<H> {
+impl Source for Deliverer {
     fn name(&self) -> String {
         "delivery".to_owned()
     }

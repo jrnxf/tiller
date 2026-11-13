@@ -21,6 +21,7 @@ use tiller_core::state::runs::{Bind, EndRun, lease_holder, live_session};
 use tiller_core::state::{find, get, list};
 use tiller_core::{Result, Timestamp};
 use tiller_observe::liveness::Probe;
+use tiller_panes::message::PaneState;
 
 use crate::pass::{Reconciler, Report, canonical, minutes_since};
 
@@ -120,18 +121,18 @@ impl Reconciler {
         Ok(())
     }
 
-    /// R10, R20: a live pane whose `session` token names a live session
+    /// R10, R20: a running pane whose `session` meta names a live session
     /// bound to another pane (or none) is the session's pane again; the
     /// records were older than the world.
     pub(crate) fn adopt_panes(&mut self, now: Timestamp, report: &mut Report) -> Result<()> {
-        let Some(snapshot) = self.snapshot.clone() else {
+        let Some(listing) = self.listing.clone() else {
             return Ok(());
         };
-        for pane in &snapshot.panes {
-            let Some(named) = pane.tokens.get("session") else {
+        for pane in &listing.panes {
+            let Some(named) = pane.meta.get("session") else {
                 continue;
             };
-            if pane.agent.is_none() {
+            if pane.state != PaneState::Running || pane.key != *named {
                 continue;
             }
             let Some(session) =
@@ -139,7 +140,7 @@ impl Reconciler {
             else {
                 continue;
             };
-            if session.pane_id.as_deref() == Some(pane.pane_id.as_str())
+            if session.pane_id.as_deref() == Some(pane.pane.as_str())
                 || session.host_id != self.config.host_id
             {
                 continue;
@@ -152,37 +153,38 @@ impl Reconciler {
                 Bind {
                     session_id: session.id.clone(),
                     claude_session_id: claude_id,
-                    pane_id: Some(pane.pane_id.clone()),
+                    pane_id: Some(pane.pane.as_str().to_owned()),
                     transcript_path: None,
                     source: "adopt".to_owned(),
                 },
             )?;
             report.repair(format!(
                 "R10 session {} rebound to pane {} from its metadata (was {:?})",
-                session.id, pane.pane_id, session.pane_id
+                session.id, pane.pane, session.pane_id
             ));
         }
         Ok(())
     }
 
     /// R15: a pane whose metadata names a run or session that is over.
-    /// A dead agent in it is closed; a live one is never closed, the
-    /// orchestrator is asked, and the developer after half an hour. Two
-    /// live panes naming one session go to the developer at once.
+    /// A dead agent in it is closed and forgotten; a live one is never
+    /// closed, the orchestrator is asked, and the developer after half an
+    /// hour. Two running panes naming one session go to the developer at
+    /// once.
     fn orphan_panes(&mut self, now: Timestamp, report: &mut Report) -> Result<()> {
-        let Some(snapshot) = self.snapshot.clone() else {
+        let Some(listing) = self.listing.clone() else {
             return Ok(());
         };
         let host = self.config.host_id.clone();
         // Two panes for one session.
         let mut by_session: std::collections::HashMap<&str, Vec<&str>> =
             std::collections::HashMap::new();
-        for pane in snapshot.panes.iter().filter(|p| p.agent.is_some()) {
-            if let Some(named) = pane.tokens.get("session") {
+        for pane in listing.panes.iter().filter(|p| p.state == PaneState::Running) {
+            if let Some(named) = pane.meta.get("session") {
                 by_session
                     .entry(named.as_str())
                     .or_default()
-                    .push(pane.pane_id.as_str());
+                    .push(pane.pane.as_str());
             }
         }
         for (session_id, panes) in by_session.iter().filter(|(_, p)| p.len() > 1) {
@@ -215,9 +217,10 @@ impl Reconciler {
             }
         }
 
-        for pane in &snapshot.panes {
-            let named_session = pane.tokens.get("session");
-            let named_run = pane.tokens.get("run");
+        for pane in &listing.panes {
+            let pane_id = pane.pane.as_str();
+            let named_session = pane.meta.get("session");
+            let named_run = pane.meta.get("run");
             if named_session.is_none() && named_run.is_none() {
                 continue;
             }
@@ -238,27 +241,29 @@ impl Reconciler {
                 continue;
             }
             // Orphan: its run has ended or does not exist.
-            let probe = self.sources.probe.agent(pane);
+            let probe = match pane.state {
+                PaneState::Exited => Probe::Dead,
+                PaneState::Running => self.sources.probe.process(pane.pid),
+            };
             let card: Option<Card> = match &run {
                 Some(run) => Some(get(self.conn(), "card", &run.card_id)?),
                 None => None,
             };
             match probe {
-                Probe::Dead => match self.sources.launcher.close_pane(&pane.pane_id) {
+                Probe::Dead => match self.sources.launcher.close_pane(pane_id) {
                     Ok(()) => report.repair(format!(
-                        "R15 pane {} closed: its run {} ended and its agent is dead",
-                        pane.pane_id,
+                        "R15 pane {pane_id} closed: its run {} ended and its agent is dead",
                         run.as_ref().map(|r| r.id.as_str()).unwrap_or("(none)")
                     )),
-                    Err(error) => report.error(&format!("close pane {}", pane.pane_id), &error),
+                    Err(error) => report.error(&format!("close pane {pane_id}"), &error),
                 },
                 Probe::Alive => {
                     let project = card
                         .as_ref()
                         .map(|c| c.project_id.clone())
-                        .or_else(|| pane.tokens.get("project").cloned());
+                        .or_else(|| pane.meta.get("project").cloned());
                     let Some(project) = project else { continue };
-                    let key = format!("reconcile:R15:orphan:{}:{}", host, pane.pane_id);
+                    let key = format!("reconcile:R15:orphan:{host}:{pane_id}");
                     // A worker's agent is the orchestrator's to stop, named by
                     // its session: a run's own session may have ended. An
                     // orchestrator's is the owner's.
@@ -277,9 +282,7 @@ impl Reconciler {
                         None => "close it".into(),
                     };
                     let body = format!(
-                        "pane {} runs {} with no active run ({}); {stop}, or adopt it as a run?",
-                        pane.pane_id,
-                        pane.agent.as_deref().unwrap_or("an agent"),
+                        "pane {pane_id} runs an agent with no active run ({}); {stop}, or adopt it as a run?",
                         run.as_ref()
                             .map(|r| format!("run {} ended {:?}", r.id, r.outcome))
                             .unwrap_or_else(|| "no run".into())
@@ -292,32 +295,29 @@ impl Reconciler {
                         card.as_ref().map(|c| c.id.clone()),
                     )? {
                         report.repair(format!(
-                            "R15 live pane {} with no active run: note to the orchestrator",
-                            pane.pane_id
+                            "R15 live pane {pane_id} with no active run: note to the orchestrator"
                         ));
                     }
                     if let Some(at) = self.message_at(&key)?
                         && at.plus_minutes(self.config.thresholds.orphan_note_developer) <= now
                     {
                         let item =
-                            format!("reconcile:R15:orphan-recovery:{}:{}", host, pane.pane_id);
+                            format!("reconcile:R15:orphan-recovery:{host}:{pane_id}");
                         if self.recovery(
                             now,
                             &item,
                             NewAttention {
                                 card: card.as_ref().map(|c| c.id.clone()).unwrap_or_default(),
                                 question: format!(
-                                    "Pane {} runs {} with no active run, and the orchestrator has not acted for {} minutes. Adopt it, or close it?",
-                                    pane.pane_id,
-                                    pane.agent.as_deref().unwrap_or("an agent"),
+                                    "Pane {pane_id} runs an agent with no active run, and the orchestrator has not acted for {} minutes. Adopt it, or close it?",
                                     minutes_since(at, now)
                                 ),
-                                evidence: Self::json_text(json!({"pane_id": pane.pane_id, "note_at": at.to_string()})),
+                                evidence: Self::json_text(json!({"pane_id": pane_id, "note_at": at.to_string()})),
                                 options: Some(json!(["Adopt", "Close"])),
                                 ..NewAttention::default()
                             },
                         )? {
-                            report.repair(format!("R15 orphan pane {}: recovery item", pane.pane_id));
+                            report.repair(format!("R15 orphan pane {pane_id}: recovery item"));
                         }
                     }
                 }
@@ -611,10 +611,11 @@ impl Reconciler {
         Ok(())
     }
 
-    /// Whether the run's pane is gone from this pass's snapshot, or there
-    /// with its agent dead. Without a snapshot nothing is known.
+    /// Whether the run's pane is gone from this pass's holder `list`, or
+    /// there with its child exited or dead. Without a `list` nothing is
+    /// known.
     fn run_pane_closed(&self, run: &Run) -> bool {
-        let Some(snapshot) = &self.snapshot else {
+        let Some(listing) = &self.listing else {
             return false;
         };
         let panes: Vec<Pane> = list(
@@ -629,9 +630,14 @@ impl Reconciler {
         if panes.is_empty() {
             return false;
         }
-        panes.iter().all(|pane| match snapshot.pane(&pane.pane_id) {
-            None => true,
-            Some(info) => self.sources.probe.agent(info) == Probe::Dead,
+        panes.iter().all(|pane| {
+            match listing.panes.iter().find(|p| p.pane.as_str() == pane.pane_id) {
+                None => true,
+                Some(listed) => {
+                    listed.state == PaneState::Exited
+                        || self.sources.probe.process(listed.pid) == Probe::Dead
+                }
+            }
         })
     }
 
@@ -813,3 +819,4 @@ impl Reconciler {
         )?)
     }
 }
+
