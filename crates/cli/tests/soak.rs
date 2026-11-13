@@ -371,7 +371,8 @@ impl Soak {
     /// Starts every counter pane in its current epoch. In place of the
     /// ladder's resume after a holder loss (spec 6.4).
     // H14 HOOK holder_kill_ladder: after the kill, the daemon resumes the
-    // sessions. Until H10 lands, the harness starts the panes itself.
+    // sessions (R21, H10). The harness starts the panes itself until H14
+    // runs a daemon here and reads what the hook below names.
     fn respawn(&mut self, client: &HolderClient) -> Result<(), String> {
         for (n, counter) in self.counters.iter_mut().enumerate() {
             counter.last = None;
@@ -596,9 +597,25 @@ impl Soak {
     fn hooks(&mut self, event: Event) -> Result<(), String> {
         // H14 HOOK delivery_counts (H09): after every event, each message
         // sent to a pane was delivered once.
-        // H14 HOOK daemon_reconnect (H10): after Event::DaemonRestart.
+        // H14 HOOK daemon_reconnect (H10): after Event::DaemonRestart. Read
+        // `meta.holder_instance` (unchanged), the events table (no new
+        // `holder.lost`, no `session.resume_attempted`), the poller health
+        // row with source "holder" in `GET /api/v1/health` (a
+        // `last_success_at` after the restart, `consecutive_failures` 0) and
+        // the `panes` rows of the local host (the same `pane_id`s, `gone_at`
+        // null).
         // H14 HOOK upgrade_observed_by_daemon (H10): after Event::Upgrade.
-        // H14 HOOK holder_kill_ladder (H10): after Event::HolderKill.
+        // Read the `holder.upgraded` event (entity `host`, payload
+        // `instance`, `from` and `to`, the instance unchanged) and the
+        // `panes` rows (the same `pane_id`s and `holder_instance`). Health's
+        // `warnings` holds no "holder upgrade refused".
+        // H14 HOOK holder_kill_ladder (H10): after Event::HolderKill. Read
+        // one `holder.lost` event (payload `previous` and `instance`), a
+        // `session.resume_attempted` per session the kill took down, the
+        // new `panes` rows on the new `holder_instance`, the Machines row's
+        // `holder_restarted_at` (`GET /api/v1/machines`), and one owner
+        // notification through `[notify] command` (a script that appends
+        // its argv to a file).
         let _ = event;
         Ok(())
     }
