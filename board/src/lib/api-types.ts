@@ -947,6 +947,8 @@ export interface MutationResponse<T = unknown> {
   events: number[];
   receipt: Receipt;
   data: T;
+  // The peer that answered a forwarded mutation; absent for this host.
+  host?: string;
   // What the owner should know about a mutation that applied, such as why a
   // re-added project's cards do not start at 1.
   warning?: string;
