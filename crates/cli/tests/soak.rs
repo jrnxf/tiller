@@ -91,8 +91,10 @@ const RESTORE: Duration = Duration::from_secs(300);
 const DELIVER: Duration = Duration::from_secs(50);
 
 /// How long a line the daemon typed before an ack can take to reach the
-/// stand-in's log: the delivery settle before Enter.
-const ACK_SETTLE: Duration = Duration::from_millis(500);
+/// stand-in's log: the 500 ms `Pacing` settle before Enter
+/// (`crates/panes/src/submit.rs`), plus the serve pass and the pty write,
+/// with room to spare.
+const ACK_SETTLE: Duration = Duration::from_secs(3);
 
 /// The scrollback a read takes: all the holder keeps (spec 2.8).
 const WINDOW: u16 = 10_000;
@@ -545,7 +547,7 @@ struct Logged {
 
 /// A message to the orchestrator: its outbox id, the submitted line (by
 /// its place in the stand-in's log) whose `tiller inbox` took it, and how
-/// many lines the log held a settle after that ack returned.
+/// many lines the log held a settle after the take that acked it.
 struct Message {
     id: String,
     acked_by: Option<usize>,
@@ -994,9 +996,9 @@ impl Soak {
     /// `tiller inbox <id>`, which acks that message and drains the rest of
     /// its batch (protocol 3.3). The daemon types a batch's head again when
     /// a message joins it before the ack, so a line that names an acked
-    /// message is skipped when the log held it a settle after the ack. A
-    /// line that is not one wake line, or that names an acked message and
-    /// came later, is a delivery that typed twice.
+    /// message is skipped when the log held it a settle after the take
+    /// that acked it. A line that is not one wake line, or that names an
+    /// acked message and came later, is a delivery that typed twice.
     fn take_submits(&mut self) -> Result<(), String> {
         let ids: Vec<String> = {
             let store = self.world.store();
@@ -1022,6 +1024,7 @@ impl Soak {
             }
         }
         let submits = self.submits();
+        let mut acked = Vec::new();
         for (n, submit) in submits.iter().enumerate().skip(self.submits_taken) {
             let id = submit
                 .strip_prefix("tiller inbox ")
@@ -1051,8 +1054,6 @@ impl Soak {
                         .collect()
                 })
                 .unwrap_or_default();
-            std::thread::sleep(ACK_SETTLE);
-            let typed_before = self.submits().len();
             for id in batch {
                 match self.messages.iter_mut().find(|m| m.id == id) {
                     Some(Message {
@@ -1065,16 +1066,26 @@ impl Soak {
                     }
                     Some(message) => {
                         message.acked_by = Some(n);
-                        message.typed_before = typed_before;
+                        message.typed_before = usize::MAX;
                     }
                     None => self.messages.push(Message {
-                        id,
+                        id: id.clone(),
                         acked_by: Some(n),
-                        typed_before,
+                        typed_before: usize::MAX,
                     }),
                 }
+                acked.push(id);
             }
             self.submits_taken = n + 1;
+        }
+        if !acked.is_empty() {
+            std::thread::sleep(ACK_SETTLE);
+            let typed_before = self.submits().len();
+            for message in &mut self.messages {
+                if acked.contains(&message.id) {
+                    message.typed_before = typed_before;
+                }
+            }
         }
         Ok(())
     }
