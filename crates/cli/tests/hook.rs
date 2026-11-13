@@ -4,7 +4,7 @@ mod common;
 
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use tiller_core::domain::{Activity, Boundary, Delivery, Session};
@@ -79,7 +79,7 @@ fn hook_as(
 ) -> (Duration, Duration, std::process::Output) {
     let cpu_before = children_cpu();
     let started = Instant::now();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_tiller"))
+    let mut child = common::tiller(home)
         .args(["hook", "--harness", harness, event])
         .env("TILLER_HOME", home)
         .env_remove("TILLER_SESSION_ID")

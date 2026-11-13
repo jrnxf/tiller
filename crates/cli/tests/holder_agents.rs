@@ -72,7 +72,10 @@ impl Agents {
             &claude,
             &format!(
                 "if [ \"$1\" = --version ]; then exec {agent} --version; fi\n\
-                 printf '{{\"session_id\":\"claude-%s\",\"source\":\"startup\"}}' \"$TILLER_SESSION_ID\" \
+                 {{ env; echo --; }} >> {logs}/\"$TILLER_SESSION_ID\".env\n\
+                 id=claude-$TILLER_SESSION_ID\n\
+                 if [ \"$1\" = --resume ]; then id=$id-resumed; fi\n\
+                 printf '{{\"session_id\":\"%s\",\"source\":\"startup\"}}' \"$id\" \
                  | {tiller} hook SessionStart >/dev/null 2>&1\n\
                  exec env FAKE_AGENT_LOG={logs}/\"$TILLER_SESSION_ID\".jsonl FAKE_AGENT_BUSY_MS={busy_ms} FAKE_AGENT_FRAME_MS={FRAME_MS} {agent} {args} \"$@\"\n",
                 agent = fake_agent().display(),
@@ -192,6 +195,22 @@ impl Agents {
             .unwrap_or_default()
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    /// The environment of each start of `session`'s `claude`, oldest first.
+    fn envs(&self, session: &str) -> Vec<std::collections::BTreeMap<String, String>> {
+        std::fs::read_to_string(self.logs.join(format!("{session}.env")))
+            .unwrap_or_default()
+            .split("--\n")
+            .filter(|block| !block.is_empty())
+            .map(|block| {
+                block
+                    .lines()
+                    .filter_map(|line| line.split_once('='))
+                    .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                    .collect()
+            })
             .collect()
     }
 
@@ -597,6 +616,42 @@ fn a_lost_holder_resumes_its_worker_and_notifies_the_owner_once() {
         .collect();
     let at = argv.iter().position(|a| *a == "--resume").unwrap();
     assert_eq!(argv[at + 1], format!("claude-{session}"), "{argv:?}");
+    // The resumed agent gets the Tiller env of its first launch: its hooks
+    // find the daemon's home, and the resume binds the same row.
+    let envs = agents.envs(&session);
+    assert_eq!(envs.len(), 2, "{envs:#?}");
+    let (first, resumed) = (&envs[0], &envs[1]);
+    let home = agents.world.home();
+    assert_eq!(first["TILLER_HOME"], home.to_str().unwrap(), "{first:#?}");
+    for (name, value) in first {
+        if (name.starts_with("TILLER_") || name.starts_with("CLAUDE_")) && name != "TILLER_PANE" {
+            assert_eq!(
+                resumed.get(name),
+                Some(value),
+                "the resumed pane's {name}: {resumed:#?}"
+            );
+        }
+    }
+    assert_eq!(
+        resumed["HOME"],
+        agents.world.user_home().to_str().unwrap(),
+        "{resumed:#?}"
+    );
+    // A reconcile resume puts `--resume` first, and the stub then binds a new
+    // Claude id: the bind lands only when the hook found the daemon's home.
+    let deadline = Instant::now() + WAIT;
+    while count(&format!(
+        "SELECT count(*) FROM events WHERE kind = 'session.bound' AND entity_id = '{session}' \
+         AND json_extract(payload, '$.claude_session_id') = 'claude-{session}-resumed'"
+    )) < 1
+    {
+        assert!(Instant::now() < deadline, "the resumed session never bound");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !agents.world.user_home().join(".tiller").exists(),
+        "a hook wrote to $HOME/.tiller in place of TILLER_HOME"
+    );
     // R21 notifies before it writes holder.lost, so the note can come first.
     let deadline = Instant::now() + WAIT;
     while count("SELECT count(*) FROM events WHERE kind = 'holder.lost'") < 1 {

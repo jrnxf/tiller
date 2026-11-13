@@ -37,7 +37,9 @@ fn p57_init_creates_owner_only_state_under_a_permissive_umask() {
         .join("fresh")
         .join("state")
         .join("state.db");
-    let output = Command::new("sh")
+    let mut sh = Command::new("sh");
+    common::isolate(&mut sh, world.dir.path());
+    let output = sh
         .args(["-c", "umask 002; exec \"$0\" \"$@\""])
         .arg(env!("CARGO_BIN_EXE_tiller"))
         .arg("--json")

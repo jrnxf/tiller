@@ -1283,7 +1283,7 @@ fn bad_arguments_print_an_error_response_and_exit_2() {
 #[test]
 fn toon_is_the_default_and_shows_lisbon_time() {
     let world = World::initialized();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_tiller"))
+    let output = common::tiller(world.dir.path())
         .env("TILLER_HOME", world.home())
         .args(["project", "list"])
         .output()

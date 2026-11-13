@@ -38,7 +38,7 @@ use tiller_reconcile::git::{GitScanner, WorktreePool};
 use tiller_reconcile::holder::{HolderSource, Link};
 use tiller_reconcile::sources::{
     Forge, HerdrLauncher, HerdrStatusProbe, HolderLauncher, HostReadings, Launcher, NoHarness,
-    Readings,
+    PaneEnv, Readings,
 };
 use tiller_reconcile::tools;
 use tiller_reconcile::{Config as ReconcileConfig, Reconciler, Sources};
@@ -101,9 +101,7 @@ impl Settings {
                     .collect()
             })
             .unwrap_or_default();
-        let checkouts = SpawnConfig::from_table(&table)
-            .map(|config| config.checkouts)
-            .unwrap_or_default();
+        let checkouts = checkouts_of(&table).unwrap_or_default();
         Self {
             quota_providers,
             forge_login,
@@ -112,6 +110,20 @@ impl Settings {
             checkouts,
         }
     }
+}
+
+/// `[checkouts]` of a parsed `config.toml`, or None when it does not parse.
+fn checkouts_of(table: &toml::Table) -> Option<std::collections::BTreeMap<String, PathBuf>> {
+    SpawnConfig::from_table(table)
+        .ok()
+        .map(|config| config.checkouts)
+}
+
+/// `[checkouts]` as `config.toml` names it now, or None when the file
+/// cannot be read or does not parse.
+fn checkouts(home: &Path) -> Option<std::collections::BTreeMap<String, PathBuf>> {
+    let text = std::fs::read_to_string(home.join("config.toml")).ok()?;
+    checkouts_of(&text.parse::<toml::Table>().ok()?)
 }
 
 /// The terminal holder as reconcile's observation source
@@ -203,7 +215,10 @@ pub fn boot_id() -> Option<String> {
 // -- reconcile ------------------------------------------------------------------
 
 /// The reconcile loop: one pass every 30 s (`recovery.md` section 3).
-pub struct Reconcile(Reconciler);
+pub struct Reconcile {
+    reconciler: Reconciler,
+    home: PathBuf,
+}
 
 impl Source for Reconcile {
     fn name(&self) -> String {
@@ -215,7 +230,14 @@ impl Source for Reconcile {
     }
 
     fn poll(&mut self, now: Timestamp) -> Result<(), PollError> {
-        let report = self.0.pass(now)?;
+        // Where a resumed session's checkout is (R02, R04, R21), read again on every
+        // pass so an edit needs no restart. A file caught half written keeps
+        // the paths the last pass read.
+        if let Some(paths) = checkouts(&self.home) {
+            self.reconciler
+                .set_project_paths(paths.into_iter().collect());
+        }
+        let report = self.reconciler.pass(now)?;
         if report.errors.is_empty() {
             Ok(())
         } else {
@@ -848,6 +870,7 @@ pub fn start(
     config.boot_id = boot_id();
     config.forge_login = settings.forge_login.clone();
     config.learning = settings.learning.clone();
+    config.project_paths = settings.checkouts.clone().into_iter().collect();
     // Reconcile closes a dead herdr pane through herdr (R15).
     let close_herdr = {
         let herdr = tools.herdr.clone();
@@ -861,6 +884,7 @@ pub fn start(
             let link: Arc<dyn Panes> = Arc::clone(&watch.link) as Arc<dyn Panes>;
             Box::new(HolderLauncher::new(
                 link,
+                PaneEnv::from_env(home),
                 close_herdr,
                 move |title: &str, body: &str| {
                     let note = Note {
@@ -877,7 +901,11 @@ pub fn start(
                 },
             ))
         }
-        None => Box::new(HerdrLauncher::new(tools.herdr.clone(), close_herdr)),
+        None => Box::new(HerdrLauncher::new(
+            tools.herdr.clone(),
+            PaneEnv::from_env(home),
+            close_herdr,
+        )),
     };
     let sources = Sources {
         herdr: Box::new(tools.herdr.clone()),
@@ -896,7 +924,10 @@ pub fn start(
         }),
         harness: Box::new(NoHarness),
     };
-    let reconcile = Reconcile(Reconciler::new(open()?, config, sources));
+    let reconcile = Reconcile {
+        reconciler: Reconciler::new(open()?, config, sources),
+        home: home.to_owned(),
+    };
     let publish = Publish {
         home: home.to_owned(),
         store: open()?,
@@ -982,6 +1013,28 @@ pub fn start(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A resume finds its checkout by `[checkouts]`, read on each pass: an
+    /// orchestrator once failed with "no checkout path in the config" while
+    /// the file named one.
+    #[test]
+    fn reconcile_reads_the_checkouts_of_the_config_file_each_time() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(checkouts(dir.path()), None);
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[checkouts]\nalpha = \"/home/user/alpha\"\n",
+        )
+        .unwrap();
+        let paths = checkouts(dir.path()).unwrap();
+        assert_eq!(paths["alpha"], Path::new("/home/user/alpha"));
+        std::fs::write(dir.path().join("config.toml"), "[checkouts\n").unwrap();
+        assert_eq!(
+            checkouts(dir.path()),
+            None,
+            "a half-written file keeps the last paths"
+        );
+    }
 
     /// The forge reconcile reads through is the real one: with a `gh` that
     /// reports a merged PR, the read says merged and carries no
@@ -1127,10 +1180,14 @@ esac
                 probe: Box::new(HerdrStatusProbe),
                 scanner: Box::new(scanner(&home)),
                 forge: Box::new(tiller_reconcile::sources::NoForge),
-                launcher: Box::new(HerdrLauncher::new(herdr.clone(), {
-                    let herdr = herdr.clone();
-                    move |pane: &str| herdr.close_pane(pane).map_err(|error| error.to_string())
-                })),
+                launcher: Box::new(HerdrLauncher::new(
+                    herdr.clone(),
+                    PaneEnv::from_env(&home),
+                    {
+                        let herdr = herdr.clone();
+                        move |pane: &str| herdr.close_pane(pane).map_err(|error| error.to_string())
+                    },
+                )),
                 readings: Box::new(tiller_reconcile::sources::NoReadings),
                 harness: Box::new(NoHarness),
             };

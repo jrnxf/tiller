@@ -66,7 +66,7 @@ fn proposal(world: &World, id: &str, diff: &str) {
 
 /// Runs `tiller --json` as the curator of `retro`.
 fn run_as_curator(world: &World, retro: &str, args: &[&str]) -> Out {
-    let output = Command::new(env!("CARGO_BIN_EXE_tiller"))
+    let output = common::tiller(world.dir.path())
         .env("TILLER_HOME", world.home())
         .env("TILLER_RETRO_ID", retro)
         .env_remove("TILLER_SESSION_ID")

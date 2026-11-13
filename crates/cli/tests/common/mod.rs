@@ -6,7 +6,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::Value;
@@ -32,6 +32,63 @@ pub const CALLER_ENV: &[&str] = &[
     "CLAUDECODE",
     "SSH_CONNECTION",
 ];
+
+/// The names a child finds the user's home by: `$HOME/.tiller` is where
+/// `tiller` falls back to when `TILLER_HOME` is missing, and `$HOME` is
+/// what a pane gets from the daemon (`tiller_panes::env::PASSED`).
+pub const USER_HOME_ENV: &[(&str, &str)] = &[
+    ("HOME", ""),
+    ("XDG_CONFIG_HOME", ".config"),
+    ("XDG_DATA_HOME", ".local/share"),
+    ("XDG_STATE_HOME", ".local/state"),
+    ("XDG_CACHE_HOME", ".cache"),
+];
+
+/// The user home every child of a test under `root` gets.
+pub fn user_home(root: &Path) -> PathBuf {
+    root.join("user")
+}
+
+/// Points every name of [`USER_HOME_ENV`] into [`user_home`] of `root`, so
+/// a child that loses `TILLER_HOME`, or a pane it starts, lands in the
+/// test's own directory and never in the developer's `~/.tiller`.
+pub fn isolate(command: &mut Command, root: &Path) {
+    let home = user_home(root);
+    assert_not_the_real_home(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    for (name, dir) in USER_HOME_ENV {
+        command.env(
+            name,
+            if dir.is_empty() {
+                home.clone()
+            } else {
+                home.join(dir)
+            },
+        );
+    }
+}
+
+/// The real `tiller` binary, with its home names [`isolate`]d under `root`,
+/// for a test that runs it outside a [`World`].
+pub fn tiller(root: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tiller"));
+    isolate(&mut command, root);
+    command
+}
+
+/// Fails when `home` is, or holds, the home this test process was started
+/// with: a child given it would write into the developer's own Tiller.
+pub fn assert_not_the_real_home(home: &Path) {
+    let Some(real) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
+        return;
+    };
+    let real = Path::new(&real);
+    assert!(
+        !real.starts_with(home) && !home.starts_with(real.join(".tiller")),
+        "a test child would get the real home {}",
+        real.display()
+    );
+}
 
 /// What one command printed and how it exited.
 pub struct Out {
@@ -119,21 +176,28 @@ impl World {
 
     /// `tiller` against this home and nothing the caller's shell carries:
     /// none of [`CALLER_ENV`], so a developer's `TILLER_DB` or session never
-    /// reaches the command.
+    /// reaches the command. Its user home is the world's own ([`isolate`]),
+    /// for it and for every pane a holder or daemon it runs starts.
     pub fn bare_command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_tiller"));
         command.env("TILLER_HOME", self.home());
         for name in CALLER_ENV {
             command.env_remove(name);
         }
+        isolate(&mut command, self.dir.path());
+        // A launch records workspace trust in Claude's config, and a resumed
+        // pane gets the daemon's; keep the owner's own config out of reach.
+        command.env("CLAUDE_CONFIG_DIR", self.dir.path().join("claude"));
         command
+    }
+
+    /// The user home of every command this world runs ([`isolate`]).
+    pub fn user_home(&self) -> PathBuf {
+        user_home(self.dir.path())
     }
 
     fn command(&self, session: Option<&str>) -> Command {
         let mut command = self.bare_command();
-        // A launch records workspace trust in Claude's config; keep the
-        // owner's own config out of reach.
-        command.env("CLAUDE_CONFIG_DIR", self.dir.path().join("claude"));
         if self.terminal.get() {
             command.env("TILLER_TEST_OWNER", "1");
         }
