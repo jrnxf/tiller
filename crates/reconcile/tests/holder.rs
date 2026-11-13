@@ -283,6 +283,42 @@ fn a_refused_upgrade_clears_once_the_holder_runs_the_stable_binary() {
     assert_eq!(w.store().host_degraded(UPGRADE_CHECK).unwrap(), None);
 }
 
+/// A new holder instance on the stable binary clears a refusal within the
+/// same source run, and the reconnect sends no second upgrade request.
+#[test]
+fn a_refused_upgrade_clears_when_a_new_instance_runs_the_stable_binary() {
+    let mut w = World::new();
+    let link = w.use_holder();
+    let stable = w.fleet.dir.path().join("stable-tiller");
+    std::fs::write(&stable, "").unwrap();
+    let stable = std::fs::canonicalize(stable).unwrap();
+    link.refuse_upgrades(Some("pane p1 is mid-subscribe"));
+    let mut poller = poller(&w, &link, Some(stable.clone()));
+    poller.poll_once(at(0));
+    assert!(w.store().host_degraded(UPGRADE_CHECK).unwrap().is_some());
+
+    link.restart();
+    poller.poll_once(at(40));
+    poller.poll_once(at(80));
+    assert!(poller.source().connected());
+    assert!(
+        w.store().host_degraded(UPGRADE_CHECK).unwrap().is_some(),
+        "a new instance on another binary keeps the warning"
+    );
+
+    link.restart();
+    link.set_binary(Some(&stable));
+    poller.poll_once(at(120));
+    poller.poll_once(at(160));
+    assert!(poller.source().connected());
+    assert_eq!(w.store().host_degraded(UPGRADE_CHECK).unwrap(), None);
+    assert_eq!(
+        link.upgrades(),
+        std::slice::from_ref(&stable),
+        "a reconnect sends no upgrade"
+    );
+}
+
 /// A holder that already runs the stable binary, or one whose binary
 /// cannot be read, is never asked.
 #[test]

@@ -241,6 +241,15 @@ impl HolderSource {
         if let HolderRecord::Upgraded { from } = &recorded.value {
             tracing::info!(%from, to = %welcome.holder, "terminal holder upgraded");
             self.store.host_health(ctx, UPGRADE_CHECK, None)?;
+        } else if self
+            .seen
+            .as_ref()
+            .is_some_and(|(instance, _)| *instance != welcome.instance)
+            && self
+                .binaries()
+                .is_some_and(|(running, stable)| running == stable)
+        {
+            self.store.host_health(ctx, UPGRADE_CHECK, None)?;
         }
         self.seen = Some((welcome.instance.clone(), welcome.holder.clone()));
 
@@ -464,6 +473,13 @@ impl HolderSource {
         self.gone.insert(key);
     }
 
+    /// The binary the holder runs and the canonical stable profile path,
+    /// when both can be read.
+    fn binaries(&self) -> Option<(PathBuf, PathBuf)> {
+        let stable = std::fs::canonicalize(self.stable.as_ref()?).ok()?;
+        Some((self.link.running_binary()?, stable))
+    }
+
     /// R22's trigger: at the first connect and after each `config.changed`,
     /// a holder that runs another binary than the stable profile path is
     /// asked to upgrade, once. A holder on the stable binary clears a
@@ -474,13 +490,7 @@ impl HolderSource {
             return Ok(());
         }
         self.upgrade_checked = Some(changed);
-        let Some(stable) = &self.stable else {
-            return Ok(());
-        };
-        let Ok(stable) = std::fs::canonicalize(stable) else {
-            return Ok(());
-        };
-        let Some(running) = self.link.running_binary() else {
+        let Some((running, stable)) = self.binaries() else {
             return Ok(());
         };
         if running == stable {
