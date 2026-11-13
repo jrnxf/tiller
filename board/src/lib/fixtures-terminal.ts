@@ -23,6 +23,32 @@ const bold = (text: string) => `${ESC}[1m${text}${ESC}[22m`;
 const thinkingRow = (size: PaneSize) => size.rows - 6;
 const promptRow = (size: PaneSize) => size.rows - 3;
 
+// A row cut to the pane's width, color codes kept: an agent redraws for the
+// size it is given, so a narrow pane (a phone's Fit) never wraps a row. Wrapped
+// rows would push the screen up, and a diff that clears one row would leave
+// the rest of its line behind.
+function clip(text: string, cols: number): string {
+  let shown = 0;
+  let out = "";
+  // oxlint-disable-next-line no-control-regex
+  for (const part of text.split(/(\x1b\[[0-9;]*m)/)) {
+    if (part.startsWith(`${ESC}[`)) {
+      out += part;
+      continue;
+    }
+    const room = cols - shown;
+    const chars = [...part];
+    if (chars.length <= room) {
+      out += part;
+      shown += chars.length;
+      continue;
+    }
+    out += chars.slice(0, Math.max(0, room - 1)).join("") + (room > 0 ? "\u2026" : "");
+    shown = cols;
+  }
+  return out;
+}
+
 function lines(size: PaneSize): string[] {
   const rule = "─".repeat(size.cols - 4);
   const top = [
@@ -51,22 +77,25 @@ function lines(size: PaneSize): string[] {
   return [
     ...top,
     ...Array.from({ length: size.rows - 7 - top.length }, () => ""),
-    thinking(0),
+    thinking(0, size),
     "",
     ` ${dim(`╭${rule}╮`)}`,
     prompt("", size),
     ` ${dim(`╰${rule}╯`)}`,
     `  ${dim("? for shortcuts")}${" ".repeat(Math.max(1, size.cols - 36))}${dim("auto-accept on")}`,
-  ];
+  ].map((row) => clip(row, size.cols));
 }
 
-function thinking(seconds: number): string {
-  return ` ${color(35, "✻")} ${color(35, "Checking the lint")} ${dim(`(${seconds}s · esc to interrupt)`)}`;
+function thinking(seconds: number, size: PaneSize): string {
+  return clip(
+    ` ${color(35, "✻")} ${color(35, "Checking the lint")} ${dim(`(${seconds}s · esc to interrupt)`)}`,
+    size.cols,
+  );
 }
 
 function prompt(typed: string, size: PaneSize): string {
   const room = size.cols - 6;
-  const shown = typed.length > room ? typed.slice(-room) : typed;
+  const shown = typed.length >= room ? typed.slice(1 - room) : typed;
   return ` ${dim("│")} ${color(36, ">")} ${shown}${" ".repeat(room - shown.length - 1)}${dim("│")}`;
 }
 
@@ -88,7 +117,7 @@ function base64(text: string): string {
 // sends one.
 export function fullFrame(typed: string, seconds: number, size: PaneSize = OWN): string {
   const rows = lines(size);
-  rows[thinkingRow(size) - 1] = thinking(seconds);
+  rows[thinkingRow(size) - 1] = thinking(seconds, size);
   rows[promptRow(size) - 1] = prompt(typed, size);
   return base64(
     `${ESC}[?2026h${ESC}[2J${ESC}[1;1H${rows.join("\r\n")}${cursor(typed, size)}${ESC}[?2026l`,
@@ -98,7 +127,7 @@ export function fullFrame(typed: string, seconds: number, size: PaneSize = OWN):
 // A diff: the thinking line's clock moved.
 export function tickFrame(typed: string, seconds: number, size: PaneSize = OWN): string {
   return base64(
-    `${ESC}[${thinkingRow(size)};1H${ESC}[2K${thinking(seconds)}${cursor(typed, size)}`,
+    `${ESC}[${thinkingRow(size)};1H${ESC}[2K${thinking(seconds, size)}${cursor(typed, size)}`,
   );
 }
 
@@ -123,7 +152,7 @@ export function historyText(typed: string, seconds: number, size: PaneSize = OWN
       "",
     );
   }
-  return `${[...earlier, ...screenRows(typed, seconds, size)].join("\n")}\n`;
+  return `${[...earlier.map((row) => clip(row, size.cols)), ...screenRows(typed, seconds, size)].join("\n")}\n`;
 }
 
 // The pane's screen as herdr's visible read returns it, for a tail: rows
@@ -134,7 +163,7 @@ export function screenText(typed: string, seconds: number, size: PaneSize = OWN)
 
 function screenRows(typed: string, seconds: number, size: PaneSize): string[] {
   const screen = lines(size);
-  screen[thinkingRow(size) - 1] = thinking(seconds);
+  screen[thinkingRow(size) - 1] = thinking(seconds, size);
   screen[promptRow(size) - 1] = prompt(typed, size);
   return screen;
 }
