@@ -18,8 +18,14 @@ const BUDGET: Duration = Duration::from_millis(10);
 const WALL_CEILING: Duration = Duration::from_millis(50);
 /// Unmeasured runs that warm the page cache first.
 const WARM_UP: usize = 3;
-/// Measured runs of each command.
+/// Measured runs of each command in one set.
 const MEASURED: usize = 40;
+/// Sets of runs a command may take: it passes on the first set inside both
+/// limits.
+const SETS: usize = 5;
+/// The pause before each set after the first, so the five sets span 40 s
+/// and a slow spell of the host can end inside them.
+const PAUSE: Duration = Duration::from_secs(10);
 
 /// One measured run of `tiller <args>`.
 #[derive(Debug)]
@@ -199,7 +205,18 @@ fn host(
 /// lower clock when the package runs hot. At a load average of about 7, one
 /// set of `card show` runs took a CPU median of 11.9 ms against 6.8 ms a
 /// minute later, with the same page faults (1274 and 1276): 8.5 ms on the
-/// one core whose sibling was offline, 12 ms on the others.
+/// one core whose sibling was offline, 12 ms on the others. Under other
+/// tests at load averages of 6 to 8, sets of the same binary took CPU
+/// medians from 5.1 to 9.0 ms, and in a full `cargo nextest run` a run
+/// whose sibling was busy took about 1.35 times as long as one whose
+/// sibling was idle.
+///
+/// Those effects come and go in spells of seconds to a minute, while a
+/// slower binary is slower in every set. So a command may take up to
+/// [`SETS`] sets of [`MEASURED`] runs, [`PAUSE`] apart, and passes on the
+/// first set inside both limits. Each set still gates its median, so a slow
+/// path in half the runs fails every set. A failure names each set's median
+/// and lower quartile.
 ///
 /// `.config/nextest.toml` still runs this test alone, in the `wall-clock`
 /// group, so its own neighbours do not share the cores it measures. Under
@@ -227,32 +244,39 @@ fn startup_is_under_ten_milliseconds() {
     let pinned = pin_to_performance_cores();
     eprintln!("measured on the performance cores {pinned:?} (None: one kind of core)");
     for args in [&["version"][..], &["card", "show", "alpha-1"][..]] {
-        let load_before = load_average();
-        for _ in 0..WARM_UP {
-            run(&world, args);
+        let mut failed = Vec::new();
+        for set in 1..=SETS {
+            if set > 1 {
+                std::thread::sleep(PAUSE);
+            }
+            let load_before = load_average();
+            for _ in 0..WARM_UP {
+                run(&world, args);
+            }
+            let runs: Vec<_> = (0..MEASURED).map(|_| run(&world, args)).collect();
+            let mut wall: Vec<_> = runs.iter().map(|run| run.wall).collect();
+            wall.sort();
+            let mut cpu: Vec<_> = runs.iter().map(|run| run.cpu).collect();
+            cpu.sort();
+            let (wall_quartile, cpu_median) = (wall[MEASURED / 4], cpu[MEASURED / 2]);
+            eprintln!(
+                "tiller {args:?} set {set} over {MEASURED} runs: wall p25 {wall_quartile:?}, median {:?}; cpu median {cpu_median:?}, max {:?}",
+                wall[MEASURED / 2],
+                cpu[MEASURED - 1]
+            );
+            if cpu_median < BUDGET && wall_quartile < WALL_CEILING {
+                break;
+            }
+            failed.push(format!(
+                "\nset {set}: cpu median {cpu_median:?}, wall lower quartile {wall_quartile:?} at {}; the runs:{}",
+                host(&load_before, usable, pinned.as_deref()),
+                listed(&runs)
+            ));
         }
-        let runs: Vec<_> = (0..MEASURED).map(|_| run(&world, args)).collect();
-        let mut wall: Vec<_> = runs.iter().map(|run| run.wall).collect();
-        wall.sort();
-        let mut cpu: Vec<_> = runs.iter().map(|run| run.cpu).collect();
-        cpu.sort();
-        let (wall_quartile, cpu_median) = (wall[MEASURED / 4], cpu[MEASURED / 2]);
-        eprintln!(
-            "tiller {args:?} over {MEASURED} runs: wall p25 {wall_quartile:?}, median {:?}; cpu median {cpu_median:?}, max {:?}",
-            wall[MEASURED / 2],
-            cpu[MEASURED - 1]
-        );
         assert!(
-            cpu_median < BUDGET,
-            "{args:?} cpu median {cpu_median:?} at {}; the runs:{}",
-            host(&load_before, usable, pinned.as_deref()),
-            listed(&runs)
-        );
-        assert!(
-            wall_quartile < WALL_CEILING,
-            "{args:?} wall lower quartile {wall_quartile:?} at {}; the runs:{}",
-            host(&load_before, usable, pinned.as_deref()),
-            listed(&runs)
+            failed.len() < SETS,
+            "{args:?} took a cpu median of {BUDGET:?} or more, or a wall lower quartile of {WALL_CEILING:?} or more, in each of {SETS} sets:{}",
+            failed.concat()
         );
     }
 }

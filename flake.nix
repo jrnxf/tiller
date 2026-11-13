@@ -122,6 +122,9 @@
               # the Claude Code viewport reads the composer, the prompt parser
               # and the holder's model gate are tested on.
               ./crates/panes/tests/fixtures
+              # The handover record's version 1 bytes, which a holder test
+              # reads.
+              ./crates/holder/tests/fixtures
             ];
           };
           # The version the binary reports. Cargo.toml keeps the base version; the
@@ -182,6 +185,9 @@
               commonArgs
               // {
                 inherit cargoArtifacts;
+                # Every failure, not the first few: a sandbox-only cause
+                # fails many tests at once, and fail-fast showed 9 of 40.
+                cargoNextestExtraArgs = "--no-fail-fast";
                 # The landing tests drive real git repositories, and the
                 # checkout tests read process states with ps.
                 nativeCheckInputs = [

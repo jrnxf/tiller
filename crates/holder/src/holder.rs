@@ -2045,9 +2045,14 @@ async fn read_pty(cell: Arc<PaneCell>) {
                     );
                 }
                 // A flooding app keeps the PTY readable, so this loop never
-                // waits. Yield on budget, or the clients' writer tasks woken
-                // on this worker never run, and their queues fill.
-                tokio::task::consume_budget().await;
+                // waits. Yield after every chunk, or the clients' writer
+                // tasks woken on this worker never run, and their queues
+                // fill. A yield on the coop budget came only after 128
+                // chunks (8 MiB, 26 ms in a test build), and no worker
+                // polled the sockets in that time, so a `ping` waited
+                // behind the flood. `yield_now` polls the I/O driver before
+                // this task runs again.
+                tokio::task::yield_now().await;
             }
             Ok(Err(err)) if err.kind() == io::ErrorKind::Interrupted => {}
             // EIO: the child and everything else that had the slave open

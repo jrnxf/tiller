@@ -28,7 +28,7 @@ fn holder_showing(world: &World, screen: &str, last: &str) -> (Running, PaneId) 
                 .chain([screen_file.display().to_string()])
                 .collect(),
             cwd: world.dir.path().display().to_string(),
-            env: BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]),
+            env: BTreeMap::from([("PATH".to_owned(), common::pane_path())]),
             size: None,
             meta: Default::default(),
         })

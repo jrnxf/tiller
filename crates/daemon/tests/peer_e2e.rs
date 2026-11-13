@@ -1001,7 +1001,9 @@ done"#;
                 lab.to_str().unwrap().into(),
             ],
             cwd: lab.to_str().unwrap().into(),
-            env: [("PATH".to_owned(), "/usr/bin:/bin".to_owned())].into(),
+            // The test's own PATH: `cmp`, `dd` and `sleep` are not under
+            // `/usr/bin:/bin` in the Nix build sandbox.
+            env: [("PATH".to_owned(), std::env::var("PATH").unwrap())].into(),
             size: None,
             meta: [("session".to_owned(), session.clone())].into(),
         })

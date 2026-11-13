@@ -64,7 +64,7 @@ fn a_recording_holder_writes_a_scripted_panes_raw_output_and_its_resizes() {
             .map(str::to_owned)
             .to_vec(),
             cwd: world.dir.path().display().to_string(),
-            env: BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]),
+            env: BTreeMap::from([("PATH".to_owned(), common::pane_path())]),
             size: Some(Size {
                 cols: 120,
                 rows: 40,

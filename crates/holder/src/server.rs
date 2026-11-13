@@ -867,6 +867,18 @@ mod tests {
         serde_json::from_slice(&body[1..]).unwrap()
     }
 
+    /// The absolute path of `cat` on this test's `PATH`: it is not in
+    /// `/bin` everywhere (the Nix build sandbox has `/bin/sh` only).
+    fn cat() -> String {
+        std::env::split_paths(&std::env::var("PATH").unwrap())
+            .map(|dir| dir.join("cat"))
+            .find(|path| path.is_file())
+            .unwrap()
+            .display()
+            .to_string()
+    }
+
+    /// A spawn of `argv` with this test's `PATH`, the one its tools are on.
     fn spawn_request(id: u64, key: &str, argv: &[&str]) -> Request {
         Request::Spawn {
             id,
@@ -876,7 +888,7 @@ mod tests {
                 cwd: "/".to_owned(),
                 env: std::collections::BTreeMap::from([(
                     "PATH".to_owned(),
-                    "/usr/bin:/bin".to_owned(),
+                    std::env::var("PATH").unwrap(),
                 )]),
                 size: None,
                 meta: tiller_panes::Meta::new(),
@@ -971,7 +983,7 @@ mod tests {
         }
 
         async fn spawn_cat(&mut self, id: u64, key: &str) -> PaneId {
-            self.spawn(id, key, &["/bin/cat"]).await
+            self.spawn(id, key, &[&cat()]).await
         }
 
         async fn spawn(&mut self, id: u64, key: &str, argv: &[&str]) -> PaneId {
@@ -1236,7 +1248,7 @@ mod tests {
         tokio::spawn(holder.clone().reaper(signal(SignalKind::child()).unwrap()));
         let mut client = Client::connect(&holder).await;
         let pane = client.spawn_cat(1, "a").await;
-        client.send(spawn_request(2, "b", &["/bin/cat"])).await;
+        client.send(spawn_request(2, "b", &[&cat()])).await;
         assert_eq!(client.reply(2).await["code"], "busy");
         // The same key is the same pane, not one more.
         assert_eq!(client.spawn_cat(3, "a").await, pane);
@@ -1334,7 +1346,7 @@ mod tests {
             })
             .await;
         // The close is in flight until the shell's exit is in.
-        client.send(spawn_request(4, "b", &["/bin/cat"])).await;
+        client.send(spawn_request(4, "b", &[&cat()])).await;
         let busy = client.reply(4).await;
         assert_eq!(busy["code"], "busy", "{busy}");
         let exited = client.reply(3).await;

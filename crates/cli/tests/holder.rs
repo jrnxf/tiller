@@ -9,7 +9,7 @@ mod common;
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -139,7 +139,7 @@ fn spawn_of(world: &World, argv: &[&str]) -> Spawn {
         key: format!("key-{}", argv.join(" ")),
         argv: argv.iter().map(|arg| (*arg).to_owned()).collect(),
         cwd: world.dir.path().display().to_string(),
-        env: BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]),
+        env: BTreeMap::from([("PATH".to_owned(), common::pane_path())]),
         size: None,
         meta: Meta::default(),
     }
@@ -415,7 +415,7 @@ fn a_client_cut_for_a_stuck_pane_leaves_other_clients_and_panes_alone() {
     let world = World::new();
     let holder = Holder::start(&world);
     let stuck = holder.spawn(&world, &["/bin/sh", "-c", "sleep 30"]);
-    let reading = holder.spawn(&world, &["/bin/cat"]);
+    let reading = holder.spawn(&world, &[common::bin("cat").as_str()]);
     let updates = holder.updates(&reading);
     assert!(matches!(
         next(&updates, &holder, "repaint"),
@@ -488,7 +488,7 @@ fn a_db_other_than_the_homes_is_refused() {
 fn a_subscriber_that_reads_all_the_time_on_a_flooding_pane_is_not_cut() {
     let world = World::new();
     let holder = Holder::start(&world);
-    let pane = holder.spawn(&world, &["/usr/bin/yes"]);
+    let pane = holder.spawn(&world, &[common::bin("yes").as_str()]);
     let updates = holder.updates(&pane);
     assert!(matches!(
         next(&updates, &holder, "repaint"),
@@ -765,7 +765,7 @@ fn read_raw(socket: &mut UnixStream) -> serde_json::Value {
 fn unsubscribe_ends_one_stream_and_release_answers_with_the_size() {
     let world = World::new();
     let holder = Holder::start(&world);
-    let pane = holder.spawn(&world, &["/bin/cat"]);
+    let pane = holder.spawn(&world, &[common::bin("cat").as_str()]);
 
     let mut socket = raw_connection(&holder);
     send_raw(
@@ -830,7 +830,7 @@ fn meta_merges_set_then_drops_remove_and_tells_watchers() {
             ("a".to_owned(), "1".to_owned()),
             ("b".to_owned(), "2".to_owned()),
         ]),
-        ..spawn_of(&world, &["/bin/cat"])
+        ..spawn_of(&world, &[common::bin("cat").as_str()])
     };
     let pane = holder.client.spawn(&spawn).unwrap();
     watch.until(&holder, "spawned", |event| {
@@ -856,7 +856,7 @@ fn meta_merges_set_then_drops_remove_and_tells_watchers() {
     // The same set again changes nothing, so it is no event: the next
     // pane's spawn is the next event.
     holder.client.set_meta(&pane.pane, &set, &["a"]).unwrap();
-    let next = holder.spawn(&world, &["/bin/cat", "-u"]);
+    let next = holder.spawn(&world, &[common::bin("cat").as_str(), "-u"]);
     let metas = std::cell::Cell::new(0);
     watch.until(&holder, "spawned", |event| {
         metas.set(metas.get() + usize::from(matches!(event, Event::Meta { .. })));
@@ -975,7 +975,7 @@ fn signal_close_and_forget_take_a_pane_from_running_to_gone() {
     assert!(matches!(err, PanesError::NotFound(_)), "{err}");
 
     // `close` hangs up, and a child that ends on it is not killed.
-    let cat = holder.spawn(&world, &["/bin/cat"]);
+    let cat = holder.spawn(&world, &[common::bin("cat").as_str()]);
     let exit = holder.client.close(&cat.pane, WAIT).unwrap();
     assert_eq!(exit.signal, Some(1), "{exit:?}");
     // A second close answers with the same exit.
@@ -1009,7 +1009,7 @@ fn signal_close_and_forget_take_a_pane_from_running_to_gone() {
 fn switch_answers_for_a_running_pane_only() {
     let world = World::new();
     let holder = Holder::start(&world);
-    let pane = holder.spawn(&world, &["/bin/cat"]);
+    let pane = holder.spawn(&world, &[common::bin("cat").as_str()]);
     // No attach client runs, so none is told.
     assert_eq!(holder.client.switch(&pane.pane).unwrap(), 0);
     let gone = holder.spawn(&world, &["/bin/sh", "-c", "exit 0"]);
@@ -1026,7 +1026,7 @@ fn switch_answers_for_a_running_pane_only() {
 fn switch_tells_each_attach_watch_and_the_pane_counts_its_attach_streams() {
     let world = World::new();
     let holder = Holder::start(&world);
-    let pane = holder.spawn(&world, &["/bin/cat"]);
+    let pane = holder.spawn(&world, &[common::bin("cat").as_str()]);
     let daemon_watch = Watch::start(&holder);
     let attach = HolderClient::connect(&holder.socket, "attach").unwrap();
     let mut events = attach.watch().unwrap();
@@ -1072,12 +1072,14 @@ fn the_child_gets_the_spawn_env_and_only_three_vars_more() {
     let holder = Holder::start(&world);
     let spawn = Spawn {
         env: BTreeMap::from([
+            // Data only: `env` runs by its absolute path. Short, so each
+            // var fits on one screen row.
             ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
             ("EXAMPLE_VAR".to_owned(), "a value".to_owned()),
             // The holder's own value wins over the spawn's.
             ("TERM".to_owned(), "dumb".to_owned()),
         ]),
-        ..spawn_of(&world, &["/usr/bin/env"])
+        ..spawn_of(&world, &[common::bin("env").as_str()])
     };
     let pane = holder.client.spawn(&spawn).unwrap();
     exit_of(&holder, &pane);
@@ -1088,6 +1090,14 @@ fn the_child_gets_the_spawn_env_and_only_three_vars_more() {
         .rows_text
         .into_iter()
         .filter(|row| !row.is_empty())
+        // A newer coreutils `env` (9.12, not 9.7) quotes a value for a
+        // terminal, as `ls` does a name: `EXAMPLE_VAR='a value'`.
+        .map(|row| match row.split_once("='") {
+            Some((name, value)) if value.ends_with('\'') => {
+                format!("{name}={}", &value[..value.len() - 1])
+            }
+            _ => row,
+        })
         .collect();
     env.sort();
     assert_eq!(
@@ -1200,7 +1210,7 @@ fn a_close_that_waits_holds_up_none_of_the_connections_other_replies() {
         shows(&holder, &stubborn, "hung up");
         holder.client.ping().unwrap();
         assert_eq!(holder.client.list().unwrap().panes.len(), 1);
-        let other = holder.spawn(&world, &["/bin/cat"]);
+        let other = holder.spawn(&world, &[common::bin("cat").as_str()]);
         holder.client.get(&other.pane).unwrap().unwrap();
         // Each of those came back while the close still waited its grace.
         assert!(!closing.is_finished(), "the close did not wait its grace");
@@ -1601,9 +1611,39 @@ fn rss_kib(pid: u32) -> u64 {
         .unwrap_or(0)
 }
 
+/// How long this test's own side of a request waited for a core: the
+/// calling thread's run-queue wait plus that of each client reply reader
+/// (`tiller-panes-replies`), from `/proc/<tid>/schedstat`. Zero where
+/// `/proc` cannot say.
+fn own_run_queue_wait() -> Duration {
+    let wait = |task: &Path| {
+        std::fs::read_to_string(task.join("schedstat"))
+            .ok()
+            .and_then(|stat| stat.split_whitespace().nth(1)?.parse().ok())
+            .map_or(Duration::ZERO, Duration::from_nanos)
+    };
+    let readers = std::fs::read_dir("/proc/self/task")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|task| {
+            std::fs::read_to_string(task.join("comm"))
+                .is_ok_and(|name| name.trim_end() == "tiller-panes-replies")
+        });
+    readers.map(|task| wait(&task)).sum::<Duration>() + wait(Path::new("/proc/thread-self"))
+}
+
 // Section 9.4: a flood of 200 MiB, with a subscriber that reads nothing.
 // The holder's memory stays bound, and every `ping` is answered in under
 // 50 ms.
+//
+// A ping's wall time also holds the time this test's own threads waited
+// for a core, which a loaded host adds and the holder cannot change, so
+// that wait is taken off. Every ping is still gated, not a median, and the
+// holder's own threads are not excused: a holder that waits behind the
+// flood, or for a core, still fails. The slowest raw wall time is printed
+// beside it.
 #[test]
 fn a_flood_keeps_the_holders_memory_bound_and_every_ping_fast() {
     // It times the wall clock, so `.config/nextest.toml` runs it alone.
@@ -1628,15 +1668,18 @@ fn a_flood_keeps_the_holders_memory_bound_and_every_ping_fast() {
     let before = rss_kib(pid);
     holder.client.input(&pane.pane, "g\n").unwrap();
     let started = Instant::now();
-    let (mut slowest, mut peak, mut pings) = (Duration::ZERO, before, 0);
+    let (mut slowest, mut slowest_wall, mut peak, mut pings) =
+        (Duration::ZERO, Duration::ZERO, before, 0);
     while holder.client.get(&pane.pane).unwrap().unwrap().state != PaneState::Exited {
         assert!(
             started.elapsed() < Duration::from_secs(60),
             "the flood did not end"
         );
-        let sent = Instant::now();
+        let (sent, waited) = (Instant::now(), own_run_queue_wait());
         holder.client.ping().unwrap();
-        slowest = slowest.max(sent.elapsed());
+        let wall = sent.elapsed();
+        slowest = slowest.max(wall.saturating_sub(own_run_queue_wait() - waited));
+        slowest_wall = slowest_wall.max(wall);
         pings += 1;
         if pings % 10 == 0 {
             peak = peak.max(rss_kib(pid));
@@ -1645,7 +1688,7 @@ fn a_flood_keeps_the_holders_memory_bound_and_every_ping_fast() {
     }
     let took = started.elapsed();
     eprintln!(
-        "flood: {took:?}, {pings} pings, slowest {slowest:?}, rss {before} KiB to {peak} KiB"
+        "flood: {took:?}, {pings} pings, slowest {slowest:?} ({slowest_wall:?} wall), rss {before} KiB to {peak} KiB"
     );
     reading.end();
     // The app writes as fast as the holder takes it.
@@ -1655,7 +1698,7 @@ fn a_flood_keeps_the_holders_memory_bound_and_every_ping_fast() {
     );
     assert!(
         slowest < Duration::from_millis(50),
-        "a ping took {slowest:?}"
+        "a ping took {slowest:?} besides this test's own wait for a core"
     );
     assert!(
         peak < before + 64 * 1024,
