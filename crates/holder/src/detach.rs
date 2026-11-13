@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use rustix::fs::{OFlags, fcntl_setfl};
+use rustix::io::{FdFlags, fcntl_setfd};
 use rustix::process::{WaitOptions, waitpid};
 use tiller_panes::paths::{SocketPathTooLong, check_socket_path};
 use tiller_panes::{HolderClient, run_dir, socket_path};
@@ -114,9 +115,12 @@ pub fn detach(home: &Path) -> Result<Detached, DetachError> {
     let null = File::open("/dev/null").map_err(io_error("open", Path::new("/dev/null")))?;
     // Its write end stays open in the holder alone (it closes at exec, so
     // no pane's child holds it): the read end sees the end of the file when
-    // the holder is gone.
-    let (alive, hold) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
-        .map_err(|err| DetachError::Fork(err.into()))?;
+    // the holder is gone. macOS has no `pipe2`, so close-on-exec is set
+    // after: the caller is single-threaded, so no exec can come between.
+    let (alive, hold) = rustix::pipe::pipe().map_err(|err| DetachError::Fork(err.into()))?;
+    for end in [&alive, &hold] {
+        fcntl_setfd(end, FdFlags::CLOEXEC).map_err(|err| DetachError::Fork(err.into()))?;
+    }
     fcntl_setfl(&alive, OFlags::NONBLOCK).map_err(|err| DetachError::Fork(err.into()))?;
 
     match fork().map_err(DetachError::Fork)? {

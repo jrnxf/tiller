@@ -7,8 +7,7 @@
 //! names plus `TERM`, `COLORTERM` and `TILLER_PANE`.
 //!
 //! The part between fork and exec is the only unsafe code in the holder. It
-//! is checked on Linux; the macOS build compiles the same calls but is not
-//! tested yet.
+//! is tested on Linux and, in the `macos` CI job, on macOS.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -57,19 +56,23 @@ pub fn start(launch: Launch<'_>) -> io::Result<Started> {
             format!("argv[0] {program:?} is not an absolute path"),
         ));
     }
-    let master = rustix::pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY)?;
+    let master =
+        rustix::pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).map_err(at("openpt"))?;
     // Set apart from the open: not every system takes it as an open flag.
-    rustix::io::fcntl_setfd(&master, FdFlags::CLOEXEC)?;
-    rustix::pty::grantpt(&master)?;
-    rustix::pty::unlockpt(&master)?;
-    set_size(&master, launch.size)?;
-    let name = rustix::pty::ptsname(&master, Vec::new())?;
+    rustix::io::fcntl_setfd(&master, FdFlags::CLOEXEC).map_err(at("cloexec"))?;
+    rustix::pty::grantpt(&master).map_err(at("grantpt"))?;
+    rustix::pty::unlockpt(&master).map_err(at("unlockpt"))?;
+    let name = rustix::pty::ptsname(&master, Vec::new()).map_err(at("ptsname"))?;
     let slave = rustix::fs::open(
         name.as_c_str(),
         OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC,
         Mode::empty(),
-    )?;
-    rustix::io::ioctl_fionbio(&master, true)?;
+    )
+    .map_err(at("open the slave"))?;
+    // On the slave, once it is open, as openpty does: macOS refuses the
+    // size on a master whose slave is not open.
+    set_size(&slave, launch.size).map_err(at("set the size"))?;
+    rustix::io::ioctl_fionbio(&master, true).map_err(at("nonblocking"))?;
 
     let mut command = Command::new(program);
     command
@@ -80,8 +83,8 @@ pub fn start(launch: Launch<'_>) -> io::Result<Started> {
         .env("COLORTERM", "truecolor")
         .env("TILLER_PANE", launch.pane)
         .current_dir(launch.cwd)
-        .stdin(Stdio::from(slave.try_clone()?))
-        .stdout(Stdio::from(slave.try_clone()?))
+        .stdin(Stdio::from(slave.try_clone().map_err(at("dup the slave"))?))
+        .stdout(Stdio::from(slave.try_clone().map_err(at("dup the slave"))?))
         .stderr(Stdio::from(slave));
     child_setup(&mut command);
     let child = command.spawn()?;
@@ -94,7 +97,17 @@ pub fn start(launch: Launch<'_>) -> io::Result<Started> {
     })
 }
 
-/// Sets the PTY's size, which sends the child's group `SIGWINCH`.
+/// Names the step of [`start`] that failed. The child's own steps fail as
+/// a bare error from the spawn.
+fn at<E: Into<io::Error>>(what: &'static str) -> impl FnOnce(E) -> io::Error {
+    move |err| {
+        let err = err.into();
+        io::Error::new(err.kind(), format!("{what}: {err}"))
+    }
+}
+
+/// Sets the PTY's size, on either side, which sends the child's group
+/// `SIGWINCH`.
 pub fn set_size(master: impl AsFd, size: Size) -> io::Result<()> {
     rustix::termios::tcsetwinsize(
         master,
