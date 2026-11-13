@@ -67,11 +67,11 @@ function tryAgain(failures: number, error: Error): boolean {
 }
 
 // Forwarded answers the peer has not confirmed, by host and session: one in
-// flight, or one a 503 or 504 left open, in the wait it was sent in (`at`).
-// They outlive the strip, so a view that would hide it while its peer lags
-// keeps it up, and the same tap in the same wait carries the same key, so it
-// is typed once. The next wait drops it, so its taps mint new keys.
-type OpenAnswer = { at: string; tap: string; key: string };
+// flight, or one a 503 or 504 left open. They outlive the strip, so a view
+// that would hide it while its peer lags keeps it up, and the same tap after
+// it carries the same key, so it is typed once. The agent leaving the wait
+// drops it, so the next wait's taps mint new keys.
+type OpenAnswer = { tap: string; key: string };
 const openAnswers = new Map<string, OpenAnswer>();
 const listeners = new Set<() => void>();
 
@@ -80,6 +80,7 @@ function openKey(host: string, sessionId: string): string {
 }
 
 function setOpen(id: string, answer: OpenAnswer | null) {
+  if (!answer && !openAnswers.has(id)) return;
   if (answer) openAnswers.set(id, answer);
   else openAnswers.delete(id);
   for (const listener of listeners) listener();
@@ -150,10 +151,8 @@ export function AnswerStrip({
     waiting && observedAt !== null ? (wait === null || answered ? observedAt : wait) : null;
   if (next !== wait) setWait(next);
   useEffect(() => {
-    if (!host) return;
-    const id = openKey(host, sessionId);
-    if (openAnswers.has(id) && openAnswers.get(id)?.at !== wait) setOpen(id, null);
-  }, [host, sessionId, wait]);
+    if (host && !waiting) setOpen(openKey(host, sessionId), null);
+  }, [host, sessionId, waiting]);
   const read = useQuery({
     queryKey: ["prompt", host ?? null, sessionId, next],
     queryFn: async ({ signal }) => {
@@ -163,6 +162,7 @@ export function AnswerStrip({
         host ? { host } : {},
       );
       if (!result.ok) throw new PromptReadError(result.detail, result.status);
+      if (host && result.body.reason === "not_waiting") setOpen(openKey(host, sessionId), null);
       if (result.body.reason === "no_dialog") {
         throw new PromptReadError("no dialog on the screen yet", null);
       }
@@ -190,8 +190,8 @@ export function AnswerStrip({
     const same = `${shown.screen}:${n}`;
     const id = host ? openKey(host, sessionId) : null;
     const before = id ? openAnswers.get(id) : undefined;
-    const key = before?.at === at && before.tap === same ? before.key : ulid();
-    if (id) setOpen(id, { at, tap: same, key });
+    const key = before?.tap === same ? before.key : ulid();
+    if (id) setOpen(id, { tap: same, key });
     const sent = await readPane(`${promptPath(sessionId)}/answer`, undefined, {
       option: n,
       screen: shown.screen,
