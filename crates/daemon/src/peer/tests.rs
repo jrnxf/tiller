@@ -4418,3 +4418,91 @@ async fn a_peer_agent_verb_waits_for_its_proof_past_ten_seconds() {
     );
     assert_eq!(agent.keys(), [format!("keys {} esc", agent.pane)]);
 }
+
+/// A peer's starter whose stop takes a while: it marks the stop begun,
+/// waits, then marks it done.
+#[derive(Default)]
+struct SlowStop {
+    begun: AtomicBool,
+    done: AtomicBool,
+}
+
+impl OrchestratorStart for SlowStop {
+    fn start(
+        &self,
+        _store: &mut Store,
+        _ctx: &tiller_core::Ctx,
+        _project: &str,
+        _restart: bool,
+    ) -> Result<tiller_core::Applied<tiller_agents::spawn::orchestrator::Orchestrator>, StartError>
+    {
+        Err(StartError::Refused {
+            exit: 5,
+            code: "stub_refused",
+            message: "the stub starts no orchestrator".into(),
+            hint: None,
+            current: None,
+        })
+    }
+
+    fn stop_agent(
+        &self,
+        _store: &mut Store,
+        _ctx: &tiller_core::Ctx,
+        _session: &Session,
+    ) -> Result<Controlled, StartError> {
+        self.begun.store(true, Ordering::SeqCst);
+        std::thread::sleep(ms(500));
+        self.done.store(true, Ordering::SeqCst);
+        Ok(Controlled {
+            applied: tiller_core::Applied {
+                value: json!({"verb": "stop"}),
+                events: Vec::new(),
+                replayed: false,
+            },
+            warning: None,
+        })
+    }
+}
+
+#[test]
+fn a_link_that_ends_mid_proof_lets_the_verb_finish() {
+    let mut pair = pair();
+    let session = pair.peer.worker("p-1");
+    let starter = Arc::new(SlowStop::default());
+    let (ours, theirs) = UnixStream::pair().unwrap();
+    let config = ServeConfig {
+        home: pair.peer.dir.path().to_owned(),
+        from: "test-host".to_owned(),
+        timing: quick(),
+        herdr: None,
+        orchestrators: Some(starter.clone()),
+        holder: None,
+    };
+    let input = BufReader::new(theirs.try_clone().unwrap());
+    let served = std::thread::spawn(move || serve(&config, input, theirs));
+    let mut link = welcomed(&pair, SyncLink::on(ours));
+    let order = Order {
+        op: Op::Stop,
+        target: Some(session),
+        body: json!({"idempotency_key": "k-stop"}),
+        idempotency_key: "k-stop".to_owned(),
+    };
+    let frame = Mutate::signed(&signer(&pair), &pair.peer.host, order, Timestamp::now());
+    link.send(&Frame::Mutate(Box::new(frame)));
+    for _ in 0..500 {
+        if starter.begun.load(Ordering::SeqCst) {
+            break;
+        }
+        std::thread::sleep(ms(10));
+    }
+    assert!(starter.begun.load(Ordering::SeqCst), "the stop never began");
+
+    // The board host's daemon restarts: the link ends mid-proof.
+    drop(link);
+    let _ = served.join().unwrap();
+    assert!(
+        starter.done.load(Ordering::SeqCst),
+        "peer serve returned before the stop finished"
+    );
+}

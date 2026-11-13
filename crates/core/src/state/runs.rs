@@ -1376,7 +1376,7 @@ impl Store {
         self.write(ctx, "run.place", None, |tx| {
             let run = load_run(tx, run)?;
             match tx.actor() {
-                Actor::Owner | Actor::Board | Actor::Daemon => {}
+                Actor::Owner | Actor::Board | Actor::Peer(_) | Actor::Daemon => {}
                 Actor::Session(id) if *id == run.supervisor_session_id => {}
                 other => {
                     return Err(Error::Forbidden(format!(
@@ -1487,7 +1487,7 @@ impl Store {
         self.write(ctx, "run.reconfigure", None, |tx| {
             let run = load_run(tx, run)?;
             match tx.actor() {
-                Actor::Owner | Actor::Board | Actor::Daemon => {}
+                Actor::Owner | Actor::Board | Actor::Peer(_) | Actor::Daemon => {}
                 Actor::Session(id) if *id == run.supervisor_session_id => {}
                 other => {
                     return Err(Error::Forbidden(format!(

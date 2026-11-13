@@ -2386,7 +2386,7 @@ pub(crate) struct Hands<'a> {
     pub(crate) herdr: Option<&'a Cli>,
     pub(crate) holder: Option<&'a Arc<dyn Holder>>,
     /// The input rate a prompt answer spends, as the board's own does.
-    pub(crate) mirrors: Option<&'a Mirrors>,
+    pub(crate) mirrors: &'a Mirrors,
 }
 
 impl Hands<'_> {
@@ -2521,9 +2521,7 @@ fn answer_here(
             "a prompt answer reaches panes on this machine only, so nothing was sent",
         ));
     }
-    if let Some(mirrors) = hands.mirrors {
-        spend_input(mirrors)?;
-    }
+    spend_input(hands.mirrors)?;
     let wait = waiting_of(store, &session_id)?.ok_or_else(screen_changed)?;
     let dialog = dialog_on(hands.herdr, hands.holder, &pane, &wait)?
         .filter(|dialog| dialog.prompt.screen == screen)

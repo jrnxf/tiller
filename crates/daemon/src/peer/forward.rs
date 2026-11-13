@@ -443,7 +443,7 @@ fn applied(
         starter: config.orchestrators.as_deref(),
         herdr: config.herdr.as_ref(),
         holder: config.holder.as_ref(),
-        mirrors: Some(mirrors),
+        mirrors,
     };
     mutation.apply_here(store, &ctx, &hands)
 }

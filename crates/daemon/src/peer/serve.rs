@@ -12,6 +12,7 @@
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -616,21 +617,32 @@ impl Checks {
 /// relaunch and a prompt answer can take seconds. They run on one thread of
 /// their own, in the order they came, each with every check the link
 /// thread made, so the link keeps sending beats and events and answering
-/// other frames while one waits.
+/// other frames while one waits. When the link ends, the verb that started
+/// finishes, for up to [`super::PROOF_WAIT`], before `peer serve` exits;
+/// one that had not started never does, and a retry with its key runs it.
 struct Proofs {
-    asks: mpsc::Sender<(Mutate, forward::Op)>,
+    asks: Option<mpsc::Sender<(Mutate, forward::Op)>>,
     answers: mpsc::Receiver<(String, u16, Value)>,
+    closing: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    wait: Duration,
 }
 
 impl Proofs {
     fn start(config: &ServeConfig, key: &PeerKey, mirrors: &Arc<Mirrors>) -> Self {
         let (asks, asked) = mpsc::channel::<(Mutate, forward::Op)>();
         let (answer, answers) = mpsc::channel();
+        let closing = Arc::new(AtomicBool::new(false));
+        let wait = config.timing.proof;
         let config = config.clone();
         let key = key.clone();
         let mirrors = Arc::clone(mirrors);
-        std::thread::spawn(move || {
+        let closed = Arc::clone(&closing);
+        let worker = std::thread::spawn(move || {
             for (frame, op) in asked {
+                if closed.load(Ordering::SeqCst) {
+                    return;
+                }
                 let (http_status, body) = match Store::open_current(config.home.join("state.db")) {
                     Ok(mut store) => {
                         forward::apply(&mut store, &config, &key, &frame, op, &mirrors)
@@ -642,18 +654,48 @@ impl Proofs {
                 }
             }
         });
-        Self { asks, answers }
+        Self {
+            asks: Some(asks),
+            answers,
+            closing,
+            worker: Some(worker),
+            wait,
+        }
     }
 
     fn ask(&self, frame: Mutate, op: forward::Op) {
         // The thread lives as long as the link; a send fails only if it
         // panicked, and the board host then gets no answer and a 504.
-        let _ = self.asks.send((frame, op));
+        if let Some(asks) = &self.asks {
+            let _ = asks.send((frame, op));
+        }
     }
 
     /// A verb that has its proof: the frame's id and its `result`.
     fn done(&self) -> Option<(String, u16, Value)> {
         self.answers.try_recv().ok()
+    }
+}
+
+impl Drop for Proofs {
+    fn drop(&mut self) {
+        self.closing.store(true, Ordering::SeqCst);
+        self.asks = None;
+        let deadline = Instant::now() + self.wait;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.answers.recv_timeout(left) {
+                Ok(_) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    tracing::warn!("a forwarded agent verb outlived the link's proof wait");
+                    return;
+                }
+            }
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 
