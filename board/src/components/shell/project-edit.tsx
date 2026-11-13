@@ -563,7 +563,7 @@ function EditForm({
           {conflictText ?? `Not saved: ${changedAfter}.`}
         </p>
       ) : error && error !== handled ? (
-        <ProjectFailure error={error} />
+        <ProjectFailure error={error} inline />
       ) : null}
       <div className="dialog-actions">
         <button type="button" className="btn" disabled={busy} onClick={onClose}>

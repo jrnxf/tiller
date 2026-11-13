@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use axum::body::Body;
-use axum::extract::{Path, Query, RawQuery, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
@@ -2863,6 +2863,21 @@ async fn agent_read<T: for<'de> Deserialize<'de>>(
     host_read(state, host, format!("agents/{session}/{what}"), act).await
 }
 
+/// The peer query path for project `id`, then `tail`. The peer splits the
+/// path on `/` and reads each part as it is, so an id that is not a project
+/// id is not found here, rather than sent as another path (D22).
+fn peer_project_path(host: Option<&str>, id: &str, tail: &str) -> Result<String, ApiError> {
+    if host.is_some() && ids::validate_project_id(id).is_err() {
+        return Err(Error::NotFound {
+            entity: "project",
+            id: id.to_owned(),
+            candidates: Vec::new(),
+        }
+        .into());
+    }
+    Ok(format!("projects/{id}{tail}"))
+}
+
 /// A one-shot read of a record on the paired peer `host` names, as a
 /// `query` on its link (`protocol.md` 10.2); `None` when `host` is this
 /// host. `act` says the read needs the `act` scope. The answer, or the
@@ -3242,7 +3257,7 @@ async fn project_delete_preview(
     Path(id): Path<String>,
     Query(query): Query<HostQuery>,
 ) -> ApiResult<ProjectDeletePreview> {
-    let path = format!("projects/{id}/delete");
+    let path = peer_project_path(query.host.as_deref(), &id, "/delete")?;
     if let Some(preview) = host_read(&state, query.host.as_deref(), path, true).await? {
         return Ok(Json(preview));
     }
@@ -3406,6 +3421,13 @@ fn add_here(
     let plan = checkout_plan(store, home, &new.id, new.repo.as_deref(), &checkout)?;
     let undo = tiller_agents::checkout::clone(&plan, tiller_agents::checkout::CLONE_LIMIT)
         .map_err(checkout_refused)?;
+    // A clone can take minutes: the project is added when it is done, not
+    // when it was asked for. A retry that comes while it runs is refused by
+    // the clone's claim on the folder, and one after it sees the key.
+    let ctx = &Ctx {
+        now: Timestamp::now(),
+        ..ctx.clone()
+    };
     let done = add_numbered(store, ctx, home, new, Some(plan.path().to_path_buf()));
     if done.is_err()
         && let Some(undo) = undo
@@ -3545,7 +3567,7 @@ fn write_config(
     Ok(true)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, utoipa::IntoParams)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::IntoParams)]
 pub struct CheckoutQuery {
     /// A paired peer's label or id: the folder is checked on that host,
     /// under its own `spawn.checkouts_root` (D22).
@@ -3566,18 +3588,16 @@ pub struct CheckoutQuery {
     responses((status = 200, body = CheckoutCheck), (status = 503, body = ErrorBody)))]
 async fn project_checkout(
     State(state): State<AppState>,
-    RawQuery(raw): RawQuery,
     Query(query): Query<CheckoutQuery>,
 ) -> ApiResult<CheckoutCheck> {
     if query.host.is_some() {
         // The parameters as the board sent them, but `host`: the peer reads
         // them as this host would.
-        let params = raw
-            .unwrap_or_default()
-            .split('&')
-            .filter(|param| !param.is_empty() && !param.starts_with("host="))
-            .collect::<Vec<_>>()
-            .join("&");
+        let params = serde_urlencoded::to_string(CheckoutQuery {
+            host: None,
+            ..query.clone()
+        })
+        .map_err(|error| ApiError::from(Error::Usage(format!("the checkout query: {error}"))))?;
         let path = format!("projects/checkout?{params}");
         if let Some(check) = host_read(&state, query.host.as_deref(), path, true).await? {
             return Ok(Json(check));
@@ -3974,7 +3994,7 @@ async fn project_retire_preview(
     Path(id): Path<String>,
     Query(query): Query<HostQuery>,
 ) -> ApiResult<ProjectRetirePreview> {
-    let path = format!("projects/{id}/retire");
+    let path = peer_project_path(query.host.as_deref(), &id, "/retire")?;
     if let Some(preview) = host_read(&state, query.host.as_deref(), path, true).await? {
         return Ok(Json(preview));
     }
@@ -4031,7 +4051,7 @@ async fn project_fields(
     Path(id): Path<String>,
     Query(query): Query<HostQuery>,
 ) -> ApiResult<ProjectFields> {
-    let path = format!("projects/{id}");
+    let path = peer_project_path(query.host.as_deref(), &id, "")?;
     if let Some(fields) = host_read(&state, query.host.as_deref(), path, true).await? {
         return Ok(Json(fields));
     }
@@ -13662,6 +13682,48 @@ pub(crate) mod tests {
         assert!(
             committed == generated,
             "contract/openapi.json is stale: run TILLER_WRITE_CONTRACT=1 cargo nextest run -p tiller-daemon contract"
+        );
+    }
+
+    #[test]
+    fn a_peer_project_path_takes_only_a_project_id() {
+        assert_eq!(
+            peer_project_path(Some("peer"), "alpha-web", "/retire").unwrap(),
+            "projects/alpha-web/retire"
+        );
+        for id in ["alpha/retire", "alpha?before=1", "../doctor", "Alpha"] {
+            let refused = peer_project_path(Some("peer"), id, "").unwrap_err();
+            assert_eq!(refused.status, StatusCode::NOT_FOUND, "{id}");
+        }
+        // This host's own read keeps its own answer for an id like that.
+        assert_eq!(
+            peer_project_path(None, "Alpha", "").unwrap(),
+            "projects/Alpha"
+        );
+    }
+
+    #[test]
+    fn a_forwarded_checkout_query_is_encoded_without_host() {
+        let query = CheckoutQuery {
+            host: Some("peer".into()),
+            project: "alpha".into(),
+            repo: Some("example/alpha".into()),
+            path: Some("/home/user/src/a&b=c".into()),
+            clone: Some(true),
+        };
+        let params = serde_urlencoded::to_string(CheckoutQuery {
+            host: None,
+            ..query.clone()
+        })
+        .unwrap();
+        assert!(!params.contains("host"), "{params}");
+        let read: CheckoutQuery = serde_urlencoded::from_str(&params).unwrap();
+        assert_eq!(
+            read,
+            CheckoutQuery {
+                host: None,
+                ..query
+            }
         );
     }
 }

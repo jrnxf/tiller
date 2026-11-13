@@ -2,10 +2,10 @@
 //! by sshd for the board host's daemon. It reads `hello`, answers `welcome`
 //! or `refused`, then sends a `snapshot` or the replay, every new `events`
 //! row as an `event`, a `beat` every 10 s, and a `result` for each `query`
-//! and each `mutate` (10.3, applied by [`super::forward`]). A forwarded
-//! agent verb that waits for its proof runs on a thread of its own, and a
-//! project add, retire or delete on another, so the link keeps its beats
-//! while they wait.
+//! and each `mutate` (10.3, applied by [`super::forward`]). The forwarded
+//! agent verbs that wait for their proof run in turn on one other thread,
+//! and each project add, retire or delete on a thread of its own, so the
+//! link keeps its beats while they wait.
 //!
 //! It serves this host's own records only. It has no client half: it never
 //! opens a link of its own, so a board host that is also some other host's
@@ -100,8 +100,8 @@ pub fn serve(
         }),
     )?;
     let mirrors = Arc::new(Mirrors::new());
-    let proofs = Worker::start(config, &key, &mirrors, config.timing.proof);
-    let projects = Worker::start(config, &key, &mirrors, config.timing.project);
+    let proofs = Worker::in_turn(applier(config, &key, &mirrors), config.timing.proof);
+    let projects = Worker::at_once(applier(config, &key, &mirrors), config.timing.project);
     let mut link = Link {
         store,
         config,
@@ -643,75 +643,116 @@ impl Checks {
 
 /// One lane of a link's slow forwarded mutations (`protocol.md` 7.4, 10.3
 /// step 6). The agent verbs that wait for their proof (an interrupt, a
-/// stop, a resume, a relaunch and a prompt answer) take seconds; a project
-/// add may clone for minutes, and a retire or a delete stops agents (D22).
-/// Each lane runs on one thread of its own, in the order they came, each
+/// stop, a resume, a relaunch and a prompt answer) take seconds, and run on
+/// one thread in the order they came, so a stop and the resume after it
+/// apply in that order. A project add may clone for minutes, and a retire
+/// or a delete stops agents (D22): each runs on a thread of its own at once,
+/// so one clone does not use up the wait of the ops sent after it. Each runs
 /// with every check the link thread made, so the link keeps sending beats
 /// and events and answering other frames while one waits. When the link
-/// ends, the mutation that started finishes, for up to the lane's wait
+/// ends, the mutations that started finish, for up to the lane's wait
 /// ([`super::PROOF_WAIT`] or [`super::PROJECT_WAIT`]), before `peer serve`
-/// exits; one that had not started never does, and a retry with its key
+/// exits; a proof that had not started never does, and a retry with its key
 /// runs it.
 struct Worker {
-    asks: Option<mpsc::Sender<(Mutate, forward::Op)>>,
-    answers: mpsc::Receiver<(String, u16, Value)>,
-    closing: Arc<AtomicBool>,
-    worker: Option<std::thread::JoinHandle<()>>,
+    pace: Pace,
+    answer: Option<mpsc::Sender<Answer>>,
+    answers: mpsc::Receiver<Answer>,
     wait: Duration,
 }
 
+/// A forwarded mutation's frame id and its `result`.
+type Answer = (String, u16, Value);
+
+/// Runs a forwarded mutation, off the link thread.
+type Apply = Arc<dyn Fn(Mutate, forward::Op) -> Answer + Send + Sync>;
+
+/// How a [`Worker`] runs what it is asked.
+enum Pace {
+    /// On one thread, in turn: the queue, and whether the link has closed.
+    InTurn(Option<mpsc::Sender<(Mutate, forward::Op)>>, Arc<AtomicBool>),
+    /// Each on a thread of its own, at once.
+    AtOnce(Apply),
+}
+
+/// [`forward::apply`] on this host's store, with every check the link
+/// thread made.
+fn applier(config: &ServeConfig, key: &PeerKey, mirrors: &Arc<Mirrors>) -> Apply {
+    let (config, key, mirrors) = (config.clone(), key.clone(), Arc::clone(mirrors));
+    Arc::new(move |frame, op| {
+        let (http_status, body) = match Store::open_current(config.home.join("state.db")) {
+            Ok(mut store) => forward::apply(&mut store, &config, &key, &frame, op, &mirrors),
+            Err(error) => ApiError::from(error).into_result(),
+        };
+        (frame.id, http_status, body)
+    })
+}
+
 impl Worker {
-    fn start(config: &ServeConfig, key: &PeerKey, mirrors: &Arc<Mirrors>, wait: Duration) -> Self {
+    fn in_turn(apply: Apply, wait: Duration) -> Self {
         let (asks, asked) = mpsc::channel::<(Mutate, forward::Op)>();
         let (answer, answers) = mpsc::channel();
         let closing = Arc::new(AtomicBool::new(false));
-        let config = config.clone();
-        let key = key.clone();
-        let mirrors = Arc::clone(mirrors);
         let closed = Arc::clone(&closing);
-        let worker = std::thread::spawn(move || {
+        std::thread::spawn(move || {
             for (frame, op) in asked {
-                if closed.load(Ordering::SeqCst) {
-                    return;
-                }
-                let (http_status, body) = match Store::open_current(config.home.join("state.db")) {
-                    Ok(mut store) => {
-                        forward::apply(&mut store, &config, &key, &frame, op, &mirrors)
-                    }
-                    Err(error) => ApiError::from(error).into_result(),
-                };
-                if answer.send((frame.id, http_status, body)).is_err() {
+                if closed.load(Ordering::SeqCst) || answer.send(apply(frame, op)).is_err() {
                     return;
                 }
             }
         });
         Self {
-            asks: Some(asks),
+            pace: Pace::InTurn(Some(asks), closing),
+            answer: None,
             answers,
-            closing,
-            worker: Some(worker),
+            wait,
+        }
+    }
+
+    fn at_once(apply: Apply, wait: Duration) -> Self {
+        let (answer, answers) = mpsc::channel();
+        Self {
+            pace: Pace::AtOnce(apply),
+            answer: Some(answer),
+            answers,
             wait,
         }
     }
 
     fn ask(&self, frame: Mutate, op: forward::Op) {
-        // The thread lives as long as the link; a send fails only if it
-        // panicked, and the board host then gets no answer and a 504.
-        if let Some(asks) = &self.asks {
-            let _ = asks.send((frame, op));
+        match &self.pace {
+            // The thread lives as long as the link; a send fails only if it
+            // panicked, and the board host then gets no answer and a 504.
+            Pace::InTurn(Some(asks), _) => {
+                let _ = asks.send((frame, op));
+            }
+            Pace::InTurn(None, _) => {}
+            Pace::AtOnce(apply) => {
+                let Some(answer) = self.answer.clone() else {
+                    return;
+                };
+                let apply = Arc::clone(apply);
+                std::thread::spawn(move || {
+                    let _ = answer.send(apply(frame, op));
+                });
+            }
         }
     }
 
-    /// A mutation that has run: the frame's id and its `result`.
-    fn done(&self) -> Option<(String, u16, Value)> {
+    /// A mutation that has run.
+    fn done(&self) -> Option<Answer> {
         self.answers.try_recv().ok()
     }
 }
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        self.closing.store(true, Ordering::SeqCst);
-        self.asks = None;
+        if let Pace::InTurn(asks, closing) = &mut self.pace {
+            closing.store(true, Ordering::SeqCst);
+            *asks = None;
+        }
+        // The answers end once every thread that holds a sender has.
+        self.answer = None;
         let deadline = Instant::now() + self.wait;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -723,9 +764,6 @@ impl Drop for Worker {
                     return;
                 }
             }
-        }
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
         }
     }
 }
@@ -971,5 +1009,88 @@ mod tests {
         ] {
             assert!(parse_query(refused).is_err(), "{refused}");
         }
+    }
+
+    fn frame(id: &str) -> Mutate {
+        Mutate {
+            id: id.into(),
+            op: String::new(),
+            target: None,
+            body: Value::Null,
+            idempotency_key: id.into(),
+            ts: String::new(),
+            viewer_host_id: String::new(),
+            peer_host_id: String::new(),
+            key_id: String::new(),
+            sig: String::new(),
+        }
+    }
+
+    /// Answers each frame at once, but the one named `slow`, which waits
+    /// for the test to let it go. The ids it has started are sent on.
+    fn held(started: mpsc::Sender<String>) -> (Apply, mpsc::Sender<()>) {
+        let (release, released) = mpsc::channel::<()>();
+        let released = std::sync::Mutex::new(released);
+        let started = std::sync::Mutex::new(started);
+        let apply: Apply = Arc::new(move |frame: Mutate, _| {
+            let _ = started.lock().unwrap().send(frame.id.clone());
+            if frame.id == "slow" {
+                let _ = released
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(20));
+            }
+            (frame.id, 200, Value::Null)
+        });
+        (apply, release)
+    }
+
+    fn answer(worker: &Worker) -> String {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some((id, _, _)) = worker.done() {
+                return id;
+            }
+            assert!(Instant::now() < deadline, "no answer");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// A project add that clones for minutes does not hold back a retire
+    /// sent after it on the same link: the retire's wait counts from when it
+    /// was sent, so it must not queue behind the clone (D22).
+    #[test]
+    fn a_slow_project_op_does_not_hold_back_the_next() {
+        let (started, starts) = mpsc::channel();
+        let (apply, release) = held(started);
+        let worker = Worker::at_once(apply, Duration::from_secs(10));
+        worker.ask(frame("slow"), forward::Op::ProjectAdd);
+        assert_eq!(
+            starts.recv_timeout(Duration::from_secs(10)).unwrap(),
+            "slow"
+        );
+        worker.ask(frame("quick"), forward::Op::ProjectRetire);
+        assert_eq!(answer(&worker), "quick");
+        release.send(()).unwrap();
+        assert_eq!(answer(&worker), "slow");
+    }
+
+    /// The agent verbs keep their order: a resume sent after a stop runs
+    /// once the stop has.
+    #[test]
+    fn proof_ops_run_in_turn() {
+        let (started, starts) = mpsc::channel();
+        let (apply, release) = held(started);
+        let worker = Worker::in_turn(apply, Duration::from_secs(10));
+        worker.ask(frame("slow"), forward::Op::Stop);
+        worker.ask(frame("next"), forward::Op::Resume);
+        assert_eq!(
+            starts.recv_timeout(Duration::from_secs(10)).unwrap(),
+            "slow"
+        );
+        assert!(starts.recv_timeout(Duration::from_millis(200)).is_err());
+        release.send(()).unwrap();
+        assert_eq!(answer(&worker), "slow");
+        assert_eq!(answer(&worker), "next");
     }
 }

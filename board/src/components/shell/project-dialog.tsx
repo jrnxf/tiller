@@ -39,8 +39,15 @@ export function AgentList({ agents, title }: { agents: ProjectAgent[]; title: st
 // Why a project add, edit, archive or delete failed. A peer's refusal says
 // which host refused it (D22), unless its message names the host already, as
 // an unreachable peer's does. A forward the peer did not confirm says it may
-// have been applied, after the 11 min a clone and its stops may take.
-export function ProjectFailure({ error }: { error: ActionError | null }) {
+// have been applied, after the 11 min a clone and its stops may take, or the
+// 10 s an `inline` edit waits.
+export function ProjectFailure({
+  error,
+  inline = false,
+}: {
+  error: ActionError | null;
+  inline?: boolean;
+}) {
   if (!error) return null;
   const { host, message } = error;
   if (host && error.code !== "forward_uncertain" && !message.includes(host)) {
@@ -50,7 +57,7 @@ export function ProjectFailure({ error }: { error: ActionError | null }) {
       </p>
     );
   }
-  return <ActionFailure error={error} host={error.host ?? undefined} project />;
+  return <ActionFailure error={error} host={error.host ?? undefined} project={!inline} />;
 }
 
 // Why a preview could not be read, as the dialog says it.
