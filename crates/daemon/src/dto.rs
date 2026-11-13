@@ -1950,8 +1950,8 @@ pub struct AnswerBody {
 #[serde(deny_unknown_fields)]
 pub struct WithdrawBody {
     pub idempotency_key: String,
-    /// A paired peer's label: the withdraw is not forwarded, so a peer's
-    /// item is refused (`protocol.md` 7.4).
+    /// A paired peer's label: the withdraw is forwarded to it
+    /// (`protocol.md` 7.4).
     #[serde(default)]
     pub host: Option<String>,
 }
@@ -2146,7 +2146,7 @@ pub struct TerminalHistory {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TerminalTailAsk {
-    /// A paired peer's label; a tail read is not forwarded.
+    /// A paired peer's label: the peer reads its own pane.
     #[serde(default)]
     pub host: Option<String>,
 }
@@ -2182,7 +2182,8 @@ pub struct TerminalInput {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PromptAsk {
-    /// A paired peer's label; a prompt read is not forwarded.
+    /// A paired peer's label: the peer reads its own screen. It needs an
+    /// `act` pairing.
     #[serde(default)]
     pub host: Option<String>,
 }
@@ -2254,9 +2255,14 @@ pub struct PromptAnswer {
     pub option: u8,
     /// The `screen` of the prompt read the buttons were drawn from.
     pub screen: String,
-    /// A paired peer's label; an answer is not forwarded.
+    /// A paired peer's label: the answer is forwarded to it, and the peer
+    /// reads and checks its own screen just before it types.
     #[serde(default)]
     pub host: Option<String>,
+    /// Required when `host` names a peer: a retry with it types nothing
+    /// twice.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 /// One line of the terminal mirror's NDJSON stream (`protocol.md` 7.4).
@@ -2288,7 +2294,7 @@ pub struct SteerBody {
     pub idempotency_key: String,
     /// One line, at most 20,000 characters.
     pub text: String,
-    /// A paired peer's label; a steer is not forwarded.
+    /// A paired peer's label: the steer is forwarded to it.
     #[serde(default)]
     pub host: Option<String>,
 }
@@ -2299,7 +2305,8 @@ pub struct SteerBody {
 #[serde(deny_unknown_fields)]
 pub struct InterruptBody {
     pub idempotency_key: String,
-    /// A paired peer's label; an interrupt is not forwarded.
+    /// A paired peer's label: the interrupt is forwarded to it, and the
+    /// board waits up to 60 s for its proof.
     #[serde(default)]
     pub host: Option<String>,
 }
@@ -2311,7 +2318,8 @@ pub struct InterruptBody {
 #[serde(deny_unknown_fields)]
 pub struct AgentControlBody {
     pub idempotency_key: String,
-    /// A paired peer's label; a stop or a resume is not forwarded.
+    /// A paired peer's label: the stop, unpause or resume is forwarded to
+    /// it.
     #[serde(default)]
     pub host: Option<String>,
 }
@@ -2326,7 +2334,7 @@ pub struct PauseBody {
     pub until: String,
     /// Why the run waits, at most 20,000 characters.
     pub reason: String,
-    /// A paired peer's label; a pause is not forwarded.
+    /// A paired peer's label: the pause is forwarded to it.
     #[serde(default)]
     pub host: Option<String>,
 }
@@ -2344,7 +2352,8 @@ pub struct RelaunchBody {
     /// brief.
     #[serde(default)]
     pub new_attempt: bool,
-    /// A paired peer's label; a relaunch is not forwarded.
+    /// A paired peer's label: the relaunch is forwarded to it, and the new
+    /// session starts on that host.
     #[serde(default)]
     pub host: Option<String>,
 }

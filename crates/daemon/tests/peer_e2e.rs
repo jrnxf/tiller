@@ -938,3 +938,354 @@ esac
     );
     assert_eq!(count(&world.board, "SELECT count(*) FROM asks"), 0);
 }
+
+/// Claude's screen mid-turn.
+const WORKING: &str = include_str!("../../panes/tests/fixtures/claude/working.ansi");
+
+/// A builder on the peer in herdr pane `w2:p1`, beside the orchestrator in
+/// `w1:p1`, and the herdr the peer's `peer serve` drives. The herdr logs
+/// each call to the returned file and answers from files next to it: the
+/// builder's `status` (`working` to start), the `screen` a read gives
+/// ([`WORKING`] to start), the
+/// `after-keys` screen a typed digit leaves (marked by `typed`), and
+/// `orchestrator-gone`, which
+/// makes the orchestrator's pane gone. Returns the builder's session and
+/// the log.
+fn peer_builder(world: &mut World) -> (String, PathBuf) {
+    let session = world.peer.worker("w2:p1");
+    let lab = world.peer.dir.path().join("lab");
+    std::fs::create_dir_all(&lab).unwrap();
+    std::fs::write(lab.join("status"), "working").unwrap();
+    std::fs::write(lab.join("screen"), WORKING).unwrap();
+    let herdr = peer_herdr(world.peer.dir.path());
+    std::fs::create_dir_all(herdr.parent().unwrap()).unwrap();
+    std::fs::write(
+        &herdr,
+        format!(
+            r#"#!/bin/sh
+# The daemons run with an empty PATH: builtins only.
+show() {{ while IFS= read -r line || [ -n "$line" ]; do printf '%s\n' "$line"; done < "$1"; }}
+echo "$*" >> '{lab}/herdr.log'
+case "$*" in
+"pane get w2:p1"*)
+  read -r status < '{lab}/status'
+  printf '{{"result":{{"pane":{{"pane_id":"w2:p1","workspace_id":"w2","agent":"claude","agent_status":"%s","tokens":{{"session":"{session}"}}}}}}}}\n' "$status" ;;
+"pane get w1:p1"*)
+  if [ -e '{lab}/orchestrator-gone' ]; then
+    echo '{{"error":{{"code":"pane_not_found","message":"no pane w1:p1"}}}}' >&2
+    exit 1
+  fi
+  echo '{{"result":{{"pane":{{"pane_id":"w1:p1","workspace_id":"w1","agent":"claude","agent_status":"idle"}}}}}}' ;;
+"pane layout"*)
+  echo '{{"result":{{"layout":{{"panes":[{{"pane_id":"w2:p1","rect":{{"width":120,"height":40}}}}]}}}}}}' ;;
+"pane read"*)
+  if [ -e '{lab}/typed' ]; then show '{lab}/after-keys'; else show '{lab}/screen'; fi ;;
+"pane send-keys w2:p1 "[0-9]*)
+  if [ -e '{lab}/after-keys' ]; then : > '{lab}/typed'; fi ;;
+"api snapshot"*)
+  echo '{{"result":{{"snapshot":{{"version":"0.9.5","workspaces":[{{"workspace_id":"w1","label":"alpha","number":1}},{{"workspace_id":"w2","label":"alpha-1","number":2}}],"panes":[{{"pane_id":"w1:p1","workspace_id":"w1","agent":"claude","agent_status":"idle"}},{{"pane_id":"w2:p1","workspace_id":"w2","agent":"claude","agent_status":"working"}}]}}}}}}' ;;
+*) echo '{{"result":{{}}}}' ;;
+esac
+"#,
+            lab = lab.display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&herdr, std::fs::Permissions::from_mode(0o755)).unwrap();
+    (session, lab.join("herdr.log"))
+}
+
+/// The agent's own hook on the peer: once `log` shows the Escape reached
+/// `w2:p1`, the agent's turn ends with a `Stop`.
+fn stop_hook_after_escape(world: &World, log: &Path, session: &str) -> std::thread::JoinHandle<()> {
+    let store = world.peer.open();
+    let (log, session) = (log.to_owned(), session.to_owned());
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + WAIT;
+        while Instant::now() < deadline {
+            let calls = std::fs::read_to_string(&log).unwrap_or_default();
+            if calls
+                .lines()
+                .any(|call| call.starts_with("pane send-keys w2:p1 esc"))
+            {
+                store
+                    .conn()
+                    .execute(
+                        "INSERT INTO observations (id, session_id, source, event, observed_at, recorded_at, payload)
+                         VALUES ('01M7AEQD3P56M1JB0XWF6BRST0', ?1, 'hook', 'Stop', ?2, ?2, '{}')",
+                        rusqlite::params![session, Timestamp::now().to_string()],
+                    )
+                    .unwrap();
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    })
+}
+
+/// Puts the peer's `session` on Claude's permission dialog for a Bash call,
+/// as its hook and its pane show it; a typed digit leaves an empty composer.
+fn ask_permission(world: &World, lab: &Path, session: &str) {
+    let now = Timestamp::now().to_string();
+    let store = world.peer.open();
+    store
+        .conn()
+        .execute(
+            "INSERT INTO observations (id, session_id, source, event, observed_at, recorded_at, payload)
+             VALUES ('01M7AEQD3P56M1JB0XWF6BRWT0', ?1, 'hook', 'PermissionRequest', ?2, ?2, ?3)",
+            rusqlite::params![session, now, json!({"tool_name": "Bash"}).to_string()],
+        )
+        .unwrap();
+    store
+        .conn()
+        .execute(
+            "UPDATE sessions SET activity = 'waiting_permission', activity_observed_at = ?2
+             WHERE id = ?1",
+            rusqlite::params![session, now],
+        )
+        .unwrap();
+    std::fs::write(
+        lab.join("screen"),
+        include_str!("../../panes/tests/fixtures/claude/permission-dialog.ansi"),
+    )
+    .unwrap();
+    std::fs::write(
+        lab.join("after-keys"),
+        include_str!("../../panes/tests/fixtures/claude/empty.ansi"),
+    )
+    .unwrap();
+}
+
+/// The owner, on the board host, works a builder that runs on the peer
+/// (D20): reads its tail, interrupts its turn, reads and answers its
+/// permission prompt, steers it, and stops the peer's orchestrator. Each
+/// read is a query and each verb a signed `mutate` on the real link; the
+/// peer's real controls type into its own herdr and write its own store,
+/// as `board@<label>`. The board host writes nothing.
+#[test]
+fn board_interrupts_answers_steers_and_stops_a_peer_agent() {
+    let mut world = World::start();
+    let (session, log) = peer_builder(&mut world);
+    let lab = log.parent().unwrap().to_owned();
+    world.live();
+    let host_seq = world.board.open().last_seq().unwrap();
+    let agent = |verb: &str| format!("/api/v1/agents/{session}/{verb}");
+
+    // The tail, off the peer's pane.
+    let (status, tail) = world.post(&agent("terminal/tail"), &json!({"host": LABEL}));
+    assert_eq!(status, 200, "{tail}");
+    assert_eq!(tail["session_id"], session.as_str());
+
+    // An interrupt: the Escape reaches the peer's pane, and the turn ends.
+    let hook = stop_hook_after_escape(&world, &log, &session);
+    let (status, interrupted) = world.post(
+        &agent("interrupt"),
+        &json!({"idempotency_key": "int-1", "host": LABEL}),
+    );
+    hook.join().unwrap();
+    assert_eq!(status, 200, "{interrupted}");
+    assert_eq!(interrupted["host"], LABEL);
+    assert_eq!(interrupted["data"]["cancel"], "confirmed", "{interrupted}");
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(calls.contains("pane send-keys w2:p1 esc"), "{calls}");
+
+    // The prompt, read and answered on the peer's own screen.
+    std::fs::write(lab.join("status"), "blocked").unwrap();
+    ask_permission(&world, &lab, &session);
+    let (status, prompt) = world.post(&agent("prompt"), &json!({"host": LABEL}));
+    assert_eq!(status, 200, "{prompt}");
+    assert_eq!(
+        prompt["prompt"]["command"], "rm -f nothing-here.txt && touch made.txt",
+        "{prompt}"
+    );
+    let screen = prompt["prompt"]["screen"].as_str().unwrap().to_owned();
+    let answer =
+        json!({"idempotency_key": "answer-1", "host": LABEL, "option": 4, "screen": screen});
+    let (status, answered) = world.post(&agent("prompt/answer"), &answer);
+    assert_eq!(status, 200, "{answered}");
+    assert_eq!(answered["host"], LABEL);
+    assert_eq!(answered["data"]["sent"]["option"], 4, "{answered}");
+    let digits = || {
+        std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .filter(|call| *call == "pane send-keys w2:p1 4")
+            .count()
+    };
+    assert_eq!(digits(), 1);
+    // The same key again is the stored answer: nothing is typed twice.
+    let (status, again) = world.post(&agent("prompt/answer"), &answer);
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["replayed"], true, "{again}");
+    assert_eq!(digits(), 1);
+
+    // A steer waits in the peer's outbox for the builder.
+    std::fs::write(lab.join("status"), "working").unwrap();
+    std::fs::write(lab.join("screen"), WORKING).unwrap();
+    let _ = std::fs::remove_file(lab.join("after-keys"));
+    let _ = std::fs::remove_file(lab.join("typed"));
+    let (status, steered) = world.post(
+        &agent("steer"),
+        &json!({"idempotency_key": "steer-1", "host": LABEL, "text": "use the new API"}),
+    );
+    assert_eq!(status, 200, "{steered}");
+    assert_eq!(
+        count(
+            &world.peer,
+            "SELECT count(*) FROM outbox WHERE kind = 'steer' AND body LIKE '%use the new API%'"
+        ),
+        1
+    );
+
+    // The peer's orchestrator is stopped through the peer's own starter:
+    // its pane is gone, so the stop is proven at once.
+    std::fs::write(lab.join("orchestrator-gone"), "").unwrap();
+    let orchestrator = world.peer.orchestrator_session.clone();
+    let (status, stopped) = world.post(
+        &format!("/api/v1/agents/{orchestrator}/stop"),
+        &json!({"idempotency_key": "stop-1", "host": LABEL}),
+    );
+    assert_eq!(status, 200, "{stopped}");
+    assert_eq!(stopped["host"], LABEL);
+    let ended: Option<String> = world
+        .peer
+        .open()
+        .conn()
+        .query_row(
+            "SELECT ended_at FROM sessions WHERE id = ?1",
+            [&orchestrator],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(ended.is_some(), "{stopped}");
+
+    // All of it was written on the peer as the forwarded owner, and none of
+    // it on the board host.
+    assert_eq!(
+        count(
+            &world.peer,
+            "SELECT count(*) FROM events WHERE kind = 'outbox.enqueued' AND actor = 'board@test-host'"
+        ),
+        1
+    );
+    let written = written_since(&world.board, host_seq);
+    assert!(written.is_empty(), "the board host wrote {written:?}");
+    assert_eq!(count(&world.board, "SELECT count(*) FROM outbox"), 0);
+}
+
+/// The owner pauses, unpauses, resumes and relaunches a run on the peer
+/// from the board host, and withdraws an attention item there that no
+/// longer applies. Each is a signed `mutate` on the real link, applied by
+/// the peer's own store and starter.
+#[test]
+fn board_pauses_resumes_and_relaunches_a_peer_run() {
+    let mut world = World::start();
+    let (session, log) = peer_builder(&mut world);
+    // The run's worktree is on the peer's disk.
+    let worktree = log.parent().unwrap().join("worktree");
+    std::fs::create_dir_all(&worktree).unwrap();
+    world
+        .peer
+        .open()
+        .conn()
+        .execute(
+            "UPDATE runs SET worktree_path = ?1",
+            [worktree.to_str().unwrap()],
+        )
+        .unwrap();
+    // An item about a session that is gone.
+    world
+        .peer
+        .open()
+        .conn()
+        .execute(
+            "INSERT INTO attention (id, card_id, kind, question, opened_at, subject_session_id)
+             SELECT '01M7AEQD3P56M1JB0XWF6BRAT1', id, 'recovery', 'Backup failed', ?1, 'gone'
+             FROM cards LIMIT 1",
+            [Timestamp::now().to_string()],
+        )
+        .unwrap();
+    world.live();
+    let host_seq = world.board.open().last_seq().unwrap();
+    let agent = |verb: &str| format!("/api/v1/agents/{session}/{verb}");
+    let paused = || -> Option<String> {
+        world
+            .peer
+            .open()
+            .conn()
+            .query_row(
+                "SELECT pause_until FROM runs WHERE id = (SELECT run_id FROM sessions WHERE id = ?1)",
+                [&session],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+
+    let until = Timestamp::now().plus_minutes(60).to_string();
+    let (status, body) = world.post(
+        &agent("pause"),
+        &json!({"idempotency_key": "pause-1", "host": LABEL, "until": until, "reason": "waits on review"}),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["host"], LABEL);
+    assert!(paused().is_some());
+
+    let (status, body) = world.post(
+        &agent("unpause"),
+        &json!({"idempotency_key": "unpause-1", "host": LABEL}),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(paused(), None);
+
+    // The peer's herdr shows Claude in the run's pane, so the resume
+    // leaves it alone.
+    let (status, body) = world.post(
+        &agent("resume"),
+        &json!({"idempotency_key": "resume-1", "host": LABEL}),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["host"], LABEL);
+    assert_eq!(body["data"]["left_alone"], true, "{body}");
+
+    // The peer's own relaunch judges the run: its worktree is gone from
+    // the peer's disk now, so it refuses, and the refusal comes back as the
+    // peer's.
+    std::fs::remove_dir(&worktree).unwrap();
+    let (status, body) = world.post(
+        &agent("relaunch"),
+        &json!({"idempotency_key": "relaunch-1", "host": LABEL, "note": "start from the tests"}),
+    );
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"]["host"], LABEL, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("worktree"),
+        "{body}"
+    );
+
+    let (status, body) = world.post(
+        "/api/v1/attention/01M7AEQD3P56M1JB0XWF6BRAT1/withdraw",
+        &json!({"idempotency_key": "withdraw-1", "host": LABEL}),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        count(
+            &world.peer,
+            "SELECT count(*) FROM attention WHERE withdrawn_at IS NOT NULL"
+        ),
+        1
+    );
+
+    assert_eq!(
+        count(
+            &world.peer,
+            "SELECT count(*) FROM events WHERE kind IN ('run.paused', 'run.unpaused') AND actor = 'board@test-host'"
+        ),
+        2
+    );
+    let written = written_since(&world.board, host_seq);
+    assert!(written.is_empty(), "the board host wrote {written:?}");
+}
