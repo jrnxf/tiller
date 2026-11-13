@@ -576,6 +576,12 @@ fn a_lost_holder_resumes_its_worker_and_notifies_the_owner_once() {
         .collect();
     let at = argv.iter().position(|a| *a == "--resume").unwrap();
     assert_eq!(argv[at + 1], format!("claude-{session}"), "{argv:?}");
+    // R21 notifies before it writes holder.lost, so the note can come first.
+    let deadline = Instant::now() + WAIT;
+    while count("SELECT count(*) FROM events WHERE kind = 'holder.lost'") < 1 {
+        assert!(Instant::now() < deadline, "R21 never wrote holder.lost");
+        std::thread::sleep(Duration::from_millis(100));
+    }
     assert_eq!(count("SELECT count(*) FROM events WHERE kind = 'holder.lost'"), 1);
     let machines = get(port, &cookie, "/api/v1/machines");
     assert!(
@@ -701,7 +707,21 @@ fn killed_daemon_delivers_once(kill: Kill) {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
-    agents.until(&session, "the message", |events| has(events, "submit"));
+    // A delivery pass that meets a busy screen, a working holder status or an
+    // unreadable composer defers by design for 30 s, which outlasts WAIT. The
+    // wait covers one such deferral. 30 is BUSY_DEFER_SECS in
+    // tiller_delivery::outbox, which this crate does not depend on.
+    const BUSY_DEFER: Duration = Duration::from_secs(30);
+    let deadline = Instant::now() + WAIT + BUSY_DEFER;
+    while !has(&agents.events(&session), "submit") {
+        assert!(
+            Instant::now() < deadline,
+            "{kill:?}: the message never reached fake-agent: {:#?}\ndeferrals: {:#?}",
+            agents.events(&session),
+            deferrals(&agents.world, &id)
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let deadline = Instant::now() + WAIT;
     while agents
         .world
@@ -744,6 +764,19 @@ fn killed_daemon_delivers_once(kill: Kill) {
     assert_eq!(agents.of(&session, "start").len(), 1, "{kill:?}");
     assert!(agents.of(&session, "exit").is_empty(), "{kill:?}");
     assert_eq!(agents.live(&run), (session, pane));
+}
+
+/// Each `outbox.deferred` of message `id`: when, until when, and why.
+fn deferrals(world: &World, id: &str) -> Vec<(String, String)> {
+    let store = world.store();
+    let mut rows = store
+        .conn()
+        .prepare("SELECT at, payload FROM events WHERE kind = 'outbox.deferred' AND entity_id = ?1 ORDER BY seq")
+        .unwrap();
+    rows.query_map([id], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
 }
 
 /// Whether the composer row, between its rules, holds `text`.
