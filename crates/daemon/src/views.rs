@@ -18,7 +18,7 @@ use tiller_core::state::interventions::InterventionSource;
 use tiller_core::state::signals::lisbon_weeks;
 use tiller_core::state::{find, get, list, review};
 use tiller_core::{Result, Store, Timestamp};
-use tiller_herdr::poller::Health as PollerRecord;
+use tiller_poll::Health as PollerRecord;
 
 use crate::dto::*;
 use crate::peer::{Federation, PeerView};
@@ -489,11 +489,9 @@ fn agent_row(store: &Store, session: &Session) -> Result<AgentRow> {
         Some(run) => Some(get(store.conn(), "card", &run.card_id)?),
         None => None,
     };
-    let herdr_name = match (&run, &card) {
-        (Some(run), Some(card)) => Some(herdr_name(&card.display_id, run)),
-        _ => pane
-            .as_ref()
-            .and_then(|pane| pane.herdr_agent().map(str::to_owned)),
+    let name = match (&run, &card) {
+        (Some(run), Some(card)) => Some(agent_name(&card.display_id, run)),
+        _ => None,
     };
     // The model: the run's, else the newest one a hook reported.
     let reported: Option<String> = one(
@@ -525,7 +523,7 @@ fn agent_row(store: &Store, session: &Session) -> Result<AgentRow> {
     )?;
     // The newest sign of the agent's own output: a tool call, a subagent or
     // the end of a turn, as hooks report them. Owner input, notifications and
-    // herdr's polls do not count, and a host with hooks blocked sees no tool
+    // the holder's screen reads do not count, and a host with hooks blocked sees no tool
     // calls, so it gets none. Tool calls are coalesced (4.3): this lags by up
     // to 60 s.
     let last_output_at: Option<Timestamp> = one(
@@ -548,7 +546,7 @@ fn agent_row(store: &Store, session: &Session) -> Result<AgentRow> {
         activity: effective.unwrap_or_else(|| session.activity.to_string()),
         activity_observed_at: at_opt(session.activity_observed_at),
         last_status_line: run.as_ref().and_then(|run| run.last_status_line.clone()),
-        herdr_name,
+        name,
         card_id: card.map(|card| card.id),
         host_id: session.host_id.clone(),
         workers: Vec::new(),
@@ -597,8 +595,8 @@ fn pause_of(store: &Store, run: &Run) -> Result<Option<PauseInfo>> {
     }))
 }
 
-/// A run's herdr agent name (`protocol.md` section 6.1).
-pub fn herdr_name(display_id: &str, run: &Run) -> String {
+/// A run's agent name (`protocol.md` section 6.1).
+pub fn agent_name(display_id: &str, run: &Run) -> String {
     let base = format!("{display_id}-{}", run.role.short_name());
     if run.attempt > 1 {
         format!("{base}-{}", run.attempt)
@@ -679,24 +677,6 @@ pub fn machines(store: &Store, local: &LocalHealth, now: Timestamp) -> Result<Ma
     let quota_stale = quota_is_stale(store, now)?;
     let mut machines = Vec::new();
     for host in store.hosts()? {
-        let is_local = host.kind == HostKind::Local;
-        let running: i64 = if is_local {
-            store.conn().query_row(
-                "SELECT count(*) FROM sessions s LEFT JOIN runs r ON r.id = s.run_id
-                 WHERE s.host_id = ?1 AND s.ended_at IS NULL
-                   AND (s.role = 'orchestrator' OR r.ended_at IS NULL)",
-                [&host.id],
-                |row| row.get(0),
-            )?
-        } else {
-            store.conn().query_row(
-                "SELECT count(*) FROM panes
-                 WHERE host_id = ?1 AND gone_at IS NULL AND state = 'running'
-                   AND coalesce(json_extract(metadata, '$.agent_status'), '') != 'done'",
-                [&host.id],
-                |row| row.get(0),
-            )?
-        };
         if let Some(peer) = local
             .peers
             .peers
@@ -707,69 +687,39 @@ pub fn machines(store: &Store, local: &LocalHealth, now: Timestamp) -> Result<Ma
             continue;
         }
         // Paired before the link supervisor re-read the pairings: a peer whose
-        // link has not opened yet, not a herdr machine.
+        // link has not opened yet.
         if let (Some(scope), Some(peer_host_id)) = (host.peer_scope, host.peer_host_id.as_deref()) {
             let pending = PeerView::new(&host.label, &host.id, peer_host_id, scope);
             machines.push(peer_machine(&host, &pending));
             continue;
         }
+        // A remote host with no pairing has no link to show.
+        if host.kind != HostKind::Local {
+            continue;
+        }
+        let running: i64 = store.conn().query_row(
+            "SELECT count(*) FROM sessions s LEFT JOIN runs r ON r.id = s.run_id
+             WHERE s.host_id = ?1 AND s.ended_at IS NULL
+               AND (s.role = 'orchestrator' OR r.ended_at IS NULL)",
+            [&host.id],
+            |row| row.get(0),
+        )?;
         let slots = capacity.iter().find(|row| row.host_id == host.id);
-        let (health, stale_reason, last_seen_at) = if is_local {
-            let degraded =
-                host.stale_reason.is_some() || !local.failing_pollers.is_empty() || quota_stale;
-            (
-                if degraded { "degraded" } else { "ok" },
-                host.stale_reason.clone(),
-                Some(now),
-            )
-        } else {
-            match host.last_seen_at {
-                None => (
-                    "stale",
-                    Some(
-                        host.stale_reason
-                            .clone()
-                            .unwrap_or_else(|| "never_seen".into()),
-                    ),
-                    None,
-                ),
-                Some(seen) if seen < now.plus_minutes(-REMOTE_STALE_MINUTES) => (
-                    "stale",
-                    Some(
-                        host.stale_reason
-                            .clone()
-                            .unwrap_or_else(|| "herdr_link_down".into()),
-                    ),
-                    Some(seen),
-                ),
-                Some(seen) => ("ok", None, Some(seen)),
-            }
-        };
-        let holder_restarted = if is_local {
-            holder_restarted(store, &host.id, now)?
-        } else {
-            None
-        };
+        let degraded =
+            host.stale_reason.is_some() || !local.failing_pollers.is_empty() || quota_stale;
+        let holder_restarted = holder_restarted(store, &host.id, now)?;
         machines.push(Machine {
             id: host.id,
             label: host.label,
             kind: host.kind.to_string(),
-            view_only: !is_local,
-            health: health.to_owned(),
+            view_only: false,
+            health: if degraded { "degraded" } else { "ok" }.to_owned(),
             running_agents: Some(running),
-            capacity: if is_local {
-                slots.and_then(|row| row.lane_capacity)
-            } else {
-                None
-            },
-            free_slots: if is_local {
-                slots.and_then(|row| row.free)
-            } else {
-                None
-            },
-            last_seen_at: at_opt(last_seen_at),
-            stale_reason,
-            version: is_local.then(|| env!("CARGO_PKG_VERSION").to_owned()),
+            capacity: slots.and_then(|row| row.lane_capacity),
+            free_slots: slots.and_then(|row| row.free),
+            last_seen_at: at_opt(Some(now)),
+            stale_reason: host.stale_reason,
+            version: Some(env!("CARGO_PKG_VERSION").to_owned()),
             link: None,
             peer_scope: None,
             link_reason: None,
@@ -1057,7 +1007,7 @@ fn slug(display_id: &str, title: &str) -> String {
 fn event_line(event: &Event) -> EventLine {
     let source = match event.actor.as_str() {
         "hook" => "hook",
-        _ if event.entity == "pane" => "herdr",
+        _ if event.entity == "pane" => "holder",
         _ if event.entity == "pr" => "gh",
         _ => "tiller",
     };
@@ -1366,16 +1316,10 @@ fn freshness(store: &Store, active: Option<&Run>, prs: &[Pr]) -> Result<Vec<Fres
     let newest_pr = prs.iter().max_by_key(|pr| pr.fetched_at);
     Ok(vec![
         Freshness {
-            source: match &pane {
-                Some(pane) if pane.holder_instance.is_some() => "Pane (holder)".into(),
-                _ => "Pane (herdr)".into(),
-            },
+            source: "Pane (holder)".into(),
             detail: match (&pane, &session) {
                 (Some(pane), _) if pane.gone_at.is_some() => "pane closed".into(),
-                (Some(pane), _) if pane.holder_instance.is_some() => pane.state.to_string(),
-                (Some(pane), _) => pane
-                    .herdr_status()
-                    .map_or_else(|| "no status".into(), str::to_owned),
+                (Some(pane), _) => pane.state.to_string(),
                 (None, Some(_)) => "no pane bound".into(),
                 (None, None) => "no live session".into(),
             },
@@ -1624,7 +1568,7 @@ fn routed_text(payload: &Value) -> String {
 // -- runs ---------------------------------------------------------------------
 
 /// `GET /api/v1/runs/{id}` without its pane tail, which the handler reads
-/// from herdr.
+/// from the terminal holder.
 /// Where a run's live pane is: its id, on this host. A pane on a remote
 /// host is read through its peer link (H11), not from here.
 pub struct PaneTarget {

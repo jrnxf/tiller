@@ -1,8 +1,7 @@
 //! Fakes for every source and a small world to run passes against (feature
-//! `testing`): the herdr test fleet from `tiller_herdr::testing`, a fake
-//! herdr server, a fake terminal holder link, and in-memory probes, scans,
-//! forge answers, launches, readings and harness records that tests set
-//! between passes.
+//! `testing`): the test fleet from `tiller_panes::testing`, a fake terminal
+//! holder link, and in-memory probes, scans, forge answers, launches,
+//! readings and harness records that tests set between passes.
 //!
 //! This file is also compiled into the crate's own integration tests through
 //! `tests/common/mod.rs`, so it names the crate as `tiller_reconcile`.
@@ -18,13 +17,13 @@ use tiller_core::domain::{Activity, Attention, ObservationSource, OutboxMessage,
 use tiller_core::state::runs::NewObservation;
 use tiller_core::state::{get, list};
 use tiller_core::{Actor, Ctx, Store, Timestamp};
-use tiller_herdr::client::PaneInfo;
-use tiller_herdr::fake::{FakeHerdr, Screen};
-pub use tiller_herdr::testing::{Fleet, owner};
+pub use tiller_panes::fake_claude::Screen;
 use tiller_panes::handshake::Welcome;
+pub use tiller_panes::message::Meta;
 use tiller_panes::message::{
-    Exit, Format, Listing, Meta, Pane, PaneId, Read, Screen as PaneScreen, Signal, Spawn,
+    Exit, Format, Listing, Pane, PaneId, Read, Screen as PaneScreen, Signal, Spawn,
 };
+pub use tiller_panes::testing::{Fleet, owner};
 use tiller_panes::{
     Events, FakePanes, Key, Live, Panes, PanesError, Subscribe, Subscription, Upgrade,
 };
@@ -32,8 +31,8 @@ use tiller_panes::{
 use tiller_reconcile::holder::Link;
 use tiller_reconcile::pass::{Config, Reconciler, Sources};
 use tiller_reconcile::sources::{
-    AgentProbe, Cut, Forge, Harness, HolderLauncher, HostReadings, Launched, Launcher, PaneEnv,
-    PrRead, Probe, Readings, Scanner, WorktreeScan,
+    AgentProbe, Cut, Forge, Harness, HolderLauncher, HostReadings, Launched, Launcher, PrRead,
+    Prepare, Probe, Readings, Scanner, WorktreeScan,
 };
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -52,19 +51,13 @@ pub fn ago(minutes: i64) -> Timestamp {
     now().plus_minutes(-minutes)
 }
 
-/// A probe that answers from herdr's reading unless a pane is overridden,
-/// and from the process table unless a pid is.
+/// A probe that answers from the process table unless a pid is set.
 #[derive(Clone, Default)]
 pub struct FakeProbe {
-    overrides: Arc<Mutex<HashMap<String, Probe>>>,
     pids: Arc<Mutex<HashMap<u32, Probe>>>,
 }
 
 impl FakeProbe {
-    pub fn set(&self, pane_id: &str, probe: Probe) {
-        lock(&self.overrides).insert(pane_id.to_owned(), probe);
-    }
-
     /// What `kill(pid, 0)` says of `pid`. A fake holder's pids are above
     /// any real one, so unset they read as dead.
     pub fn set_pid(&self, pid: u32, probe: Probe) {
@@ -73,17 +66,6 @@ impl FakeProbe {
 }
 
 impl AgentProbe for FakeProbe {
-    fn agent(&self, pane: &PaneInfo) -> Probe {
-        if let Some(probe) = lock(&self.overrides).get(&pane.pane_id) {
-            return *probe;
-        }
-        if pane.agent.is_some() {
-            Probe::Alive
-        } else {
-            Probe::Dead
-        }
-    }
-
     fn process(&self, pid: u32) -> Probe {
         lock(&self.pids)
             .get(&pid)
@@ -497,12 +479,9 @@ impl Forge for FakeForge {
     }
 }
 
-/// The daemon's side of a fake launch's pane environment.
-pub fn pane_env() -> PaneEnv {
-    PaneEnv {
-        tiller_home: PathBuf::from("/home/user/.tiller"),
-        claude_config: None,
-    }
+/// The script a fake launch runs for `session`.
+pub fn launch_script(session: &str) -> PathBuf {
+    PathBuf::from(format!("/home/user/runs/resume-{session}.sh"))
 }
 
 /// One launch the fake made.
@@ -520,26 +499,25 @@ struct LauncherWorld {
     closed: Vec<String>,
     notifications: Vec<(String, String)>,
     fail_next: Option<String>,
+    script_next: Option<Prepare>,
+    /// The `--resume` id of each script written and not yet run, by session.
+    prepared: BTreeMap<String, Option<String>>,
     /// The screen a launched pane shows.
     screen: Option<Screen>,
-    /// The terminal holder launches spawn in, when the host runs one.
-    holder: Option<FakeLink>,
 }
 
-/// A launcher over the fake herdr: each launch opens a workspace whose pane
-/// runs Claude (idle, by default) and names the session in its tokens. With
-/// a holder ([`FakeLauncher::use_holder`]) each launch is the daemon's
-/// holder `spawn` instead.
+/// A launcher over the fake holder: each launch is the daemon's holder
+/// `spawn`, keyed by the session, its pane showing Claude idle by default.
 #[derive(Clone)]
 pub struct FakeLauncher {
-    herdr: FakeHerdr,
+    holder: FakeLink,
     world: Arc<Mutex<LauncherWorld>>,
 }
 
 impl FakeLauncher {
-    pub fn new(herdr: FakeHerdr) -> Self {
+    pub fn new(holder: FakeLink) -> Self {
         Self {
-            herdr,
+            holder,
             world: Arc::new(Mutex::new(LauncherWorld::default())),
         }
     }
@@ -561,76 +539,71 @@ impl FakeLauncher {
         lock(&self.world).fail_next = Some(error.to_owned());
     }
 
-    /// What a launched pane shows (default idle Claude; `Permission` for a
-    /// trust prompt; `Shell` for a launch that died at once).
-    pub fn launched_screen(&self, screen: Screen) {
-        lock(&self.world).screen = Some(screen);
+    /// The next script is refused with `why`, as for a session whose launch
+    /// files are gone.
+    pub fn refuse_next(&self, why: &str) {
+        lock(&self.world).script_next = Some(Prepare::Refused(why.to_owned()));
     }
 
-    /// Launches spawn in `holder` from now on.
-    pub fn use_holder(&self, holder: FakeLink) {
-        lock(&self.world).holder = Some(holder);
+    /// The next script fails with `error`, as for a `config.toml` that
+    /// does not parse, which a later pass may find fixed.
+    pub fn fail_script_next(&self, error: &str) {
+        lock(&self.world).script_next = Some(Prepare::Failed(error.to_owned()));
+    }
+
+    /// What a launched pane shows (default idle Claude; `Permission` for a
+    /// trust prompt).
+    pub fn launched_screen(&self, screen: Screen) {
+        lock(&self.world).screen = Some(screen);
     }
 }
 
 impl Launcher for FakeLauncher {
-    fn launch(
+    fn prepare(
         &mut self,
         session: &Session,
-        cwd: &Path,
+        _cwd: &Path,
         resume: Option<&str>,
-    ) -> Result<Launched, String> {
-        if let Some(error) = lock(&self.world).fail_next.take() {
+    ) -> Result<PathBuf, Prepare> {
+        let mut world = lock(&self.world);
+        if let Some(error) = world.script_next.take() {
             return Err(error);
         }
-        let holder = lock(&self.world).holder.clone();
-        if let Some(holder) = holder {
-            let pane_id = holder
-                .spawn(&HolderLauncher::request(&pane_env(), session, cwd, resume))
-                .map_err(|e| e.to_string())?
-                .pane
-                .as_str()
-                .to_owned();
-            lock(&self.world).launches.push(LaunchCall {
-                session_id: session.id.clone(),
-                cwd: cwd.to_owned(),
-                resume: resume.map(str::to_owned),
-                pane_id: pane_id.clone(),
-            });
-            return Ok(Launched { pane_id });
-        }
-        let n = lock(&self.world).launches.len() + 1;
-        let workspace = format!("launch{n}");
-        let pane_id = format!("{workspace}:p1");
+        world
+            .prepared
+            .insert(session.id.clone(), resume.map(str::to_owned));
+        Ok(launch_script(&session.id))
+    }
+
+    fn launch(&mut self, session: &Session, cwd: &Path, script: &Path) -> Result<Launched, String> {
+        let resume = {
+            let mut world = lock(&self.world);
+            if let Some(error) = world.fail_next.take() {
+                return Err(error);
+            }
+            world.prepared.remove(&session.id).flatten()
+        };
+        let pane = self
+            .holder
+            .spawn(&HolderLauncher::request(session, cwd, script))
+            .map_err(|e| e.to_string())?
+            .pane;
         let screen = lock(&self.world).screen.unwrap_or(Screen::Idle);
-        self.herdr
-            .add_workspace(&workspace, &format!("{} resuming", session.project_id));
-        self.herdr.add_pane(&workspace, &pane_id, screen);
-        self.herdr.set_tokens(
-            &pane_id,
-            BTreeMap::from([
-                ("session".to_owned(), session.id.clone()),
-                ("project".to_owned(), session.project_id.clone()),
-            ]),
-        );
+        show(&self.holder.panes(), &pane, screen);
+        let pane_id = pane.as_str().to_owned();
         lock(&self.world).launches.push(LaunchCall {
             session_id: session.id.clone(),
             cwd: cwd.to_owned(),
-            resume: resume.map(str::to_owned),
+            resume,
             pane_id: pane_id.clone(),
         });
         Ok(Launched { pane_id })
     }
 
     fn close_pane(&mut self, pane_id: &str) -> Result<(), String> {
-        let holder = lock(&self.world).holder.clone();
-        if let Some(holder) = holder.filter(|_| tiller_core::ids::is_holder_pane(pane_id)) {
-            let pane = PaneId::from(pane_id);
-            let _ = holder.close(&pane, Duration::ZERO);
-            let _ = holder.forget(&pane);
-        } else {
-            self.herdr.remove_pane(pane_id);
-        }
+        let pane = PaneId::from(pane_id);
+        let _ = self.holder.close(&pane, Duration::ZERO);
+        let _ = self.holder.forget(&pane);
         lock(&self.world).closed.push(pane_id.to_owned());
         Ok(())
     }
@@ -676,21 +649,28 @@ impl Harness for FakeHarness {
     }
 }
 
-/// A fleet, a fake herdr it is laid out in, every fake source, and the
-/// engine over them.
+/// Draws `screen` on `pane`, as its Claude shows it.
+fn show(panes: &FakePanes, pane: &PaneId, screen: Screen) {
+    let ansi = screen.ansi();
+    let rows: Vec<&str> = ansi.lines().collect();
+    panes.set_screen(pane, &rows);
+}
+
+/// A fleet, the fake terminal holder it is laid out in, every fake source,
+/// and the engine over them.
 pub struct World {
     pub fleet: Fleet,
-    pub herdr: FakeHerdr,
+    /// The terminal holder: reconcile lists it, and resumes spawn in it.
+    pub holder: FakeLink,
     pub probe: FakeProbe,
     pub scanner: FakeScanner,
     pub forge: FakeForge,
     pub launcher: FakeLauncher,
     pub readings: FakeReadings,
     pub harness: FakeHarness,
-    /// The terminal holder, once [`World::use_holder`] put one here.
-    pub holder: Option<FakeLink>,
     pub config: Config,
     forge_override: Option<Box<dyn Forge>>,
+    scanner_override: Option<Box<dyn Scanner>>,
     reconciler: Option<Reconciler>,
 }
 
@@ -704,7 +684,7 @@ impl World {
     /// Project `alpha` with a live orchestrator in `w1:p1`; no workers yet.
     pub fn new() -> Self {
         let fleet = Fleet::new();
-        let herdr = FakeHerdr::new(fleet.dir.path().join("herdr.json"));
+        let holder = FakeLink::new();
         let home = fleet.dir.path().join("tiller-home");
         std::fs::create_dir_all(&home).unwrap();
         {
@@ -717,17 +697,17 @@ impl World {
             .insert("alpha".into(), fleet.dir.path().join("alpha-checkout"));
         std::fs::create_dir_all(fleet.dir.path().join("alpha-checkout")).unwrap();
         Self {
-            launcher: FakeLauncher::new(herdr.clone()),
-            herdr,
+            launcher: FakeLauncher::new(holder.clone()),
+            holder,
             probe: FakeProbe::default(),
             scanner: FakeScanner::default(),
             forge: FakeForge::default(),
             readings: FakeReadings::default(),
             harness: FakeHarness::default(),
-            holder: None,
             config,
             fleet,
             forge_override: None,
+            scanner_override: None,
             reconciler: None,
         }
     }
@@ -743,21 +723,10 @@ impl World {
         session
     }
 
-    /// Puts a fake terminal holder on this host, from the next engine on:
-    /// reconcile lists it, and resumes spawn in it.
-    pub fn use_holder(&mut self) -> FakeLink {
-        let holder = FakeLink::new();
-        self.launcher.use_holder(holder.clone());
-        self.holder = Some(holder.clone());
-        self.reconciler = None;
-        holder
-    }
-
     /// Records the holder's instance in `meta.holder_instance`, as the
     /// holder source's first `welcome` does.
     pub fn holder_seen(&mut self) {
-        let holder = self.holder.clone().unwrap();
-        let welcome = holder.welcome().unwrap();
+        let welcome = self.holder.welcome().unwrap();
         self.store_mut()
             .holder_record(
                 &Ctx::new(Actor::Daemon),
@@ -775,46 +744,115 @@ impl World {
     /// holder, keyed by the session as a spawn keys it. Returns the
     /// session and its pane.
     pub fn holder_worker(&mut self) -> (String, PaneId) {
-        let holder = self.holder.clone().unwrap();
         let n = self.fleet.workers.len() + 2;
         let session = self.worker(&format!("w{n}:p1"));
-        // The herdr layout never lays out a holder session.
+        // Its pane is the spawn's, never one [`World::place`] lays out.
         self.fleet.workers.retain(|(s, _, _)| *s != session);
         let record = self.session(&session);
-        let pane = holder
+        let pane = self
+            .holder
             .spawn(&HolderLauncher::request(
-                &pane_env(),
                 &record,
                 Path::new("/home/user/worktrees"),
-                None,
+                &launch_script(&session),
             ))
             .unwrap();
         self.fleet.bind(&session, pane.pane.as_str());
         (session, pane.pane)
     }
 
-    /// Lays the fleet out in the fake herdr (orchestrator, an unrelated
-    /// workspace, the workers) with every Claude pane idle and tokened.
-    pub fn place(&self) {
-        self.fleet.place(&self.herdr);
-        let bindings =
-            tiller_herdr::layout::bindings(self.fleet.store.conn(), &self.fleet.host).unwrap();
-        for binding in bindings {
-            self.herdr.set_tokens(&binding.pane_id, binding.tokens());
+    /// Lays the fleet out in the holder as a holder that already runs it
+    /// lists it: the orchestrator's pane, an exited pane of no session
+    /// (`w3:p1`), then each worker's, every Claude idle with a live child
+    /// and the pane's meta naming its session, project and run, as a spawn
+    /// names them. The holder's instance is the one on record.
+    pub fn place(&mut self) {
+        let mut bound = vec![(
+            self.fleet.orchestrator_pane.clone(),
+            self.fleet.orchestrator_session.clone(),
+        )];
+        bound.extend(
+            self.fleet
+                .workers
+                .iter()
+                .map(|(session, _, pane)| (pane.clone(), session.clone())),
+        );
+        for (pane, session) in &bound {
+            let record = self.session(session);
+            let meta =
+                HolderLauncher::request(&record, Path::new("/home/user"), &launch_script(session))
+                    .meta;
+            self.add_pane(pane, session, meta, Screen::Idle);
         }
+        let notes = self.add_pane("w3:p1", "notes", Meta::new(), Screen::Idle);
+        self.holder.panes().exit(&notes, Some(0), None);
+        self.holder_seen();
+    }
+
+    /// Puts a running pane `pane` keyed `key` in the holder, its child live
+    /// and its Claude showing `screen`.
+    pub fn add_pane(&self, pane: &str, key: &str, meta: Meta, screen: Screen) -> PaneId {
+        let panes = self.holder.panes();
+        let id = PaneId::from(pane);
+        let record = panes.add(&id, key, meta);
+        self.probe.set_pid(record.pid, Probe::Alive);
+        show(&panes, &id, screen);
+        id
+    }
+
+    /// What `pane`'s Claude shows from now on.
+    pub fn set_screen(&self, pane: &str, screen: Screen) {
+        show(&self.holder.panes(), &PaneId::from(pane), screen);
+    }
+
+    /// `pane`'s child exits, leaving the shell's last screen.
+    pub fn exit_pane(&self, pane: &str) {
+        let pane = PaneId::from(pane);
+        let panes = self.holder.panes();
+        if let Some(record) = panes.get(&pane).unwrap() {
+            self.probe.set_pid(record.pid, Probe::Dead);
+        }
+        assert!(panes.exit(&pane, Some(0), None), "{pane} is not running");
+    }
+
+    /// Sets `set` on `pane`'s metadata and drops the keys in `remove`.
+    pub fn set_meta(&self, pane: &str, set: &[(&str, &str)], remove: &[&str]) {
+        let set = set
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        Panes::set_meta(&self.holder.panes(), &PaneId::from(pane), &set, remove).unwrap();
+    }
+
+    /// The holder drops `pane` from its list, and its child is gone with it.
+    pub fn remove_pane(&self, pane: &str) {
+        let pane = PaneId::from(pane);
+        let panes = self.holder.panes();
+        if let Some(record) = panes.get(&pane).unwrap() {
+            self.probe.set_pid(record.pid, Probe::Dead);
+        }
+        panes.remove(&pane);
+    }
+
+    /// The holder's record of `pane`.
+    pub fn pane(&self, pane: &str) -> Pane {
+        self.holder
+            .panes()
+            .get(&PaneId::from(pane))
+            .unwrap()
+            .unwrap()
     }
 
     /// The engine, built on first use from the config as it stands.
     pub fn reconciler(&mut self) -> &mut Reconciler {
         if self.reconciler.is_none() {
             let sources = Sources {
-                herdr: Box::new(self.herdr.clone()),
-                holder: self
-                    .holder
-                    .clone()
-                    .map(|holder| Arc::new(holder) as Arc<dyn Link>),
+                holder: Arc::new(self.holder.clone()) as Arc<dyn Link>,
                 probe: Box::new(self.probe.clone()),
-                scanner: Box::new(self.scanner.clone()),
+                scanner: self
+                    .scanner_override
+                    .take()
+                    .unwrap_or_else(|| Box::new(self.scanner.clone())),
                 forge: self
                     .forge_override
                     .take()
@@ -836,6 +874,13 @@ impl World {
     /// engine on.
     pub fn use_forge(&mut self, forge: Box<dyn Forge>) {
         self.forge_override = Some(forge);
+        self.reconciler = None;
+    }
+
+    /// Scans worktrees through `scanner` instead of the fake, from the
+    /// next engine on.
+    pub fn use_scanner(&mut self, scanner: Box<dyn Scanner>) {
+        self.scanner_override = Some(scanner);
         self.reconciler = None;
     }
 

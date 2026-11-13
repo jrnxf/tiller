@@ -10,7 +10,7 @@ publish = false
 
 [features]
 # The fake sources and the test fleet, for other crates' tests.
-testing = ["dep:tempfile", "tiller-herdr/testing", "tiller-panes/testing"]
+testing = ["dep:tempfile", "tiller-panes/testing"]
 
 [dependencies]
 jiff.workspace = true
@@ -20,7 +20,6 @@ serde_json.workspace = true
 tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
 tiller-core.workspace = true
-tiller-herdr.workspace = true
 tiller-observe.workspace = true
 tiller-panes.workspace = true
 tiller-poll.workspace = true
@@ -29,7 +28,6 @@ tracing.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 tempfile.workspace = true
-tiller-herdr = { workspace = true, features = ["testing"] }
 tiller-panes = { workspace = true, features = ["testing"] }
 
 [lints]

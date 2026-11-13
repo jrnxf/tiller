@@ -1,6 +1,6 @@
 //! `tiller doctor` end to end: the real binary against fake tools. Every tool
 //! is a small script under the world's `bin`, found through `PATH` and the
-//! `TILLER_*` variables, so no test touches a real herdr, forge or Claude.
+//! `TILLER_*` variables, so no test touches a real forge or Claude.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -36,11 +36,6 @@ fn world_with_tools(world: &World) -> std::path::PathBuf {
         "no-mistakes",
         "case \"$1\" in daemon) echo 'daemon running (pid 1)';; *) echo 'no-mistakes version v1.0.0';; esac",
     );
-    script(
-        &bin,
-        "herdr",
-        "echo '{\"result\":{\"snapshot\":{\"version\":\"0.9.5\",\"workspaces\":[],\"panes\":[]}}}'",
-    );
     // The no-mistakes daemon runs the same binary as its CLI, found through
     // its pid file and the process list.
     let nm_home = world.dir.path().join("no-mistakes-home");
@@ -59,7 +54,6 @@ fn world_with_tools(world: &World) -> std::path::PathBuf {
     fs::create_dir_all(&claude_dir).unwrap();
     world.set_env("PATH", bin.to_str().unwrap());
     world.set_env("CLAUDE_CONFIG_DIR", claude_dir.to_str().unwrap());
-    world.set_env("TILLER_HERDR", bin.join("herdr").to_str().unwrap());
     world.set_env("TILLER_QUOTA_AXI", bin.join("quota-axi").to_str().unwrap());
     world.set_env("TILLER_GH", bin.join("gh").to_str().unwrap());
     bin
@@ -85,7 +79,6 @@ fn healthy_host_reports_every_tool_and_exits_zero() {
     for (name, version) in [
         ("git", "git version 9.9.9"),
         ("treehouse", "v1.2.3"),
-        ("herdr", "0.9.5"),
         ("claude", "2.1.312 (Claude Code)"),
         ("gh", "gh version 2.0.0"),
         ("gh-axi", "0.1.0"),
@@ -116,19 +109,6 @@ fn missing_required_tool_exits_five_with_the_report() {
     assert_eq!(check(report, "git")["status"], "ok");
 }
 
-#[test]
-fn unreachable_herdr_fails_the_check() {
-    let world = World::initialized();
-    let bin = world_with_tools(&world);
-    script(&bin, "herdr", "exit 1");
-    let out = world.run(&["doctor"]);
-    assert_eq!(out.code, 5, "{}", out.json);
-    assert_eq!(
-        check(&out.json["error"]["current"], "herdr")["status"],
-        "fail"
-    );
-}
-
 /// Hung tools cost one timeout together, not one each, and a hung process
 /// list is cut at the report's deadline: a peer's report reaches its board
 /// host inside the 10 s the board waits.
@@ -145,12 +125,11 @@ fn hung_tools_do_not_hold_the_report_past_its_deadline() {
     let hang = bin.join("hang");
     world.set_env("TILLER_GH", hang.to_str().unwrap());
     world.set_env("TILLER_QUOTA_AXI", hang.to_str().unwrap());
-    world.set_env("TILLER_HERDR", hang.to_str().unwrap());
     world.set_env("TILLER_PS", hang.to_str().unwrap());
     let started = std::time::Instant::now();
     let out = world.run(&["doctor"]);
     let took = started.elapsed();
-    // Before, the probes ran one after another: 15 s for the three tools,
+    // Before, the probes ran one after another: 10 s for the two tools,
     // then 30 s for the process list. Now they end at the 7 s deadline,
     // inside the 10 s a board host waits for a peer's answer; two probe
     // timeouts one after another would pass that.
@@ -168,7 +147,6 @@ fn hung_tools_do_not_hold_the_report_past_its_deadline() {
             "{name}: {detail}"
         );
     }
-    assert_eq!(check(report, "herdr")["status"], "fail");
     assert_eq!(check(report, "git")["status"], "ok");
     let list = check(report, "firstmate");
     assert_eq!(list["code"], "processes_unreadable", "{list}");
@@ -180,11 +158,10 @@ fn hung_tools_do_not_hold_the_report_past_its_deadline() {
         .map(|c| c["name"].as_str().unwrap())
         .collect();
     assert_eq!(
-        &names[..9],
+        &names[..8],
         [
             "git",
             "treehouse",
-            "herdr",
             "claude",
             "gh",
             "gh-axi",

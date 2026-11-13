@@ -2,7 +2,7 @@
 //! board over the change stream (`protocol.md` 7.5, `memory.md` section 12).
 //!
 //! The daemon runs through the real binary with only `git` on its `PATH`,
-//! so no test reaches a real herdr server, `gh` or `quota-axi`.
+//! so no test reaches a real `gh` or `quota-axi`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

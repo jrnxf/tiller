@@ -1,6 +1,6 @@
 //! The daemon's background work, each piece a poller in one registry so
-//! `/api/v1/health` shows its last success and last error: the herdr cache
-//! (local and each saved machine), delivery, reconcile, the land loop, the
+//! `/api/v1/health` shows its last success and last error: the terminal
+//! holder's pane cache, delivery, reconcile, the land loop, the
 //! stop loop of finished runs, the transcript tailer and the quota feed.
 
 use std::collections::HashMap;
@@ -18,27 +18,27 @@ use tiller_agents::land::publish::Published;
 use tiller_agents::land::reconcile::{Local, ReconcileForge};
 use tiller_agents::land::scrub::ScrubList;
 use tiller_agents::land::{DaemonLock, Landed, Lander};
+use tiller_agents::spawn::SpawnError;
 use tiller_agents::spawn::config::SpawnConfig;
+use tiller_agents::spawn::launch::Start;
 use tiller_agents::spawn::pool::{Pool as _, Treehouse};
 use tiller_agents::spawn::readings;
+use tiller_agents::spawn::trust::ClaudeConfig;
 use tiller_core::backup::{self, Nightly};
 use tiller_core::domain::{Host, HostKind, PipelineState, Session};
 use tiller_core::state::list;
 use tiller_core::state::memory_load::CopyMark;
 use tiller_core::{Actor, Ctx, Store, Timestamp};
-use tiller_delivery::notify::{Command, Note, Notifier, Notify, ViaHerdr};
+use tiller_delivery::notify::{Command, Note, Notifier, Notify};
 use tiller_delivery::outbox::Deliverer;
 use tiller_delivery::sources::{Lavish, PageAnswers};
-use tiller_herdr::client::{Cli, Herdr};
-use tiller_herdr::poller::{HerdrSource, PollError, Registry, Source};
-use tiller_herdr::routed::Routed;
 use tiller_observe::tailer::Tailer;
 use tiller_panes::Panes;
+use tiller_poll::{PollError, Registry, Source};
 use tiller_reconcile::git::{GitScanner, WorktreePool};
 use tiller_reconcile::holder::{HolderSource, Link};
 use tiller_reconcile::sources::{
-    Forge, HerdrLauncher, HerdrStatusProbe, HolderLauncher, HostReadings, Launcher, NoHarness,
-    PaneEnv, Readings,
+    Forge, HolderLauncher, HostReadings, NoHarness, Prepare, ProcessProbe, Readings, ScriptWriter,
 };
 use tiller_reconcile::tools;
 use tiller_reconcile::{Config as ReconcileConfig, Reconciler, Sources};
@@ -137,27 +137,21 @@ pub struct HolderWatch {
     pub stable: Option<PathBuf>,
 }
 
-/// The owner's `[notify] command` when set; herdr's notification until the
-/// cutover drops herdr otherwise.
-fn owner_notifier(settings: &Settings, herdr: &Cli) -> Box<dyn Notify + Send> {
-    match Command::new(settings.notify_command.clone()) {
-        Some(command) => Box::new(command),
-        None => Box::new(ViaHerdr(herdr.clone())),
-    }
+/// The owner's `[notify] command`, or none when it is unset: Tiller then
+/// sends nothing (`terminal-holder.md` 7).
+fn owner_notifier(settings: &Settings) -> Option<Command> {
+    Command::new(settings.notify_command.clone())
 }
 
 /// How the workers reach the outside world.
 #[derive(Clone)]
 pub struct Tools {
-    /// The local herdr server.
-    pub herdr: Cli,
-    /// The terminal holder, when this daemon runs with one: delivery, stop
-    /// and the notifier reach a holder pane through it.
-    pub holder: Option<Arc<dyn Panes>>,
+    /// The terminal holder, the only pane backend: delivery, stop and
+    /// reconcile reach every pane through it.
+    pub holder: Arc<dyn Panes>,
     /// The same holder as reconcile's observation source, with the stable
-    /// profile path its live upgrade aims at. Reconcile relaunches into the
-    /// holder when it is set.
-    pub holder_source: Option<HolderWatch>,
+    /// profile path its live upgrade aims at.
+    pub holder_source: HolderWatch,
     /// `quota-axi`, with any leading arguments.
     pub quota: Vec<OsString>,
     /// The GitHub CLI program.
@@ -176,9 +170,7 @@ pub struct Tools {
 impl std::fmt::Debug for Tools {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Tools")
-            .field("herdr", &self.herdr)
-            .field("holder", &self.holder.is_some())
-            .field("holder_source", &self.holder_source.is_some())
+            .field("stable", &self.holder_source.stable)
             .field("quota", &self.quota)
             .field("gh", &self.gh)
             .field("lavish", &self.lavish)
@@ -186,16 +178,6 @@ impl std::fmt::Debug for Tools {
             .finish_non_exhaustive()
     }
 }
-
-impl Tools {
-    /// herdr for herdr panes and the holder for holder panes.
-    pub fn routed(&self) -> PaneRouter {
-        Routed::new(self.herdr.clone(), self.holder.clone())
-    }
-}
-
-/// What delivery and stop drive panes through.
-pub type PaneRouter = Routed<Cli, Arc<dyn Panes>>;
 
 /// The host's boot id, when the OS reports one (R04).
 pub fn boot_id() -> Option<String> {
@@ -260,15 +242,54 @@ struct ConfiguredPool {
 
 impl ConfiguredPool {
     fn read(&self) -> Result<SpawnConfig, String> {
-        let table = match std::fs::read_to_string(&self.config) {
-            Ok(text) => text
-                .parse::<toml::Table>()
-                .map_err(|error| format!("config.toml does not parse: {error}"))?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
-            Err(error) => return Err(format!("read config.toml: {error}")),
-        };
-        SpawnConfig::from_table(&table).map_err(|error| format!("config.toml: {error}"))
+        spawn_config(&self.config)
     }
+}
+
+/// The spawn tables of `config.toml` as they stand now; a missing file is
+/// the defaults.
+fn spawn_config(path: &Path) -> Result<SpawnConfig, String> {
+    let table = match std::fs::read_to_string(path) {
+        Ok(text) => text
+            .parse::<toml::Table>()
+            .map_err(|error| format!("config.toml does not parse: {error}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+        Err(error) => return Err(format!("read config.toml: {error}")),
+    };
+    SpawnConfig::from_table(&table).map_err(|error| format!("config.toml: {error}"))
+}
+
+/// The script a reconcile resume runs (`recovery.md` R02, R04, R21),
+/// written by the builder of `tiller agent resume`, so a resumed agent gets
+/// every flag of its first launch. `config.toml` is read on each call, so
+/// an edit needs no restart.
+fn resume_scripts(home: &Path, store: Store) -> ScriptWriter {
+    let tiller_home = std::path::absolute(home).unwrap_or_else(|_| home.to_owned());
+    let config = home.join("config.toml");
+    let claude_config = ClaudeConfig::from_env();
+    Box::new(move |session: &Session, cwd: &Path, resume: Option<&str>| {
+        let spawn = spawn_config(&config).map_err(Prepare::Failed)?.spawn;
+        let scratch_root = spawn
+            .scratch_dir()
+            .map_err(|error| Prepare::Failed(error.to_string()))?;
+        let host = tiller_agents::spawn::resume::Host {
+            scratch_root: &scratch_root,
+            tiller_home: &tiller_home,
+            claude: &spawn.claude,
+            claude_config: &claude_config,
+            review_hosts: &spawn.review_allowed_hosts,
+        };
+        let start = match resume {
+            Some(claude_session_id) => Start::Resume { claude_session_id },
+            None => Start::Plain,
+        };
+        tiller_agents::spawn::resume::write(store.conn(), &host, session, cwd, start)
+            .map(|launch| launch.script)
+            .map_err(|error| match error {
+                SpawnError::Refused(why) => Prepare::Refused(why),
+                error => Prepare::Failed(error.to_string()),
+            })
+    })
 }
 
 impl WorktreePool for ConfiguredPool {
@@ -329,13 +350,14 @@ pub fn read_tool_versions(tools: &Tools) -> tools::Versions {
         &tools::Programs::standard(tools.quota.clone()),
         tools::ps_args,
     );
-    let herdr = tools
-        .herdr
-        .snapshot()
+    let holder = tools
+        .holder_source
+        .link
+        .welcome()
         .ok()
-        .and_then(|snapshot| snapshot.version);
+        .map(|welcome| welcome.holder);
     if let Some(object) = versions.tools.as_object_mut() {
-        object.insert("herdr".to_owned(), herdr.into());
+        object.insert("holder".to_owned(), holder.into());
         object.insert("skew".to_owned(), versions.skew.clone().into());
     }
     versions
@@ -593,7 +615,7 @@ impl Source for Backups {
 /// took `/exit` without leaving is not sent another, and is left to R15.
 pub struct Finished {
     store: Store,
-    herdr: PaneRouter,
+    holder: Arc<dyn Panes>,
 }
 
 impl Source for Finished {
@@ -614,7 +636,7 @@ impl Source for Finished {
         let swept = control::stop_finished(
             &mut self.store,
             &Ctx::at(Actor::Daemon, now),
-            &self.herdr,
+            tiller_agents::pane::Holder::new(Some(&*self.holder)),
             &waits,
         )
         .map_err(|error| PollError::State(tiller_core::Error::Internal(error.to_string())))?;
@@ -853,70 +875,57 @@ pub fn start(
     // Every source is built, and every connection opened, before any
     // starts: a failure here leaves nothing running, and the next attempt
     // registers each name afresh.
-    let herdr = HerdrSource::local(tools.herdr.clone(), open()?, &local);
-    let delivery = Deliverer::new(open()?, tools.routed(), &local);
-    let notify = Notifier::new(open()?, owner_notifier(&settings, &tools.herdr))
-        .with_checkouts(settings.checkouts.clone());
-    let holder = match &tools.holder_source {
-        Some(watch) => Some(HolderSource::new(
-            Arc::clone(&watch.link),
-            open()?,
-            &local,
-            watch.stable.clone(),
-        )),
-        None => None,
+    let delivery = Deliverer::new(open()?, Arc::clone(&tools.holder), &local);
+    let notify = match owner_notifier(&settings) {
+        Some(command) => {
+            Some(Notifier::new(open()?, command).with_checkouts(settings.checkouts.clone()))
+        }
+        None => {
+            tracing::warn!("owner notifications are off: config.toml sets no [notify] command");
+            None
+        }
     };
+    let watch = &tools.holder_source;
+    let holder = HolderSource::new(
+        Arc::clone(&watch.link),
+        open()?,
+        &local,
+        watch.stable.clone(),
+    );
     let mut config = ReconcileConfig::new(&local, home);
     config.boot_id = boot_id();
     config.forge_login = settings.forge_login.clone();
     config.learning = settings.learning.clone();
     config.project_paths = settings.checkouts.clone().into_iter().collect();
-    // Reconcile closes a dead herdr pane through herdr (R15).
-    let close_herdr = {
-        let herdr = tools.herdr.clone();
-        move |pane: &str| herdr.close_pane(pane).map_err(|error| error.to_string())
-    };
-    // With a holder, a resumed agent starts in it, and the owner hears of
-    // a restore through `[notify] command` (R21).
-    let launcher: Box<dyn Launcher> = match &tools.holder_source {
-        Some(watch) => {
-            let notifier = owner_notifier(&settings, &tools.herdr);
-            let link: Arc<dyn Panes> = Arc::clone(&watch.link) as Arc<dyn Panes>;
-            Box::new(HolderLauncher::new(
-                link,
-                PaneEnv::from_env(home),
-                close_herdr,
-                move |title: &str, body: &str| {
-                    let note = Note {
-                        title: title.to_owned(),
-                        message: body.to_owned(),
-                        session_id: None,
-                        pane: None,
-                        cwd: None,
-                        host: label.clone(),
-                    };
-                    if let Err(error) = notifier.notify(&note) {
-                        tracing::warn!(%error, "reconcile notification failed");
-                    }
-                },
-            ))
-        }
-        None => Box::new(HerdrLauncher::new(
-            tools.herdr.clone(),
-            PaneEnv::from_env(home),
-            close_herdr,
-        )),
-    };
+    // A resumed agent starts in the holder, and the owner hears of a
+    // restore through `[notify] command` (R21).
+    let notifier = owner_notifier(&settings);
+    let launcher = HolderLauncher::new(
+        Arc::clone(&tools.holder),
+        resume_scripts(home, open()?),
+        move |title: &str, body: &str| {
+            let Some(notifier) = &notifier else {
+                return;
+            };
+            let note = Note {
+                title: title.to_owned(),
+                message: body.to_owned(),
+                session_id: None,
+                pane: None,
+                cwd: None,
+                host: label.clone(),
+            };
+            if let Err(error) = notifier.notify(&note) {
+                tracing::warn!(%error, "reconcile notification failed");
+            }
+        },
+    );
     let sources = Sources {
-        herdr: Box::new(tools.herdr.clone()),
-        holder: tools
-            .holder_source
-            .as_ref()
-            .map(|watch| Arc::clone(&watch.link)),
-        probe: Box::new(HerdrStatusProbe),
+        holder: Arc::clone(&watch.link),
+        probe: Box::new(ProcessProbe),
         scanner: Box::new(scanner(home)),
         forge: reconcile_forge(home, open()?, &tools.gh),
-        launcher,
+        launcher: Box::new(launcher),
         readings: Box::new(LiveReadings {
             home: home.to_owned(),
             tools: tools.clone(),
@@ -964,7 +973,7 @@ pub fn start(
     };
     let finished = Finished {
         store: open()?,
-        herdr: tools.routed(),
+        holder: Arc::clone(&tools.holder),
     };
     let loads = MemoryLoads {
         store: open()?,
@@ -989,12 +998,11 @@ pub fn start(
     // Every worker but reconcile holds its polls while the owner marker
     // names another system (R20). A reconcile pass checks the marker
     // itself, so it sees the flip back and runs its full pass.
-    spawn(registry, Gated::new(home, herdr), stop, &mut handles);
-    if let Some(holder) = holder {
-        spawn(registry, Gated::new(home, holder), stop, &mut handles);
-    }
+    spawn(registry, Gated::new(home, holder), stop, &mut handles);
     spawn(registry, Gated::new(home, delivery), stop, &mut handles);
-    spawn(registry, Gated::new(home, notify), stop, &mut handles);
+    if let Some(notify) = notify {
+        spawn(registry, Gated::new(home, notify), stop, &mut handles);
+    }
     spawn(registry, reconcile, stop, &mut handles);
     spawn(registry, Gated::new(home, publish), stop, &mut handles);
     spawn(registry, Gated::new(home, land), stop, &mut handles);
@@ -1070,15 +1078,14 @@ esac
 
     /// R15 as the running daemon wires it: a real git checkout named in
     /// `config.toml`, a worktree of it the run worked in, the daemon's own
-    /// scanner, and a `treehouse` that logs each call it gets.
+    /// scanner, and a `treehouse` that logs each call it gets. The panes
+    /// are in a fake terminal holder.
     struct Pool {
-        fleet: tiller_herdr::testing::Fleet,
+        world: tiller_reconcile::testing::World,
         dir: tempfile::TempDir,
-        herdr: tiller_herdr::fake::FakeHerdr,
         home: PathBuf,
         worktree: PathBuf,
         run_id: String,
-        reconciler: Option<Reconciler>,
     }
 
     fn git(dir: &Path, args: &[&str]) -> String {
@@ -1108,14 +1115,10 @@ esac
         /// agent sits idle in pane `w2:p1`.
         fn new() -> Self {
             use std::os::unix::fs::PermissionsExt;
-            let mut fleet = tiller_herdr::testing::Fleet::new();
-            let session = fleet.worker("w2:p1");
-            let run_id = fleet
-                .workers
-                .iter()
-                .find(|(s, _, _)| *s == session)
-                .map(|(_, run, _)| run.clone())
-                .unwrap();
+            let mut world = tiller_reconcile::testing::World::new();
+            let session = world.worker("w2:p1");
+            world.place();
+            let run_id = world.run_of(&session).id;
             let dir = tempfile::tempdir().unwrap();
             let checkout = dir.path().join("checkouts").join("alpha");
             std::fs::create_dir_all(&checkout).unwrap();
@@ -1135,8 +1138,8 @@ esac
                     worktree.to_str().unwrap(),
                 ],
             );
-            fleet
-                .store
+            world
+                .store()
                 .conn()
                 .execute(
                     "UPDATE runs SET worktree_path = ?2, branch = 'tiller/alpha-1-build' WHERE id = ?1",
@@ -1167,44 +1170,19 @@ esac
             )
             .unwrap();
 
-            let herdr = tiller_herdr::fake::FakeHerdr::new(dir.path().join("herdr.json"));
-            fleet.place(&herdr);
-            for binding in tiller_herdr::layout::bindings(fleet.store.conn(), &fleet.host).unwrap()
-            {
-                herdr.set_tokens(&binding.pane_id, binding.tokens());
-            }
-            let config = ReconcileConfig::new(&fleet.host, &home);
-            let sources = Sources {
-                herdr: Box::new(herdr.clone()),
-                holder: None,
-                probe: Box::new(HerdrStatusProbe),
-                scanner: Box::new(scanner(&home)),
-                forge: Box::new(tiller_reconcile::sources::NoForge),
-                launcher: Box::new(HerdrLauncher::new(
-                    herdr.clone(),
-                    PaneEnv::from_env(&home),
-                    {
-                        let herdr = herdr.clone();
-                        move |pane: &str| herdr.close_pane(pane).map_err(|error| error.to_string())
-                    },
-                )),
-                readings: Box::new(tiller_reconcile::sources::NoReadings),
-                harness: Box::new(NoHarness),
-            };
-            let reconciler = Reconciler::new(fleet.open(), config, sources);
+            world.config = ReconcileConfig::new(&world.fleet.host, &home);
+            world.use_scanner(Box::new(scanner(&home)));
             Self {
-                fleet,
+                world,
                 dir,
-                herdr,
                 home,
                 worktree,
                 run_id,
-                reconciler: Some(reconciler),
             }
         }
 
         fn pass(&mut self, now: Timestamp) -> tiller_reconcile::Report {
-            self.reconciler.as_mut().unwrap().pass(now).unwrap()
+            self.world.pass(now)
         }
 
         /// Ends the run and lets its agent exit, then runs the passes that
@@ -1223,8 +1201,7 @@ esac
                     },
                 )
                 .unwrap();
-            self.herdr
-                .set_screen("w2:p1", tiller_herdr::fake::Screen::Shell);
+            self.world.exit_pane("w2:p1");
             let first = self.pass(t0.plus_minutes(1));
             let second = self.pass(t0.plus_minutes(2));
             tiller_reconcile::Report {
@@ -1235,7 +1212,7 @@ esac
         }
 
         fn dir_db(&self) -> PathBuf {
-            self.fleet.db.clone()
+            self.world.fleet.db.clone()
         }
 
         fn treehouse_calls(&self) -> Vec<String> {
@@ -1372,13 +1349,13 @@ esac
 
     /// The orchestrator's transcript, as the daemon's tailer source sees it.
     struct Transcript {
-        fleet: tiller_herdr::testing::Fleet,
+        fleet: tiller_panes::testing::Fleet,
     }
 
     impl Transcript {
         fn new() -> Self {
             Self {
-                fleet: tiller_herdr::testing::Fleet::new(),
+                fleet: tiller_panes::testing::Fleet::new(),
             }
         }
 
@@ -1733,7 +1710,7 @@ esac
     /// the daemon was down are made up by one backup at the next pass.
     #[test]
     fn the_backup_worker_takes_the_night_on_the_clock() {
-        let fleet = tiller_herdr::testing::Fleet::new();
+        let fleet = tiller_panes::testing::Fleet::new();
         let home = fleet.dir.path();
         let paths = backup::Paths::in_home(home);
         let mut worker = Backups {
@@ -1777,7 +1754,7 @@ esac
 
     #[test]
     fn the_backup_worker_waits_for_the_retry_after_a_failed_pass() {
-        let fleet = tiller_herdr::testing::Fleet::new();
+        let fleet = tiller_panes::testing::Fleet::new();
         let paths = backup::Paths::in_home(fleet.dir.path());
         let mut worker = Backups {
             store: fleet.open(),

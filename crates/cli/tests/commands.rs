@@ -983,13 +983,8 @@ fn every_command_has_a_snapshot_and_an_exit_code() {
 /// ended, the delete cancels the card a run still works on and deletes.
 #[test]
 fn project_delete_stops_its_agents_or_names_the_one_that_did_not_stop() {
-    use std::os::unix::fs::PermissionsExt;
+    // No terminal holder runs in the home: no stop can be proven.
     let world = World::initialized();
-    // A herdr that fails every call: no stop can be proven.
-    let herdr = world.dir.path().join("herdr");
-    std::fs::write(&herdr, "#!/bin/sh\nexit 1\n").unwrap();
-    std::fs::set_permissions(&herdr, std::fs::Permissions::from_mode(0o755)).unwrap();
-    world.set_env("TILLER_HERDR", herdr.to_str().unwrap());
     let orchestrator = world.orchestrator();
     let card = world.must(&[
         "card", "create", "alpha", "--kind", "ship", "--title", "last one",

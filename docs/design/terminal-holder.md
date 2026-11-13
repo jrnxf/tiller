@@ -44,7 +44,7 @@ The blast radius is the only point for one holder per session. The design answer
 
 - The holder is small. It has no network listener, no SQLite, no HTTP and no model calls. Its work is PTYs, the screen model and one socket.
 - Each pane's model update runs inside `catch_unwind`. A panic in the model resets that pane's model only (section 3.5). The PTY, the child and every other pane keep running. The holder's release profile keeps `panic = "unwind"` for this reason.
-- A lost holder is recovery row R21 (section 6.4). It reuses the reboot restore, which resumes every session with `claude --resume`.
+- A lost holder is recovery row R21 (section 6.4). It reuses the reboot restore, which resumes every session with `claude --resume` and the flags of its first launch (`recovery.md` section 2, step 2).
 
 ### 2.2 Process and service
 
@@ -306,7 +306,7 @@ The holder encodes each name for the app's current mode: legacy, application cur
 |---|---|---|
 | Worker spawn: `create_workspace(label, worktree)`, `report_tokens`, `relayout`, `send_text(launch line)`, `send_enter` | `agents/spawn/mod.rs:576-598` | One `spawn { key: session, argv: [claude, ...], cwd: worktree, env, meta }`. The launch line is gone: the holder runs `claude` directly, not a shell that types it. `relayout` goes away |
 | Orchestrator spawn | `agents/spawn/orchestrator.rs:237,305-309` | The same `spawn` |
-| Resume after a crash or a reboot | `agents/control.rs:1269-1298`, `reconcile/sources.rs:203-262` (`HerdrLauncher`) | `spawn` with `claude --resume <id>`. `HerdrLauncher` becomes `PaneLauncher` |
+| Resume after a crash or a reboot | `agents/control.rs:1269-1298`, `reconcile/sources.rs:203-262` (`HerdrLauncher`) | `spawn` of the session's `resume-<session>.sh`, which `spawn::resume` writes as `tiller agent resume` does: the first launch's flags plus `--resume <id>`. A session whose launch files are gone or damaged is refused with a recovery item, never rebuilt (`recovery.md` section 2, step 2). `HerdrLauncher` becomes `PaneLauncher` |
 | Workspace label, block order, glyphs | `herdr/layout.rs`, `relayout`, `layout::repair` | The label moves to `meta.label`, and `agents::labels` makes it (from `worker_label` and `orchestrator_label`). Order is not stored: the switcher and the board sort by project, then role, then start time. `rename_workspace`, `move_workspace` and `repair` go away |
 | Row tokens re-reported after a herdr restart (R18) | `reconcile/pass.rs:271-273` | Goes away. `meta` lives in the holder and survives a daemon restart and a live upgrade |
 | Snapshot for reconcile | `reconcile/pass.rs:161`, `recovery/evidence.rs:30-48`, `ladder.rs` | `list`. The pane's `key` replaces `tokens["session"]`, and `state`/`exit` replace `agent` and `agent_status` |
@@ -468,7 +468,7 @@ What the handover loses: nothing in the PTYs, the children or the metadata. The 
 
 ### 6.3 A machine reboot
 
-Every pane, every child and the holder are gone. The holder starts at boot (systemd user with lingering) or at login (launchd), with a new `instance` and no panes. R04 runs as it does today, with one change: step (1) "recreate the herdr layout" goes away, because there is no layout. The orchestrators come back first, then each worker in its own worktree, with `claude --resume`.
+Every pane, every child and the holder are gone. The holder starts at boot (systemd user with lingering) or at login (launchd), with a new `instance` and no panes. R04 runs as it does today, with one change: step (1) "recreate the herdr layout" goes away, because there is no layout. The orchestrators come back first, then each worker in its own worktree, with `claude --resume` and the flags of its first launch.
 
 ### 6.4 The holder is lost (new row R21)
 
@@ -596,8 +596,8 @@ The doc rows land in H01, before the code, so that each builder builds against a
 | `roles/*.settings.json` | `Bash(herdr *)` becomes `Bash(tiller holder*)` and `Bash(tiller attach*)`, each with its `Bash(<tiller> ...)` twin, with no space before the `*` so the bare commands match too |
 | `probe/` | History, left as is (`probe/reports` record what was measured then) |
 | `scripts/firstmate-export` and its fixtures | Left as is. It reads the predecessor's herdr ids, which is part of the import contract |
-| `scripts/two-host-demo.sh` | `TILLER_HERDR=/nonexistent/herdr` becomes a test holder socket in the demo's home |
-| `demo/` | Its herdr copy becomes holder copy |
+| `scripts/two-host-demo.sh` | `TILLER_HERDR=/nonexistent/herdr` goes. It only pointed the demo's daemons away from herdr, and with no holder in the demo's home they reach no pane, as before |
+| `demo/` | Deleted. It was the throwaway board demo over Firstmate and herdr, which `build-plan.md` deletes at cutover |
 
 ### 10.1 Board files
 
@@ -621,7 +621,7 @@ The migration follows R11: a pre-migration copy, one transaction, and no hook ev
 ### 11.2 Nix module
 
 - A new `tiller-holder` user service on Linux and launchd agent on macOS, as in section 2.2.
-- `services.tiller.holder.enable` defaults to `false` when H06 lands, so a dotfiles bump before cutover starts no holder on the live host. H13 changes the default to the daemon's `enable`.
+- `programs.tiller.holder.enable` defaulted to `false` when H06 landed, so a dotfiles bump before cutover started no holder on the live host. H13 changes the default to the daemon's `enable`, and the daemon's unit then wants and starts after the holder's.
 - `herdr` leaves the daemon's PATH comment and every option that named it. The module no longer needs herdr at all.
 
 ### 11.3 Steps on the live tiller
@@ -683,7 +683,7 @@ Each task but S1P, HA1 and H15 is one builder, one branch, one worktree and one 
 | H11 (`holder-port`) | Daemon API and peers: live view on `subscribe`, Fit as a lease, history, prompt, input, Open in terminal, peer pane link, the saved-machine paths removed | H10, H07 | 5 h |
 | HR2 | Peer agent parity (D20): the spec rows first (HR2a: `authority.md` section 3, the matrix and G46, `protocol.md` 7.4 and 10.7, ADR 0003's note), then the code: the agent verbs and the withdraw forwarded as `mutate`, the tail and the prompt read as `query`, the 60 s wait for a proof, and the tests the spec names | H11 | 4 h |
 | H12 (`holder-port`) | Board: copy, `terminal-open.ts`, stream semantics, the tail UI for saved machines removed, every agent control live on a peer's agent (HR2), screenshots in both themes at 1440 and 390 px | H11, HR2 | 4 h |
-| H13 (`holder-port`) | Delete `crates/herdr` and every herdr name left (section 10 code rows, roles, flake, demo, scripts). Set `services.tiller.holder.enable` to default to the daemon's `enable`. `git grep -i herdr` finds only history: `probe/`, `scripts/firstmate-export` and its fixtures, ADRs, superseded docs and the specs' [H] notes on what came before the cutover. Tests with herdr in their name are renamed | H12, H08 | 3 h |
+| H13 (`holder-port`) | Delete `crates/herdr` and every herdr name left (section 10 code rows, roles, flake, demo, scripts). Set `programs.tiller.holder.enable` to default to the daemon's `enable`. `git grep -i herdr` finds only history: `probe/`, `scripts/firstmate-export` and its fixtures, ADRs, superseded docs and the specs' [H] notes on what came before the cutover. Tests with herdr in their name are renamed | H12, H08 | 3 h |
 | H14 (`holder-port`) | End-to-end soak on a test home with `fake-agent` panes: 4 h of daemon restarts, 3 live upgrades and a holder kill, with no gap in any counter. Then the full CI gate and `nix flake check` | H13 | 6 h (4 h is the soak itself) |
 | H15 | Cutover on the live tiller, with the owner (section 11.3), after the owner merges `holder-port` | H14 | 1 h |
 

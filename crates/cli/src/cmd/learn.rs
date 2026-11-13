@@ -18,7 +18,7 @@ use tiller_core::domain::{
 use tiller_core::state::learning::{self, Finish, Learning};
 use tiller_core::state::{find, get, list, resolve_id};
 use tiller_core::{Actor, Store};
-use tiller_herdr::process::{self, Interrupt};
+use tiller_panes::process::{self, Interrupt};
 
 use super::KeyArg;
 use super::admin::load_config;
@@ -738,7 +738,7 @@ const STOPPED_OUTPUT_WAIT: Duration = Duration::from_secs(1);
 /// Runs the curator in a process group of its own and stops the whole
 /// group when the curator exits, at `timeout`, when `interrupt` is caught,
 /// or when waiting for it fails, so nothing it started outlives the run
-/// (`tiller_herdr::process::wait_all`).
+/// (`tiller_panes::process::wait_all`).
 fn run_with_timeout(
     argv: &[String],
     env: &[(String, String)],
@@ -1034,7 +1034,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
-    use tiller_herdr::testing::{eventually, gone};
+    use tiller_panes::testing::{eventually, gone};
 
     use super::*;
 

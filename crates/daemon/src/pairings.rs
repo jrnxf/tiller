@@ -185,7 +185,7 @@ mod tests {
     use tiller_core::domain::PeerScope;
     use tiller_core::state::peers::{KeyFile, NewPairing, NewPeerKey};
     use tiller_core::{Actor, Ctx};
-    use tiller_herdr::testing::Fleet;
+    use tiller_panes::testing::Fleet;
 
     use super::*;
     use crate::api::tests::{

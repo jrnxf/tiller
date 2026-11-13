@@ -506,7 +506,7 @@ mod tests {
     use axum::http::StatusCode;
     use serde_json::{Value, json};
     use tiller_core::{Actor, Applied, Ctx};
-    use tiller_herdr::testing::Fleet;
+    use tiller_panes::testing::Fleet;
 
     use super::*;
     use crate::api::tests::{
@@ -933,7 +933,7 @@ mod tests {
     /// running holdout eval that runs `eval`.
     fn slow_runs(
         released: &Arc<AtomicBool>,
-        eval: impl FnOnce(&tiller_herdr::process::Interrupt) + Send + 'static,
+        eval: impl FnOnce(&tiller_panes::process::Interrupt) + Send + 'static,
     ) -> (Fleet, Retros, crate::memory::eval::Evals) {
         let fleet = fleet();
         let mut store = fleet.open();
@@ -970,7 +970,7 @@ mod tests {
                 crate::server::stop_board_runs(&retros, &evals, Duration::from_secs(60));
             })
         };
-        let stopped = tiller_herdr::testing::eventually(|| caught.load(Ordering::SeqCst));
+        let stopped = tiller_panes::testing::eventually(|| caught.load(Ordering::SeqCst));
         released.store(true, Ordering::SeqCst);
         stopper.join().unwrap();
         assert!(

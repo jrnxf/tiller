@@ -14,15 +14,9 @@
 //!    `origin/<default>` (P05, P06), and the scan records it clean;
 //! 4. the launch files are written and `run.place` records the base and
 //!    fragment hash;
-//! 5. herdr opens the worker's workspace, `run.place` binds its pane to the
-//!    session, the row tokens are reported and the layout pass moves the
-//!    workspace under its project's orchestrator and fixes the glyphs
-//!    (`docs/design/herdr-layout.md`);
-//! 6. the launch line is typed into the pane.
-//!
-//! With the terminal holder in the world ([`World::panes`]), steps 5 and 6
-//! are one `spawn` that runs the launch script in a pane of the holder's,
-//! and `run.place` binds that pane (`terminal-holder.md` 4.4).
+//! 5. the terminal holder ([`World::panes`]) spawns a pane that runs the
+//!    launch script, and `run.place` binds that pane to the session
+//!    (`terminal-holder.md` 4.4).
 //!
 //! A step after `run.start` that fails ends the run `failed`, releases the
 //! reservation `spawn_failed`, and cleans up what it made through the same
@@ -39,6 +33,7 @@ pub mod orchestrator;
 pub mod pool;
 pub mod promote;
 pub mod readings;
+pub mod resume;
 pub mod settings;
 pub mod trust;
 
@@ -65,9 +60,6 @@ use tiller_core::state::runs::{
 };
 use tiller_core::state::{find, get, list, resolve_card};
 use tiller_core::{Applied, Ctx, Store};
-use tiller_herdr::client::{Herdr, HerdrError};
-use tiller_herdr::layout;
-use tiller_herdr::routed::Routed;
 use tiller_panes::PaneState;
 use tiller_reconcile::sources::{Scanner, WorktreeScan};
 
@@ -92,8 +84,6 @@ pub enum SpawnError {
     Refused(String),
     #[error(transparent)]
     State(#[from] tiller_core::Error),
-    #[error(transparent)]
-    Herdr(#[from] HerdrError),
     /// Its text names the terminal holder already.
     #[error(transparent)]
     Panes(#[from] tiller_panes::PanesError),
@@ -216,10 +206,8 @@ fn direct_push_line(checks: &serde_json::Value) -> String {
 pub struct World<'a> {
     pub config: &'a SpawnConfig,
     pub pool: &'a dyn Pool,
-    pub herdr: &'a dyn Herdr,
-    /// The terminal holder new sessions launch in, when this host runs one;
-    /// `None` launches them in herdr. Which of the two holds a session's
-    /// pane is told by its pane id ([`tiller_core::ids::is_holder_pane`]).
+    /// The terminal holder every session runs in; `None` when this host
+    /// runs none, which refuses every launch and pane call.
     pub panes: Option<&'a dyn tiller_panes::Panes>,
     pub scanner: &'a dyn Scanner,
     /// The review page tool, which cleanup ends a run's pages with (P48).
@@ -239,10 +227,21 @@ pub struct World<'a> {
 }
 
 impl<'a> World<'a> {
-    /// herdr for herdr panes and the terminal holder for holder panes, as
-    /// stop, resume, relaunch and interrupt reach a session's pane.
-    pub fn routed(&self) -> Routed<&'a dyn Herdr, &'a dyn tiller_panes::Panes> {
-        Routed::new(self.herdr, self.panes)
+    /// The terminal holder, as stop, resume, relaunch and interrupt reach a
+    /// session's pane.
+    pub fn holder(&self) -> crate::pane::Holder<'a> {
+        crate::pane::Holder::new(self.panes)
+    }
+
+    /// What a resume of a session on this host needs ([`resume::write`]).
+    pub fn resume_host(&self) -> resume::Host<'a> {
+        resume::Host {
+            scratch_root: self.scratch_root,
+            tiller_home: self.tiller_home,
+            claude: &self.config.spawn.claude,
+            claude_config: self.claude_config,
+            review_hosts: &self.config.spawn.review_allowed_hosts,
+        }
     }
 }
 
@@ -256,14 +255,11 @@ pub struct Spawned {
     pub branch: String,
     pub base_sha: String,
     pub pane_id: String,
-    /// herdr's workspace; empty for a pane in the terminal holder, which has
-    /// no workspaces.
-    pub workspace_id: String,
     pub label: String,
-    /// The herdr agent name, `<card>-<role>`.
+    /// The agent name, `<card>-<role>`.
     pub name: String,
     pub dispatch: Value,
-    /// A layout repair that failed: the workspace is usable, out of order.
+    /// A memory load that failed to record: the agent runs without it.
     pub warning: Option<String>,
 }
 
@@ -278,7 +274,7 @@ pub enum Outcome {
     },
 }
 
-/// The herdr agent name of a run: `alpha-42-build`, then `alpha-42-build-2`.
+/// The agent name of a run: `alpha-42-build`, then `alpha-42-build-2`.
 pub fn agent_name(display_id: &str, role: RunRole, attempt: i64) -> String {
     match attempt {
         1 => format!("{display_id}-{}", role.short_name()),
@@ -534,7 +530,7 @@ fn place(
 }
 
 /// The rest of a spawn once the run has a worktree at `base_sha`: the
-/// launch files, the herdr workspace and the launch line. A promotion
+/// launch files and the holder pane that runs them. A promotion
 /// reaches it with the scout's worktree.
 #[allow(clippy::too_many_arguments)]
 fn launch_in(
@@ -599,76 +595,30 @@ fn launch_in(
     made.events
         .extend(crate::stale::record(store, ctx, &session.id, role)?.events);
 
-    if let Some(panes) = world.panes {
-        let label = crate::labels::worker_label(&card.display_id, run.role);
-        let role = run.role.to_string();
-        let owner = holder::Owner {
-            session: &session.id,
-            run: Some(&run.id),
-            project: &project.id,
-            role: &role,
-            label: &label,
-        };
-        let pane = holder::open(panes, &owner, &launched.script, worktree)?;
-        made.pane = Some(pane.pane.to_string());
-        let placed = store.run_place(
-            ctx,
-            &run.id,
-            Placement {
-                pane_id: Some(pane.pane.to_string()),
-                ..Placement::default()
-            },
-        )?;
-        made.events.extend(placed.events);
-        let session: Session = get(store.conn(), "session", &session.id)?;
-        let (loads, warning) = memory::record_load(store, ctx, &session.id, &memory);
-        made.events.extend(loads);
-        return Ok(Spawned {
-            name: agent_name(&card.display_id, run.role, run.attempt),
-            run: placed.value,
-            session,
-            reservation: started.reservation.clone(),
-            worktree: worktree_text,
-            branch: branch.to_owned(),
-            base_sha,
-            pane_id: pane.pane.to_string(),
-            workspace_id: String::new(),
-            label,
-            dispatch: Value::Null,
-            warning,
-        });
-    }
-    let label = layout::worker_label(&card.display_id, run.role, true);
-    let created = world.herdr.create_workspace(&label, Some(worktree))?;
-    made.pane = Some(created.pane_id.clone());
+    let panes = world.holder().require()?;
+    let label = crate::labels::worker_label(&card.display_id, run.role);
+    let role = run.role.to_string();
+    let owner = holder::Owner {
+        session: &session.id,
+        run: Some(&run.id),
+        project: &project.id,
+        role: &role,
+        label: &label,
+    };
+    let pane = holder::open(panes, &owner, &launched.script, worktree)?;
+    made.pane = Some(pane.pane.to_string());
     let placed = store.run_place(
         ctx,
         &run.id,
         Placement {
-            pane_id: Some(created.pane_id.clone()),
+            pane_id: Some(pane.pane.to_string()),
             ..Placement::default()
         },
     )?;
     made.events.extend(placed.events);
     let session: Session = get(store.conn(), "session", &session.id)?;
-    let bindings = layout::bindings(store.conn(), &run.host_id)?;
-    // The tokens name the session before anything else reads the pane.
-    if let Some(binding) = bindings.iter().find(|b| b.session_id == session.id) {
-        world
-            .herdr
-            .report_tokens(&created.pane_id, &binding.tokens())?;
-    }
-    let warning = relayout(world.herdr, &bindings).err();
-    world.herdr.send_text(&created.pane_id, &launched.line)?;
-    world.herdr.send_enter(&created.pane_id)?;
-    // The memory it was given, once the line went in.
-    let (loads, loaded) = memory::record_load(store, ctx, &session.id, &memory);
+    let (loads, warning) = memory::record_load(store, ctx, &session.id, &memory);
     made.events.extend(loads);
-    let warning = [warning, loaded]
-        .into_iter()
-        .flatten()
-        .reduce(|all, next| format!("{all}; {next}"));
-
     Ok(Spawned {
         name: agent_name(&card.display_id, run.role, run.attempt),
         run: placed.value,
@@ -677,29 +627,11 @@ fn launch_in(
         worktree: worktree_text,
         branch: branch.to_owned(),
         base_sha,
-        pane_id: created.pane_id,
-        workspace_id: created.workspace_id,
+        pane_id: pane.pane.to_string(),
         label,
         dispatch: Value::Null,
         warning,
     })
-}
-
-/// One layout pass: tokens, then renames, then moves. A herdr that refuses
-/// `workspace.move`, or a client without the API socket, leaves correct
-/// labels in the wrong order, which is still usable (`herdr-layout.md`,
-/// Known limits), so the caller only reports it.
-pub(crate) fn relayout(herdr: &dyn Herdr, bindings: &[layout::Binding]) -> Result<(), String> {
-    let snapshot = herdr.snapshot().map_err(|e| e.to_string())?;
-    let repair =
-        layout::repair(herdr, &snapshot, bindings).map_err(|e| format!("layout repair: {e}"))?;
-    if repair.unordered > 0 {
-        return Err(format!(
-            "layout repair: {} workspace moves skipped: workspace.move needs the herdr API socket (spawn.herdr_socket)",
-            repair.unordered
-        ));
-    }
-    Ok(())
 }
 
 /// Ends a spawn that failed after `run.start`: the run `failed`, the
@@ -764,15 +696,12 @@ fn fail(
     }
 }
 
-/// Closes a pane a failed launch opened, in herdr or in the terminal holder.
+/// Closes a pane a failed launch opened in the terminal holder.
 pub(crate) fn close_pane(world: &World<'_>, pane: &str) -> std::result::Result<(), String> {
-    if tiller_core::ids::is_holder_pane(pane) {
-        return match world.panes {
-            Some(panes) => holder::close(panes, pane),
-            None => Err("this command has no terminal holder to close it in".into()),
-        };
+    match world.panes {
+        Some(panes) => holder::close(panes, pane),
+        None => Err("this command has no terminal holder to close it in".into()),
     }
-    world.herdr.close_pane(pane).map_err(|e| e.to_string())
 }
 
 /// Scans a run's worktree now and records the reading; returns the scan
@@ -1122,7 +1051,7 @@ pub fn cleanup(
     events.extend(cleaned.events);
     let closed = close_panes(world, &open, &mut warnings);
     // A pane that closed with its session still recorded live ends here, so
-    // the layout and delivery stop addressing it.
+    // delivery stops addressing it.
     if let Some(session) = live_session(store.conn(), &run.id)? {
         events.extend(store.session_end(ctx, &session.id, "cleaned")?.events);
     }
@@ -1141,10 +1070,6 @@ pub fn cleanup(
         && e.kind() != std::io::ErrorKind::NotFound
     {
         warnings.push(format!("removing {}: {e}", scratch.display()));
-    }
-    let bindings = layout::bindings(store.conn(), &run.host_id)?;
-    if let Err(e) = relayout(world.herdr, &bindings) {
-        warnings.push(e);
     }
     Ok(Applied {
         value: Cleaned {
@@ -1201,13 +1126,11 @@ fn cleaned_before(store: &Store, run: &Run) -> Result<bool> {
         .map_err(tiller_core::Error::from)?)
 }
 
-/// The run's panes herdr still has, all of them bare shells: refuses when
-/// one runs an agent. A pane is the run's only while its row tokens name
-/// one of the run's sessions, since herdr may give a closed pane's id to
-/// another workspace; a pane with no tokens is judged as the run's, so a
-/// live agent there still refuses, but it is never closed.
+/// The run's panes the terminal holder still lists, all of them exited:
+/// refuses when one still runs. A holder pane is keyed by its session, so
+/// it is the run's. One that runs is never ended here; an exited one is
+/// forgotten.
 fn dead_panes(store: &Store, world: &World<'_>, run: &Run) -> Result<Vec<String>> {
-    let herdr = world.herdr;
     let sessions: Vec<Session> = list(
         store.conn(),
         "run_id = ?1 AND pane_id IS NOT NULL ORDER BY started_at",
@@ -1218,34 +1141,14 @@ fn dead_panes(store: &Store, world: &World<'_>, run: &Run) -> Result<Vec<String>
         let Some(pane_id) = &session.pane_id else {
             continue;
         };
-        // A holder pane is keyed by its session, so it is the run's. One
-        // that runs is never ended here; an exited one is forgotten.
-        if tiller_core::ids::is_holder_pane(pane_id) {
-            match holder::state(world.panes, pane_id)? {
-                Some(PaneState::Running) => {
-                    return Err(SpawnError::Refused(format!(
-                        "pane {pane_id} still runs in the terminal holder; a live pane is never closed"
-                    )));
-                }
-                Some(_) if !open.contains(pane_id) => open.push(pane_id.clone()),
-                _ => {}
+        match holder::state(world.panes, pane_id)? {
+            Some(PaneState::Running) => {
+                return Err(SpawnError::Refused(format!(
+                    "pane {pane_id} still runs in the terminal holder; a live pane is never closed"
+                )));
             }
-            continue;
-        }
-        let Some(pane) = herdr.pane(pane_id)? else {
-            continue;
-        };
-        let owner = pane.tokens.get("session");
-        if owner.is_some_and(|owner| sessions.iter().all(|s| &s.id != owner)) {
-            continue;
-        }
-        if let Some(agent) = &pane.agent {
-            return Err(SpawnError::Refused(format!(
-                "pane {pane_id} still runs {agent}; a live pane is never closed"
-            )));
-        }
-        if owner.is_some() && !open.contains(pane_id) {
-            open.push(pane_id.clone());
+            Some(_) if !open.contains(pane_id) => open.push(pane_id.clone()),
+            _ => {}
         }
     }
     Ok(open)
@@ -1259,7 +1162,7 @@ fn close_panes(world: &World<'_>, panes: &[String], warnings: &mut Vec<String>) 
         match close_pane(world, pane) {
             Ok(()) => closed.push(pane.clone()),
             Err(e) => warnings.push(format!(
-                "closing pane {pane} failed ({e}); close it in herdr"
+                "closing pane {pane} failed ({e}); the terminal holder still lists it"
             )),
         }
     }

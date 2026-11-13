@@ -1,7 +1,7 @@
 //! A launch loads the project's approved memory: the prompt holds the text
 //! and `session_loads` names the revision (`memory.md` sections 2 and 7).
 //! The real binary, one `state.db`, the memory repo under the home and a
-//! herdr stand-in that answers the launch's calls.
+//! terminal holder that takes the launch.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -11,6 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use common::holder::start_holder;
 use common::{World, git_only_daemon};
 
 const WAIT: Duration = Duration::from_secs(30);
@@ -21,17 +22,8 @@ fn script(path: &Path, body: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// A herdr that opens one workspace with one pane, shows an empty fleet and
-/// takes every write.
-const HERDR: &str = r#"case "$*" in
-  *"workspace create"*) echo '{"result":{"workspace":{"workspace_id":"w1"},"root_pane":{"pane_id":"p1"}}}' ;;
-  *"api snapshot"*) echo '{"result":{"workspaces":[],"panes":[]}}' ;;
-  *) echo '{"result":{}}' ;;
-esac
-"#;
-
 /// The places a launch writes, under the world's own directory, and the
-/// stand-in herdr and claude.
+/// stand-in claude.
 fn launchable(world: &World) {
     let root = world.dir.path();
     let checkout = root.join("checkouts/alpha");
@@ -52,9 +44,6 @@ fn launchable(world: &World) {
         std::fs::create_dir_all(&dir).unwrap();
         world.must(&["config", "set", key, dir.to_str().unwrap()]);
     }
-    let herdr = root.join("herdr");
-    script(&herdr, HERDR);
-    world.set_env("TILLER_HERDR", herdr.to_str().unwrap());
     // No model runs: the claude the launch line names only answers --version.
     let claude = root.join("claude-stub");
     script(&claude, "echo '2.1.0 (Claude Code)'\n");
@@ -134,6 +123,7 @@ fn approved_revision(world: &World) -> String {
 fn a_launch_loads_the_approved_memory_into_the_prompt_and_the_loads() {
     let world = World::initialized();
     launchable(&world);
+    let (_holder, _) = start_holder(&world);
     approve_line(&world, "Run the formatter before a commit.");
     let revision = approved_revision(&world);
 

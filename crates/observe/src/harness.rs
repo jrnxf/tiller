@@ -11,8 +11,8 @@
 //! An adapter observes; it does not yet guard. G35 refuses a role on a
 //! harness unless Tiller carries its tool calls to `tiller guard` and the
 //! harness has an equivalent of the sandbox, and only Claude Code has both
-//! today. A harness with no adapter is observed through herdr and liveness
-//! only, as a reduced host is.
+//! today. A harness with no adapter is observed through the terminal holder
+//! and liveness only, as a reduced host is.
 
 use serde_json::{Map, Value};
 
@@ -113,7 +113,7 @@ pub struct Capabilities {
 pub fn refusal(name: &str) -> Option<String> {
     let Some(harness) = Harness::parse(name) else {
         return Some(format!(
-            "harness {name} has no adapter; Tiller observes it through herdr and liveness only (G35)"
+            "harness {name} has no adapter; Tiller observes it through the terminal holder and liveness only (G35)"
         ));
     };
     let caps = harness.capabilities();

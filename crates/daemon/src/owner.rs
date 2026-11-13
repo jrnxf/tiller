@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use tiller_core::Timestamp;
-use tiller_herdr::poller::{PollError, Source};
+use tiller_poll::{PollError, Source};
 
 /// A worker that skips its poll while the owner marker in `home` names
 /// another system, read again before every poll. A held poll is not a
@@ -117,7 +117,7 @@ mod tests {
     async fn board_mutations_refused_while_marker_names_other_system() {
         use axum::http::StatusCode;
         use serde_json::{Value, json};
-        use tiller_herdr::testing::Fleet;
+        use tiller_panes::testing::Fleet;
 
         use crate::api::tests::{
             Fixture, app_with, cards, create, get, mutation, owner_cookie, send,

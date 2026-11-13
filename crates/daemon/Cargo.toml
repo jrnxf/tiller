@@ -24,10 +24,10 @@ toml.workspace = true
 tiller-agents.workspace = true
 tiller-core.workspace = true
 tiller-delivery.workspace = true
-tiller-herdr.workspace = true
 tiller-holder.workspace = true
 tiller-observe.workspace = true
 tiller-panes.workspace = true
+tiller-poll.workspace = true
 tiller-reconcile.workspace = true
 tokio = { workspace = true, features = ["io-std", "io-util", "process"] }
 tracing.workspace = true
@@ -36,8 +36,8 @@ utoipa.workspace = true
 [dev-dependencies]
 insta.workspace = true
 tempfile.workspace = true
-tiller-herdr = { workspace = true, features = ["testing"] }
 tiller-panes = { workspace = true, features = ["testing"] }
+tiller-reconcile = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["io-util"] }
 tower.workspace = true
 tracing-subscriber.workspace = true

@@ -164,7 +164,7 @@ mod fixtures {
 async fn damaged_database_refuses_mutations_and_serves_reads() {
     use axum::http::StatusCode;
     use serde_json::Value;
-    use tiller_herdr::testing::Fleet;
+    use tiller_panes::testing::Fleet;
 
     use crate::api::tests::{Fixture, app_with, cards, create, get, owner_cookie, send};
     use crate::assets::Assets;
@@ -230,7 +230,7 @@ async fn damaged_database_refuses_mutations_and_serves_reads() {
 #[tokio::test]
 async fn corruption_found_while_serving_makes_the_daemon_read_only() {
     use axum::http::StatusCode;
-    use tiller_herdr::testing::Fleet;
+    use tiller_panes::testing::Fleet;
 
     use crate::api::tests::{Fixture, app_with, create, get, owner_cookie, send};
     use crate::assets::Assets;
@@ -269,7 +269,7 @@ async fn corruption_found_while_serving_makes_the_daemon_read_only() {
 async fn corruption_found_by_back_up_now_makes_the_daemon_read_only() {
     use axum::http::StatusCode;
     use serde_json::{Value, json};
-    use tiller_herdr::testing::Fleet;
+    use tiller_panes::testing::Fleet;
 
     use crate::api::tests::{Fixture, app_with, create, mutation, owner_cookie, send};
     use crate::assets::Assets;
@@ -327,7 +327,7 @@ async fn corruption_found_by_back_up_now_makes_the_daemon_read_only() {
 #[cfg(test)]
 #[test]
 fn a_passing_check_at_start_clears_the_marker() {
-    use tiller_herdr::testing::Fleet;
+    use tiller_panes::testing::Fleet;
 
     let fleet = Fleet::new();
     let home = fleet.dir.path();

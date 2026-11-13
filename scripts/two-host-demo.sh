@@ -42,14 +42,14 @@ shift
 [ "\$1" = tiller ] || exit 127
 shift
 [ "\$1 \$2" = "peer serve" ] && echo \$\$ > "$work/serve.pid"
-export TILLER_HOME="$peer_home" TILLER_HERDR=/nonexistent/herdr
+export TILLER_HOME="$peer_home"
 export SSH_CONNECTION="192.0.2.1 50000 192.0.2.2 22"
 exec "$bin" "\$@"
 SHIM
 chmod +x "$shim"
 
-on_board() { TILLER_HOME=$board_home TILLER_HERDR=/nonexistent/herdr TILLER_SSH=$shim "$bin" "$@"; }
-on_peer() { TILLER_HOME=$peer_home TILLER_HERDR=/nonexistent/herdr "$bin" "$@"; }
+on_board() { TILLER_HOME=$board_home TILLER_SSH=$shim "$bin" "$@"; }
+on_peer() { TILLER_HOME=$peer_home "$bin" "$@"; }
 
 on_board init --host-label board-host --lane-capacity 2 >/dev/null
 on_peer init --host-label peer-host --lane-capacity 2 >/dev/null
@@ -64,7 +64,7 @@ on_peer attention open "$card" --kind decision --question "Which database should
 # `peer serve` (authority.md G44).
 start_daemon() {
   local home=$1 log=$2
-  TILLER_HOME=$home TILLER_HERDR=/nonexistent/herdr TILLER_QUOTA_AXI=/nonexistent/quota-axi \
+  TILLER_HOME=$home TILLER_QUOTA_AXI=/nonexistent/quota-axi \
     TILLER_SSH=$shim TILLER_LOG=warn "$bin" daemon --port 0 >"$log" 2>"$log.err" &
   pids+=("$!")
   for _ in $(seq 1 100); do

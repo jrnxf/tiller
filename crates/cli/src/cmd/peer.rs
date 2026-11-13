@@ -156,7 +156,6 @@ pub fn serve(app: &App, from: String) -> Result<ExitCode, Failure> {
         home: app.home.clone(),
         from,
         timing: Timing::default(),
-        herdr: Some(super::spawn::configured_herdr(app)?),
         orchestrators: Some(std::sync::Arc::new(super::spawn::BoardStart {
             app: app.same_caller(),
         })),
@@ -188,7 +187,6 @@ pub fn pane(app: &App, from: String) -> Result<ExitCode, Failure> {
         home: app.home.clone(),
         from,
         timing: Timing::default(),
-        herdr: Some(super::spawn::configured_herdr(app)?),
         orchestrators: None,
         holder: Some(std::sync::Arc::new(tiller_daemon::holder::HolderLink::new(
             &std::path::absolute(&app.home)?,

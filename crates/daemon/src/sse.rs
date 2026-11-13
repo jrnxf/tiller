@@ -451,9 +451,8 @@ mod tests {
 
     use tiller_core::domain::CardKind;
     use tiller_core::state::cards::NewCard;
-    use tiller_herdr::client::Cli;
-    use tiller_herdr::poller::Registry;
-    use tiller_herdr::testing::{Fleet, owner};
+    use tiller_panes::testing::{Fleet, owner};
+    use tiller_poll::Registry;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
@@ -478,13 +477,12 @@ mod tests {
             stop: stop.clone(),
             pollers: Registry::new(),
             peers: crate::peer::link::Peers::idle(),
-            herdr: Cli::local(),
             terminal: None,
             started_at: Timestamp::now(),
             tools: Arc::new(Mutex::new(serde_json::Value::Null)),
             damage: crate::readonly::Damage::default(),
             orchestrators: None,
-            mirrors: crate::mirror::Mirrors::new(home),
+            mirrors: crate::mirror::Mirrors::new(),
             holder: None,
             sessions: crate::auth::Sessions::default(),
             streams: crate::sse::Streams::default(),

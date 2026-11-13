@@ -10,7 +10,7 @@ use std::process::Command;
 
 use common::{Out, World, snap};
 use serde_json::{Value, json};
-use tiller_herdr::testing::gone;
+use tiller_panes::testing::gone;
 
 const PROPOSAL: &str = "01JC00000000000000000000P1";
 const OTHER: &str = "01JC00000000000000000000P2";

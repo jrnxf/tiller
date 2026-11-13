@@ -16,7 +16,7 @@ use tiller_core::state::stop_hook::intake_stats;
 use tiller_core::state::{find, get, list};
 use tiller_core::{Store, Timestamp};
 
-use super::card::herdr_name;
+use super::card::agent_name;
 use crate::app::{App, Done, Failure, Outcome};
 use crate::lisbon;
 
@@ -250,10 +250,8 @@ fn session_row(store: &Store, session: &Session) -> Result<Value, Failure> {
         None => None,
     };
     let name = match (&run, &card) {
-        (Some(run), Some(card)) => Some(herdr_name(&card.display_id, run)),
-        _ => pane
-            .as_ref()
-            .and_then(|pane| pane.herdr_agent().map(str::to_owned)),
+        (Some(run), Some(card)) => Some(agent_name(&card.display_id, run)),
+        _ => None,
     };
     Ok(json!({
         "session_id": session.id,
@@ -267,7 +265,7 @@ fn session_row(store: &Store, session: &Session) -> Result<Value, Failure> {
         "activity_observed_at": session.activity_observed_at,
         "last_status_line": run.as_ref().and_then(|run| run.last_status_line.clone()),
         "last_status_at": run.as_ref().and_then(|run| run.last_status_at),
-        "herdr_name": name,
+        "name": name,
         "pane_id": session.pane_id,
         "workspace_label": pane.and_then(|pane| pane.label),
     }))

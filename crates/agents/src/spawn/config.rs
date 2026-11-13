@@ -138,12 +138,6 @@ pub struct Paths {
     pub treehouse: Vec<String>,
     /// The Claude Code command.
     pub claude: String,
-    /// The herdr command and its leading arguments, `["herdr"]` for the
-    /// local server's default session.
-    pub herdr: Vec<String>,
-    /// The herdr session's API socket, which `workspace.move` needs; without
-    /// it the layout pass fixes labels but not order.
-    pub herdr_socket: Option<PathBuf>,
     /// Hosts the worker sandbox may reach (`<network_allow>`).
     pub network_allow: Vec<String>,
     /// The hostnames the developer opens review links by. Every launch
@@ -174,8 +168,6 @@ impl Default for Paths {
             scratch_root: None,
             treehouse: vec!["treehouse".into()],
             claude: "claude".into(),
-            herdr: vec!["herdr".into()],
-            herdr_socket: None,
             network_allow: ["github.com", "api.github.com"].map(String::from).into(),
             review_allowed_hosts: Vec::new(),
             lavish: vec!["lavish-axi".into()],
@@ -187,22 +179,48 @@ impl Default for Paths {
     }
 }
 
+/// The `[spawn]` keys herdr read. The terminal holder replaced herdr, so
+/// they are dropped before the table is read: a config that still names one
+/// starts, and the daemon and `tiller doctor` name it
+/// (`terminal-holder.md` 11.1).
+pub const RETIRED_HERDR_KEYS: [&str; 3] = ["herdr", "herdr_socket", "herdr_session"];
+
+/// The `[spawn]` table without [`RETIRED_HERDR_KEYS`].
+fn without_herdr(spawn: &toml::Value) -> toml::Value {
+    let mut spawn = spawn.clone();
+    if let Some(table) = spawn.as_table_mut() {
+        for key in RETIRED_HERDR_KEYS {
+            table.remove(key);
+        }
+    }
+    spawn
+}
+
 impl Paths {
     /// Reads only the `[spawn]` table of a parsed config file, for the
     /// daemon and `tiller peer serve`, which need its tools and nothing the
     /// other tables say.
     pub fn from_table(table: &toml::Table) -> Result<Self, SpawnError> {
-        let paths: Self = match table.get("spawn") {
-            Some(spawn) => spawn
-                .clone()
+        match table.get("spawn") {
+            Some(spawn) => without_herdr(spawn)
                 .try_into()
-                .map_err(|e: toml::de::Error| SpawnError::Config(format!("spawn: {e}")))?,
-            None => Self::default(),
-        };
-        if paths.herdr.is_empty() {
-            return Err(SpawnError::Config("spawn: herdr names a command".into()));
+                .map_err(|e: toml::de::Error| SpawnError::Config(format!("spawn: {e}"))),
+            None => Ok(Self::default()),
         }
-        Ok(paths)
+    }
+
+    /// The run scratch root: `scratch_root`, else
+    /// `$HOME/.local/state/tiller/runs`.
+    pub fn scratch_dir(&self) -> Result<PathBuf, SpawnError> {
+        if let Some(root) = &self.scratch_root {
+            return Ok(root.clone());
+        }
+        std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .map(|home| PathBuf::from(home).join(".local/state/tiller/runs"))
+            .ok_or_else(|| {
+                SpawnError::Usage("HOME is not set; set spawn.scratch_root in config.toml".into())
+            })
     }
 }
 
@@ -213,7 +231,11 @@ impl SpawnConfig {
         let mut own = toml::Table::new();
         for key in ["dispatch", "quota", "spawn", "checkouts"] {
             if let Some(value) = table.get(key) {
-                own.insert(key.into(), value.clone());
+                let value = match key {
+                    "spawn" => without_herdr(value),
+                    _ => value.clone(),
+                };
+                own.insert(key.into(), value);
             }
         }
         let config: Self = own
@@ -240,13 +262,9 @@ impl SpawnConfig {
             }
         }
         let spawn = &self.spawn;
-        if spawn.treehouse.is_empty()
-            || spawn.herdr.is_empty()
-            || spawn.claude.is_empty()
-            || spawn.lavish.is_empty()
-        {
+        if spawn.treehouse.is_empty() || spawn.claude.is_empty() || spawn.lavish.is_empty() {
             return Err(SpawnError::Config(
-                "spawn: treehouse, herdr, claude and lavish each name a command".into(),
+                "spawn: treehouse, claude and lavish each name a command".into(),
             ));
         }
         if let Some(bad) = spawn

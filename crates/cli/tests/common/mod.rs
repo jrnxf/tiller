@@ -595,7 +595,7 @@ pub fn parse_cpu_list(text: &str) -> Vec<usize> {
 /// child leaves no process behind.
 ///
 /// The child first gets SIGTERM and `grace` to stop the way it does for
-/// the owner: a daemon then stops its curators and herdr calls itself.
+/// the owner: a daemon then stops its curators and its pollers.
 /// When it is still running after that, it and every process under it are
 /// frozen with SIGSTOP, so none starts another, then killed with SIGKILL,
 /// with the whole process group of each one that leads a group of its own
@@ -826,7 +826,7 @@ pub fn listening_port(child: &mut std::process::Child, wait: std::time::Duration
 }
 
 /// The real daemon on a free port, with a `PATH` that holds `git` and
-/// nothing else, so no poller reaches a real herdr, `gh` or `quota-axi`.
+/// nothing else, so no poller reaches a real `gh` or `quota-axi`.
 /// Returns its guard and its port.
 pub fn git_only_daemon(world: &World) -> (Running, u16) {
     use std::process::Stdio;
@@ -849,7 +849,6 @@ pub fn git_only_daemon(world: &World) -> (Running, u16) {
             .bare_command()
             .args(["daemon", "--port", "0"])
             .env("PATH", &bin)
-            .env("TILLER_HERDR", "/nonexistent/herdr")
             .env("TILLER_QUOTA_AXI", "/nonexistent/quota-axi")
             .env("TILLER_LOG", "warn")
             .stdin(Stdio::null())

@@ -2,7 +2,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tiller_herdr::testing::{eventually, gone};
+use tiller_panes::testing::{eventually, gone};
 
 use super::*;
 

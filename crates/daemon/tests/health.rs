@@ -63,7 +63,6 @@ impl Daemon {
             .env("PATH", format!("{}:{}", bin.display(), git_dir.display()))
             .env("TILLER_HOME", home)
             .env("TILLER_NO_MISTAKES_HOME", nm_home)
-            .env("TILLER_HERDR", "/nonexistent/herdr")
             .env("TILLER_QUOTA_AXI", bin.join("quota-axi"))
             .env("TILLER_LOG", "warn")
             .status()
@@ -189,7 +188,27 @@ fn reports_missing_and_outdated_tools() {
         tools["no-mistakes-daemon"].is_string().then_some(tools)
     });
 
-    assert!(tools["herdr"].is_null(), "herdr is not running: {tools}");
+    // Only the tools the daemon reads, each named once.
+    let names: Vec<&str> = tools
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "gh-axi",
+            "git",
+            "holder",
+            "no-mistakes",
+            "no-mistakes-daemon",
+            "quota-axi",
+            "skew",
+            "tiller"
+        ],
+        "{tools}"
+    );
     assert!(tools["gh-axi"].is_null(), "gh-axi is missing: {tools}");
     assert_eq!(tools["quota-axi"], "quota-axi 0.4.2");
     assert!(tools["git"].as_str().unwrap().starts_with("git version"));

@@ -2,10 +2,9 @@
 //! the protocol's messages and framing, the version handshake, the socket
 //! client, the `Panes` and `Live` traits and key names (4.2, 4.3).
 //!
-//! It also holds the parts of the herdr adapter that are about panes but
-//! not about herdr (4.1): reading a Claude composer, submitting a line,
-//! process groups, "Open in terminal" and the test fleet. It depends on no
-//! terminal crate.
+//! It also holds what Tiller does with a pane (4.1): reading a Claude
+//! composer, submitting a line, process groups, "Open in terminal" and the
+//! test fleet. It depends on no terminal crate.
 
 pub mod client;
 pub mod composer;
@@ -26,6 +25,8 @@ pub mod submit;
 #[cfg(any(test, feature = "testing"))]
 pub mod fake;
 #[cfg(any(test, feature = "testing"))]
+pub mod fake_claude;
+#[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
 pub use client::{HolderClient, Upgrade};
@@ -41,3 +42,5 @@ pub use paths::{run_dir, socket_path};
 
 #[cfg(any(test, feature = "testing"))]
 pub use fake::FakePanes;
+#[cfg(any(test, feature = "testing"))]
+pub use fake_claude::FakeClaude;

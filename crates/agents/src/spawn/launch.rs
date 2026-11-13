@@ -1,6 +1,6 @@
 //! The launch form (`authority.md` section 7, layer 1): the files a run's
-//! session starts from, written into its scratch directory, and the one
-//! line spawn types into the new pane.
+//! session starts from, written into its scratch directory, and the
+//! script the new pane runs.
 //!
 //! The role body, the approved memory and the brief go into one file
 //! passed with `--append-system-prompt-file`, so the brief and the memory
@@ -128,9 +128,12 @@ pub enum Start<'a> {
     Fresh { note: &'a str },
     /// `claude --resume <claude session id>`.
     Resume { claude_session_id: &'a str },
+    /// A new session with no first prompt: the daemon's second try at a
+    /// resume (`recovery.md` R02, R04, R21), which its wake follows.
+    Plain,
 }
 
-/// The files written for a launch, and the line that starts it.
+/// The files written for a launch, and the script that starts it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Launch {
     pub prompt: PathBuf,
@@ -142,8 +145,6 @@ pub struct Launch {
     /// The parts behind the hash: `role`, `settings`, `mcp`, `model`,
     /// `effort`, `tiller`, `claude` and `memory`.
     pub manifest: Value,
-    /// What spawn types into the pane, followed by Enter.
-    pub line: String,
     /// Set when the role's declared permission mode is not the one launched
     /// (auto mode is unavailable); spawn shows it in its output.
     pub mode_note: Option<String>,
@@ -311,7 +312,7 @@ pub fn sh_quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', r"'\''"))
 }
 
-fn absolute(name: &str, path: &Path) -> Result<String, SpawnError> {
+pub(super) fn absolute(name: &str, path: &Path) -> Result<String, SpawnError> {
     let text = path.to_string_lossy();
     if !path.is_absolute() || text.len() < 2 || text.ends_with('/') {
         return Err(SpawnError::Usage(format!(
@@ -554,14 +555,13 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
     fs::set_permissions(spec.scratch, fs::Permissions::from_mode(0o700))?;
 
     let dir = spec.scratch;
-    let mut launch = Launch {
+    let launch = Launch {
         prompt: dir.join("prompt.md"),
         settings: dir.join("settings.json"),
         mcp: dir.join("mcp.json"),
         script: dir.join("launch.sh"),
         config_hash: rendered.config_hash,
         manifest: rendered.manifest,
-        line: String::new(),
         mode_note: rendered.mode_note,
     };
     write_new(&launch.prompt, rendered.prompt.as_bytes(), 0o600)?;
@@ -590,7 +590,6 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
     write_new(&launch.script, text.as_bytes(), 0o700)?;
     // Last, so a launch refused for any other reason records nothing.
     trust::record(spec.claude_config, spec.worktree)?;
-    launch.line = format!("sh {}", sh_quote(&launch.script.to_string_lossy()));
     Ok(launch)
 }
 
@@ -643,14 +642,13 @@ pub fn write_refreshed(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
     }
     let rendered = render(spec)?;
     let dir = spec.scratch;
-    let mut launch = Launch {
+    let launch = Launch {
         prompt: dir.join("prompt.md"),
         settings: dir.join("settings.json"),
         mcp: dir.join("mcp.json"),
         script: dir.join(format!("relaunch-{}.sh", spec.session_id)),
         config_hash: rendered.config_hash,
         manifest: rendered.manifest,
-        line: String::new(),
         mode_note: rendered.mode_note,
     };
     replace(&launch.prompt, rendered.prompt.as_bytes(), 0o600)?;
@@ -677,7 +675,6 @@ pub fn write_refreshed(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
     preflight(&text, &command, &launch)?;
     replace(&launch.script, text.as_bytes(), 0o700)?;
     trust::record(spec.claude_config, spec.worktree)?;
-    launch.line = format!("sh {}", sh_quote(&launch.script.to_string_lossy()));
     Ok(launch)
 }
 
@@ -686,45 +683,59 @@ pub fn write_refreshed(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
 /// reuses unchanged: the run's brief and hash stay what they were. The
 /// script is named for the session and how it starts
 /// (`relaunch-<session>.sh`, `resume-<session>.sh`) and replaces only an
-/// earlier script of that same name. Returns the launch, whose line a
-/// herdr pane takes typed and whose script a holder pane runs.
+/// earlier script of that same name. Returns the launch, whose script a
+/// holder pane runs.
 pub fn write_again(spec: &AgainSpec<'_>, start: Start<'_>) -> Result<Launch, SpawnError> {
     absolute("the worktree", spec.worktree)?;
     absolute("the scratch directory", spec.scratch)?;
-    let mut launch = Launch {
+    let launch = Launch {
         prompt: spec.scratch.join("prompt.md"),
         settings: spec.scratch.join("settings.json"),
         mcp: spec.scratch.join("mcp.json"),
         script: spec.scratch.join(match start {
             Start::Fresh { .. } => format!("relaunch-{}.sh", spec.session_id),
-            Start::Resume { .. } => format!("resume-{}.sh", spec.session_id),
+            Start::Resume { .. } | Start::Plain => format!("resume-{}.sh", spec.session_id),
         }),
         config_hash: String::new(),
         manifest: Value::Null,
-        line: String::new(),
         mode_note: None,
     };
-    for file in [&launch.prompt, &launch.settings, &launch.mcp] {
-        if !file.is_file() {
-            return Err(SpawnError::Refused(format!(
-                "{} is missing, so the run's launch cannot be repeated",
-                file.display()
-            )));
-        }
-    }
+    let refused = |file: &Path, what: &str| {
+        SpawnError::Refused(format!(
+            "{} {what}, so the run's launch cannot be repeated",
+            file.display()
+        ))
+    };
+    let read = |file: &Path| match fs::read(file) {
+        Ok(bytes) => Ok(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(refused(file, "is missing")),
+        Err(e) => Err(SpawnError::from(e)),
+    };
+    let json = |file: &Path| {
+        serde_json::from_slice::<Value>(&read(file)?)
+            .map_err(|e| refused(file, &format!("does not parse ({e})")))
+    };
+    String::from_utf8(read(&launch.prompt)?)
+        .map_err(|_| refused(&launch.prompt, "is not UTF-8"))?;
+    let mut fragment = json(&launch.settings)?;
+    json(&launch.mcp)?;
     let front = spec.role.frontmatter()?;
     let (mode, _) = effective_mode(spec.claude, &front.permission_mode);
     // The fragment must name the mode the flag does.
-    let mut fragment: Value = serde_json::from_slice(&fs::read(&launch.settings)?)?;
     if fragment["permissions"]["defaultMode"] != mode.as_str() {
         fragment["permissions"]["defaultMode"] = Value::String(mode.clone());
-        fs::write(&launch.settings, serde_json::to_vec_pretty(&fragment)?)?;
+        replace(
+            &launch.settings,
+            &serde_json::to_vec_pretty(&fragment)?,
+            0o600,
+        )?;
     }
     let start = match start {
         Start::Fresh { note } => vec![relaunch_prompt(note)],
         Start::Resume { claude_session_id } => {
             vec!["--resume".to_owned(), claude_session_id.to_owned()]
         }
+        Start::Plain => Vec::new(),
     };
     let command = Command {
         role: spec.role,
@@ -751,7 +762,6 @@ pub fn write_again(spec: &AgainSpec<'_>, start: Start<'_>) -> Result<Launch, Spa
     write_new(&partial, text.as_bytes(), 0o700)?;
     fs::rename(&partial, &launch.script)?;
     trust::record(spec.claude_config, spec.worktree)?;
-    launch.line = format!("sh {}", sh_quote(&launch.script.to_string_lossy()));
     Ok(launch)
 }
 
@@ -816,7 +826,6 @@ mod tests {
             script: "/home/user/run/launch.sh".into(),
             config_hash: String::new(),
             manifest: Value::Null,
-            line: String::new(),
             mode_note: None,
         };
         script(
@@ -875,7 +884,6 @@ mod tests {
             script: dir.join("launch.sh"),
             config_hash: String::new(),
             manifest: Value::Null,
-            line: String::new(),
             mode_note: None,
         }
     }

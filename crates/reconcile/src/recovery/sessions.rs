@@ -14,9 +14,11 @@ use tiller_core::state::runs::{Bind, NewObservation, live_session};
 use tiller_core::state::{find, get, list, projects};
 use tiller_core::{Actor, Result, Timestamp};
 use tiller_observe::liveness::Probe;
+use tiller_panes::{Format, PaneId, Read};
 
 use crate::ladder::{self, Death, Verdict};
 use crate::pass::{Reconciler, Report, minutes_since, ts};
+use crate::sources::Prepare;
 
 /// The `source` a resume launch binds the new pane under, so the proof of
 /// life is a hook's bind, never the launcher's own.
@@ -92,7 +94,6 @@ impl Reconciler {
             session,
             &effective,
             errored,
-            self.snapshot.as_ref(),
             self.holder_reading(recorded_pid)?,
             self.sources.probe.as_ref(),
         );
@@ -600,7 +601,11 @@ impl Reconciler {
             }
             return Ok(());
         };
-        self.attempt_resume(session, &cwd, true, "crash", now, report)?;
+        if let Launch::Refused(why) =
+            self.attempt_resume(session, &cwd, true, "crash", now, report)?
+        {
+            self.resume_refused(session, "crash", reason, &why, now, report)?;
+        }
         Ok(())
     }
 
@@ -666,6 +671,26 @@ impl Reconciler {
         let skipped = floor("RAM", host.ram_floor_mb, readings.ram_free_mb)
             .or_else(|| floor("disk", host.disk_floor_mb, readings.disk_free_mb));
         let resume_id = session.claude_session_id.clone().filter(|_| with_resume);
+        // The script is written before the attempt is recorded: a session
+        // whose launch files are gone is refused, and nothing was tried.
+        let script = match skipped {
+            Some(_) => None,
+            None => match self
+                .sources
+                .launcher
+                .prepare(session, cwd, resume_id.as_deref())
+            {
+                Ok(script) => Some(script),
+                Err(Prepare::Refused(why)) => {
+                    report.repair(format!("session {} resume refused: {why}", session.id));
+                    return Ok(Launch::Refused(why));
+                }
+                Err(Prepare::Failed(error)) => {
+                    report.error(&format!("resume script of session {}", session.id), &error);
+                    return Ok(Launch::RateLimited);
+                }
+            },
+        };
         let checks = json!({
             "ram_free_mb": readings.ram_free_mb,
             "disk_free_mb": readings.disk_free_mb,
@@ -676,17 +701,17 @@ impl Reconciler {
         });
         self.store
             .session_resume_attempted(&self.ctx(now), &session.id, checks)?;
-        if let Some(why) = skipped {
-            report.repair(format!("session {} resume skipped: {why}", session.id));
-            self.resume_skipped_item(session, &why, now, report)?;
-            return Ok(Launch::Skipped);
-        }
+        let script = match (script, skipped) {
+            (Some(script), None) => script,
+            (_, why) => {
+                let why = why.unwrap_or_default();
+                report.repair(format!("session {} resume skipped: {why}", session.id));
+                self.resume_skipped_item(session, &why, now, report)?;
+                return Ok(Launch::Skipped);
+            }
+        };
         self.last_launch = Some(now);
-        match self
-            .sources
-            .launcher
-            .launch(session, cwd, resume_id.as_deref())
-        {
+        match self.sources.launcher.launch(session, cwd, &script) {
             Ok(launched) => {
                 if let Some(claude_id) = &session.claude_session_id {
                     self.store.run_bind_session(
@@ -722,6 +747,62 @@ impl Reconciler {
         }
     }
 
+    /// A resume whose script was refused ([`Launch::Refused`]) stops the
+    /// automatic path: an orchestrator's session ends with `end_reason`, as
+    /// one with no checkout path does, and the owner gets a recovery item.
+    fn resume_refused(
+        &mut self,
+        session: &Session,
+        reason: &str,
+        end_reason: &str,
+        why: &str,
+        now: Timestamp,
+        report: &mut Report,
+    ) -> Result<()> {
+        let key = refused_key(session);
+        let item = match &session.run_id {
+            None => {
+                self.store
+                    .session_end(&self.ctx(now), &session.id, end_reason)?;
+                NewAttention {
+                    question: format!(
+                        "The {} orchestrator could not be resumed after a {reason}: {why}. Relaunch it by hand, or hold the project?",
+                        session.project_id
+                    ),
+                    evidence: Self::json_text(json!({"session_id": session.id})),
+                    subject_project_id: Some(session.project_id.clone()),
+                    options: Some(json!(["Relaunch", "Hold the project"])),
+                    ..NewAttention::default()
+                }
+            }
+            Some(run_id) => {
+                let run: Run = get(self.conn(), "run", run_id)?;
+                let card: Card = get(self.conn(), "card", &run.card_id)?;
+                NewAttention {
+                    card: card.id.clone(),
+                    run_id: Some(run.id.clone()),
+                    question: format!(
+                        "{} {} run {} could not be resumed after a {reason}: {why}. Relaunch it by hand, abandon it, or wait?",
+                        card.display_id,
+                        run.role.short_name(),
+                        run.id
+                    ),
+                    evidence: Self::json_text(json!({"session_id": session.id})),
+                    subject_project_id: Some(session.project_id.clone()),
+                    options: Some(json!(["Relaunch", "Abandon", "Wait"])),
+                    ..NewAttention::default()
+                }
+            }
+        };
+        if self.recovery(now, &key, item)? {
+            report.repair(format!(
+                "session {}: recovery item for the refused resume",
+                session.id
+            ));
+        }
+        Ok(())
+    }
+
     fn resume_skipped_item(
         &mut self,
         session: &Session,
@@ -755,16 +836,18 @@ impl Reconciler {
     }
 
     /// Whether the session's pane shows a prompt (a trust or permission
-    /// dialog) in this pass's snapshot: a resumed session there is left
-    /// alone, and never answered (R04, R17).
+    /// dialog) on its screen now: a resumed session there is left alone,
+    /// and never answered (R04, R17).
     fn at_prompt(&self, session: &Session) -> bool {
-        // Only this pass's snapshot: the stored activity of a dead session
-        // keeps its last prompt forever, since the view never ages a prompt.
-        let Some(snapshot) = &self.snapshot else {
+        // Only the screen now: the stored activity of a dead session keeps
+        // its last prompt forever, since the view never ages a prompt.
+        let Some(pane) = session.pane_id.as_deref() else {
             return false;
         };
-        ladder::bound_pane(snapshot, session)
-            .is_some_and(|p| p.agent.is_some() && p.agent_status.as_deref() == Some("blocked"))
+        self.sources
+            .holder
+            .screen(&PaneId::from(pane), Read::Visible, Format::Ansi)
+            .is_ok_and(|screen| crate::holder::screen_status(&screen.text()) == Some("blocked"))
     }
 
     /// Settles a session whose newest resume attempt is still open. Returns
@@ -801,6 +884,7 @@ impl Reconciler {
         };
         if self.key_used(&failed_key)?
             || self.key_used(&format!("reconcile:R21:failed:{}", session.id))?
+            || self.key_used(&refused_key(session))?
         {
             // Left for the owner: the pane stays, the row stays `unknown`.
             return Ok(true);
@@ -830,8 +914,11 @@ impl Reconciler {
             return Ok(true);
         }
         if automatic(&attempts) < 2 {
-            if let Some(cwd) = self.resume_cwd(session)? {
-                self.attempt_resume(session, &cwd, false, &reason, now, report)?;
+            if let Some(cwd) = self.resume_cwd(session)?
+                && let Launch::Refused(why) =
+                    self.attempt_resume(session, &cwd, false, &reason, now, report)?
+            {
+                self.resume_refused(session, &reason, "crash: resume refused", &why, now, report)?;
             }
             return Ok(true);
         }
@@ -953,8 +1040,8 @@ impl Reconciler {
     /// that the session is not already alive. The boot id, or the holder
     /// instance, is written last, when every session is alive, settled or
     /// reported, so a daemon that dies mid-restore repeats it safely. R21
-    /// restores only the sessions of holder panes: the herdr panes did not
-    /// go with the holder.
+    /// restores only the sessions that had a pane: a spawn that never bound
+    /// did not go with the holder.
     pub(crate) fn restore(
         &mut self,
         restore: &Restore,
@@ -979,28 +1066,16 @@ impl Reconciler {
         // resumed.
         let mut summary: Vec<(String, String, String)> = Vec::new();
         for session in self.live_sessions()? {
-            let probe = if session
-                .pane_id
-                .as_deref()
-                .is_some_and(tiller_core::ids::is_holder_pane)
-            {
-                match self.restore_probe(restore, &session)? {
-                    Some(probe) => probe,
-                    None => {
-                        // No holder list this pass: unknown, never gone.
-                        pending = true;
-                        continue;
-                    }
-                }
-            } else {
-                if matches!(restore, Restore::HolderLost { .. }) {
-                    continue;
-                }
-                let Some(snapshot) = &self.snapshot else {
+            if session.pane_id.is_none() && matches!(restore, Restore::HolderLost { .. }) {
+                continue;
+            }
+            let probe = match self.restore_probe(restore, &session)? {
+                Some(probe) => probe,
+                None => {
+                    // No holder list this pass: unknown, never gone.
                     pending = true;
                     continue;
-                };
-                ladder::bound_pane(snapshot, &session).map(|p| self.sources.probe.agent(p))
+                }
             };
             if probe == Some(Probe::Unknown) && !self.hook_seen_after(&session.id, since)? {
                 // Present, unproven: never a second agent on one run.
@@ -1072,6 +1147,21 @@ impl Reconciler {
                                 session.id.clone(),
                                 "skipped for a floor".into(),
                             )),
+                            Launch::Refused(why) => {
+                                self.restore_skipped(
+                                    restore,
+                                    &session,
+                                    run.as_ref(),
+                                    &why,
+                                    now,
+                                    report,
+                                )?;
+                                summary.push((
+                                    project,
+                                    session.id.clone(),
+                                    format!("skipped: {why}"),
+                                ));
+                            }
                         }
                     }
                     Err(why) => {
@@ -1096,8 +1186,20 @@ impl Reconciler {
                         continue;
                     }
                     if automatic(&attempts) < 2 {
-                        if let Ok(cwd) = self.restore_target(&session, run.as_ref())? {
-                            self.attempt_resume(&session, &cwd, false, reason, now, report)?;
+                        if let Ok(cwd) = self.restore_target(&session, run.as_ref())?
+                            && let Launch::Refused(why) =
+                                self.attempt_resume(&session, &cwd, false, reason, now, report)?
+                        {
+                            self.restore_skipped(
+                                restore,
+                                &session,
+                                run.as_ref(),
+                                &why,
+                                now,
+                                report,
+                            )?;
+                            summary.push((project, session.id.clone(), format!("skipped: {why}")));
+                            continue;
                         }
                         pending = true;
                         continue;
@@ -1111,15 +1213,10 @@ impl Reconciler {
                 }
             }
         }
-        // The new instance goes with the boot id (R04 step 5), so a holder
-        // wired here must have listed this pass.
-        let instance = match (&self.sources.holder, &self.listing) {
-            (None, _) => None,
-            (Some(_), Some(listing)) => Some(listing.instance.clone()),
-            (Some(_), None) => {
-                pending = true;
-                None
-            }
+        // The new instance goes with the boot id (R04 step 5), so the holder
+        // must have listed this pass.
+        let Some(instance) = self.listing.as_ref().map(|l| l.instance.clone()) else {
+            return Ok(());
         };
         if pending {
             return Ok(());
@@ -1221,7 +1318,7 @@ impl Reconciler {
                     &format!("{resumed_total} of {workers_total} workers resumed"),
                 );
                 self.store
-                    .daemon_boot_id(&self.ctx(now), boot_id, instance.as_deref())?;
+                    .daemon_boot_id(&self.ctx(now), boot_id, Some(&instance))?;
                 report.repair(format!("R04 restore complete: boot id {boot_id} written"));
             }
             Restore::HolderLost { instance } => {
@@ -1283,7 +1380,7 @@ impl Reconciler {
     /// When the holder of `instance` started, from its `welcome`: `None`
     /// when it does not answer or another instance does.
     fn holder_started(&self, instance: &str) -> Option<Timestamp> {
-        let welcome = self.sources.holder.as_ref()?.welcome().ok()?;
+        let welcome = self.sources.holder.welcome().ok()?;
         (welcome.instance == instance).then(|| Timestamp::from_jiff(welcome.started_at))
     }
 
@@ -1492,15 +1589,24 @@ impl Restore {
     }
 }
 
+/// The key of the recovery item for a refused resume.
+fn refused_key(session: &Session) -> String {
+    format!("reconcile:resume:refused:{}", session.id)
+}
+
 /// What one resume attempt did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Launch {
     /// A launch was made (the bind window judges it).
     Launched,
-    /// Another launch happened within the launch gap: next pass.
+    /// Not tried this pass: another launch happened within the launch gap,
+    /// or its script could not be written for now ([`Prepare::Failed`]).
     RateLimited,
     /// A floor refused it; the attempt event carries the reason.
     Skipped,
+    /// Its script could not be written, such as for a session whose launch
+    /// files are gone: nothing was attempted, and no attempt is recorded.
+    Refused(String),
 }
 
 /// What a project has in flight when its orchestrator dies (R02).

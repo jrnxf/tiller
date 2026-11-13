@@ -2,8 +2,8 @@
 //! cards, runs, panes, worktrees and PRs, plus the board column derivation.
 //!
 //! One [`Reconciler`] owns a `state.db` connection and the sources it reads
-//! the world through ([`sources`]): the local terminal holder (and the herdr
-//! server until the cutover), the agent process probe, the worktree scanner, the forge, the session launcher and
+//! the world through ([`sources`]): the local terminal holder, the agent
+//! process probe, the worktree scanner, the forge, the session launcher and
 //! the host readings. [`Reconciler::pass`] runs the eight steps of
 //! `recovery.md` section 3 in order, each repair in its own transaction, so
 //! a pass killed halfway leaves only committed single repairs and the next
@@ -15,10 +15,10 @@
 //!   runs are the ones `recovery.md` section 6 lists, each behind its guard.
 //!   Nothing here removes a worktree with unlanded or unknown commits, closes
 //!   a card on inference, or types anything into a pane.
-//! - **Absence of evidence is `unknown`, never `gone`.** A failed holder (or
-//!   herdr) read stops the liveness ladder for the pass; only a successful
-//!   list that positively lacks a pane, and an agent probe that positively finds no
-//!   process, make a session *dead*.
+//! - **Absence of evidence is `unknown`, never `gone`.** A failed holder
+//!   read stops the liveness ladder for the pass; only a successful list
+//!   that positively lacks a pane, and an agent probe that positively finds
+//!   no process, make a session *dead*.
 //! - **Clocks start from events.** Every deadline counts from the event that
 //!   first recorded the condition (`session.ended`, `outbox.enqueued`,
 //!   `host.degraded`, `session.resume_attempted`), never from a pass's

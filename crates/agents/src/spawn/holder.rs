@@ -1,15 +1,14 @@
 //! A session's pane in the terminal holder (`terminal-holder.md` 4.4): one
-//! `spawn` in place of herdr's workspace, row tokens, layout pass and typed
-//! launch line.
+//! `spawn` that runs the launch script.
 //!
 //! The holder runs the launch script itself, which `exec`s the agent, so
 //! nothing is typed into the pane. The pane's `key` is the session id and
 //! its `meta` names the session, the run and the label, so the pane says
-//! whose it is without herdr's tokens.
+//! whose it is.
 
 use std::path::Path;
 
-use tiller_herdr::routed::CLOSE_GRACE;
+use crate::pane::CLOSE_GRACE;
 use tiller_panes::{Meta, Pane, PaneId, PaneState, Panes, PanesError, Spawn};
 
 use super::Result;

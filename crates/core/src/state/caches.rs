@@ -35,34 +35,22 @@ pub fn landed_heads(conn: &Connection, host: &str, path: &str) -> Result<Vec<Str
     Ok(heads.collect::<rusqlite::Result<_>>()?)
 }
 
-/// Which holder a pane snapshot comes from. Each refresh replaces only its
-/// own holder's rows, so the herdr poller and the holder poller never mark
-/// each other's panes gone while both run (until the cutover drops herdr).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PaneHolder {
-    /// herdr: rows with no `holder_instance`.
-    Herdr,
-    /// The terminal holder: rows with a `holder_instance`, of any instance,
-    /// so a pane of an older instance is gone once the new one lists.
-    Holder,
-}
-
 /// One pane as its holder reports it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PaneReading {
     pub pane_id: String,
-    /// The holder `instance` that listed it; `None` for a herdr pane.
+    /// The holder `instance` that listed it.
     pub holder_instance: Option<String>,
     /// The Tiller session the pane's key or tokens name.
     pub session_id: Option<String>,
     pub pid: Option<i64>,
-    /// `meta.label` (the herdr workspace label for a herdr pane).
+    /// `meta.label`.
     pub label: Option<String>,
     pub state: PaneState,
     pub exit_code: Option<i64>,
     pub exit_signal: Option<i64>,
     pub exited_at: Option<Timestamp>,
-    /// The pane's `meta` (herdr's row tokens for a herdr pane).
+    /// The pane's `meta`.
     pub metadata: Value,
 }
 
@@ -133,12 +121,7 @@ pub struct QuotaReading {
 
 /// A full snapshot of one host's panes from one holder. That holder's
 /// panes missing from it are gone.
-fn refresh_panes(
-    tx: &mut Tx<'_>,
-    host_id: &str,
-    holder: PaneHolder,
-    panes: &[PaneReading],
-) -> Result<usize> {
+fn refresh_panes(tx: &mut Tx<'_>, host_id: &str, panes: &[PaneReading]) -> Result<usize> {
     let mut changes = 0;
     for pane in panes {
         let old: Option<Pane> = find(
@@ -203,11 +186,9 @@ fn refresh_panes(
         }
     }
     let seen: Vec<&str> = panes.iter().map(|p| p.pane_id.as_str()).collect();
-    let scope = match holder {
-        PaneHolder::Herdr => "host_id = ?1 AND gone_at IS NULL AND holder_instance IS NULL",
-        PaneHolder::Holder => "host_id = ?1 AND gone_at IS NULL AND holder_instance IS NOT NULL",
-    };
-    let live: Vec<Pane> = list(tx.conn(), scope, &[&host_id])?;
+    // Every live row is the holder's to replace, of any instance, so a pane
+    // of an older instance is gone once the new one lists.
+    let live: Vec<Pane> = list(tx.conn(), "host_id = ?1 AND gone_at IS NULL", &[&host_id])?;
     for pane in live
         .into_iter()
         .filter(|p| !seen.contains(&p.pane_id.as_str()))
@@ -393,19 +374,17 @@ fn refresh_quota(tx: &mut Tx<'_>, windows: &[QuotaReading]) -> Result<usize> {
 }
 
 impl Store {
-    /// `cache.refresh` for one host's panes from one holder (the holder
-    /// poller, or the herdr poller until the cutover).
+    /// `cache.refresh` for one host's panes from its terminal holder.
     pub fn cache_panes(
         &mut self,
         ctx: &Ctx,
         host_id: &str,
-        holder: PaneHolder,
         panes: Vec<PaneReading>,
     ) -> Result<Applied<usize>> {
         self.write(ctx, "cache.refresh", None, |tx| {
             tx.rebuildable();
             get::<Host>(tx.conn(), "host", host_id)?;
-            refresh_panes(tx, host_id, holder, &panes)
+            refresh_panes(tx, host_id, &panes)
         })
     }
 

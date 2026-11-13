@@ -115,8 +115,8 @@ const PANE_QUEUE: usize = 64;
 /// Inputs waiting for an open stream's link to take them.
 const PANE_ASKS: usize = 16;
 
-/// How long a stream the browser left has to end on the peer, so a Fit
-/// gives the pane back before the next Fit takes its turn.
+/// How long a stream the browser left has to end on the peer, so its Fit's
+/// lease ends there before the link closes.
 const PANE_DRAIN: Duration = Duration::from_secs(12);
 
 /// What the board asks of an open peer pane stream.
@@ -221,17 +221,14 @@ impl PaneStream {
     /// closes, `stop` turns true or the browser falls a whole queue
     /// behind; a link that ends is followed by an `unavailable` line, so
     /// the browser opens again and learns whether the peer is still there.
-    /// `fitted` says the open asked the peer for a Fit, and `fit` is the
-    /// turn this host's Fit on a herdr pane holds, kept until the peer has
-    /// given the pane back. A Fit on a pane in the peer's terminal holder
-    /// is a lease there, and needs no turn.
+    /// `fitted` says the open asked the peer for a Fit, which is a lease in
+    /// the peer's terminal holder.
     pub fn relay(
         self,
         label: String,
         stop: watch::Receiver<bool>,
         viewer: crate::mirror::Viewer,
         fitted: bool,
-        fit: Option<tokio::sync::OwnedMutexGuard<()>>,
         unfit: Option<String>,
     ) -> Body {
         let (tx, mut rx) = mpsc::channel::<Bytes>(PANE_QUEUE);
@@ -239,7 +236,6 @@ impl PaneStream {
         let fitted = fitted && unfit.is_none();
         tokio::spawn(async move {
             let _viewer = viewer;
-            let _fit = fit;
             let PaneStream {
                 first,
                 mut lines,
@@ -325,7 +321,7 @@ impl PaneStream {
             }
             drop(waiting);
             // Closing the peer's stdin ends its stream; reading on to its
-            // end lets a Fit give the pane back before the turn is free.
+            // end lets its Fit's lease end there first.
             drop(writer);
             let _ = timeout(PANE_DRAIN, async {
                 while let Ok(Some(_)) = lines.next_line().await {}

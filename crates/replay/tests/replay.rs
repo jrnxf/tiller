@@ -1,5 +1,5 @@
 //! A replay of a small invented bundle, end to end: the real hooks, the
-//! recorded orchestrator, spawn against the fake herdr and the stub pool,
+//! recorded orchestrator, spawn against the fake holder and the stub pool,
 //! and the audit.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

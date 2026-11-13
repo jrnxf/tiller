@@ -1884,7 +1884,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tiller-core",
- "tiller-herdr",
  "tiller-observe",
  "tiller-panes",
  "tiller-reconcile",
@@ -1914,7 +1913,6 @@ dependencies = [
  "tiller-agents",
  "tiller-core",
  "tiller-daemon",
- "tiller-herdr",
  "tiller-holder",
  "tiller-observe",
  "tiller-panes",
@@ -1965,10 +1963,10 @@ dependencies = [
  "tiller-agents",
  "tiller-core",
  "tiller-delivery",
- "tiller-herdr",
  "tiller-holder",
  "tiller-observe",
  "tiller-panes",
+ "tiller-poll",
  "tiller-reconcile",
  "tokio",
  "toml",
@@ -1986,27 +1984,9 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tiller-core",
- "tiller-herdr",
- "tracing",
-]
-
-[[package]]
-name = "tiller-herdr"
-version = "0.1.0"
-dependencies = [
- "insta",
- "rusqlite",
- "rustix",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tiller-core",
  "tiller-panes",
  "tiller-poll",
- "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -2046,6 +2026,7 @@ dependencies = [
 name = "tiller-panes"
 version = "0.1.0"
 dependencies = [
+ "insta",
  "jiff",
  "proptest",
  "rustix",
@@ -2083,7 +2064,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tiller-core",
- "tiller-herdr",
  "tiller-observe",
  "tiller-panes",
  "tiller-poll",
@@ -2104,8 +2084,8 @@ dependencies = [
  "thiserror",
  "tiller-agents",
  "tiller-core",
- "tiller-herdr",
  "tiller-observe",
+ "tiller-panes",
  "tiller-reconcile",
  "toml",
 ]
