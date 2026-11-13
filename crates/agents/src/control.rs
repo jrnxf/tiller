@@ -155,7 +155,7 @@ pub enum RelaunchOutcome {
 /// the daemon (`authority.md` role matrix). The store checks again.
 fn require_controller(ctx: &Ctx, run: &Run, what: &str, daemon: bool) -> Result<()> {
     match &ctx.actor {
-        Actor::Owner | Actor::Board => Ok(()),
+        Actor::Owner | Actor::Board | Actor::Peer(_) => Ok(()),
         Actor::Daemon if daemon => Ok(()),
         Actor::Session(id) if *id == run.supervisor_session_id => Ok(()),
         other => Err(tiller_core::Error::Forbidden(format!(
@@ -994,7 +994,7 @@ pub fn stop_agent(
             Some(run)
         }
         None => {
-            if !matches!(ctx.actor, Actor::Owner | Actor::Board) {
+            if !ctx.actor.is_owner() {
                 return Err(tiller_core::Error::Forbidden(format!(
                     "{} may not stop orchestrator session {}; the owner does",
                     ctx.actor, session.id

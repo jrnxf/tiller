@@ -875,6 +875,49 @@ fn relaunch_new_attempt_on_another_model() {
 }
 
 #[test]
+fn a_forwarded_relaunch_starts_the_agent_on_the_owning_host() {
+    // The board host's owner, forwarded over a signed link (`authority.md`
+    // G46), relaunches in place and as a new attempt, as the owner here does.
+    for new_attempt in [false, true] {
+        let mut rig = Rig::new();
+        let spawned = running(&mut rig);
+        let claude = boot(&rig, "startup");
+        let request = RelaunchRequest {
+            note: "start from the tests".into(),
+            new_attempt,
+            brief: new_attempt.then(|| "Do the parser again.".into()),
+            asked: None,
+        };
+        let peer = Ctx::new(Actor::Peer("board-host".into()));
+
+        let done =
+            relaunched(relaunch_it(&mut rig, &peer, &patient(), &spawned.run.id, request).unwrap());
+        let new = claude.join().unwrap().unwrap();
+        assert_eq!(done.started, Proof::Confirmed, "{}", done.evidence);
+        assert_eq!(done.session.id, new);
+        assert_eq!(
+            done.session.pane_id.as_deref(),
+            Some(spawned.pane_id.as_str())
+        );
+        assert_eq!(done.run.id == spawned.run.id, !new_attempt);
+        assert!(done.run.ended_at.is_none());
+        assert!(done.run.config_hash.is_some());
+        assert!(session(&rig, &spawned.session.id).ended_at.is_some());
+        let actors: Vec<String> = rig
+            .fleet
+            .store
+            .conn()
+            .prepare("SELECT DISTINCT actor FROM events WHERE kind = 'run.relaunched'")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(actors, ["board@board-host"], "new_attempt: {new_attempt}");
+    }
+}
+
+#[test]
 fn relaunch_model_needs_a_new_attempt_and_the_rule() {
     let mut rig = Rig::new();
     let spawned = running(&mut rig);

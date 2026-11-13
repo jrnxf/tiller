@@ -160,7 +160,9 @@ pub fn serve(app: &App, from: String) -> Result<ExitCode, Failure> {
         orchestrators: Some(std::sync::Arc::new(super::spawn::BoardStart {
             app: app.same_caller(),
         })),
-        holder: None,
+        holder: Some(std::sync::Arc::new(tiller_daemon::holder::HolderLink::new(
+            &std::path::absolute(&app.home)?,
+        ))),
     };
     let input = std::io::BufReader::new(std::io::stdin());
     match tiller_daemon::peer::serve::serve(&config, input, std::io::stdout().lock()) {

@@ -33,11 +33,12 @@ use super::serve::{ServeConfig, own_snapshot, serve};
 use super::{Frame, Hello, HelloKey, Timing, Welcome};
 use crate::api::tests::{
     Answer, app_with_peers, b64, get, holder_calls, holder_pane, mirror_herdr, mutation, next_line,
-    owner_cookie, send,
+    owner_cookie, send, waiting,
 };
-use crate::api::{OrchestratorStart, StartError};
+use crate::api::{BoardRelaunch, Controlled, OrchestratorStart, StartError};
 use crate::dto::{BoardResponse, ErrorBody, ErrorDetail, LinkState, MutationResponse};
 use crate::readonly::Damage;
+use tiller_core::domain::{Run, Session};
 use tiller_panes::FakePanes;
 
 fn ms(millis: u64) -> Duration {
@@ -53,6 +54,7 @@ fn quick() -> Timing {
         poll: ms(20),
         refresh: ms(100),
         query: ms(1000),
+        proof: ms(3000),
         skew: Duration::from_secs(120),
         backoff: [ms(50); 4],
         refused_retry: ms(200),
@@ -172,15 +174,20 @@ fn serve_timed(
     orchestrators: Option<Arc<dyn OrchestratorStart>>,
     timing: Timing,
 ) -> UnixStream {
-    let (ours, theirs) = UnixStream::pair().unwrap();
-    let config = ServeConfig {
+    serve_config(ServeConfig {
         home: home.to_owned(),
         from: from.to_owned(),
         timing,
         herdr: None,
         orchestrators,
         holder: None,
-    };
+    })
+}
+
+/// `tiller peer serve` on `config`, on one end of a socket pair; the other
+/// end is returned.
+fn serve_config(config: ServeConfig) -> UnixStream {
+    let (ours, theirs) = UnixStream::pair().unwrap();
     let input = BufReader::new(theirs.try_clone().unwrap());
     std::thread::spawn(move || {
         let _ = serve(&config, input, theirs);
@@ -300,11 +307,20 @@ impl Connector for Frozen {
 
 /// The board host's links, until the returned sender is dropped.
 fn start(home: &Path, connector: impl Connector + 'static) -> (Arc<Peers>, watch::Sender<bool>) {
+    start_timed(home, connector, quick())
+}
+
+/// [`start`] on other timings.
+fn start_timed(
+    home: &Path,
+    connector: impl Connector + 'static,
+    timing: Timing,
+) -> (Arc<Peers>, watch::Sender<bool>) {
     let (stop_tx, stop) = watch::channel(false);
     let peers = Peers::start(
         home.to_owned(),
         Arc::new(connector),
-        quick(),
+        timing,
         Damage::default(),
         stop,
     );
@@ -1688,6 +1704,8 @@ struct Wire {
     sent: Arc<Mutex<Vec<u8>>>,
     lose_results: Arc<AtomicUsize>,
     starter: Option<Arc<dyn OrchestratorStart>>,
+    herdr: Option<tiller_herdr::client::Cli>,
+    holder: Option<Arc<dyn crate::holder::Holder>>,
 }
 
 impl Wire {
@@ -1697,6 +1715,8 @@ impl Wire {
             sent: Arc::default(),
             lose_results: Arc::default(),
             starter: None,
+            herdr: None,
+            holder: None,
         }
     }
 
@@ -1704,11 +1724,25 @@ impl Wire {
         self.starter = Some(starter);
         self
     }
+
+    /// The peer's herdr and terminal holder, which its agent verbs reach.
+    fn with_panes(mut self, herdr: tiller_herdr::client::Cli, holder: &FakePanes) -> Self {
+        self.herdr = Some(herdr);
+        self.holder = Some(Arc::new(holder.clone()));
+        self
+    }
 }
 
 impl Connector for Wire {
     fn connect(&self, target: &Target) -> Connecting {
-        let socket = serve_with_starter(&self.home, &target.from, self.starter.clone());
+        let socket = serve_config(ServeConfig {
+            home: self.home.clone(),
+            from: target.from.clone(),
+            timing: quick(),
+            herdr: self.herdr.clone(),
+            orchestrators: self.starter.clone(),
+            holder: self.holder.clone(),
+        });
         let sent = self.sent.clone();
         let lose = self.lose_results.clone();
         Box::pin(async move {
@@ -2466,38 +2500,101 @@ async fn a_peer_pane_history_comes_from_the_peer() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_peer_pane_takes_no_agent_verb() {
-    // Keys and the Fit reach a peer's pane (`authority.md` G46); the tail,
-    // the prompt and its answer stay this host's own.
+async fn a_pane_link_takes_no_forwarded_verb() {
+    // An agent verb goes on the signed sync link as a `mutate` and its
+    // reads as a `query` (7.4); a pane link carries neither, only signed
+    // keys and the Fit (10.7).
+    let mut pair = pair();
+    let session = pair.peer.worker("w2:p1");
     let scratch = tempfile::tempdir().unwrap();
-    let (_pair, session, app, cookie, dialed, _stop) = watching(scratch.path()).await;
-    let owner = [("cookie", cookie.as_str())];
-    let refused = [
-        ("terminal/tail", json!({"host": "peer"})),
-        ("prompt", json!({"host": "peer"})),
-        (
-            "prompt/answer",
-            json!({"host": "peer", "option": 1, "screen": "x"}),
-        ),
-    ];
-    for (tail, body) in refused {
-        let answer = send(
-            &app,
-            mutation("POST", &pane_path(&session, tail), body, &owner),
-        )
-        .await;
-        let error = refusal(&answer, StatusCode::BAD_GATEWAY);
-        assert_eq!(error.code, "peer_refused", "{tail}: {}", answer.body);
-        assert!(
-            error.message.contains("only keys and the Fit")
-                || error.message.contains("not forwarded"),
-            "{tail}: {}",
-            answer.body
+    let before = last_seq(&pair.peer);
+    let verb = |op, body: Value| {
+        let order = Order {
+            op,
+            target: Some(session.clone()),
+            body,
+            idempotency_key: "k-1".to_owned(),
+        };
+        Frame::Mutate(Box::new(Mutate::signed(
+            &signer(&pair),
+            &pair.peer.host,
+            order,
+            Timestamp::now(),
+        )))
+        .line()
+        .unwrap()
+    };
+    let mut extra = verb(Op::Interrupt, json!({"idempotency_key": "k-1"}))
+        + &verb(
+            Op::PromptAnswer,
+            json!({"idempotency_key": "k-1", "option": 1, "screen": "x"}),
         );
+    for (id, tail) in [("q1", "terminal/tail"), ("q2", "prompt")] {
+        extra += &Frame::Query {
+            id: id.into(),
+            path: format!("agents/{session}/{tail}"),
+        }
+        .line()
+        .unwrap();
     }
-    // No pane link opened and nothing reached the peer's herdr.
-    assert_eq!(dialed.load(Ordering::SeqCst), 0);
-    assert!(!scratch.path().join("calls").exists());
+    let lines = open_pane_lines(
+        &pair,
+        scratch.path(),
+        pane_open(&pair, &session, PaneKind::Stream),
+        &extra,
+    )
+    .await;
+    assert!(lines[0].contains(r#""type":"size""#), "{lines:?}");
+    assert!(
+        !lines.iter().any(|line| line.contains(r#""type":"result""#)),
+        "{lines:?}"
+    );
+    let calls = std::fs::read_to_string(scratch.path().join("calls")).unwrap();
+    assert!(
+        !calls.contains("send-keys") && !calls.contains("send-text"),
+        "{calls}"
+    );
+    assert_eq!(last_seq(&pair.peer), before, "a pane link wrote");
+    let keys: i64 = pair
+        .peer
+        .open()
+        .conn()
+        .query_row("SELECT count(*) FROM idempotency_keys", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(keys, 0);
+}
+
+/// [`open_pane`], with every line the peer sends until it is quiet for a
+/// second.
+async fn open_pane_lines(pair: &Pair, scratch: &Path, open: PaneOpen, extra: &str) -> Vec<String> {
+    let config = ServeConfig {
+        home: pair.peer.dir.path().to_owned(),
+        from: "test-host".into(),
+        timing: quick(),
+        herdr: Some(mirror_herdr(scratch)),
+        orchestrators: None,
+        holder: None,
+    };
+    let (mut board_out, peer_in) = tokio::io::duplex(1 << 16);
+    let (peer_out, board_in) = tokio::io::duplex(1 << 16);
+    let serving = tokio::spawn(async move {
+        let _ = pane::serve(&config, tokio::io::BufReader::new(peer_in), peer_out).await;
+    });
+    let line = Frame::PaneOpen(Box::new(open)).line().unwrap();
+    board_out.write_all(line.as_bytes()).await.unwrap();
+    board_out.write_all(extra.as_bytes()).await.unwrap();
+    let mut lines = tokio::io::BufReader::new(board_in).lines();
+    let mut seen = Vec::new();
+    while let Ok(Ok(Some(line))) =
+        tokio::time::timeout(Duration::from_secs(1), lines.next_line()).await
+    {
+        seen.push(line);
+    }
+    drop(board_out);
+    let _ = tokio::time::timeout(Duration::from_secs(10), serving).await;
+    seen
 }
 
 /// The owner's view of the peer agent `session`, opened with `body`.
@@ -3365,4 +3462,1047 @@ fn a_pane_link_refuses_an_open_in_place_of_the_first_frame() {
         .unwrap();
     assert!(output.is_empty());
     assert!(!scratch.path().join("calls").exists());
+}
+
+// -- agent verbs on a peer (D20) ------------------------------------------------------
+
+/// A peer's starter for the agent verbs: it records each stop, resume and
+/// relaunch it is asked for, as `(verb, actor, key)`, and answers it done,
+/// or refuses it while `refuse` is set.
+#[derive(Default)]
+struct AgentStarter {
+    seen: Mutex<Vec<(String, String, Option<String>)>>,
+    refuse: AtomicBool,
+}
+
+impl AgentStarter {
+    fn seen(&self) -> Vec<(String, String, Option<String>)> {
+        self.seen.lock().unwrap().clone()
+    }
+
+    fn answer(&self, verb: String, ctx: &tiller_core::Ctx) -> Result<Controlled, StartError> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((verb.clone(), ctx.actor.to_string(), ctx.key.clone()));
+        if self.refuse.load(Ordering::SeqCst) {
+            return Err(StartError::Refused {
+                exit: 5,
+                code: "stub_refused",
+                message: format!("the stub refuses the {verb}"),
+                hint: None,
+                current: None,
+            });
+        }
+        Ok(Controlled {
+            applied: tiller_core::Applied {
+                value: json!({"verb": verb}),
+                events: Vec::new(),
+                replayed: false,
+            },
+            warning: None,
+        })
+    }
+}
+
+impl OrchestratorStart for AgentStarter {
+    fn start(
+        &self,
+        _store: &mut Store,
+        _ctx: &tiller_core::Ctx,
+        _project: &str,
+        _restart: bool,
+    ) -> Result<tiller_core::Applied<tiller_agents::spawn::orchestrator::Orchestrator>, StartError>
+    {
+        Err(StartError::Refused {
+            exit: 5,
+            code: "stub_refused",
+            message: "the stub starts no orchestrator".into(),
+            hint: None,
+            current: None,
+        })
+    }
+
+    fn stop_agent(
+        &self,
+        _store: &mut Store,
+        ctx: &tiller_core::Ctx,
+        _session: &Session,
+    ) -> Result<Controlled, StartError> {
+        self.answer("stop".into(), ctx)
+    }
+
+    fn resume_run(
+        &self,
+        _store: &mut Store,
+        ctx: &tiller_core::Ctx,
+        _run: &Run,
+    ) -> Result<Controlled, StartError> {
+        self.answer("resume".into(), ctx)
+    }
+
+    fn relaunch_run(
+        &self,
+        _store: &mut Store,
+        ctx: &tiller_core::Ctx,
+        _run: &Run,
+        relaunch: BoardRelaunch,
+    ) -> Result<Controlled, StartError> {
+        self.answer(format!("relaunch: {}", relaunch.note), ctx)
+    }
+}
+
+/// A paired board and peer with a builder in a terminal holder pane on the
+/// peer, and the board's app over a live link whose `peer serve` holds that
+/// holder and an [`AgentStarter`].
+struct PeerAgent {
+    pair: Pair,
+    session: String,
+    holder: FakePanes,
+    pane: tiller_panes::PaneId,
+    starter: Arc<AgentStarter>,
+    app: Router,
+    cookie: String,
+    /// Every byte the board host sent on the link.
+    sent: Arc<Mutex<Vec<u8>>>,
+    /// The next `result` frames lost on the way back.
+    lose_results: Arc<AtomicUsize>,
+    _scratch: tempfile::TempDir,
+    _stop: watch::Sender<bool>,
+}
+
+/// [`PeerAgent`] on the board's `timing`, with `prepare` run on the pair
+/// before the link starts.
+async fn peer_agent(timing: Timing, prepare: impl FnOnce(&Pair)) -> PeerAgent {
+    let mut pair = pair();
+    let holder = FakePanes::new();
+    let pane = holder_pane(&holder, "s-1");
+    let session = pair.peer.worker(pane.as_str());
+    prepare(&pair);
+    let scratch = tempfile::tempdir().unwrap();
+    let starter = Arc::new(AgentStarter::default());
+    let wire = Wire::new(pair.peer.dir.path())
+        .with_starter(starter.clone())
+        .with_panes(mirror_herdr(scratch.path()), &holder);
+    let (sent, lose_results) = (wire.sent.clone(), wire.lose_results.clone());
+    let (peers, stop) = start_timed(pair.board.dir.path(), wire, timing);
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers);
+    PeerAgent {
+        pair,
+        session,
+        holder,
+        pane,
+        starter,
+        app,
+        cookie,
+        sent,
+        lose_results,
+        _scratch: scratch,
+        _stop: stop,
+    }
+}
+
+impl PeerAgent {
+    /// The owner's `body` to the peer agent's `tail`.
+    async fn post(&self, tail: &str, body: Value) -> Answer {
+        act_on_peer(&self.app, &self.cookie, &self.session, tail, body).await
+    }
+
+    /// Draws Claude's permission dialog for a Bash call on the peer's pane,
+    /// with the agent waiting on it.
+    fn ask_permission(&self) {
+        waiting(&self.pair.peer, &self.session, "Bash");
+        self.draw_permission();
+    }
+
+    /// Draws the permission dialog again, with the agent still waiting.
+    fn draw_permission(&self) {
+        self.set_screen(include_str!(
+            "../../../panes/tests/fixtures/claude/permission-dialog.ansi"
+        ));
+    }
+
+    fn set_screen(&self, ansi: &str) {
+        let rows: Vec<&str> = ansi.lines().collect();
+        self.holder.set_screen(&self.pane, &rows);
+    }
+
+    /// The keys typed into the peer's pane.
+    fn keys(&self) -> Vec<String> {
+        holder_calls(&self.holder, "keys")
+    }
+
+    /// The `mutate` and `query` frames the board host sent, as `type op-or-path`.
+    fn asked(&self) -> Vec<String> {
+        wire_text(&self.sent)
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter_map(|frame| match frame["type"].as_str()? {
+                "mutate" => Some(format!("mutate {}", frame["op"].as_str()?)),
+                "query" => Some(format!("query {}", frame["path"].as_str()?)),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// The verbs' endpoints and bodies, each with its own key.
+fn verbs() -> Vec<(&'static str, Value)> {
+    let until = Timestamp::now().plus_minutes(60).to_string();
+    vec![
+        (
+            "interrupt",
+            json!({"idempotency_key": "k-int", "host": "peer"}),
+        ),
+        (
+            "steer",
+            json!({"idempotency_key": "k-steer", "host": "peer", "text": "use the new API"}),
+        ),
+        ("stop", json!({"idempotency_key": "k-stop", "host": "peer"})),
+        (
+            "pause",
+            json!({"idempotency_key": "k-pause", "host": "peer", "until": until, "reason": "waits on review"}),
+        ),
+        (
+            "unpause",
+            json!({"idempotency_key": "k-unpause", "host": "peer"}),
+        ),
+        (
+            "resume",
+            json!({"idempotency_key": "k-resume", "host": "peer"}),
+        ),
+        (
+            "relaunch",
+            json!({"idempotency_key": "k-relaunch", "host": "peer", "note": "start from the tests"}),
+        ),
+        (
+            "prompt/answer",
+            json!({"idempotency_key": "k-answer", "host": "peer", "option": 1, "screen": "x"}),
+        ),
+    ]
+}
+
+/// Claude's Stop hook on the peer once an Escape reached `holder`, as the
+/// agent's turn ends after an interrupt.
+fn stop_hook_after_escape(
+    fleet: &Fleet,
+    holder: &FakePanes,
+    session: &str,
+) -> std::thread::JoinHandle<()> {
+    let mut store = fleet.open();
+    let holder = holder.clone();
+    let session = session.to_owned();
+    std::thread::spawn(move || {
+        for _ in 0..1000 {
+            if holder_calls(&holder, "keys")
+                .iter()
+                .any(|call| call.ends_with(" esc"))
+            {
+                store
+                    .observation_record(
+                        &tiller_core::Ctx::new(tiller_core::Actor::Hook),
+                        tiller_core::state::runs::NewObservation {
+                            session_id: Some(session),
+                            run_id: None,
+                            source: tiller_core::domain::ObservationSource::Hook,
+                            event: "Stop".into(),
+                            verdict: None,
+                            observed_at: Timestamp::now(),
+                            payload: json!({}),
+                        },
+                    )
+                    .unwrap();
+                return;
+            }
+            std::thread::sleep(ms(10));
+        }
+    })
+}
+
+const WORKING: &str = include_str!("../../../panes/tests/fixtures/claude/working.ansi");
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_board_reads_a_peer_agents_tail() {
+    // A `read` pairing may read a tail too (G46).
+    for scope in [PeerScope::Act, PeerScope::Read] {
+        let agent = peer_agent(quick(), |pair| {
+            if scope == PeerScope::Read {
+                read_scope(&pair.board);
+                read_scope(&pair.peer);
+            }
+        })
+        .await;
+        agent.holder.set_screen(&agent.pane, &["one", "two", "$ "]);
+        let tail = agent.post("terminal/tail", json!({"host": "peer"})).await;
+        assert_eq!(tail.status, StatusCode::OK, "{scope:?}: {}", tail.body);
+        let tail: Value = serde_json::from_str(&tail.body).unwrap();
+        assert_eq!(tail["session_id"], agent.session);
+        assert_eq!(
+            (tail["cols"].as_u64(), tail["rows"].as_u64()),
+            (Some(120), Some(40)),
+            "{tail}"
+        );
+        assert_eq!(
+            agent.asked(),
+            [format!("query agents/{}/terminal/tail", agent.session)]
+        );
+        // Read off the peer's holder: nothing was typed.
+        assert!(agent.keys().is_empty());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_board_reads_and_answers_a_peer_agents_prompt() {
+    // From the stage or the Inbox alike: no stream is open, and no pane
+    // link is dialed.
+    let agent = peer_agent(quick(), |_| {}).await;
+    let idle = agent.post("prompt", json!({"host": "peer"})).await;
+    assert_eq!(idle.status, StatusCode::OK, "{}", idle.body);
+    let idle: Value = serde_json::from_str(&idle.body).unwrap();
+    assert_eq!(idle["reason"], "not_waiting");
+
+    agent.ask_permission();
+    let shown = agent.post("prompt", json!({"host": "peer"})).await;
+    assert_eq!(shown.status, StatusCode::OK, "{}", shown.body);
+    let shown: Value = serde_json::from_str(&shown.body).unwrap();
+    assert_eq!(shown["session_id"], agent.session);
+    assert_eq!(shown["reason"], Value::Null, "{shown}");
+    assert_eq!(
+        shown["prompt"]["command"],
+        "rm -f nothing-here.txt && touch made.txt"
+    );
+    let screen = shown["prompt"]["screen"].as_str().unwrap();
+
+    let sent = agent
+        .post(
+            "prompt/answer",
+            json!({"idempotency_key": "k-1", "host": "peer", "option": 4, "screen": screen}),
+        )
+        .await;
+    let sent = applied(&sent);
+    assert_eq!(sent.host.as_deref(), Some("peer"));
+    assert!(!sent.replayed);
+    assert_eq!(sent.data["sent"]["option"], 4);
+    assert_eq!(agent.keys(), [format!("keys {} 4", agent.pane)]);
+    // The prompt read is a query and the answer a forwarded mutation.
+    let session = &agent.session;
+    assert_eq!(
+        agent.asked(),
+        [
+            format!("query agents/{session}/prompt"),
+            format!("query agents/{session}/prompt"),
+            "mutate POST /api/v1/agents/{session}/prompt/answer".to_owned(),
+        ]
+    );
+    // A peer answer needs its key, so a retry types nothing twice.
+    let keyless = agent
+        .post(
+            "prompt/answer",
+            json!({"host": "peer", "option": 4, "screen": screen}),
+        )
+        .await;
+    assert_eq!(keyless.status, StatusCode::BAD_REQUEST, "{}", keyless.body);
+    assert_eq!(agent.keys().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_answer_on_a_changed_dialog_is_screen_changed() {
+    let agent = peer_agent(quick(), |_| {}).await;
+    agent.ask_permission();
+    let shown = agent.post("prompt", json!({"host": "peer"})).await;
+    let shown: Value = serde_json::from_str(&shown.body).unwrap();
+    let screen = shown["prompt"]["screen"].as_str().unwrap().to_owned();
+
+    // The peer's dialog moved on after the buttons were drawn here.
+    agent.set_screen(WORKING);
+    let stale = agent
+        .post(
+            "prompt/answer",
+            json!({"idempotency_key": "k-1", "host": "peer", "option": 1, "screen": screen}),
+        )
+        .await;
+    let error = refusal(&stale, StatusCode::CONFLICT);
+    assert_eq!(error.code, "screen_changed", "{}", stale.body);
+    assert_eq!(error.host.as_deref(), Some("peer"));
+    assert!(agent.keys().is_empty());
+
+    // So did a screen string the peer never drew.
+    agent.draw_permission();
+    let forged = agent
+        .post(
+            "prompt/answer",
+            json!({"idempotency_key": "k-2", "host": "peer", "option": 1, "screen": "other"}),
+        )
+        .await;
+    assert_eq!(
+        refusal(&forged, StatusCode::CONFLICT).code,
+        "screen_changed"
+    );
+    assert!(agent.keys().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_pairing_cannot_read_or_answer_a_peer_prompt() {
+    // The board host's own pairing is `read`: nothing goes out.
+    let agent = peer_agent(quick(), |pair| {
+        read_scope(&pair.board);
+        read_scope(&pair.peer);
+    })
+    .await;
+    agent.ask_permission();
+    for (tail, body) in [
+        ("prompt", json!({"host": "peer"})),
+        (
+            "prompt/answer",
+            json!({"idempotency_key": "k-1", "host": "peer", "option": 1, "screen": "x"}),
+        ),
+    ] {
+        let answer = agent.post(tail, body).await;
+        let error = refusal(&answer, StatusCode::BAD_GATEWAY);
+        assert_eq!(error.reason.as_deref(), Some("read_scope"), "{tail}");
+        assert_eq!(error.host.as_deref(), Some("peer"));
+    }
+    assert!(agent.asked().is_empty(), "{:?}", agent.asked());
+
+    // The board host still thinks it may act; the peer's key row says
+    // `read`, and the peer refuses the read itself.
+    let agent = peer_agent(quick(), |pair| {
+        pair.peer
+            .open()
+            .conn()
+            .execute("UPDATE peer_keys SET scope = 'read'", [])
+            .unwrap();
+    })
+    .await;
+    agent.ask_permission();
+    let read = agent.post("prompt", json!({"host": "peer"})).await;
+    let error = refusal(&read, StatusCode::BAD_GATEWAY);
+    assert_eq!(error.reason.as_deref(), Some("read_scope"), "{}", read.body);
+    assert_eq!(error.host.as_deref(), Some("peer"));
+    let answer = agent
+        .post(
+            "prompt/answer",
+            json!({"idempotency_key": "k-1", "host": "peer", "option": 1, "screen": "x"}),
+        )
+        .await;
+    let error = refusal(&answer, StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        error.reason.as_deref(),
+        Some("read_scope"),
+        "{}",
+        answer.body
+    );
+    assert!(agent.keys().is_empty());
+    // A read spends no input: the peer read no screen for it.
+    assert!(
+        !agent
+            .holder
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("screen")),
+        "{:?}",
+        agent.holder.calls()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replayed_peer_answer_types_nothing_twice() {
+    let agent = peer_agent(quick(), |_| {}).await;
+    agent.ask_permission();
+    let shown = agent.post("prompt", json!({"host": "peer"})).await;
+    let shown: Value = serde_json::from_str(&shown.body).unwrap();
+    let screen = shown["prompt"]["screen"].as_str().unwrap().to_owned();
+    let answer = json!({"idempotency_key": "k-1", "host": "peer", "option": 4, "screen": screen});
+
+    // The peer typed, but its result was lost on the way back.
+    agent.lose_results.store(1, Ordering::SeqCst);
+    let lost = agent.post("prompt/answer", answer.clone()).await;
+    let error = refusal(&lost, StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(error.code, "forward_uncertain", "{}", lost.body);
+    assert_eq!(agent.keys().len(), 1);
+
+    // The dialog is up again, the same one: a retry with the same key gets
+    // the first answer back and types nothing.
+    agent.draw_permission();
+    let retry = agent.post("prompt/answer", answer).await;
+    let retry = applied(&retry);
+    assert!(retry.replayed);
+    assert_eq!(retry.host.as_deref(), Some("peer"));
+    assert_eq!(retry.data["sent"]["option"], 4);
+    assert_eq!(agent.keys(), [format!("keys {} 4", agent.pane)]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_board_interrupts_steers_and_stops_a_peer_agent() {
+    let agent = peer_agent(quick(), |_| {}).await;
+    let session = agent.session.clone();
+    agent.set_screen(WORKING);
+    let hook = stop_hook_after_escape(&agent.pair.peer, &agent.holder, &session);
+    let interrupted = agent
+        .post(
+            "interrupt",
+            json!({"idempotency_key": "k-int", "host": "peer"}),
+        )
+        .await;
+    hook.join().unwrap();
+    let interrupted = applied(&interrupted);
+    assert_eq!(interrupted.host.as_deref(), Some("peer"));
+    assert_eq!(
+        interrupted.data["cancel"], "confirmed",
+        "{:?}",
+        interrupted.data
+    );
+    assert_eq!(interrupted.data["session"], session);
+    assert_eq!(agent.keys(), [format!("keys {} esc", agent.pane)]);
+
+    let steered = agent
+        .post(
+            "steer",
+            json!({"idempotency_key": "k-steer", "host": "peer", "text": "use the new API"}),
+        )
+        .await;
+    let steered = applied(&steered);
+    assert_eq!(steered.host.as_deref(), Some("peer"));
+    let steers = |fleet: &Fleet| -> i64 {
+        fleet
+            .open()
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM outbox WHERE kind = 'steer' AND body = 'use the new API'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(steers(&agent.pair.peer), 1);
+    assert_eq!(steers(&agent.pair.board), 0);
+
+    let stopped = agent
+        .post("stop", json!({"idempotency_key": "k-stop", "host": "peer"}))
+        .await;
+    let stopped = applied(&stopped);
+    assert_eq!(stopped.host.as_deref(), Some("peer"));
+    assert_eq!(stopped.data["verb"], "stop");
+    assert_eq!(
+        agent.starter.seen(),
+        [(
+            "stop".to_owned(),
+            "board@test-host".to_owned(),
+            Some("k-stop".to_owned())
+        )]
+    );
+    assert_eq!(
+        agent.asked(),
+        [
+            "mutate POST /api/v1/agents/{session}/interrupt",
+            "mutate POST /api/v1/agents/{session}/steer",
+            "mutate POST /api/v1/agents/{session}/stop",
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_board_pauses_resumes_and_relaunches_a_peer_run() {
+    let agent = peer_agent(quick(), |_| {}).await;
+    let session = agent.session.clone();
+    let paused_until = |fleet: &Fleet| -> Option<String> {
+        fleet
+            .open()
+            .conn()
+            .query_row(
+                "SELECT pause_until FROM runs WHERE id = (SELECT run_id FROM sessions WHERE id = ?1)",
+                [&session],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let until = Timestamp::now().plus_minutes(60).to_string();
+    let paused = agent
+        .post(
+            "pause",
+            json!({"idempotency_key": "k-pause", "host": "peer", "until": until, "reason": "waits on review"}),
+        )
+        .await;
+    assert_eq!(applied(&paused).host.as_deref(), Some("peer"));
+    assert!(paused_until(&agent.pair.peer).is_some());
+
+    let unpaused = agent
+        .post(
+            "unpause",
+            json!({"idempotency_key": "k-unpause", "host": "peer"}),
+        )
+        .await;
+    assert_eq!(applied(&unpaused).host.as_deref(), Some("peer"));
+    assert_eq!(paused_until(&agent.pair.peer), None);
+
+    for (tail, body) in [
+        (
+            "resume",
+            json!({"idempotency_key": "k-resume", "host": "peer"}),
+        ),
+        (
+            "relaunch",
+            json!({"idempotency_key": "k-relaunch", "host": "peer", "note": "start from the tests"}),
+        ),
+    ] {
+        let answer = agent.post(tail, body).await;
+        assert_eq!(applied(&answer).host.as_deref(), Some("peer"), "{tail}");
+    }
+    assert_eq!(
+        agent.starter.seen(),
+        [
+            (
+                "resume".to_owned(),
+                "board@test-host".to_owned(),
+                Some("k-resume".to_owned())
+            ),
+            (
+                "relaunch: start from the tests".to_owned(),
+                "board@test-host".to_owned(),
+                Some("k-relaunch".to_owned())
+            ),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_board_withdraws_a_peer_attention_item() {
+    let agent = peer_agent(quick(), |pair| {
+        // An item about a session that is gone: it no longer applies.
+        add_card(&pair.peer, "a peer card");
+        pair.peer
+            .open()
+            .conn()
+            .execute(
+                "INSERT INTO attention (id, card_id, kind, question, opened_at, subject_session_id)
+                 SELECT '01M7AEQD3P56M1JB0XWF6BRAT1', id, 'recovery', 'Backup failed', ?1, 'gone' FROM cards LIMIT 1",
+                [Timestamp::now().to_string()],
+            )
+            .unwrap();
+    })
+    .await;
+    let path = "/api/v1/attention/01M7AEQD3P56M1JB0XWF6BRAT1/withdraw";
+    let body = json!({"idempotency_key": "k-1", "host": "peer"});
+    let withdrawn = send(
+        &agent.app,
+        mutation("POST", path, body.clone(), &[("cookie", &agent.cookie)]),
+    )
+    .await;
+    let withdrawn = applied(&withdrawn);
+    assert_eq!(withdrawn.host.as_deref(), Some("peer"));
+    let withdrawn_at = |fleet: &Fleet| -> Option<String> {
+        fleet
+            .open()
+            .conn()
+            .query_row(
+                "SELECT withdrawn_at FROM attention WHERE id = '01M7AEQD3P56M1JB0XWF6BRAT1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(None)
+    };
+    assert!(withdrawn_at(&agent.pair.peer).is_some());
+    assert_eq!(withdrawn_at(&agent.pair.board), None);
+    // The same key again is the stored answer.
+    let again = send(
+        &agent.app,
+        mutation("POST", path, body, &[("cookie", &agent.cookie)]),
+    )
+    .await;
+    assert!(applied(&again).replayed);
+    assert_eq!(
+        agent.asked(),
+        ["mutate POST /api/v1/attention/{id}/withdraw"; 2]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_pairing_cannot_send_an_agent_verb() {
+    let agent = peer_agent(quick(), |pair| {
+        read_scope(&pair.board);
+        read_scope(&pair.peer);
+    })
+    .await;
+    agent.set_screen(WORKING);
+    let before = last_seq(&agent.pair.peer);
+    for (tail, body) in verbs() {
+        let answer = agent.post(tail, body).await;
+        let error = refusal(&answer, StatusCode::BAD_GATEWAY);
+        assert_eq!(error.reason.as_deref(), Some("read_scope"), "{tail}");
+        assert_eq!(error.host.as_deref(), Some("peer"), "{tail}");
+    }
+    // Nothing went out, but it may still tail.
+    assert!(agent.asked().is_empty(), "{:?}", agent.asked());
+    let tail = agent.post("terminal/tail", json!({"host": "peer"})).await;
+    assert_eq!(tail.status, StatusCode::OK, "{}", tail.body);
+
+    // The peer refuses a signed verb from a `read` key itself.
+    let mut link = linked(&agent.pair);
+    for (op, body) in [
+        (Op::Interrupt, json!({"idempotency_key": "k-1"})),
+        (Op::Stop, json!({"idempotency_key": "k-1"})),
+        (
+            Op::Steer,
+            json!({"idempotency_key": "k-1", "text": "use the new API"}),
+        ),
+    ] {
+        let order = Order {
+            op,
+            target: Some(agent.session.clone()),
+            body,
+            idempotency_key: "k-1".to_owned(),
+        };
+        let frame = Mutate::signed(
+            &signer(&agent.pair),
+            &agent.pair.peer.host,
+            order,
+            Timestamp::now(),
+        );
+        assert_refused(&agent.pair, link.mutate(frame), "read_scope", before);
+    }
+    assert!(agent.keys().is_empty());
+    assert!(agent.starter.seen().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fleet_caller_cannot_send_a_peer_agent_verb() {
+    let agent = peer_agent(quick(), |_| {}).await;
+    agent.ask_permission();
+    let mut endpoints = verbs();
+    endpoints.push(("prompt", json!({"host": "peer"})));
+    endpoints.push(("terminal/tail", json!({"host": "peer"})));
+    for headers in [vec![], vec![("cookie", "tiller_owner=forged")]] {
+        for (tail, body) in &endpoints {
+            let answer = send(
+                &agent.app,
+                mutation(
+                    "POST",
+                    &pane_path(&agent.session, tail),
+                    body.clone(),
+                    &headers,
+                ),
+            )
+            .await;
+            assert_eq!(
+                answer.status,
+                StatusCode::FORBIDDEN,
+                "{tail}: {}",
+                answer.body
+            );
+        }
+    }
+    assert!(agent.asked().is_empty(), "{:?}", agent.asked());
+    assert!(agent.keys().is_empty());
+    assert!(agent.starter.seen().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forwarded_agent_verb_records_the_forwarded_owner() {
+    let agent = peer_agent(quick(), |_| {}).await;
+    let before = last_seq(&agent.pair.peer);
+    let board_before = last_seq(&agent.pair.board);
+    let until = Timestamp::now().plus_minutes(60).to_string();
+    for (tail, body) in [
+        (
+            "pause",
+            json!({"idempotency_key": "k-pause", "host": "peer", "until": until, "reason": "waits on review"}),
+        ),
+        (
+            "steer",
+            json!({"idempotency_key": "k-steer", "host": "peer", "text": "use the new API"}),
+        ),
+    ] {
+        applied(&agent.post(tail, body).await);
+    }
+    // Written on the peer as the forwarded owner, with the key that signed
+    // it; nothing on the board host.
+    assert_eq!(last_seq(&agent.pair.board), board_before);
+    let store = agent.pair.peer.open();
+    let mut statement = store
+        .conn()
+        .prepare("SELECT kind, actor, payload FROM events WHERE seq > ?1")
+        .unwrap();
+    let events: Vec<(String, String, String)> = statement
+        .query_map([before], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(
+        events.iter().any(|(kind, ..)| kind == "run.paused"),
+        "{events:?}"
+    );
+    assert!(events.len() >= 2, "{events:?}");
+    for (kind, actor, payload) in events {
+        assert_eq!(actor, "board@test-host", "{kind}");
+        let payload: Value = serde_json::from_str(&payload).unwrap();
+        let via = &payload["via_peer"];
+        assert_eq!(
+            via["key_id"],
+            Value::from(agent.pair.key_id.clone()),
+            "{kind}: {payload}"
+        );
+        assert_eq!(via["viewer_label"], "test-host");
+        assert!(via["frame_id"].is_string(), "{payload}");
+    }
+    // The starter's verbs get the same actor and key.
+    applied(
+        &agent
+            .post("stop", json!({"idempotency_key": "k-stop", "host": "peer"}))
+            .await,
+    );
+    assert_eq!(
+        agent.starter.seen(),
+        [(
+            "stop".to_owned(),
+            "board@test-host".to_owned(),
+            Some("k-stop".to_owned())
+        )]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forwarded_agent_verb_passes_the_peers_refusal_back() {
+    let agent = peer_agent(quick(), |_| {}).await;
+    let before = last_seq(&agent.pair.peer);
+    // The peer's store refuses a pause that is not in the future.
+    let past = Timestamp::now().plus_minutes(-60).to_string();
+    let paused = agent
+        .post(
+            "pause",
+            json!({"idempotency_key": "k-pause", "host": "peer", "until": past, "reason": "waits on review"}),
+        )
+        .await;
+    let error = refusal(&paused, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        error.message.contains("is not in the future"),
+        "{}",
+        paused.body
+    );
+    assert_eq!(error.host.as_deref(), Some("peer"));
+
+    // The peer's controls refuse an interrupt of an idle agent.
+    agent.set_screen(include_str!(
+        "../../../panes/tests/fixtures/claude/empty.ansi"
+    ));
+    let idle = agent
+        .post(
+            "interrupt",
+            json!({"idempotency_key": "k-int", "host": "peer"}),
+        )
+        .await;
+    let error = refusal(&idle, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(error.message.contains("is not working"), "{}", idle.body);
+    assert_eq!(error.host.as_deref(), Some("peer"));
+    assert!(agent.keys().is_empty());
+
+    // And its starter's refusal comes back as its own.
+    agent.starter.refuse.store(true, Ordering::SeqCst);
+    let stopped = agent
+        .post("stop", json!({"idempotency_key": "k-stop", "host": "peer"}))
+        .await;
+    let error = refusal(&stopped, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(error.code, "stub_refused");
+    assert_eq!(error.host.as_deref(), Some("peer"));
+
+    // An unknown agent is the peer's 404.
+    let missing = act_on_peer(
+        &agent.app,
+        &agent.cookie,
+        "nope",
+        "stop",
+        json!({"idempotency_key": "k-nope", "host": "peer"}),
+    )
+    .await;
+    let error = refusal(&missing, StatusCode::NOT_FOUND);
+    assert_eq!(error.host.as_deref(), Some("peer"));
+    assert_eq!(last_seq(&agent.pair.peer), before, "a refusal wrote");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forwarded_relaunch_starts_its_agent_on_the_owning_host_only() {
+    let agent = peer_agent(quick(), |_| {}).await;
+    let board_before = last_seq(&agent.pair.board);
+    let relaunched = agent
+        .post(
+            "relaunch",
+            json!({"idempotency_key": "k-1", "host": "peer", "note": "start from the tests", "new_attempt": true}),
+        )
+        .await;
+    assert_eq!(applied(&relaunched).host.as_deref(), Some("peer"));
+    // The peer's own starter ran it; the board host, which has none, wrote
+    // nothing and started nothing.
+    assert_eq!(
+        agent.starter.seen(),
+        [(
+            "relaunch: start from the tests".to_owned(),
+            "board@test-host".to_owned(),
+            Some("k-1".to_owned())
+        )]
+    );
+    assert_eq!(last_seq(&agent.pair.board), board_before);
+
+    // A relaunch for a third host that is not paired goes nowhere.
+    agent.pair.board.remote_host("third");
+    let third = agent
+        .post(
+            "relaunch",
+            json!({"idempotency_key": "k-2", "host": "third", "note": "start from the tests"}),
+        )
+        .await;
+    let error = refusal(&third, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        error.message.contains("not a paired peer"),
+        "{}",
+        third.body
+    );
+
+    // The peer forwards no frame on (G42): a relaunch that names a host is
+    // refused there, and nothing starts.
+    let before = last_seq(&agent.pair.peer);
+    let mut link = linked(&agent.pair);
+    let order = Order {
+        op: Op::Relaunch,
+        target: Some(agent.session.clone()),
+        body: json!({"idempotency_key": "k-3", "host": "third", "note": "start from the tests"}),
+        idempotency_key: "k-3".to_owned(),
+    };
+    let frame = Mutate::signed(
+        &signer(&agent.pair),
+        &agent.pair.peer.host,
+        order,
+        Timestamp::now(),
+    );
+    let (status, body) = link.mutate(frame);
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("names no host"),
+        "{body}"
+    );
+    assert_eq!(last_seq(&agent.pair.peer), before);
+    assert_eq!(agent.starter.seen().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_agent_verb_waits_for_its_proof_past_ten_seconds() {
+    // An interrupt waits up to 10 s for the turn to end, so the board host
+    // waits for a proof verb's result longer than for a query (PROOF_WAIT).
+    assert_eq!(super::PROOF_WAIT, Duration::from_secs(60));
+    assert_eq!(Timing::default().proof, super::PROOF_WAIT);
+    assert!(Timing::default().query <= Duration::from_secs(10));
+    let timing = Timing {
+        proof: super::PROOF_WAIT,
+        ..quick()
+    };
+    let agent = peer_agent(timing, |_| {}).await;
+    agent.set_screen(WORKING);
+    // No Stop hook comes: the peer waits the whole 10 s, then answers.
+    let started = std::time::Instant::now();
+    let interrupted = agent
+        .post(
+            "interrupt",
+            json!({"idempotency_key": "k-int", "host": "peer"}),
+        )
+        .await;
+    let interrupted = applied(&interrupted);
+    assert!(started.elapsed() >= Duration::from_secs(10));
+    assert_eq!(interrupted.host.as_deref(), Some("peer"));
+    assert_eq!(
+        interrupted.data["cancel"], "unconfirmed",
+        "{:?}",
+        interrupted.data
+    );
+    assert_eq!(agent.keys(), [format!("keys {} esc", agent.pane)]);
+}
+
+/// A peer's starter whose stop takes a while: it marks the stop begun,
+/// waits, then marks it done.
+#[derive(Default)]
+struct SlowStop {
+    begun: AtomicBool,
+    done: AtomicBool,
+}
+
+impl OrchestratorStart for SlowStop {
+    fn start(
+        &self,
+        _store: &mut Store,
+        _ctx: &tiller_core::Ctx,
+        _project: &str,
+        _restart: bool,
+    ) -> Result<tiller_core::Applied<tiller_agents::spawn::orchestrator::Orchestrator>, StartError>
+    {
+        Err(StartError::Refused {
+            exit: 5,
+            code: "stub_refused",
+            message: "the stub starts no orchestrator".into(),
+            hint: None,
+            current: None,
+        })
+    }
+
+    fn stop_agent(
+        &self,
+        _store: &mut Store,
+        _ctx: &tiller_core::Ctx,
+        _session: &Session,
+    ) -> Result<Controlled, StartError> {
+        self.begun.store(true, Ordering::SeqCst);
+        std::thread::sleep(ms(500));
+        self.done.store(true, Ordering::SeqCst);
+        Ok(Controlled {
+            applied: tiller_core::Applied {
+                value: json!({"verb": "stop"}),
+                events: Vec::new(),
+                replayed: false,
+            },
+            warning: None,
+        })
+    }
+}
+
+#[test]
+fn a_link_that_ends_mid_proof_lets_the_verb_finish() {
+    let mut pair = pair();
+    let session = pair.peer.worker("p-1");
+    let starter = Arc::new(SlowStop::default());
+    let (ours, theirs) = UnixStream::pair().unwrap();
+    let config = ServeConfig {
+        home: pair.peer.dir.path().to_owned(),
+        from: "test-host".to_owned(),
+        timing: quick(),
+        herdr: None,
+        orchestrators: Some(starter.clone()),
+        holder: None,
+    };
+    let input = BufReader::new(theirs.try_clone().unwrap());
+    let served = std::thread::spawn(move || serve(&config, input, theirs));
+    let mut link = welcomed(&pair, SyncLink::on(ours));
+    let order = Order {
+        op: Op::Stop,
+        target: Some(session),
+        body: json!({"idempotency_key": "k-stop"}),
+        idempotency_key: "k-stop".to_owned(),
+    };
+    let frame = Mutate::signed(&signer(&pair), &pair.peer.host, order, Timestamp::now());
+    link.send(&Frame::Mutate(Box::new(frame)));
+    for _ in 0..500 {
+        if starter.begun.load(Ordering::SeqCst) {
+            break;
+        }
+        std::thread::sleep(ms(10));
+    }
+    assert!(starter.begun.load(Ordering::SeqCst), "the stop never began");
+
+    // The board host's daemon restarts: the link ends mid-proof.
+    drop(link);
+    let _ = served.join().unwrap();
+    assert!(
+        starter.done.load(Ordering::SeqCst),
+        "peer serve returned before the stop finished"
+    );
 }
