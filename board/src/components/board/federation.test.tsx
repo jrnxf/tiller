@@ -1,7 +1,7 @@
 import { QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, onTestFinished, test, vi } from "vitest";
 
 import { hydrateFromSnapshot } from "../../lib/boot";
 import { connectionStore } from "../../lib/connection";
@@ -722,4 +722,85 @@ test("a read pairing's or a down peer's agent shows its pane with no controls", 
     expect(screen.queryByRole("group", { name: "Answer" })).toBeNull();
     cleanup();
   }
+});
+
+// A stream that goes live at once, and the terminal requests the stage made.
+function liveTerminal() {
+  const api = globalThis.fetch;
+  const asked: { path: string; body: Record<string, unknown> }[] = [];
+  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input);
+    if (!/\/terminal(\/\w+)?$/.test(path)) return api(input, init);
+    asked.push({ path, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+    if (!path.endsWith("/terminal")) return Promise.resolve(new Response("{}", { status: 200 }));
+    const lines = [
+      { type: "size", cols: 80, rows: 24 },
+      { type: "frame", seq: 1, full: true, bytes: btoa("screen") },
+    ];
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const line of lines) {
+          controller.enqueue(new TextEncoder().encode(`${JSON.stringify(line)}\n`));
+        }
+      },
+    });
+    return Promise.resolve(new Response(body, { status: 200 }));
+  });
+  return asked;
+}
+
+// A laid out page, which jsdom lacks, so the stage measures a room for the Fit.
+function stubLayout() {
+  for (const [name, value] of [
+    ["offsetHeight", 400],
+    ["clientWidth", 1000],
+    ["clientHeight", 600],
+  ] as const) {
+    vi.spyOn(HTMLElement.prototype, name, "get").mockReturnValue(value);
+  }
+}
+
+test.each([
+  ["host-d", true],
+  ["host-f", false],
+])("%s's stage asks for the Fit only when its pairing acts", async (host, fits) => {
+  stubApi("federated");
+  stubLayout();
+  const asked = liveTerminal();
+  await peerStage(host, true);
+  await waitFor(() => expect(asked).not.toHaveLength(0));
+  if (fits) {
+    await waitFor(() => expect(asked.some(({ body }) => "fit" in body)).toBe(true));
+  } else {
+    await act(() => new Promise((resolve) => setTimeout(resolve, 600)));
+    expect(asked.filter(({ body }) => "fit" in body)).toEqual([]);
+    expect(asked.filter(({ path }) => path.endsWith("/fit"))).toEqual([]);
+    expect(screen.getByTestId("toast").textContent).not.toContain("kept its own size");
+  }
+});
+
+test("a view only peer's soft keys are off, and a tap sends no keys", async () => {
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: query.includes("max-width"),
+    media: query,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    addListener: () => {},
+    removeListener: () => {},
+  }));
+  Element.prototype.scrollTo = () => {};
+  onTestFinished(() => {
+    Reflect.deleteProperty(Element.prototype, "scrollTo");
+  });
+  stubApi("federated");
+  const asked = liveTerminal();
+  await peerStage("host-f", true);
+  fireEvent.click(await screen.findByRole("button", { name: "Expand the terminal" }));
+  const keys = await screen.findByRole("group", { name: "Keys a phone lacks" });
+  await waitFor(() => expect(screen.getByText("View only")).toBeTruthy());
+  const esc = within(keys).getByRole("button", { name: "Esc" }) as HTMLButtonElement;
+  expect(esc.disabled).toBe(true);
+  fireEvent.click(esc);
+  await flush();
+  expect(asked.filter(({ path }) => path.endsWith("/terminal/input"))).toEqual([]);
 });

@@ -13,7 +13,14 @@ import type {
   TimelineEntry,
   TimelineResponse,
 } from "../../lib/api-types";
-import { HOST_PROJECT, focusReason, hostName, ownerOf, shownId } from "../../lib/peers";
+import {
+  HOST_PROJECT,
+  VIEW_ONLY_REASON,
+  focusReason,
+  hostName,
+  ownerOf,
+  shownId,
+} from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import {
   agentsQuery,
@@ -173,12 +180,14 @@ function RunCard({
   run,
   owner,
   canAct,
+  viewOnly,
   name,
 }: {
   run: CardRun;
   owner: string | undefined;
   // False for a peer whose link is not live or whose pairing is read-only.
   canAct: boolean;
+  viewOnly: boolean;
   name: string;
 }) {
   const off = focusReason(owner);
@@ -304,6 +313,7 @@ function RunCard({
           }
           actions={openPane}
           peer={owner}
+          viewOnly={viewOnly}
         />
       ) : null}
     </div>
@@ -789,6 +799,7 @@ export function CardPage({
                   run={run}
                   owner={ownerOf(column)}
                   canAct={standing.canAct}
+                  viewOnly={standing.reason === VIEW_ONLY_REASON}
                   name={id}
                 />
               ))

@@ -651,17 +651,18 @@ export function LiveTerminal({
   const [view, setView] = useState<View>(popup ? (phone ? "sheet" : "dialog") : "inline");
   const [scale, setScale] = useState<Scale>(popup && phone ? "one" : "fit");
   const [font, setFont] = useState(BASE_FONT);
-  // The Fit is the stage's while the board is on screen, the stage is not
-  // expanded, and the pane has not refused it. It holds on a phone too,
-  // where the sheet keeps the stage's size so the pane does not resize each
-  // time the owner types.
+  // The Fit is the stage's while the board is on screen, the pairing acts,
+  // the stage is not expanded, and the pane has not refused it. It holds on a
+  // phone too, where the sheet keeps the stage's size so the pane does not
+  // resize each time the owner types.
   const stageFont = useStore(stageFontStore);
   // Without the Fit, the stage's room can hold the text smaller than the
   // stage font: the size it shows, and whether one size larger still fits.
   const [roomFont, setRoomFont] = useState<RoomFont>({ shown: 0, next: true });
   const visible = useVisible();
   const [unfit, setUnfit] = useState(false);
-  const fitting = stage && !unfit && visible && (view === "inline" || view === "sheet");
+  const fitting =
+    stage && !viewOnly && !unfit && visible && (view === "inline" || view === "sheet");
   const fittingRef = useRef(fitting);
   // The stage's room in cells at the stage's font, kept up by the layout.
   const fitTarget = useRef<TerminalSize | null>(null);
@@ -1508,7 +1509,7 @@ export function LiveTerminal({
                   type="button"
                   className={`mir-key${wide ? " w" : ""}`}
                   aria-label={name}
-                  disabled={!live}
+                  disabled={!live || viewOnly}
                   // Keep the screen focused, so the phone keyboard stays up.
                   onPointerDown={(event) => event.preventDefault()}
                   onClick={() => send(key)}

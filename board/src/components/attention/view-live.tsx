@@ -3,7 +3,8 @@ import { useState } from "react";
 
 import { TerminalIcon } from "../board/icons";
 import { LiveTerminal } from "../board/live-terminal";
-import { ownerOf } from "../../lib/peers";
+import { VIEW_ONLY_REASON, ownerOf } from "../../lib/peers";
+import { useStanding } from "../board/peer-state";
 import { agentTitle, useSessionAgent } from "./agent-name";
 
 // View live: the session's own live terminal, the Agents view's expanded
@@ -12,6 +13,7 @@ export function ViewLive({ sessionId }: { sessionId: string }) {
   const [open, setOpen] = useState(false);
   const { agent } = useSessionAgent(sessionId);
   const name = agentTitle(agent);
+  const standing = useStanding(agent ?? {});
   return (
     <>
       <button
@@ -39,6 +41,7 @@ export function ViewLive({ sessionId }: { sessionId: string }) {
             </Link>
           }
           peer={agent ? ownerOf(agent) : undefined}
+          viewOnly={standing.reason === VIEW_ONLY_REASON}
           onClose={() => setOpen(false)}
         />
       ) : null}
