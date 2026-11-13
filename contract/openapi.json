@@ -4629,7 +4629,7 @@
           {
             "name": "retired",
             "in": "query",
-            "description": "`true` lists this host's retired projects instead.",
+            "description": "`true` lists the retired projects instead: this host's, or with\n`host` that peer's, read from it.",
             "required": false,
             "schema": {
               "type": [
@@ -4725,6 +4725,18 @@
         "operationId": "project_checkout",
         "parameters": [
           {
+            "name": "host",
+            "in": "query",
+            "description": "A paired peer's label or id: the folder is checked on that host,\nunder its own `spawn.checkouts_root` (D22).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
             "name": "project",
             "in": "query",
             "description": "The project id; an empty Local checkout folder is named after it.\nAbsent is the same as empty: the board drops empty parameters.",
@@ -4806,6 +4818,18 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "host",
+            "in": "query",
+            "description": "A host id or label.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -4819,6 +4843,16 @@
             }
           },
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`peer_unreachable`: the peer `host` names did not answer",
             "content": {
               "application/json": {
                 "schema": {
@@ -5024,6 +5058,18 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "host",
+            "in": "query",
+            "description": "A host id or label.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -5037,6 +5083,16 @@
             }
           },
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`peer_unreachable`: the peer `host` names did not answer",
             "content": {
               "application/json": {
                 "schema": {
@@ -5383,6 +5439,18 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "host",
+            "in": "query",
+            "description": "A host id or label.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -5396,6 +5464,16 @@
             }
           },
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`peer_unreachable`: the peer `host` names did not answer",
             "content": {
               "application/json": {
                 "schema": {
@@ -6103,7 +6181,7 @@
       },
       "AddProject": {
         "type": "object",
-        "description": "`POST /api/v1/projects`: register a project on this host, as `tiller\nproject add` does with the fields the board asks for. `--checks`,\n`--remote`, `--default-branch` and the deploy flags stay CLI-only.",
+        "description": "`POST /api/v1/projects`: register a project on this host or a peer, as `tiller\nproject add` does with the fields the board asks for. `--checks`,\n`--remote`, `--default-branch` and the deploy flags stay CLI-only.",
         "required": [
           "idempotency_key",
           "id",
@@ -6138,7 +6216,7 @@
               "string",
               "null"
             ],
-            "description": "A paired peer's label. Refused: a project add is not forwarded."
+            "description": "A paired peer's label: forward the mutation to it (`protocol.md`\n7.4, 10.3, D22). Absent means this host."
           },
           "id": {
             "type": "string"
@@ -7793,7 +7871,7 @@
       },
       "DeleteProject": {
         "type": "object",
-        "description": "`POST /api/v1/projects/{id}/delete`: the hard delete of one project.\nLocal to the owning host; it is not forwarded to a peer.",
+        "description": "`POST /api/v1/projects/{id}/delete`: the hard delete of one project.\nWith a peer `host` it is forwarded to that host, which checks `confirm`\nagain (D22).",
         "required": [
           "idempotency_key",
           "confirm"
@@ -7808,7 +7886,7 @@
               "string",
               "null"
             ],
-            "description": "A paired peer's label. Refused: a project delete is not forwarded."
+            "description": "A paired peer's label: forward the mutation to it (`protocol.md`\n7.4, 10.3, D22). Absent means this host."
           },
           "idempotency_key": {
             "type": "string"
@@ -8129,7 +8207,7 @@
       },
       "EditProject": {
         "type": "object",
-        "description": "`PATCH /api/v1/projects/{id}`: `tiller project edit` from the board,\nagainst the `rev` the board read. An absent field stays as it is. An\nempty text clears `repo`, `remote`, `deploy_workflow` and\n`deploy_environment`, as an empty CLI flag does. Local to the owning\nhost; it is not forwarded to a peer.",
+        "description": "`PATCH /api/v1/projects/{id}`: `tiller project edit` from the board,\nagainst the `rev` the board read. An absent field stays as it is. An\nempty text clears `repo`, `remote`, `deploy_workflow` and\n`deploy_environment`, as an empty CLI flag does. With a peer `host` it is\nforwarded to that host, which checks it again (D22).",
         "required": [
           "idempotency_key",
           "rev"
@@ -8184,7 +8262,7 @@
               "string",
               "null"
             ],
-            "description": "A paired peer's label. Refused: a project edit is not forwarded."
+            "description": "A paired peer's label: forward the mutation to it (`protocol.md`\n7.4, 10.3, D22). Absent means this host."
           },
           "idempotency_key": {
             "type": "string"
@@ -11431,7 +11509,7 @@
       },
       "RetireProject": {
         "type": "object",
-        "description": "`POST /api/v1/projects/{id}/retire`: retire one project, off the board.\nLocal to the owning host; it is not forwarded to a peer.",
+        "description": "`POST /api/v1/projects/{id}/retire`: retire one project, off the board.\nWith a peer `host` it is forwarded to that host (D22).",
         "required": [
           "idempotency_key"
         ],
@@ -11441,7 +11519,7 @@
               "string",
               "null"
             ],
-            "description": "A paired peer's label. Refused: a project retire is not forwarded."
+            "description": "A paired peer's label: forward the mutation to it (`protocol.md`\n7.4, 10.3, D22). Absent means this host."
           },
           "idempotency_key": {
             "type": "string"

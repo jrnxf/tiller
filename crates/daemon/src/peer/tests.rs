@@ -55,6 +55,7 @@ fn quick() -> Timing {
         refresh: ms(100),
         query: ms(1000),
         proof: ms(3000),
+        project: ms(5000),
         skew: Duration::from_secs(120),
         backoff: [ms(50); 4],
         refused_retry: ms(200),
@@ -1317,9 +1318,9 @@ async fn spawn_not_forwardable_from_the_board() {
             json!({"idempotency_key": "k-3", "host": "peer", "label": "planned"}),
         ),
         (
-            "PATCH",
-            "/api/v1/projects/alpha",
-            json!({"idempotency_key": "k-4", "host": "peer", "rev": 1, "capacity": 1}),
+            "POST",
+            "/api/v1/config",
+            json!({"idempotency_key": "k-4", "host": "peer", "key": "spawn.claude", "value": "claude"}),
         ),
         (
             "POST",
@@ -4396,4 +4397,559 @@ fn a_link_that_ends_mid_proof_lets_the_verb_finish() {
         starter.done.load(Ordering::SeqCst),
         "peer serve returned before the stop finished"
     );
+}
+
+// -- peer project management (D22) ---------------------------------------------
+
+/// A plain project `id` on `fleet`, as `tiller project add` leaves it.
+fn add_project(fleet: &Fleet, id: &str) {
+    fleet
+        .open()
+        .project_add(
+            &tiller_core::store::Ctx::new(tiller_core::store::Actor::Owner),
+            tiller_core::state::projects::NewProject {
+                id: id.into(),
+                name: id.into(),
+                repo: None,
+                remote: None,
+                default_branch: None,
+                delivery: tiller_core::domain::Delivery::DirectPr,
+                checks: None,
+                capacity: None,
+                deploy_workflow: None,
+                deploy_environment: None,
+                deploy_timeout_minutes: None,
+            },
+        )
+        .unwrap();
+}
+
+/// The number of `projects` rows named `id` on `fleet`, retired or not.
+fn projects_named(fleet: &Fleet, id: &str) -> i64 {
+    fleet
+        .open()
+        .conn()
+        .query_row("SELECT count(*) FROM projects WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+/// The four project mutations of D22 as the board sends them for `host`,
+/// each on project `id`: method, path and body.
+fn project_actions(id: &str, host: &str) -> [(&'static str, String, Value); 4] {
+    [
+        (
+            "POST",
+            "/api/v1/projects".to_owned(),
+            json!({"idempotency_key": "k-pa-add", "host": host, "id": id,
+                "repo": format!("example/{id}"), "delivery": "direct-pr"}),
+        ),
+        (
+            "PATCH",
+            format!("/api/v1/projects/{id}"),
+            json!({"idempotency_key": "k-pa-edit", "host": host, "rev": 1, "name": "Renamed"}),
+        ),
+        (
+            "POST",
+            format!("/api/v1/projects/{id}/retire"),
+            json!({"idempotency_key": "k-pa-retire", "host": host, "stop_agents": false}),
+        ),
+        (
+            "POST",
+            format!("/api/v1/projects/{id}/delete"),
+            json!({"idempotency_key": "k-pa-delete", "host": host, "confirm": id}),
+        ),
+    ]
+}
+
+/// The same four as signed `mutate` frames for the peer, as the board host
+/// sends them: the body without `host`.
+fn project_frames(pair: &Pair, id: &str) -> Vec<Mutate> {
+    let orders = [
+        (
+            Op::ProjectAdd,
+            None,
+            json!({"id": id, "repo": format!("example/{id}"), "delivery": "direct-pr"}),
+        ),
+        (
+            Op::ProjectEdit,
+            Some(id),
+            json!({"rev": 1, "name": "Renamed"}),
+        ),
+        (Op::ProjectRetire, Some(id), json!({"stop_agents": false})),
+        (Op::ProjectDelete, Some(id), json!({"confirm": id})),
+    ];
+    orders
+        .into_iter()
+        .enumerate()
+        .map(|(n, (op, target, mut body))| {
+            let key = format!("k-pf-{n}");
+            body["idempotency_key"] = json!(key);
+            Mutate::signed(
+                &signer(pair),
+                &pair.peer.host,
+                Order {
+                    op,
+                    target: target.map(str::to_owned),
+                    body,
+                    idempotency_key: key,
+                },
+                Timestamp::now(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_board_adds_edits_retires_and_deletes_a_peer_project() {
+    let pair = pair();
+    let (peers, _stop) = start(pair.board.dir.path(), Wire::new(pair.peer.dir.path()));
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    let board_before = last_seq(&pair.board);
+    let peer_before = last_seq(&pair.peer);
+    let act = |method: &str, path: &str, body: Value| {
+        mutation(method, path, body, &[("cookie", cookie.as_str())])
+    };
+
+    // Add: the peer makes the project, and the same key again is its replay.
+    let add = json!({"idempotency_key": "k-add", "host": "peer", "id": "gamma",
+        "repo": "example/gamma", "delivery": "direct-pr"});
+    let added = applied(&send(&app, act("POST", "/api/v1/projects", add.clone())).await);
+    assert_eq!(added.host.as_deref(), Some("peer"));
+    let after_add = last_seq(&pair.peer);
+    let again = applied(&send(&app, act("POST", "/api/v1/projects", add)).await);
+    assert!(again.replayed, "the same key again was not a replay");
+    assert_eq!(again.events, added.events);
+    assert_eq!(last_seq(&pair.peer), after_add, "a replay wrote again");
+    assert_eq!(projects_named(&pair.peer, "gamma"), 1);
+
+    // Edit, from the fields the board reads from the peer.
+    let fields = get(&app, "/api/v1/projects/gamma?host=peer").await;
+    assert_eq!(fields.status, StatusCode::OK, "{}", fields.body);
+    let fields: Value = serde_json::from_str(&fields.body).unwrap();
+    assert_eq!(fields["repo"], "example/gamma", "{fields}");
+    let edit = json!({"idempotency_key": "k-edit", "host": "peer", "rev": fields["rev"],
+        "name": "Gamma on the peer"});
+    applied(&send(&app, act("PATCH", "/api/v1/projects/gamma", edit)).await);
+    let name: String = pair
+        .peer
+        .open()
+        .conn()
+        .query_row("SELECT name FROM projects WHERE id = 'gamma'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(name, "Gamma on the peer");
+
+    // Retire, after its preview, and the peer's archive lists it.
+    let preview = get(&app, "/api/v1/projects/gamma/retire?host=peer").await;
+    assert_eq!(preview.status, StatusCode::OK, "{}", preview.body);
+    let preview: Value = serde_json::from_str(&preview.body).unwrap();
+    assert!(preview["refused"].is_null(), "{preview}");
+    let retire = json!({"idempotency_key": "k-retire", "host": "peer", "stop_agents": false});
+    applied(&send(&app, act("POST", "/api/v1/projects/gamma/retire", retire)).await);
+    let archived = get(&app, "/api/v1/projects?retired=true&host=peer").await;
+    assert_eq!(archived.status, StatusCode::OK, "{}", archived.body);
+    let archived: Value = serde_json::from_str(&archived.body).unwrap();
+    assert_eq!(archived["projects"][0]["id"], "gamma", "{archived}");
+    let local = get(&app, "/api/v1/projects?retired=true").await;
+    assert!(!local.body.contains("gamma"), "{}", local.body);
+
+    // Delete, after its preview, with the id typed again.
+    let preview = get(&app, "/api/v1/projects/gamma/delete?host=peer").await;
+    assert_eq!(preview.status, StatusCode::OK, "{}", preview.body);
+    let preview: Value = serde_json::from_str(&preview.body).unwrap();
+    assert_eq!(preview["project"], "gamma", "{preview}");
+    assert!(preview["refused"].is_null(), "{preview}");
+    let delete = json!({"idempotency_key": "k-delete", "host": "peer", "confirm": "gamma"});
+    let deleted = applied(&send(&app, act("POST", "/api/v1/projects/gamma/delete", delete)).await);
+    assert_eq!(deleted.host.as_deref(), Some("peer"));
+    assert_eq!(projects_named(&pair.peer, "gamma"), 0);
+
+    // Nothing on the board host; on the peer, every event is the forwarded
+    // owner's, with the key that signed it, so the peer records who deleted.
+    assert_eq!(last_seq(&pair.board), board_before);
+    assert_eq!(projects_named(&pair.board, "gamma"), 0);
+    let store = pair.peer.open();
+    let mut statement = store
+        .conn()
+        .prepare("SELECT kind, actor, payload FROM events WHERE seq > ?1")
+        .unwrap();
+    let events: Vec<(String, String, String)> = statement
+        .query_map([peer_before], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    // The delete takes the project's own events with it: its tombstone is
+    // what is left, and it names the board that sent it.
+    let kinds: Vec<&str> = events.iter().map(|(kind, _, _)| kind.as_str()).collect();
+    assert_eq!(kinds, ["project.deleted"], "{events:?}");
+    for (kind, actor, payload) in &events {
+        assert_eq!(actor, "board@test-host", "{kind}");
+        let payload: Value = serde_json::from_str(payload).unwrap();
+        let via = &payload["via_peer"];
+        assert_eq!(
+            via["key_id"],
+            Value::from(pair.key_id.clone()),
+            "{kind}: {payload}"
+        );
+        assert_eq!(via["viewer_label"], "test-host", "{kind}: {payload}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_board_adds_a_peer_project_with_the_peers_checkout_rules() {
+    let pair = pair();
+    let code = tempfile::tempdir().unwrap();
+    let board_root = code.path().join("board-code");
+    let peer_root = code.path().join("peer-code");
+    for (fleet, root) in [(&pair.board, &board_root), (&pair.peer, &peer_root)] {
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(
+            fleet.dir.path().join("config.toml"),
+            format!("[spawn]\ncheckouts_root = \"{}\"\n", root.display()),
+        )
+        .unwrap();
+    }
+    let board_config = std::fs::read_to_string(pair.board.dir.path().join("config.toml")).unwrap();
+    let (peers, _stop) = start(pair.board.dir.path(), Wire::new(pair.peer.dir.path()));
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    let add = |key: &str, repo: &str, checkout: Value| {
+        mutation(
+            "POST",
+            "/api/v1/projects",
+            json!({"idempotency_key": key, "host": "peer", "id": "gamma", "repo": repo,
+                "delivery": "direct-pr", "checkout": checkout}),
+            &[("cookie", cookie.as_str())],
+        )
+    };
+
+    // The Add dialog's check reads the peer's own default folder.
+    let check = get(
+        &app,
+        "/api/v1/projects/checkout?host=peer&project=gamma&repo=example/gamma&clone=true",
+    )
+    .await;
+    assert_eq!(check.status, StatusCode::OK, "{}", check.body);
+    let check: Value = serde_json::from_str(&check.body).unwrap();
+    let default = peer_root.join("gamma").display().to_string();
+    assert_eq!(check["path"], Value::from(default.clone()), "{check}");
+    assert!(check["problem"].is_null(), "{check}");
+
+    // A folder fine on the board host is outside the peer's root; a folder
+    // that is not empty is no place to clone; a repo that is not
+    // `owner/name` fails the GitHub check. The peer refuses each.
+    let full = peer_root.join("full");
+    std::fs::create_dir_all(full.join("src")).unwrap();
+    let before = last_seq(&pair.peer);
+    for (key, repo, checkout, why) in [
+        (
+            "k-co-1",
+            "example/gamma",
+            json!({"path": board_root.join("gamma").display().to_string(), "clone": true}),
+            format!(
+                "is not under spawn.checkouts_root ({})",
+                peer_root.display()
+            ),
+        ),
+        (
+            "k-co-2",
+            "example/gamma",
+            json!({"path": full.display().to_string(), "clone": true}),
+            format!("{} is not empty", full.display()),
+        ),
+        (
+            "k-co-3",
+            "not a repo",
+            json!({"path": default.clone(), "clone": true}),
+            "owner/name".to_owned(),
+        ),
+    ] {
+        let answer = send(&app, add(key, repo, checkout)).await;
+        assert!(answer.status.is_client_error(), "{key}: {}", answer.body);
+        let error = refusal(&answer, answer.status);
+        assert!(error.message.contains(&why), "{key}: {}", error.message);
+        assert_eq!(error.host.as_deref(), Some("peer"), "{key}");
+    }
+    assert_eq!(last_seq(&pair.peer), before);
+
+    // An existing checkout under the peer's root is set in the peer's own
+    // config; the board host's config is untouched.
+    let made = peer_root.join("gamma");
+    std::fs::create_dir_all(&made).unwrap();
+    for args in [
+        vec!["init", "--quiet", "-b", "main"],
+        vec![
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/gamma.git",
+        ],
+    ] {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&made)
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+    }
+    let answer = send(
+        &app,
+        add(
+            "k-co-4",
+            "example/gamma",
+            json!({"path": default.clone(), "clone": false}),
+        ),
+    )
+    .await;
+    assert_eq!(applied(&answer).host.as_deref(), Some("peer"));
+    let peer_config = std::fs::read_to_string(pair.peer.dir.path().join("config.toml")).unwrap();
+    assert!(peer_config.contains("gamma"), "{peer_config}");
+    assert!(peer_config.contains(&default), "{peer_config}");
+    assert_eq!(
+        std::fs::read_to_string(pair.board.dir.path().join("config.toml")).unwrap(),
+        board_config
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_project_refusal_passes_back_with_its_host() {
+    let pair = pair();
+    add_project(&pair.peer, "gamma");
+    add_project(&pair.board, "gamma");
+    let (peers, _stop) = start(pair.board.dir.path(), Wire::new(pair.peer.dir.path()));
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    let before = last_seq(&pair.peer);
+    let act = |method: &str, path: &str, body: Value| {
+        mutation(method, path, body, &[("cookie", cookie.as_str())])
+    };
+
+    // The same request here and on the peer: the peer's own refusal, the
+    // same as this host's, with `host`.
+    for (method, path, body) in [
+        // An id that another project has.
+        (
+            "POST",
+            "/api/v1/projects".to_owned(),
+            json!({"idempotency_key": "k-r-1", "id": "gamma", "name": "Another gamma",
+                "delivery": "direct-pr"}),
+        ),
+        // An id that breaks the id rules.
+        (
+            "POST",
+            "/api/v1/projects".to_owned(),
+            json!({"idempotency_key": "k-r-2", "id": "Not An Id", "delivery": "direct-pr"}),
+        ),
+        // A stale rev.
+        (
+            "PATCH",
+            "/api/v1/projects/gamma".to_owned(),
+            json!({"idempotency_key": "k-r-3", "rev": 99, "name": "Stale"}),
+        ),
+    ] {
+        let here = send(&app, act(method, &path, body.clone())).await;
+        let mut there_body = body;
+        there_body["host"] = json!("peer");
+        there_body["idempotency_key"] = json!(format!(
+            "{}-peer",
+            there_body["idempotency_key"].as_str().unwrap()
+        ));
+        let there = send(&app, act(method, &path, there_body)).await;
+        assert!(here.status.is_client_error(), "{path}: {}", here.body);
+        assert_eq!(there.status, here.status, "{path}: {}", there.body);
+        let here = refusal(&here, here.status);
+        let there = refusal(&there, there.status);
+        assert_eq!(there.code, here.code, "{path}");
+        assert_eq!(there.message, here.message, "{path}");
+        assert_eq!(there.host.as_deref(), Some("peer"), "{path}");
+        assert_eq!(here.host, None, "{path}");
+    }
+
+    // A project the peer does not have is its 404, for an action and for
+    // the preview the board reads first.
+    let missing = send(
+        &app,
+        act(
+            "POST",
+            "/api/v1/projects/nosuch/retire",
+            json!({"idempotency_key": "k-r-4", "host": "peer"}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        refusal(&missing, StatusCode::NOT_FOUND).host.as_deref(),
+        Some("peer")
+    );
+    let missing = get(&app, "/api/v1/projects/nosuch/delete?host=peer").await;
+    assert_eq!(
+        refusal(&missing, StatusCode::NOT_FOUND).host.as_deref(),
+        Some("peer")
+    );
+    assert_eq!(last_seq(&pair.peer), before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_delete_needs_the_typed_id() {
+    let pair = pair();
+    add_project(&pair.peer, "gamma");
+    let wire = Wire::new(pair.peer.dir.path());
+    let sent = wire.sent.clone();
+    let (peers, _stop) = start(pair.board.dir.path(), wire);
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    let before = last_seq(&pair.peer);
+
+    // The board host refuses a wrong id before it sends anything.
+    let answer = send(
+        &app,
+        mutation(
+            "POST",
+            "/api/v1/projects/gamma/delete",
+            json!({"idempotency_key": "k-d-1", "host": "peer", "confirm": "gamm"}),
+            &[("cookie", cookie.as_str())],
+        ),
+    )
+    .await;
+    let error = refusal(&answer, StatusCode::BAD_REQUEST);
+    assert!(error.message.contains("gamma"), "{}", error.message);
+    assert!(!wire_text(&sent).contains(r#""type":"mutate""#));
+
+    // The peer checks it again: a signed frame with the wrong id is refused
+    // there, and the project stays.
+    let mut link = linked(&pair);
+    let frame = Mutate::signed(
+        &signer(&pair),
+        &pair.peer.host,
+        Order {
+            op: Op::ProjectDelete,
+            target: Some("gamma".to_owned()),
+            body: json!({"idempotency_key": "k-d-2", "confirm": "alpha"}),
+            idempotency_key: "k-d-2".to_owned(),
+        },
+        Timestamp::now(),
+    );
+    let (status, body) = link.mutate(frame);
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(last_seq(&pair.peer), before);
+    assert_eq!(projects_named(&pair.peer, "gamma"), 1);
+}
+
+#[test]
+fn a_peer_with_accept_off_refuses_project_management() {
+    // Links turned off after the hello: the next frame is refused and the
+    // link ends, so each op goes on a link of its own.
+    let pair = pair();
+    add_project(&pair.peer, "gamma");
+    let config = pair.peer.dir.path().join("config.toml");
+    let before = last_seq(&pair.peer);
+    for frame in project_frames(&pair, "gamma") {
+        std::fs::write(&config, "[federation]\naccept = true\n").unwrap();
+        let mut link = linked(&pair);
+        std::fs::write(&config, "[federation]\naccept = false\n").unwrap();
+        let op = frame.op.clone();
+        link.send(&Frame::Mutate(Box::new(frame)));
+        loop {
+            match link.next() {
+                Frame::Refused { reason, .. } => {
+                    assert_eq!(reason, "accept_off", "{op}");
+                    break;
+                }
+                Frame::Event(_) => {}
+                frame => panic!("{op}: expected a refusal, got {frame:?}"),
+            }
+        }
+    }
+    assert_eq!(last_seq(&pair.peer), before, "a refused mutate wrote");
+    assert_eq!(projects_named(&pair.peer, "gamma"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_project_action_needs_the_board_credential() {
+    // No cookie, a forged one, or a fleet caller's token: the board host
+    // refuses each before it sends anything.
+    let pair = pair();
+    add_project(&pair.peer, "gamma");
+    let wire = Wire::new(pair.peer.dir.path());
+    let sent = wire.sent.clone();
+    let (peers, _stop) = start(pair.board.dir.path(), wire);
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    let before = last_seq(&pair.peer);
+    for headers in [
+        vec![],
+        vec![("cookie", "tiller_owner=forged")],
+        vec![("authorization", "Bearer not-the-owner")],
+    ] {
+        for (method, path, body) in project_actions("gamma", "peer") {
+            let answer = send(&app, mutation(method, &path, body, &headers)).await;
+            assert_eq!(
+                answer.status,
+                StatusCode::FORBIDDEN,
+                "{path}: {}",
+                answer.body
+            );
+        }
+    }
+    assert_eq!(last_seq(&pair.peer), before);
+    assert!(!wire_text(&sent).contains(r#""type":"mutate""#));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_pairing_cannot_manage_a_peer_project() {
+    let pair = pair();
+    add_project(&pair.peer, "gamma");
+    read_scope(&pair.board);
+    read_scope(&pair.peer);
+    let wire = Wire::new(pair.peer.dir.path());
+    let sent = wire.sent.clone();
+    let (peers, _stop) = start(pair.board.dir.path(), wire);
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    let before = (last_seq(&pair.board), last_seq(&pair.peer));
+
+    // On the board host: each action and each read behind it is refused,
+    // and no mutate goes out.
+    for (method, path, body) in project_actions("gamma", "peer") {
+        let answer = send(
+            &app,
+            mutation(method, &path, body, &[("cookie", cookie.as_str())]),
+        )
+        .await;
+        let error = refusal(&answer, StatusCode::BAD_GATEWAY);
+        assert_eq!(error.reason.as_deref(), Some("read_scope"), "{path}");
+        assert_eq!(error.host.as_deref(), Some("peer"), "{path}");
+    }
+    for path in [
+        "/api/v1/projects/gamma?host=peer",
+        "/api/v1/projects/gamma/retire?host=peer",
+        "/api/v1/projects/gamma/delete?host=peer",
+        "/api/v1/projects?retired=true&host=peer",
+        "/api/v1/projects/checkout?host=peer&project=gamma",
+    ] {
+        let answer = get(&app, path).await;
+        assert!(!answer.status.is_success(), "{path}: {}", answer.body);
+        let error = refusal(&answer, answer.status);
+        assert_eq!(error.reason.as_deref(), Some("read_scope"), "{path}");
+    }
+    assert!(!wire_text(&sent).contains(r#""type":"mutate""#));
+
+    // On the peer: a signed frame under the read key is refused there too.
+    let mut link = linked(&pair);
+    for frame in project_frames(&pair, "gamma") {
+        assert_refused(&pair, link.mutate(frame), "read_scope", before.1);
+    }
+    assert_eq!((last_seq(&pair.board), last_seq(&pair.peer)), before);
+    assert_eq!(projects_named(&pair.peer, "gamma"), 1);
 }

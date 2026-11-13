@@ -177,6 +177,12 @@ impl World {
     /// leave both homes (the commands need a terminal), then starts both
     /// daemons. The board host's reaches the peer through the SSH shim.
     fn start() -> Self {
+        Self::start_with("")
+    }
+
+    /// [`World::start`], with `exports` (shell `export` lines) set for the
+    /// peer's `peer serve` under the shim.
+    fn start_with(exports: &str) -> Self {
         let board = Fleet::new();
         let peer = Fleet::new();
 
@@ -242,13 +248,17 @@ impl World {
                 },
             )
             .unwrap();
-        Self::run(board, peer)
+        Self::run_with(board, peer, exports)
     }
 
     /// Starts both homes' daemons, the board host's with the SSH shim.
     fn run(board: Fleet, peer: Fleet) -> Self {
+        Self::run_with(board, peer, "")
+    }
+
+    fn run_with(board: Fleet, peer: Fleet, exports: &str) -> Self {
         let serve_pid = board.dir.path().join("serve.pid");
-        let shim = write_shim(board.dir.path(), peer.dir.path(), &serve_pid);
+        let shim = write_shim(board.dir.path(), peer.dir.path(), &serve_pid, exports);
         let peer_daemon = Daemon::start(peer.dir.path(), None);
         let board_daemon = Daemon::start(board.dir.path(), Some(&shim));
         let token = auth::mint_login(board.dir.path(), Timestamp::now())
@@ -273,9 +283,14 @@ impl World {
     }
 
     fn post(&self, path: &str, body: &Value) -> (u16, Value) {
+        self.send("POST", path, body)
+    }
+
+    /// A board mutation with `method`, with the owner's cookie.
+    fn send(&self, method: &str, path: &str, body: &Value) -> (u16, Value) {
         let (status, body) = http(
             self.board_daemon.port,
-            "POST",
+            method,
             path,
             Some(body),
             Some(&self.cookie),
@@ -331,8 +346,8 @@ impl World {
 /// What the board host's daemon runs as `ssh`: it drops the options, takes
 /// the alias and runs the real `tiller peer serve` (or Add a host's `tiller
 /// peer accept --unattended`) for the peer's home, the way sshd would on the
-/// other machine.
-fn write_shim(dir: &Path, peer_home: &Path, serve_pid: &Path) -> PathBuf {
+/// other machine. `exports` are shell lines run before it.
+fn write_shim(dir: &Path, peer_home: &Path, serve_pid: &Path, exports: &str) -> PathBuf {
     let shim = dir.join("ssh-shim");
     let script = format!(
         r#"#!/bin/sh
@@ -351,9 +366,11 @@ shift
 echo $$ > "{pid}"
 export HOME="{home}" TILLER_HOME="{home}"
 export SSH_CONNECTION="192.0.2.1 50000 192.0.2.2 22"
+{exports}
 exec "{tiller}" "$@"
 "#,
         pid = serve_pid.display(),
+        exports = exports,
         home = peer_home.display(),
         tiller = tiller().display(),
     );
@@ -1491,4 +1508,161 @@ fn board_pauses_resumes_and_relaunches_a_peer_run() {
     );
     let written = written_since(&world.board, host_seq);
     assert!(written.is_empty(), "the board host wrote {written:?}");
+}
+
+/// The `git` the tests run, by the test's own `PATH`.
+fn git_dir() -> PathBuf {
+    let path = std::env::var_os("PATH").unwrap();
+    std::env::split_paths(&path)
+        .find(|dir| dir.join("git").is_file())
+        .expect("git on PATH")
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+}
+
+#[test]
+fn board_manages_a_peer_project() {
+    // GitHub, for the peer's clone: a bare repo on disk that
+    // `https://github.com/` is rewritten to.
+    let lab = tempfile::tempdir().unwrap();
+    let source = lab.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    git(&source, &["init", "--quiet", "-b", "main"]);
+    std::fs::write(source.join("README.md"), "gamma\n").unwrap();
+    git(&source, &["add", "README.md"]);
+    git(&source, &["commit", "--quiet", "-m", "first"]);
+    let github = lab.path().join("github");
+    std::fs::create_dir_all(github.join("example")).unwrap();
+    git(
+        lab.path(),
+        &[
+            "clone",
+            "--quiet",
+            "--bare",
+            &source.display().to_string(),
+            &github.join("example/gamma.git").display().to_string(),
+        ],
+    );
+    let exports = format!(
+        "export PATH=\"{}\" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=1 \
+         GIT_CONFIG_KEY_0=\"url.file://{}/.insteadOf\" GIT_CONFIG_VALUE_0=\"https://github.com/\"",
+        git_dir().display(),
+        github.display(),
+    );
+    let world = World::start_with(&exports);
+    let root = lab.path().join("peer-code");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        world.peer.dir.path().join("config.toml"),
+        format!("[spawn]\ncheckouts_root = \"{}\"\n", root.display()),
+    )
+    .unwrap();
+    world.live();
+    let board_before = world.board.open().last_seq().unwrap();
+
+    // Add, with a clone: the board reads the peer's default folder, and the
+    // peer clones into it.
+    let (status, check) = world
+        .get("/api/v1/projects/checkout?host=peer&project=gamma&repo=example/gamma&clone=true");
+    assert_eq!(status, 200, "{check}");
+    let folder = root.join("gamma");
+    assert_eq!(
+        check["path"],
+        Value::from(folder.display().to_string()),
+        "{check}"
+    );
+    let (status, added) = world.post(
+        "/api/v1/projects",
+        &json!({"idempotency_key": "k-e2e-add", "host": LABEL, "id": "gamma",
+            "repo": "example/gamma", "delivery": "direct-pr",
+            "checkout": {"path": "", "clone": true}}),
+    );
+    assert_eq!(status, 200, "{added}");
+    assert_eq!(added["host"], LABEL, "{added}");
+    assert_eq!(
+        std::fs::read_to_string(folder.join("README.md")).unwrap(),
+        "gamma\n"
+    );
+    let config = std::fs::read_to_string(world.peer.dir.path().join("config.toml")).unwrap();
+    assert!(config.contains(&folder.display().to_string()), "{config}");
+
+    // Edit.
+    let (status, fields) = world.get("/api/v1/projects/gamma?host=peer");
+    assert_eq!(status, 200, "{fields}");
+    let (status, edited) = world.send(
+        "PATCH",
+        "/api/v1/projects/gamma",
+        &json!({"idempotency_key": "k-e2e-edit", "host": LABEL, "rev": fields["rev"],
+            "name": "Gamma on the peer"}),
+    );
+    assert_eq!(status, 200, "{edited}");
+    assert_eq!(
+        count(
+            &world.peer,
+            "SELECT count(*) FROM projects WHERE id = 'gamma' AND name = 'Gamma on the peer'"
+        ),
+        1
+    );
+
+    // Retire, and the peer's archive lists it.
+    let (status, retired) = world.post(
+        "/api/v1/projects/gamma/retire",
+        &json!({"idempotency_key": "k-e2e-retire", "host": LABEL, "stop_agents": true}),
+    );
+    assert_eq!(status, 200, "{retired}");
+    let (status, archived) = world.get("/api/v1/projects?retired=true&host=peer");
+    assert_eq!(status, 200, "{archived}");
+    assert_eq!(archived["projects"][0]["id"], "gamma", "{archived}");
+
+    // Delete, with the id typed again: a wrong one is refused, the right
+    // one deletes on the peer and records who sent it.
+    let (status, refused) = world.post(
+        "/api/v1/projects/gamma/delete",
+        &json!({"idempotency_key": "k-e2e-del-1", "host": LABEL, "confirm": "gamm"}),
+    );
+    assert_eq!(status, 400, "{refused}");
+    let (status, deleted) = world.post(
+        "/api/v1/projects/gamma/delete",
+        &json!({"idempotency_key": "k-e2e-del-2", "host": LABEL, "confirm": "gamma"}),
+    );
+    assert_eq!(status, 200, "{deleted}");
+    assert_eq!(
+        count(
+            &world.peer,
+            "SELECT count(*) FROM projects WHERE id = 'gamma'"
+        ),
+        0
+    );
+    assert_eq!(
+        count(
+            &world.peer,
+            "SELECT count(*) FROM events WHERE kind = 'project.deleted' AND actor = 'board@test-host'"
+        ),
+        1
+    );
+    // The delete never touches the checkout on disk.
+    assert!(folder.join("README.md").is_file());
+
+    // Nothing of it on the board host's own database.
+    assert_eq!(
+        count(
+            &world.board,
+            "SELECT count(*) FROM projects WHERE id = 'gamma'"
+        ),
+        0
+    );
+    let written = written_since(&world.board, board_before);
+    assert!(
+        written.iter().all(|event| !event.starts_with("project.")),
+        "{written:?}"
+    );
 }

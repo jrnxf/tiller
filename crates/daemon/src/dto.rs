@@ -1171,14 +1171,15 @@ pub struct CreateCard {
     pub category: Option<String>,
 }
 
-/// `POST /api/v1/projects`: register a project on this host, as `tiller
+/// `POST /api/v1/projects`: register a project on this host or a peer, as `tiller
 /// project add` does with the fields the board asks for. `--checks`,
 /// `--remote`, `--default-branch` and the deploy flags stay CLI-only.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AddProject {
     pub idempotency_key: String,
-    /// A paired peer's label. Refused: a project add is not forwarded.
+    /// A paired peer's label: forward the mutation to it (`protocol.md`
+    /// 7.4, 10.3, D22). Absent means this host.
     #[serde(default)]
     pub host: Option<String>,
     pub id: String,
@@ -1304,13 +1305,14 @@ pub struct StageProject {
 /// `PATCH /api/v1/projects/{id}`: `tiller project edit` from the board,
 /// against the `rev` the board read. An absent field stays as it is. An
 /// empty text clears `repo`, `remote`, `deploy_workflow` and
-/// `deploy_environment`, as an empty CLI flag does. Local to the owning
-/// host; it is not forwarded to a peer.
+/// `deploy_environment`, as an empty CLI flag does. With a peer `host` it is
+/// forwarded to that host, which checks it again (D22).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EditProject {
     pub idempotency_key: String,
-    /// A paired peer's label. Refused: a project edit is not forwarded.
+    /// A paired peer's label: forward the mutation to it (`protocol.md`
+    /// 7.4, 10.3, D22). Absent means this host.
     #[serde(default)]
     pub host: Option<String>,
     pub rev: i64,
@@ -1625,12 +1627,13 @@ pub struct ProjectFields {
 }
 
 /// `POST /api/v1/projects/{id}/retire`: retire one project, off the board.
-/// Local to the owning host; it is not forwarded to a peer.
+/// With a peer `host` it is forwarded to that host (D22).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RetireProject {
     pub idempotency_key: String,
-    /// A paired peer's label. Refused: a project retire is not forwarded.
+    /// A paired peer's label: forward the mutation to it (`protocol.md`
+    /// 7.4, 10.3, D22). Absent means this host.
     #[serde(default)]
     pub host: Option<String>,
     /// Stop the project's running agents first, as a delete does. Unset
@@ -1758,12 +1761,14 @@ pub enum DeleteActionId {
 }
 
 /// `POST /api/v1/projects/{id}/delete`: the hard delete of one project.
-/// Local to the owning host; it is not forwarded to a peer.
+/// With a peer `host` it is forwarded to that host, which checks `confirm`
+/// again (D22).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeleteProject {
     pub idempotency_key: String,
-    /// A paired peer's label. Refused: a project delete is not forwarded.
+    /// A paired peer's label: forward the mutation to it (`protocol.md`
+    /// 7.4, 10.3, D22). Absent means this host.
     #[serde(default)]
     pub host: Option<String>,
     /// The project id typed again: the delete applies only when it matches.

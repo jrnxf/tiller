@@ -28,7 +28,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 
-use super::forward::{Mutate, Order};
+use super::forward::{Lane, Mutate, Order};
 use super::pane::{PaneFit, PaneInput, PaneKind, PaneOpen, PaneSigner};
 use super::{Federation, Frame, Hello, HelloKey, PeerView, Timing, peer_alias, stale_reason};
 use crate::dto::TerminalFit;
@@ -495,8 +495,9 @@ impl Peers {
     }
 
     /// Forwards a mutation over a live link (`protocol.md` 10.3) and waits
-    /// up to `timing.query` for the peer's `result`, or `timing.proof` for
-    /// an agent verb that waits for its proof. Nothing is queued: a
+    /// up to `timing.query` for the peer's `result`, `timing.proof` for an
+    /// agent verb that waits for its proof, or `timing.project` for a
+    /// project add, retire or delete. Nothing is queued: a
     /// link that is not live, or does not take the frame in time, is
     /// [`Forwarded::Unreachable`].
     pub async fn forward(&self, host_id: &str, order: Order) -> Forwarded {
@@ -505,10 +506,10 @@ impl Peers {
         };
         let sent = Arc::new(AtomicU8::new(PENDING));
         let (reply, answer) = oneshot::channel();
-        let wait = if order.op.waits_for_proof() {
-            self.timing.proof
-        } else {
-            self.timing.query
+        let wait = match order.op.lane() {
+            Lane::Inline => self.timing.query,
+            Lane::Proof => self.timing.proof,
+            Lane::Project => self.timing.project,
         };
         let request = Request::Mutate {
             order,

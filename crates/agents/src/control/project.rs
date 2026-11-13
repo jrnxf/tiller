@@ -10,7 +10,7 @@ use serde::Serialize;
 use tiller_core::domain::{Project, Run, Session};
 use tiller_core::state::deletion::{Deletion, LiveAgent};
 use tiller_core::state::get;
-use tiller_core::{Actor, Applied, Ctx, Error, Store, Timestamp};
+use tiller_core::{Applied, Ctx, Error, Store, Timestamp};
 
 use super::{STOPPED, Waits, stop, stop_orchestrator};
 use crate::pane::Holder;
@@ -301,8 +301,10 @@ fn midway(error: Error, agent: &LiveAgent, done: &AgentsStopped, project_id: &st
     }
 }
 
+/// The owner, here or through a peer board with the `act` scope, which
+/// the owning host checked again before it ran this (`authority.md` D22).
 fn require_owner(ctx: &Ctx, what: &str) -> Result<()> {
-    if matches!(ctx.actor, Actor::Owner | Actor::Board) {
+    if ctx.actor.is_owner() {
         Ok(())
     } else {
         Err(Error::Forbidden(format!("{what} is owner only; {} may not", ctx.actor)).into())

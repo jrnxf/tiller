@@ -26,7 +26,7 @@ use super::projects::{local_host_id, require_owner};
 use crate::domain::{Attention, Project};
 use crate::error::{Error, Result};
 use crate::ids::FLEET_PROJECT;
-use crate::store::{Actor, Applied, Ctx, NewEvent, Store, Tx};
+use crate::store::{Applied, Ctx, NewEvent, Store, Tx};
 
 /// Nullable foreign keys that still mean "belongs to": an observation of a
 /// removed session or run, a worktree cached for the project, and a reply to
@@ -345,15 +345,10 @@ impl Store {
     /// it, its events included, on the host that owns it. Refused for
     /// `fleet`, for a project another host owns, and while any of its runs,
     /// sessions or approval executions is live. Never touches a checkout,
-    /// a worktree on disk or the remote repository.
+    /// a worktree on disk or the remote repository. A peer board's owner
+    /// may send it, checked again here first (`authority.md` D22).
     pub fn project_delete(&mut self, ctx: &Ctx, project_id: &str) -> Result<Applied<Deletion>> {
         require_owner(&ctx.actor, "project.delete")?;
-        if matches!(ctx.actor, Actor::Peer(_)) {
-            return Err(Error::Forbidden(format!(
-                "project.delete runs on the owning host only; {} may not",
-                ctx.actor
-            )));
-        }
         self.write(ctx, "project.delete", None, |tx| {
             let project: Project = get(tx.conn(), "project", project_id)?;
             check_deletable(tx.conn(), &project)?;
@@ -905,6 +900,7 @@ mod tests {
     use crate::state::projects::{NewProject, Numbering};
     use crate::state::runs::EndRun;
     use crate::state::tests::{builder_run, card, memory_store, owner};
+    use crate::store::Actor;
 
     /// Id columns that name something outside `state.db`'s projects: a
     /// display id, a legacy or external id, a host, a pane.
@@ -1481,10 +1477,13 @@ mod tests {
                 .is_some_and(|fact| fact.contains("never deleted"))
         );
         assert!(preview.deletion.removed.is_empty(), "{preview:?}");
+        // A peer board's owner, checked again by this host (D22), meets the
+        // same refusal as the owner here.
         let peer = Ctx::new(Actor::Peer("board-host".into()));
-        assert_eq!(
-            store.project_delete(&peer, "alpha").unwrap_err().code(),
-            "forbidden"
+        let error = store.project_delete(&peer, "alpha").unwrap_err();
+        assert!(
+            error.to_string().contains("orchestrator session"),
+            "{error}"
         );
         let session = Ctx::new(Actor::Session(orchestrator));
         assert_eq!(

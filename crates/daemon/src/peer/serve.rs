@@ -3,8 +3,9 @@
 //! or `refused`, then sends a `snapshot` or the replay, every new `events`
 //! row as an `event`, a `beat` every 10 s, and a `result` for each `query`
 //! and each `mutate` (10.3, applied by [`super::forward`]). A forwarded
-//! agent verb that waits for its proof runs on a thread of its own, so the
-//! link keeps its beats while it waits.
+//! agent verb that waits for its proof runs on a thread of its own, and a
+//! project add, retire or delete on another, so the link keeps its beats
+//! while they wait.
 //!
 //! It serves this host's own records only. It has no client half: it never
 //! opens a link of its own, so a board host that is also some other host's
@@ -23,10 +24,13 @@ use tiller_core::error::READ_ONLY_MARKER;
 use tiller_core::state::peers::PEER_PROTOCOL;
 use tiller_core::{Store, Timestamp};
 
-use super::forward::{self, Mutate};
+use super::forward::{self, Lane, Mutate};
 use super::nonces;
 use super::{Frame, Hello, PeerQueries, PeerSnapshot, Timing, Welcome, federation_accept};
-use crate::api::{ApiError, pane_tail_of, pane_target, prompt_read_on, remote_pane, tail_on};
+use crate::api::{
+    ApiError, CheckoutQuery, checkout_check, delete_preview, fields_of, pane_tail_of, pane_target,
+    prompt_read_on, remote_pane, retire_preview, tail_on,
+};
 use crate::dto::{Doctor, ErrorBody, MachinesResponse};
 use crate::mirror::Mirrors;
 use crate::sse::{self, Opening};
@@ -96,7 +100,8 @@ pub fn serve(
         }),
     )?;
     let mirrors = Arc::new(Mirrors::new());
-    let proofs = Proofs::start(config, &key, &mirrors);
+    let proofs = Worker::start(config, &key, &mirrors, config.timing.proof);
+    let projects = Worker::start(config, &key, &mirrors, config.timing.project);
     let mut link = Link {
         store,
         config,
@@ -106,6 +111,7 @@ pub fn serve(
         checks: Checks::default(),
         mirrors,
         proofs,
+        projects,
     };
     // A board host with no copy (`last_seq` null) gets a snapshot, as one
     // whose copy is too old or ahead of this database does.
@@ -275,7 +281,11 @@ struct Link<'a> {
     /// The input rate the board host's prompt reads and answers spend, as
     /// this host's own board's do.
     mirrors: Arc<Mirrors>,
-    proofs: Proofs,
+    /// The agent verbs that wait for their proof.
+    proofs: Worker,
+    /// The project adds, retires and deletes (D22): a clone takes minutes,
+    /// and must not hold up a stop.
+    projects: Worker,
 }
 
 impl Link<'_> {
@@ -338,7 +348,9 @@ impl Link<'_> {
                 self.recheck(output)?;
             }
             self.send_checks(output, true)?;
-            while let Some((id, http_status, body)) = self.proofs.done() {
+            while let Some((id, http_status, body)) =
+                self.proofs.done().or_else(|| self.projects.done())
+            {
                 self.applied(output, id, http_status, body)?;
             }
             self.send_events(output, false)?;
@@ -400,7 +412,7 @@ impl Link<'_> {
     }
 
     /// Verifies a `mutate` (`protocol.md` 10.3 step 3) and applies it; `None`
-    /// when it went to [`Proofs`], which answers it once it has its proof.
+    /// when it went to a [`Worker`], which answers it once it has run.
     fn mutate(&mut self, frame: Mutate) -> Option<(u16, Value)> {
         match forward::verify(
             &self.store,
@@ -413,8 +425,12 @@ impl Link<'_> {
                 // The daemon found `state.db` damaged (`recovery.md` R10):
                 // a forwarded write is refused as a local one is.
                 Ok(reason) => Some(crate::api::read_only(reason.trim()).into_result()),
-                Err(_) if op.waits_for_proof() => {
+                Err(_) if op.lane() == Lane::Proof => {
                     self.proofs.ask(frame, op);
+                    None
+                }
+                Err(_) if op.lane() == Lane::Project => {
+                    self.projects.ask(frame, op);
                     None
                 }
                 Err(_) => Some(forward::apply(
@@ -493,6 +509,17 @@ impl Link<'_> {
         answered(query.and_then(|query| self.read(query)))
     }
 
+    /// Refuses a query that needs the `act` scope over a `read` pairing.
+    fn acts(&self) -> Result<(), ApiError> {
+        if self.key.scope == PeerScope::Act {
+            return Ok(());
+        }
+        Err(ApiError::peer_refused(
+            "read_scope",
+            format!("key {} has the read scope: view only pairing", self.key.id),
+        ))
+    }
+
     fn read(&self, query: Query) -> Result<Value, ApiError> {
         let store = &self.store;
         let body = match query {
@@ -521,15 +548,32 @@ impl Link<'_> {
             Query::Prompt(session) => {
                 // The query rides the link the signed `hello` opened; the
                 // key row was read again just before it (G46).
-                if self.key.scope != PeerScope::Act {
-                    return Err(ApiError::peer_refused(
-                        "read_scope",
-                        format!("key {} has the read scope: view only pairing", self.key.id),
-                    ));
-                }
+                self.acts()?;
                 let read =
                     prompt_read_on(store, self.config.holder.as_ref(), &self.mirrors, &session)?;
                 serde_json::to_value(read)
+            }
+            // The project reads serve the add, edit, retire and delete
+            // dialogs, which only an `act` pairing opens (D22).
+            Query::Project(id) => {
+                self.acts()?;
+                serde_json::to_value(fields_of(store, &id)?)
+            }
+            Query::RetirePreview(id) => {
+                self.acts()?;
+                serde_json::to_value(retire_preview(store, &id)?)
+            }
+            Query::DeletePreview(id) => {
+                self.acts()?;
+                serde_json::to_value(delete_preview(store, &id)?)
+            }
+            Query::Checkout(query) => {
+                self.acts()?;
+                serde_json::to_value(checkout_check(store, &self.config.home, *query)?)
+            }
+            Query::Retired => {
+                self.acts()?;
+                serde_json::to_value(views::retired_projects(store, Timestamp::now())?)
             }
             // `run` hands the checks to `Checks`, off the link thread: they
             // never run here.
@@ -597,15 +641,18 @@ impl Checks {
     }
 }
 
-/// The forwarded agent verbs of one link that wait for their proof
-/// (`protocol.md` 7.4, 10.3 step 6): an interrupt, a stop, a resume, a
-/// relaunch and a prompt answer can take seconds. They run on one thread of
-/// their own, in the order they came, each with every check the link
-/// thread made, so the link keeps sending beats and events and answering
-/// other frames while one waits. When the link ends, the verb that started
-/// finishes, for up to [`super::PROOF_WAIT`], before `peer serve` exits;
-/// one that had not started never does, and a retry with its key runs it.
-struct Proofs {
+/// One lane of a link's slow forwarded mutations (`protocol.md` 7.4, 10.3
+/// step 6). The agent verbs that wait for their proof (an interrupt, a
+/// stop, a resume, a relaunch and a prompt answer) take seconds; a project
+/// add may clone for minutes, and a retire or a delete stops agents (D22).
+/// Each lane runs on one thread of its own, in the order they came, each
+/// with every check the link thread made, so the link keeps sending beats
+/// and events and answering other frames while one waits. When the link
+/// ends, the mutation that started finishes, for up to the lane's wait
+/// ([`super::PROOF_WAIT`] or [`super::PROJECT_WAIT`]), before `peer serve`
+/// exits; one that had not started never does, and a retry with its key
+/// runs it.
+struct Worker {
     asks: Option<mpsc::Sender<(Mutate, forward::Op)>>,
     answers: mpsc::Receiver<(String, u16, Value)>,
     closing: Arc<AtomicBool>,
@@ -613,12 +660,11 @@ struct Proofs {
     wait: Duration,
 }
 
-impl Proofs {
-    fn start(config: &ServeConfig, key: &PeerKey, mirrors: &Arc<Mirrors>) -> Self {
+impl Worker {
+    fn start(config: &ServeConfig, key: &PeerKey, mirrors: &Arc<Mirrors>, wait: Duration) -> Self {
         let (asks, asked) = mpsc::channel::<(Mutate, forward::Op)>();
         let (answer, answers) = mpsc::channel();
         let closing = Arc::new(AtomicBool::new(false));
-        let wait = config.timing.proof;
         let config = config.clone();
         let key = key.clone();
         let mirrors = Arc::clone(mirrors);
@@ -656,13 +702,13 @@ impl Proofs {
         }
     }
 
-    /// A verb that has its proof: the frame's id and its `result`.
+    /// A mutation that has run: the frame's id and its `result`.
     fn done(&self) -> Option<(String, u16, Value)> {
         self.answers.try_recv().ok()
     }
 }
 
-impl Drop for Proofs {
+impl Drop for Worker {
     fn drop(&mut self) {
         self.closing.store(true, Ordering::SeqCst);
         self.asks = None;
@@ -673,7 +719,7 @@ impl Drop for Proofs {
                 Ok(_) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    tracing::warn!("a forwarded agent verb outlived the link's proof wait");
+                    tracing::warn!("a forwarded mutation outlived the link's wait");
                     return;
                 }
             }
@@ -725,11 +771,27 @@ enum Query {
     Tail(String),
     /// The dialog on a waiting agent's screen, for an `act` key only (G46).
     Prompt(String),
+    /// A project's fields, for Edit project (D22).
+    Project(String),
+    /// What retiring a project would stop, and what blocks it.
+    RetirePreview(String),
+    /// What deleting a project would remove, and what blocks it.
+    DeletePreview(String),
+    /// What Add project would do with a Local checkout folder on this host.
+    Checkout(Box<CheckoutQuery>),
+    /// This host's retired projects, which the board deletes from.
+    Retired,
 }
 
 fn parse_query(path: &str) -> Result<Query, ApiError> {
     let usage = |message: &str| ApiError::from(tiller_core::Error::Usage(message.to_owned()));
     let (route, params) = path.split_once('?').unwrap_or((path, ""));
+    match route.trim_start_matches('/') {
+        "projects/checkout" => return checkout_query(params),
+        // The board's Archived list, which peers do not cache (D22).
+        "projects" if params == "retired=true" => return Ok(Query::Retired),
+        _ => {}
+    }
     let mut before = None;
     for param in params.split('&').filter(|param| !param.is_empty()) {
         match param.split_once('=').unwrap_or((param, "")) {
@@ -750,9 +812,12 @@ fn parse_query(path: &str) -> Result<Query, ApiError> {
             Query::Tail((*session).to_owned())
         }
         ["agents", session, "prompt"] if before.is_none() => Query::Prompt((*session).to_owned()),
+        ["projects", id] if before.is_none() => Query::Project((*id).to_owned()),
+        ["projects", id, "retire"] if before.is_none() => Query::RetirePreview((*id).to_owned()),
+        ["projects", id, "delete"] if before.is_none() => Query::DeletePreview((*id).to_owned()),
         _ => {
             return Err(usage(
-                "a query is cards/{id}, cards/{id}/timeline, runs/{id}, doctor, agents/{session}/terminal/tail or agents/{session}/prompt",
+                "a query is cards/{id}, cards/{id}/timeline, runs/{id}, doctor, agents/{session}/terminal/tail, agents/{session}/prompt, projects/{id}, projects/{id}/retire, projects/{id}/delete, projects/checkout or projects?retired=true",
             ));
         }
     };
@@ -762,12 +827,36 @@ fn parse_query(path: &str) -> Result<Query, ApiError> {
         | Query::Run(id)
         | Query::Tail(id)
         | Query::Prompt(id)
+        | Query::Project(id)
+        | Query::RetirePreview(id)
+        | Query::DeletePreview(id)
             if id.is_empty() =>
         {
             Err(usage("the query names no id"))
         }
         _ => Ok(query),
     }
+}
+
+/// A `projects/checkout` query's parameters, read as the board API reads
+/// them. A `host` is refused: a peer checks only its own folders.
+fn checkout_query(params: &str) -> Result<Query, ApiError> {
+    let usage = |message: String| ApiError::from(tiller_core::Error::Usage(message));
+    for param in params.split('&').filter(|param| !param.is_empty()) {
+        let name = param.split_once('=').map_or(param, |(name, _)| name);
+        if !matches!(name, "host" | "project" | "repo" | "path" | "clone") {
+            return Err(usage(format!("unknown query parameter {name:?}")));
+        }
+    }
+    let uri: axum::http::Uri = format!("/?{params}")
+        .parse()
+        .map_err(|_| usage("the checkout query does not parse".to_owned()))?;
+    let axum::extract::Query(query) = axum::extract::Query::<CheckoutQuery>::try_from_uri(&uri)
+        .map_err(|error| usage(format!("the checkout query: {error}")))?;
+    if query.host.is_some() {
+        return Err(usage("a peer serves only its own records".to_owned()));
+    }
+    Ok(Query::Checkout(Box::new(query)))
 }
 
 /// This host's own rows, built by the same views as the boot snapshot, in
@@ -827,7 +916,42 @@ mod tests {
             parse_query("agents/01JS/prompt").ok(),
             Some(Query::Prompt("01JS".into()))
         );
+        assert_eq!(
+            parse_query("projects/alpha").ok(),
+            Some(Query::Project("alpha".into()))
+        );
+        assert_eq!(
+            parse_query("projects/alpha/retire").ok(),
+            Some(Query::RetirePreview("alpha".into()))
+        );
+        assert_eq!(
+            parse_query("projects/alpha/delete").ok(),
+            Some(Query::DeletePreview("alpha".into()))
+        );
+        assert_eq!(
+            parse_query("projects/checkout?project=alpha&path=%7E%2Fsrc%2Falpha&clone=true").ok(),
+            Some(Query::Checkout(Box::new(CheckoutQuery {
+                host: None,
+                project: "alpha".into(),
+                repo: None,
+                path: Some("~/src/alpha".into()),
+                clone: Some(true),
+            })))
+        );
+        assert_eq!(
+            parse_query("projects?retired=true").ok(),
+            Some(Query::Retired)
+        );
         for refused in [
+            "projects?retired=false",
+            "projects?retired=true&host=other",
+            "projects/checkout?project=alpha&host=other",
+            "projects/checkout?colour=red",
+            "projects/alpha/stage",
+            "projects/alpha/grants",
+            "projects/alpha?before=4",
+            "projects//retire",
+            "projects",
             "agents/01JS/prompt/answer",
             "agents/01JS/terminal",
             "agents/01JS/terminal/history",

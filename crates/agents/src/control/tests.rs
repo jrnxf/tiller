@@ -1510,6 +1510,70 @@ fn retire_of_a_retired_project_stops_nothing() {
     assert!(!typed(&rig, &rig.fleet.orchestrator_pane, "/exit"));
 }
 
+/// A peer board's owner, forwarded over a signed link and checked again by
+/// this host (`authority.md` D22), retires and deletes as the owner here
+/// does, its agents stopped first; an agent session may do neither.
+#[test]
+fn a_forwarded_retire_and_delete_run_as_the_owners() {
+    let peer = Ctx::new(Actor::Peer("board-host".into()));
+    let mut rig = Rig::new();
+    let orchestrator = rig.fleet.orchestrator_session.clone();
+    let session = Ctx::new(Actor::Session(orchestrator.clone()));
+    let refused = retire_project(
+        &mut rig.fleet.store,
+        &session,
+        world!(rig).holder(),
+        &quick(),
+        "alpha",
+        true,
+    )
+    .unwrap_err();
+    assert!(refused.to_string().contains("owner only"), "{refused}");
+    let retired = retire_project(
+        &mut rig.fleet.store,
+        &peer,
+        world!(rig).holder(),
+        &quick(),
+        "alpha",
+        true,
+    )
+    .unwrap();
+    assert!(retired.value.project.retired_at.is_some());
+    assert_eq!(retired.value.agents.stopped.len(), 1, "{retired:?}");
+    assert!(self::session(&rig, &orchestrator).ended_at.is_some());
+
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    let refused = delete_project(
+        &mut rig.fleet.store,
+        &session,
+        world!(rig).holder(),
+        &quick(),
+        "alpha",
+    )
+    .unwrap_err();
+    assert!(refused.to_string().contains("owner only"), "{refused}");
+    let holder = world!(rig).holder();
+    let deleted = delete_project(&mut rig.fleet.store, &peer, holder, &quick(), "alpha").unwrap();
+    assert!(typed(&rig, &spawned.pane_id, "/exit"));
+    assert!(!deleted.value.agents.stopped.is_empty(), "{deleted:?}");
+    assert!(matches!(
+        get::<Project>(rig.fleet.store.conn(), "project", "alpha"),
+        Err(tiller_core::Error::NotFound { .. })
+    ));
+    let actor: String = rig
+        .fleet
+        .store
+        .conn()
+        .query_row(
+            "SELECT actor FROM events WHERE kind = 'project.deleted'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(actor, "board@board-host");
+}
+
 /// The stops wait on the holder between short writes of their own, so another
 /// request writes while a delete's agent is still exiting.
 #[test]
