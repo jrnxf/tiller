@@ -8,16 +8,25 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tiller_core::domain::{Project, Run, Session};
 use tiller_core::state::approvals::PrFetch;
 use tiller_herdr::client::{Herdr, PaneInfo};
+use tiller_panes::{Meta, PaneId, Panes, PanesError, Spawn};
 pub use tiller_observe::liveness::Probe;
 
 /// Step 3 of the liveness ladder: is the agent process in a pane alive?
 pub trait AgentProbe: Send {
     fn agent(&self, pane: &PaneInfo) -> Probe;
+
+    /// The same step for a terminal holder pane: is the child's process
+    /// `pid` alive (`kill(pid, 0)`)?
+    fn process(&self, pid: u32) -> Probe {
+        tiller_observe::liveness::process_alive(pid)
+    }
 }
 
 /// herdr's own reading: a pane with a recognized agent runs one; a pane
@@ -262,6 +271,110 @@ impl<H: Herdr + Send> Launcher for HerdrLauncher<H> {
         if let Err(error) = self.herdr.notify(title, body) {
             tracing::warn!(%error, "herdr notification failed");
         }
+    }
+}
+
+/// How long a closed holder pane's child has between `hup` and `kill`.
+pub const HOLDER_CLOSE_GRACE: Duration = Duration::from_secs(3);
+
+/// One desktop notification; the daemon wires `[notify] command`.
+pub type Notifier = Box<dyn FnMut(&str, &str) + Send>;
+
+/// A launcher over the terminal holder (`terminal-holder.md` 4.4): one
+/// `spawn` keyed by the session, whose child runs the resume line through
+/// `/bin/sh` in `cwd`, with the session named in the pane's `meta`. A spawn
+/// for a key the holder already runs returns that pane, so a second try
+/// starts nothing. A herdr pane left from before the cutover is closed
+/// through `close`.
+pub struct HolderLauncher {
+    holder: Arc<dyn Panes>,
+    close: PaneCloser,
+    notify: Notifier,
+}
+
+impl HolderLauncher {
+    pub fn new(
+        holder: Arc<dyn Panes>,
+        close: impl FnMut(&str) -> Result<(), String> + Send + 'static,
+        notify: impl FnMut(&str, &str) + Send + 'static,
+    ) -> Self {
+        Self {
+            holder,
+            close: Box::new(close),
+            notify: Box::new(notify),
+        }
+    }
+
+    /// The `spawn` that resumes `session` in `cwd`.
+    pub fn request(session: &Session, cwd: &Path, resume: Option<&str>) -> Spawn {
+        let mut meta = Meta::from([
+            ("session".to_owned(), session.id.clone()),
+            ("project".to_owned(), session.project_id.clone()),
+            ("role".to_owned(), session.role.as_str().to_owned()),
+            ("label".to_owned(), format!("{} resuming", session.project_id)),
+        ]);
+        if let Some(run) = &session.run_id {
+            meta.insert("run".to_owned(), run.clone());
+        }
+        let line = match resume {
+            Some(id) => format!(
+                "TILLER_SESSION_ID={} exec claude --resume {}",
+                quote(&session.id),
+                quote(id)
+            ),
+            None => format!("TILLER_SESSION_ID={} exec claude", quote(&session.id)),
+        };
+        Spawn {
+            key: session.id.clone(),
+            argv: vec![tiller_panes::env::SHELL.to_owned(), "-c".to_owned(), line],
+            cwd: cwd.to_string_lossy().into_owned(),
+            env: tiller_panes::env::current(),
+            size: None,
+            meta,
+        }
+    }
+}
+
+/// `text` as one `sh` word.
+fn quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+impl Launcher for HolderLauncher {
+    fn launch(
+        &mut self,
+        session: &Session,
+        cwd: &Path,
+        resume: Option<&str>,
+    ) -> Result<Launched, String> {
+        let pane = self
+            .holder
+            .spawn(&Self::request(session, cwd, resume))
+            .map_err(|e| e.to_string())?;
+        Ok(Launched {
+            pane_id: pane.pane.as_str().to_owned(),
+        })
+    }
+
+    /// `close`, which sends `hup` and then `kill` after the grace, then
+    /// `forget`. A pane that has exited or is gone is only forgotten.
+    fn close_pane(&mut self, pane_id: &str) -> Result<(), String> {
+        if !tiller_core::ids::is_holder_pane(pane_id) {
+            return (self.close)(pane_id);
+        }
+        let pane = PaneId::from(pane_id);
+        match self.holder.close(&pane, HOLDER_CLOSE_GRACE) {
+            Ok(_) | Err(PanesError::NotFound(_) | PanesError::Exited(_)) => {}
+            Err(e) => return Err(format!("closing pane {pane}: {e}")),
+        }
+        match self.holder.forget(&pane) {
+            Ok(()) | Err(PanesError::NotFound(_)) => Ok(()),
+            Err(e) => Err(format!("forgetting pane {pane}: {e}")),
+        }
+    }
+
+    fn notify(&mut self, title: &str, body: &str) {
+        (self.notify)(title, body);
     }
 }
 

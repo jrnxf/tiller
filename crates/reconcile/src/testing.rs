@@ -1,7 +1,8 @@
 //! Fakes for every source and a small world to run passes against (feature
 //! `testing`): the herdr test fleet from `tiller_herdr::testing`, a fake
-//! herdr server, and in-memory probes, scans, forge answers, launches,
-//! readings and harness records that tests set between passes.
+//! herdr server, a fake terminal holder link, and in-memory probes, scans,
+//! forge answers, launches, readings and harness records that tests set
+//! between passes.
 //!
 //! This file is also compiled into the crate's own integration tests through
 //! `tests/common/mod.rs`, so it names the crate as `tiller_reconcile`.
@@ -10,6 +11,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use serde_json::json;
 use tiller_core::domain::{Activity, Attention, ObservationSource, OutboxMessage, Run, Session};
@@ -19,11 +21,15 @@ use tiller_core::{Actor, Ctx, Store, Timestamp};
 use tiller_herdr::client::PaneInfo;
 use tiller_herdr::fake::{FakeHerdr, Screen};
 pub use tiller_herdr::testing::{Fleet, owner};
+use tiller_panes::handshake::Welcome;
+use tiller_panes::message::{Exit, Format, Listing, Meta, Pane, PaneId, Read, Screen as PaneScreen, Signal, Spawn};
+use tiller_panes::{Events, FakePanes, Key, Live, Panes, PanesError, Subscribe, Subscription, Upgrade};
 
+use tiller_reconcile::holder::Link;
 use tiller_reconcile::pass::{Config, Reconciler, Sources};
 use tiller_reconcile::sources::{
-    AgentProbe, Cut, Forge, Harness, HostReadings, Launched, Launcher, PrRead, Probe, Readings,
-    Scanner, WorktreeScan,
+    AgentProbe, Cut, Forge, Harness, HolderLauncher, HostReadings, Launched, Launcher, PrRead,
+    Probe, Readings, Scanner, WorktreeScan,
 };
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -42,15 +48,23 @@ pub fn ago(minutes: i64) -> Timestamp {
     now().plus_minutes(-minutes)
 }
 
-/// A probe that answers from herdr's reading unless a pane is overridden.
+/// A probe that answers from herdr's reading unless a pane is overridden,
+/// and from the process table unless a pid is.
 #[derive(Clone, Default)]
 pub struct FakeProbe {
     overrides: Arc<Mutex<HashMap<String, Probe>>>,
+    pids: Arc<Mutex<HashMap<u32, Probe>>>,
 }
 
 impl FakeProbe {
     pub fn set(&self, pane_id: &str, probe: Probe) {
         lock(&self.overrides).insert(pane_id.to_owned(), probe);
+    }
+
+    /// What `kill(pid, 0)` says of `pid`. A fake holder's pids are above
+    /// any real one, so unset they read as dead.
+    pub fn set_pid(&self, pid: u32, probe: Probe) {
+        lock(&self.pids).insert(pid, probe);
     }
 }
 
@@ -64,6 +78,207 @@ impl AgentProbe for FakeProbe {
         } else {
             Probe::Dead
         }
+    }
+
+    fn process(&self, pid: u32) -> Probe {
+        lock(&self.pids)
+            .get(&pid)
+            .copied()
+            .unwrap_or_else(|| tiller_observe::liveness::process_alive(pid))
+    }
+}
+
+#[derive(Default)]
+struct LinkWorld {
+    panes: FakePanes,
+    down: bool,
+    version: String,
+    next_version: String,
+    boot_id: String,
+    binary: Option<PathBuf>,
+    refuse: Option<String>,
+    upgrades: Vec<PathBuf>,
+    welcomes: usize,
+}
+
+/// The daemon's link to a fake terminal holder: a [`FakePanes`] that can go
+/// down, restart as a new instance, and take or refuse an upgrade.
+#[derive(Clone)]
+pub struct FakeLink {
+    world: Arc<Mutex<LinkWorld>>,
+}
+
+impl Default for FakeLink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FakeLink {
+    /// A holder at version `0.1.0` on boot `boot-1`, running `/home/user/old/tiller`.
+    pub fn new() -> Self {
+        Self {
+            world: Arc::new(Mutex::new(LinkWorld {
+                version: "0.1.0".into(),
+                next_version: "0.2.0".into(),
+                boot_id: "boot-1".into(),
+                binary: Some(PathBuf::from("/home/user/old/tiller")),
+                ..LinkWorld::default()
+            })),
+        }
+    }
+
+    /// The holder instance in use now.
+    pub fn panes(&self) -> FakePanes {
+        lock(&self.world).panes.clone()
+    }
+
+    pub fn instance(&self) -> String {
+        self.panes().instance()
+    }
+
+    pub fn version(&self) -> String {
+        lock(&self.world).version.clone()
+    }
+
+    /// The holder stops answering (true) or answers again (false). Going
+    /// down fails every watch and subscription.
+    pub fn set_down(&self, down: bool) {
+        let mut world = lock(&self.world);
+        world.down = down;
+        world.panes.set_unreachable(down);
+    }
+
+    /// The holder died and started again from nothing: a new instance with
+    /// no panes. Returns it.
+    pub fn restart(&self) -> FakePanes {
+        let mut world = lock(&self.world);
+        world.panes.set_unreachable(true);
+        world.panes = FakePanes::new();
+        world.down = false;
+        world.panes.clone()
+    }
+
+    /// The binary the holder process runs, as `/proc/<pid>/exe` reads.
+    pub fn set_binary(&self, binary: Option<&Path>) {
+        lock(&self.world).binary = binary.map(Path::to_owned);
+    }
+
+    /// Every `upgrade` refuses with `reason` (Some), or takes it (None).
+    pub fn refuse_upgrades(&self, reason: Option<&str>) {
+        lock(&self.world).refuse = reason.map(str::to_owned);
+    }
+
+    /// The binaries every `upgrade` named, oldest first.
+    pub fn upgrades(&self) -> Vec<PathBuf> {
+        lock(&self.world).upgrades.clone()
+    }
+
+    /// How many `welcome`s the link answered.
+    pub fn welcomes(&self) -> usize {
+        lock(&self.world).welcomes
+    }
+}
+
+impl Panes for FakeLink {
+    fn spawn(&self, req: &Spawn) -> tiller_panes::Result<Pane> {
+        self.panes().spawn(req)
+    }
+
+    fn list(&self) -> tiller_panes::Result<Listing> {
+        self.panes().list()
+    }
+
+    fn get(&self, pane: &PaneId) -> tiller_panes::Result<Option<Pane>> {
+        self.panes().get(pane)
+    }
+
+    fn screen(&self, pane: &PaneId, read: Read, format: Format) -> tiller_panes::Result<PaneScreen> {
+        self.panes().screen(pane, read, format)
+    }
+
+    fn input(&self, pane: &PaneId, text: &str) -> tiller_panes::Result<()> {
+        self.panes().input(pane, text)
+    }
+
+    fn paste(&self, pane: &PaneId, text: &str) -> tiller_panes::Result<()> {
+        self.panes().paste(pane, text)
+    }
+
+    fn keys(&self, pane: &PaneId, keys: &[Key]) -> tiller_panes::Result<()> {
+        self.panes().keys(pane, keys)
+    }
+
+    fn set_meta(&self, pane: &PaneId, set: &Meta, remove: &[&str]) -> tiller_panes::Result<Pane> {
+        self.panes().set_meta(pane, set, remove)
+    }
+
+    fn signal(&self, pane: &PaneId, signal: Signal) -> tiller_panes::Result<()> {
+        self.panes().signal(pane, signal)
+    }
+
+    fn close(&self, pane: &PaneId, grace: Duration) -> tiller_panes::Result<Exit> {
+        self.panes().close(pane, grace)
+    }
+
+    fn forget(&self, pane: &PaneId) -> tiller_panes::Result<()> {
+        self.panes().forget(pane)
+    }
+
+    fn switch(&self, pane: &PaneId) -> tiller_panes::Result<usize> {
+        self.panes().switch(pane)
+    }
+}
+
+impl Live for FakeLink {
+    fn subscribe(&self, pane: &PaneId, opts: Subscribe) -> tiller_panes::Result<Subscription> {
+        self.panes().subscribe(pane, opts)
+    }
+
+    fn watch(&self) -> tiller_panes::Result<Events> {
+        self.panes().watch()
+    }
+}
+
+impl Link for FakeLink {
+    fn welcome(&self) -> tiller_panes::Result<Welcome> {
+        let mut world = lock(&self.world);
+        if world.down {
+            return Err(PanesError::Unreachable("the fake holder is down".into()));
+        }
+        world.welcomes += 1;
+        Ok(Welcome {
+            proto: 1,
+            holder: world.version.clone(),
+            instance: world.panes.instance(),
+            boot_id: world.boot_id.clone(),
+            started_at: "2026-01-01T00:00:00Z".parse().unwrap(),
+            features: Vec::new(),
+        })
+    }
+
+    fn running_binary(&self) -> Option<PathBuf> {
+        lock(&self.world).binary.clone()
+    }
+
+    /// A taken upgrade keeps the instance and its panes, moves to the next
+    /// version and binary, and ends every watch with `upgraded`, as the
+    /// re-exec does.
+    fn upgrade(&self, binary: &Path) -> tiller_panes::Result<Upgrade> {
+        let mut world = lock(&self.world);
+        if world.down {
+            return Err(PanesError::Unreachable("the fake holder is down".into()));
+        }
+        world.upgrades.push(binary.to_owned());
+        if let Some(reason) = world.refuse.clone() {
+            return Ok(Upgrade::Refused(reason));
+        }
+        world.version = world.next_version.clone();
+        world.binary = Some(binary.to_owned());
+        world.panes.emit(&tiller_panes::message::Event::Upgraded {
+            holder: world.version.clone(),
+        });
+        Ok(Upgrade::Upgrading)
     }
 }
 
@@ -281,10 +496,14 @@ struct LauncherWorld {
     fail_next: Option<String>,
     /// The screen a launched pane shows.
     screen: Option<Screen>,
+    /// The terminal holder launches spawn in, when the host runs one.
+    holder: Option<FakeLink>,
 }
 
 /// A launcher over the fake herdr: each launch opens a workspace whose pane
-/// runs Claude (idle, by default) and names the session in its tokens.
+/// runs Claude (idle, by default) and names the session in its tokens. With
+/// a holder ([`FakeLauncher::use_holder`]) each launch is the daemon's
+/// holder `spawn` instead.
 #[derive(Clone)]
 pub struct FakeLauncher {
     herdr: FakeHerdr,
@@ -321,6 +540,11 @@ impl FakeLauncher {
     pub fn launched_screen(&self, screen: Screen) {
         lock(&self.world).screen = Some(screen);
     }
+
+    /// Launches spawn in `holder` from now on.
+    pub fn use_holder(&self, holder: FakeLink) {
+        lock(&self.world).holder = Some(holder);
+    }
 }
 
 impl Launcher for FakeLauncher {
@@ -332,6 +556,22 @@ impl Launcher for FakeLauncher {
     ) -> Result<Launched, String> {
         if let Some(error) = lock(&self.world).fail_next.take() {
             return Err(error);
+        }
+        let holder = lock(&self.world).holder.clone();
+        if let Some(holder) = holder {
+            let pane_id = holder
+                .spawn(&HolderLauncher::request(session, cwd, resume))
+                .map_err(|e| e.to_string())?
+                .pane
+                .as_str()
+                .to_owned();
+            lock(&self.world).launches.push(LaunchCall {
+                session_id: session.id.clone(),
+                cwd: cwd.to_owned(),
+                resume: resume.map(str::to_owned),
+                pane_id: pane_id.clone(),
+            });
+            return Ok(Launched { pane_id });
         }
         let n = lock(&self.world).launches.len() + 1;
         let workspace = format!("launch{n}");
@@ -357,7 +597,14 @@ impl Launcher for FakeLauncher {
     }
 
     fn close_pane(&mut self, pane_id: &str) -> Result<(), String> {
-        self.herdr.remove_pane(pane_id);
+        let holder = lock(&self.world).holder.clone();
+        if let Some(holder) = holder.filter(|_| tiller_core::ids::is_holder_pane(pane_id)) {
+            let pane = PaneId::from(pane_id);
+            let _ = holder.close(&pane, Duration::ZERO);
+            let _ = holder.forget(&pane);
+        } else {
+            self.herdr.remove_pane(pane_id);
+        }
         lock(&self.world).closed.push(pane_id.to_owned());
         Ok(())
     }
@@ -414,6 +661,8 @@ pub struct World {
     pub launcher: FakeLauncher,
     pub readings: FakeReadings,
     pub harness: FakeHarness,
+    /// The terminal holder, once [`World::use_holder`] put one here.
+    pub holder: Option<FakeLink>,
     pub config: Config,
     forge_override: Option<Box<dyn Forge>>,
     reconciler: Option<Reconciler>,
@@ -449,6 +698,7 @@ impl World {
             forge: FakeForge::default(),
             readings: FakeReadings::default(),
             harness: FakeHarness::default(),
+            holder: None,
             config,
             fleet,
             forge_override: None,
@@ -467,6 +717,55 @@ impl World {
         session
     }
 
+    /// Puts a fake terminal holder on this host, from the next engine on:
+    /// reconcile lists it, and resumes spawn in it.
+    pub fn use_holder(&mut self) -> FakeLink {
+        let holder = FakeLink::new();
+        self.launcher.use_holder(holder.clone());
+        self.holder = Some(holder.clone());
+        self.reconciler = None;
+        holder
+    }
+
+    /// Records the holder's instance in `meta.holder_instance`, as the
+    /// holder source's first `welcome` does.
+    pub fn holder_seen(&mut self) {
+        let holder = self.holder.clone().unwrap();
+        let welcome = holder.welcome().unwrap();
+        self.store_mut()
+            .holder_record(
+                &Ctx::new(Actor::Daemon),
+                &tiller_core::state::caches::HolderSeen {
+                    instance: welcome.instance,
+                    version: welcome.holder,
+                    boot_id: welcome.boot_id,
+                    previous_version: None,
+                },
+            )
+            .unwrap();
+    }
+
+    /// A builder run whose session runs Claude in a new pane of the
+    /// holder, keyed by the session as a spawn keys it. Returns the
+    /// session and its pane.
+    pub fn holder_worker(&mut self) -> (String, PaneId) {
+        let holder = self.holder.clone().unwrap();
+        let n = self.fleet.workers.len() + 2;
+        let session = self.worker(&format!("w{n}:p1"));
+        // The herdr layout never lays out a holder session.
+        self.fleet.workers.retain(|(s, _, _)| *s != session);
+        let record = self.session(&session);
+        let pane = holder
+            .spawn(&HolderLauncher::request(
+                &record,
+                Path::new("/home/user/worktrees"),
+                None,
+            ))
+            .unwrap();
+        self.fleet.bind(&session, pane.pane.as_str());
+        (session, pane.pane)
+    }
+
     /// Lays the fleet out in the fake herdr (orchestrator, an unrelated
     /// workspace, the workers) with every Claude pane idle and tokened.
     pub fn place(&self) {
@@ -483,6 +782,10 @@ impl World {
         if self.reconciler.is_none() {
             let sources = Sources {
                 herdr: Box::new(self.herdr.clone()),
+                holder: self
+                    .holder
+                    .clone()
+                    .map(|holder| Arc::new(holder) as Arc<dyn Link>),
                 probe: Box::new(self.probe.clone()),
                 scanner: Box::new(self.scanner.clone()),
                 forge: self

@@ -50,6 +50,7 @@ extern crate self as tiller_reconcile;
 pub mod columns;
 pub mod git;
 pub mod grants;
+pub mod holder;
 pub mod ladder;
 pub mod pass;
 pub mod recovery;

@@ -9,6 +9,7 @@
 
 pub mod client;
 pub mod composer;
+pub mod env;
 pub mod error;
 pub mod frame;
 pub mod handshake;

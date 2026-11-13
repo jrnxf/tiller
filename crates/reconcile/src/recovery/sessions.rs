@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use tiller_core::domain::{Activity, Card, ObservationSource, Role, Run, Session};
 use tiller_core::state::attention::NewAttention;
 use tiller_core::state::runs::{Bind, NewObservation, live_session};
-use tiller_core::state::{find, get, list};
+use tiller_core::state::{find, get, list, projects};
 use tiller_core::{Actor, Result, Timestamp};
 use tiller_observe::liveness::Probe;
 
@@ -84,11 +84,13 @@ impl Reconciler {
         let effective =
             ladder::effective_activity(self.conn(), session, &self.config.thresholds, now)?;
         let errored = ladder::errored_long(session, &self.config.thresholds, now);
+        let recorded_pid = self.recorded_pid(session)?;
         let verdict = ladder::climb(
             session,
             &effective,
             errored,
             self.snapshot.as_ref(),
+            self.holder_reading(recorded_pid)?,
             self.sources.probe.as_ref(),
         );
         match verdict {
@@ -102,6 +104,43 @@ impl Reconciler {
                 }
             }
         }
+    }
+
+    /// The pid the panes cache last saw in this session's pane: the agent
+    /// probe's target once the holder no longer lists the pane (R18).
+    fn recorded_pid(&self, session: &Session) -> Result<Option<u32>> {
+        let Some(pane) = &session.pane_id else {
+            return Ok(None);
+        };
+        let pid: Option<Option<i64>> = self
+            .conn()
+            .query_row(
+                "SELECT pid FROM panes WHERE host_id = ?1 AND pane_id = ?2",
+                rusqlite::params![session.host_id, pane],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(pid.flatten().and_then(|pid| u32::try_from(pid).ok()))
+    }
+
+    /// This pass's holder `list`, for the ladder, only when it comes from
+    /// the instance the records know. A new instance is R21's to judge:
+    /// until it has written `meta.holder_instance` the ladder reads every
+    /// holder pane as unknown.
+    pub(crate) fn holder_reading(
+        &self,
+        recorded_pid: Option<u32>,
+    ) -> Result<Option<ladder::HolderReading<'_>>> {
+        let Some(listing) = &self.listing else {
+            return Ok(None);
+        };
+        let known = projects::meta(self.conn(), "holder_instance")?;
+        Ok((known.as_deref() == Some(listing.instance.as_str())).then_some(
+            ladder::HolderReading {
+                listing,
+                recorded_pid,
+            },
+        ))
     }
 
     /// The ladder's dead verdict as a `liveness` observation (verdict

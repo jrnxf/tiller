@@ -819,6 +819,7 @@ pub fn start(
     config.learning = settings.learning.clone();
     let sources = Sources {
         herdr: Box::new(tools.herdr.clone()),
+        holder: None,
         probe: Box::new(HerdrStatusProbe),
         scanner: Box::new(scanner(home)),
         forge: reconcile_forge(home, open()?, &tools.gh),
@@ -1058,6 +1059,7 @@ esac
             let config = ReconcileConfig::new(&fleet.host, &home);
             let sources = Sources {
                 herdr: Box::new(herdr.clone()),
+                holder: None,
                 probe: Box::new(HerdrStatusProbe),
                 scanner: Box::new(scanner(&home)),
                 forge: Box::new(tiller_reconcile::sources::NoForge),
