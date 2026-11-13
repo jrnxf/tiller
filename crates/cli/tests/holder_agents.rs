@@ -23,12 +23,17 @@ use tiller_panes::{Format, HolderClient, Key, PaneId, Panes, Read};
 /// launch line names fires the `SessionStart` hook Claude Code would, under
 /// the Claude session id `claude-<session>`, then becomes `fake-agent`
 /// logging to a file per session, which [`Agents::events`] reads. Its turns
-/// run `busy_ms`.
+/// run `busy_ms`, and a `--replay` plays a frame each [`FRAME_MS`].
 struct Agents {
     world: World,
     worktree: PathBuf,
     logs: PathBuf,
 }
+
+/// The replay's frame pace: longer than the holder's 500 ms `quiet`, so the
+/// holder source reads the screen again between frames as it does in a real
+/// stream, and well under the 3 s settle of the output-quiet guard.
+const FRAME_MS: u64 = 800;
 
 impl Agents {
     fn new(busy_ms: u64) -> Self {
@@ -69,7 +74,7 @@ impl Agents {
                 "if [ \"$1\" = --version ]; then exec {agent} --version; fi\n\
                  printf '{{\"session_id\":\"claude-%s\",\"source\":\"startup\"}}' \"$TILLER_SESSION_ID\" \
                  | {tiller} hook SessionStart >/dev/null 2>&1\n\
-                 exec env FAKE_AGENT_LOG={logs}/\"$TILLER_SESSION_ID\".jsonl FAKE_AGENT_BUSY_MS={busy_ms} {agent} {args} \"$@\"\n",
+                 exec env FAKE_AGENT_LOG={logs}/\"$TILLER_SESSION_ID\".jsonl FAKE_AGENT_BUSY_MS={busy_ms} FAKE_AGENT_FRAME_MS={FRAME_MS} {agent} {args} \"$@\"\n",
                 agent = fake_agent().display(),
                 tiller = env!("CARGO_BIN_EXE_tiller"),
                 logs = logs.display(),
@@ -420,6 +425,189 @@ fn the_notify_command_gets_the_orchestrator_holder_pane_for_a_new_question() {
     assert_eq!(env.trim(), format!("{session} {pane} {host}"));
 }
 
+/// A board GET of `path` on the daemon at `port`: the response body.
+fn get(port: u16, cookie: &str, path: &str) -> Value {
+    use std::io::{Read as _, Write as _};
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream.set_read_timeout(Some(WAIT)).unwrap();
+    stream
+        .write_all(
+            format!(
+                "GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nCookie: {}={cookie}\r\n\r\n",
+                tiller_daemon::auth::COOKIE
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    let (_, body) = response.split_once("\r\n\r\n").unwrap();
+    serde_json::from_str(body).unwrap()
+}
+
+/// R21 on the real holder: a holder killed under a running worker comes
+/// back as a new instance, the daemon resumes the worker with its Claude
+/// session in a pane of the new holder, the owner's `[notify] command`
+/// hears of it once, and the Machines row shows the restart. A daemon
+/// restart after that sends no second notification.
+#[test]
+fn a_lost_holder_resumes_its_worker_and_notifies_the_owner_once() {
+    let agents = Agents::new(300);
+    let (mut holder, _client) = start_holder(&agents.world);
+    let run = agents.run();
+    let (session, pane) = agents.launch(&run);
+    agents.until(&session, "start", |events| has(events, "start"));
+
+    let root = agents.world.dir.path();
+    let out = root.join("notified");
+    let notify = root.join("notify");
+    script(
+        &notify,
+        &format!(
+            // The daemon's PATH holds only git: shell builtins copy stdin.
+            "while IFS= read -r line || [ -n \"$line\" ]; do printf '%s' \"$line\"; done >> {out}\necho >> {out}\n",
+            out = out.display()
+        ),
+    );
+    let config = agents.world.home().join("config.toml");
+    let mut table = std::fs::read_to_string(&config).unwrap_or_default();
+    table.push_str(&format!(
+        "\n[notify]\ncommand = [\"{}\"]\n",
+        notify.display()
+    ));
+    std::fs::write(&config, table).unwrap();
+    let count = |sql: &str| -> i64 {
+        agents
+            .world
+            .store()
+            .conn()
+            .query_row(sql, [], |row| row.get(0))
+            .unwrap()
+    };
+
+    // The resumed agent starts with the daemon's PATH and runs `claude`
+    // from it, and the claude stub runs `env`: both sit beside the git the
+    // daemon's PATH holds.
+    let bin = root.join("git-only");
+    std::fs::create_dir_all(&bin).unwrap();
+    let found = std::process::Command::new("sh")
+        .args(["-c", "command -v env"])
+        .output()
+        .unwrap();
+    std::os::unix::fs::symlink(
+        String::from_utf8(found.stdout).unwrap().trim(),
+        bin.join("env"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(root.join("claude-stub"), bin.join("claude")).unwrap();
+    let (daemon, port) = git_only_daemon(&agents.world);
+    let cookie = cookie(&agents.world);
+    // The holder source records the pane and its pid first.
+    let deadline = Instant::now() + WAIT;
+    while count("SELECT count(*) FROM panes WHERE holder_instance IS NOT NULL AND pid IS NOT NULL")
+        < 2
+    {
+        assert!(Instant::now() < deadline, "the holder source never listed");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let machines = get(port, &cookie, "/api/v1/machines");
+    assert!(
+        machines["machines"][0]["holder_restarted_at"].is_null(),
+        "{machines}"
+    );
+
+    holder.kill().unwrap();
+    holder.wait().unwrap();
+    drop(holder);
+    let (_holder, client) = start_holder(&agents.world);
+
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let notes = |out: &PathBuf| -> Vec<Value> {
+        std::fs::read_to_string(out)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_str(line).unwrap())
+            .filter(|note: &Value| {
+                note["title"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("terminal holder"))
+            })
+            .collect()
+    };
+    while notes(&out).is_empty() {
+        if Instant::now() >= deadline {
+            let store = agents.world.store();
+            let mut stmt = store
+                .conn()
+                .prepare("SELECT kind || ' ' || substr(payload, 1, 400) FROM events WHERE seq > 20 ORDER BY seq")
+                .unwrap();
+            let rows: Vec<String> = stmt
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            panic!(
+                "no R21 notification: {}\n{}",
+                std::fs::read_to_string(&out).unwrap_or_default(),
+                rows.join("\n")
+            );
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let (again, new_pane) = agents.live(&run);
+    assert_eq!(again, session, "the resume keeps the session row");
+    assert_ne!(new_pane, pane);
+    assert!(
+        client
+            .list()
+            .unwrap()
+            .panes
+            .iter()
+            .any(|p| p.pane.as_str() == new_pane),
+        "the worker runs in a pane of the new holder"
+    );
+    agents.until(&session, "the resumed start", |events| {
+        events.iter().filter(|e| e["event"] == "start").count() == 2
+    });
+    let argv = agents.of(&session, "start")[1]["argv"].clone();
+    let argv: Vec<&str> = argv
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap())
+        .collect();
+    let at = argv.iter().position(|a| *a == "--resume").unwrap();
+    assert_eq!(argv[at + 1], format!("claude-{session}"), "{argv:?}");
+    // R21 notifies before it writes holder.lost, so the note can come first.
+    let deadline = Instant::now() + WAIT;
+    while count("SELECT count(*) FROM events WHERE kind = 'holder.lost'") < 1 {
+        assert!(Instant::now() < deadline, "R21 never wrote holder.lost");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(
+        count("SELECT count(*) FROM events WHERE kind = 'holder.lost'"),
+        1
+    );
+    let machines = get(port, &cookie, "/api/v1/machines");
+    assert!(
+        machines["machines"][0]["holder_restarted_at"].is_string(),
+        "{machines}"
+    );
+    eprintln!("R21 note: {}", notes(&out)[0]);
+    eprintln!("machines: {machines}");
+
+    // A daemon restart on the same new holder notifies nothing again.
+    drop(daemon);
+    let (_daemon, _port) = git_only_daemon(&agents.world);
+    std::thread::sleep(Duration::from_secs(8));
+    assert_eq!(notes(&out).len(), 1, "{:?}", notes(&out));
+    assert_eq!(
+        count("SELECT count(*) FROM events WHERE kind = 'holder.lost'"),
+        1
+    );
+}
+
 /// Where a 9.2 kill lands.
 #[derive(Clone, Copy, Debug)]
 enum Kill {
@@ -528,7 +716,21 @@ fn killed_daemon_delivers_once(kill: Kill) {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
-    agents.until(&session, "the message", |events| has(events, "submit"));
+    // A delivery pass that meets a busy screen, a working holder status or an
+    // unreadable composer defers by design for 30 s, which outlasts WAIT. The
+    // wait covers one such deferral. 30 is BUSY_DEFER_SECS in
+    // tiller_delivery::outbox, which this crate does not depend on.
+    const BUSY_DEFER: Duration = Duration::from_secs(30);
+    let deadline = Instant::now() + WAIT + BUSY_DEFER;
+    while !has(&agents.events(&session), "submit") {
+        assert!(
+            Instant::now() < deadline,
+            "{kill:?}: the message never reached fake-agent: {:#?}\ndeferrals: {:#?}",
+            agents.events(&session),
+            deferrals(&agents.world, &id)
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let deadline = Instant::now() + WAIT;
     while agents
         .world
@@ -571,6 +773,19 @@ fn killed_daemon_delivers_once(kill: Kill) {
     assert_eq!(agents.of(&session, "start").len(), 1, "{kill:?}");
     assert!(agents.of(&session, "exit").is_empty(), "{kill:?}");
     assert_eq!(agents.live(&run), (session, pane));
+}
+
+/// Each `outbox.deferred` of message `id`: when, until when, and why.
+fn deferrals(world: &World, id: &str) -> Vec<(String, String)> {
+    let store = world.store();
+    let mut rows = store
+        .conn()
+        .prepare("SELECT at, payload FROM events WHERE kind = 'outbox.deferred' AND entity_id = ?1 ORDER BY seq")
+        .unwrap();
+    rows.query_map([id], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
 }
 
 /// Whether the composer row, between its rules, holds `text`.
@@ -674,9 +889,9 @@ fn essay() -> PathBuf {
 
 /// The output-quiet guard, on H08's `sleep-then-essay` recording. Its
 /// essay streams with the spinner off screen, so for 13 frames the composer
-/// reads Empty while Claude still prints. A message sent then is not typed
-/// into the stream: delivery waits until the pane has been quiet, then
-/// types the line once.
+/// reads Empty while Claude still prints, and the holder source reads the
+/// pane idle. A message sent then is not typed into the stream: delivery
+/// waits until the pane has been quiet, then types the line once.
 #[test]
 fn a_message_waits_out_a_reply_that_streams_with_an_empty_composer() {
     // It paces frames on the wall clock, so `.config/nextest.toml` runs it
@@ -688,11 +903,16 @@ fn a_message_waits_out_a_reply_that_streams_with_an_empty_composer() {
             "the nextest override that runs this test alone no longer matches it"
         );
     }
-    // From the busy Bash run (a mark at byte 9000) to the idle composer
-    // after the essay (the frame that ends at byte 16181).
+    // From the essay's first Empty frame (it ends at byte 9808) to the idle
+    // composer after the essay (the frame that ends at byte 16181). The
+    // holder source reads the screen at first sight, and only on `quiet`
+    // after that: a start in the Bash run would read its spinner, and the
+    // session's `working` would hold the message before the guard is asked.
+    // From here the holder reads idle while the essay still streams, the
+    // case the guard is for.
     let agents = Agents::with_args(
         300,
-        &format!("--replay {} 9000 16181 120x40", essay().display()),
+        &format!("--replay {} 9808 16181 120x40", essay().display()),
     );
     let (_holder, client) = start_holder(&agents.world);
     let (session, pane) = agents.orchestrator();

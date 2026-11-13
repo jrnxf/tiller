@@ -5,9 +5,11 @@
 //! line (a program and its leading arguments, split on whitespace), and
 //! `TILLER_GH` names the GitHub CLI program the land loop and the direct-pr
 //! publish run.
-//! `[herdr] terminal` names the terminal app the board's "Open in herdr"
+//! `[attach] terminal` names the terminal app the board's "Open in terminal"
 //! brings to the front (`protocol.md` 7.4); it is a macOS app, so other
-//! systems ignore it.
+//! systems ignore it. `[herdr] terminal` still works when `[attach]` sets
+//! none, and the start logs a warning for it and every other herdr key
+//! (`terminal-holder.md` 11.1).
 
 use std::ffi::OsString;
 use std::io::IsTerminal;
@@ -50,34 +52,53 @@ pub fn command_line(variable: &str, default: &str) -> Vec<OsString> {
     env_command(variable).unwrap_or_else(|| vec![default.into()])
 }
 
-/// The `[herdr]` table of `config.toml`.
+/// The terminal keys of the `[attach]` table, or of the `[herdr]` one
+/// they replace.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct HerdrTable {
-    /// The macOS app herdr runs in, such as `Ghostty`. Unset, "Open in
-    /// herdr" only focuses the pane.
+struct TerminalKeys {
+    /// The macOS app the pane opens in, such as `Ghostty`. Unset, "Open in
+    /// terminal" only focuses the pane.
     terminal: Option<String>,
     /// What the app takes before a command to run; `["-e"]` when unset.
     terminal_exec: Option<Vec<String>>,
 }
 
-/// The terminal app from the `[herdr]` table, or none.
-fn configured_terminal(table: &toml::Table) -> anyhow::Result<Option<MacApp>> {
-    let herdr: HerdrTable = match table.get("herdr") {
-        Some(value) => value
-            .clone()
-            .try_into()
-            .map_err(|e: toml::de::Error| anyhow::anyhow!("config.toml [herdr]: {e}"))?,
-        None => HerdrTable::default(),
+/// The terminal keys of table `name`; `[attach]` keeps `prefix` beside
+/// them, which `tiller attach` reads.
+fn terminal_keys(table: &toml::Table, name: &str) -> anyhow::Result<TerminalKeys> {
+    let Some(value) = table.get(name) else {
+        return Ok(TerminalKeys::default());
     };
-    let Some(app) = herdr.terminal else {
+    let mut value = value.clone();
+    if name == "attach"
+        && let Some(keys) = value.as_table_mut()
+    {
+        keys.remove("prefix");
+    }
+    value
+        .try_into()
+        .map_err(|e: toml::de::Error| anyhow::anyhow!("config.toml [{name}]: {e}"))
+}
+
+/// The terminal app from the `[attach]` table, else from the `[herdr]` one,
+/// or none.
+fn configured_terminal(table: &toml::Table) -> anyhow::Result<Option<MacApp>> {
+    let attach = terminal_keys(table, "attach")?;
+    let herdr = terminal_keys(table, "herdr")?;
+    let (keys, name) = if attach.terminal.is_some() {
+        (attach, "attach")
+    } else {
+        (herdr, "herdr")
+    };
+    let Some(app) = keys.terminal else {
         return Ok(None);
     };
     if app.trim().is_empty() {
-        anyhow::bail!("config.toml [herdr]: terminal names an app");
+        anyhow::bail!("config.toml [{name}]: terminal names an app");
     }
     let terminal = MacApp::new(app);
-    Ok(Some(match herdr.terminal_exec {
+    Ok(Some(match keys.terminal_exec {
         Some(exec) => terminal.exec(exec.into_iter().map(OsString::from).collect()),
         None => terminal,
     }))
@@ -186,16 +207,26 @@ pub fn run(args: &Args) -> anyhow::Result<ExitCode> {
     let table = load_config(&app).map_err(failed)?;
     let herdr = herdr_from_config(&table).map_err(failed)?;
     let herdr = follow_config(herdr, crate::cmd::admin::config_file(&app));
+    for key in crate::cmd::doctor::herdr_keys(&table) {
+        tracing::warn!(
+            key = key.key,
+            "config.toml names a herdr key; the terminal holder replaces herdr: {}",
+            key.instead
+        );
+    }
     let mut terminal = configured_terminal(&table)?;
     if !cfg!(target_os = "macos")
         && let Some(ignored) = terminal.take()
     {
         tracing::warn!(
             terminal = ignored.name(),
-            "config.toml [herdr] terminal is a macOS app; Open in herdr only focuses here"
+            "config.toml [attach] terminal is a macOS app; Open in terminal only focuses here"
         );
     }
     let (lavish, review_hosts) = lavish_from_config(&table).map_err(failed)?;
+    let holder = Arc::new(tiller_daemon::holder::HolderLink::new(
+        &std::path::absolute(&app.home)?,
+    ));
     let config = Config {
         home: app.home.clone(),
         port: args.port,
@@ -208,9 +239,13 @@ pub fn run(args: &Args) -> anyhow::Result<ExitCode> {
         ssh: command_line("TILLER_SSH", "ssh"),
         gh: std::env::var("TILLER_GH").unwrap_or_else(|_| "gh".into()),
         assets: Assets::board(),
-        holder: Some(Arc::new(tiller_daemon::holder::HolderLink::new(
-            &std::path::absolute(&app.home)?,
-        ))),
+        holder: Some(Arc::clone(&holder) as _),
+        // The holder re-execs into the binary this daemon was started by
+        // (`terminal-holder.md` 6.2).
+        holder_source: Some(tiller_daemon::workers::HolderWatch {
+            link: holder,
+            stable: crate::stable::tiller_path().ok(),
+        }),
         orchestrators: Some(Arc::new(BoardStart { app })),
     };
     match tiller_daemon::run(config)? {
@@ -264,6 +299,28 @@ mod tests {
     fn no_herdr_table_means_focus_only() {
         assert!(configured_terminal(&table("")).unwrap().is_none());
         assert!(configured_terminal(&table("[herdr]")).unwrap().is_none());
+        assert!(
+            configured_terminal(&table("[attach]\nprefix = \"ctrl-a\""))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// `[attach] terminal` wins over the `[herdr]` one it replaces, which
+    /// still works alone, and `prefix` sits beside it.
+    #[test]
+    fn the_attach_terminal_replaces_the_herdr_one() {
+        let app = configured_terminal(&table(
+            "[attach]\nterminal = \"WezTerm\"\nprefix = \"ctrl-a\"\n[herdr]\nterminal = \"Ghostty\"",
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(app.name(), "WezTerm");
+        let error = configured_terminal(&table("[attach]\nterminl = \"Ghostty\""))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("[attach]"), "{error}");
+        assert!(configured_terminal(&table("[attach]\nterminal = \"\"")).is_err());
     }
 
     #[test]

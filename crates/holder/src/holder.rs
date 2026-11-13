@@ -99,6 +99,9 @@ pub struct Limits {
     /// Requests of one connection answered later and not answered yet.
     /// One more is `busy`.
     pub in_flight: usize,
+    /// The size a `spawn` that names none starts at (`[holder]
+    /// default_size`).
+    pub default_size: Size,
 }
 
 impl Default for Limits {
@@ -110,6 +113,7 @@ impl Default for Limits {
             subscribers: 16,
             connections: 64,
             in_flight: 64,
+            default_size: tiller_panes::message::DEFAULT_SIZE,
         }
     }
 }
@@ -874,10 +878,10 @@ impl Holder {
 
     /// A holder that records every pane's raw output into `recorder`.
     #[cfg(feature = "record")]
-    pub fn recording(recorder: crate::record::Recorder) -> Arc<Self> {
+    pub fn recording(recorder: crate::record::Recorder, limits: Limits) -> Arc<Self> {
         Arc::new(Self {
             recorder: Some(recorder),
-            ..Self::bare(Limits::default())
+            ..Self::bare(limits)
         })
     }
 
@@ -908,12 +912,12 @@ impl Holder {
     /// its writes, a pending exit and a close's kill go on as they would
     /// have. A model that does not rebuild is reset, as a panic resets it.
     /// Runs inside the runtime, as it registers the masters.
-    pub fn resumed(record: Record, masters: Vec<OwnedFd>) -> io::Result<Arc<Self>> {
+    pub fn resumed(record: Record, masters: Vec<OwnedFd>, limits: Limits) -> io::Result<Arc<Self>> {
         let holder = Arc::new(Self {
             instance: record.instance,
             boot_id: record.boot_id,
             started_at: record.started_at,
-            ..Self::bare(Limits::default())
+            ..Self::bare(limits)
         });
         lock(&holder.table).next_num = record.next_num;
         let now = Instant::now();
@@ -1184,7 +1188,7 @@ impl Holder {
                 format!("the holder holds {panes} panes, its limit; forget an exited one"),
             ));
         }
-        let size = req.size.unwrap_or(tiller_panes::message::DEFAULT_SIZE);
+        let size = req.size.unwrap_or(self.limits.default_size);
         check_size(size)?;
         if !Path::new(&req.cwd).is_absolute() {
             return Err(bad_request(format!(
@@ -2248,7 +2252,7 @@ fn kill_and_reap(pid: Pid) {
     let _ = rustix::process::waitpid(Some(pid), WaitOptions::empty());
 }
 
-fn check_size(size: Size) -> Result<(), Failure> {
+pub(crate) fn check_size(size: Size) -> Result<(), Failure> {
     if size.cols < MIN_COLS || size.rows < MIN_ROWS {
         return Err(bad_request(format!(
             "a size of {} by {} is under the {MIN_COLS} by {MIN_ROWS} minimum",

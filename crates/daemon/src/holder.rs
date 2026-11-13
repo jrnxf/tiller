@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use tiller_panes::handshake::Welcome;
 use tiller_panes::message::{Exit, Format, Meta, Read, Screen, Signal};
 use tiller_panes::{
     HolderClient, Key, Listing, Live as _, Pane, PaneId, PaneState, Panes, PanesError, Result,
@@ -70,6 +71,7 @@ impl LiveControl for StreamHandle {
 #[derive(Debug)]
 pub struct HolderLink {
     path: PathBuf,
+    run_dir: PathBuf,
     client: Mutex<Option<Arc<HolderClient>>>,
 }
 
@@ -78,6 +80,7 @@ impl HolderLink {
     pub fn new(home: &Path) -> Self {
         Self {
             path: tiller_panes::socket_path(home),
+            run_dir: tiller_panes::run_dir(home),
             client: Mutex::new(None),
         }
     }
@@ -238,6 +241,43 @@ impl Holder for HolderLink {
                 Some(Update::Repaint { .. } | Update::Output(_)) => {}
             }
         }
+    }
+}
+
+impl tiller_panes::Live for HolderLink {
+    fn subscribe(&self, pane: &PaneId, opts: Subscribe) -> Result<Subscription> {
+        self.twice(|client| client.subscribe(pane, opts))
+    }
+
+    fn watch(&self) -> Result<tiller_panes::Events> {
+        self.twice(tiller_panes::Live::watch)
+    }
+}
+
+/// The holder as reconcile's observation source (`terminal-holder.md` 6.1).
+impl tiller_reconcile::holder::Link for HolderLink {
+    /// A ping first: a client kept from before a holder restart holds the
+    /// old `welcome`, and only a call finds its connection gone.
+    fn welcome(&self) -> Result<Welcome> {
+        self.twice(|client| {
+            client.ping()?;
+            Ok(client.welcome().clone())
+        })
+    }
+
+    fn running_binary(&self) -> Option<PathBuf> {
+        tiller_holder::lock::running_binary(&self.run_dir)
+    }
+
+    /// Asked once: a second ask could land on the new image.
+    fn upgrade(&self, binary: &Path) -> Result<tiller_panes::Upgrade> {
+        let Some(binary) = binary.to_str() else {
+            return Ok(tiller_panes::Upgrade::Refused(format!(
+                "the binary path {} is not UTF-8",
+                binary.display()
+            )));
+        };
+        self.once(|client| client.upgrade(binary, false))
     }
 }
 

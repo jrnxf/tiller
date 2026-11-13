@@ -35,15 +35,72 @@ pub fn landed_heads(conn: &Connection, host: &str, path: &str) -> Result<Vec<Str
     Ok(heads.collect::<rusqlite::Result<_>>()?)
 }
 
-/// One pane as herdr reports it.
+/// Which holder a pane snapshot comes from. Each refresh replaces only its
+/// own holder's rows, so the herdr poller and the holder poller never mark
+/// each other's panes gone while both run (until the cutover drops herdr).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneHolder {
+    /// herdr: rows with no `holder_instance`.
+    Herdr,
+    /// The terminal holder: rows with a `holder_instance`, of any instance,
+    /// so a pane of an older instance is gone once the new one lists.
+    Holder,
+}
+
+/// One pane as its holder reports it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PaneReading {
     pub pane_id: String,
-    pub workspace_label: Option<String>,
-    pub agent_name: Option<String>,
-    pub agent_status: Option<String>,
+    /// The holder `instance` that listed it; `None` for a herdr pane.
+    pub holder_instance: Option<String>,
+    /// The Tiller session the pane's key or tokens name.
     pub session_id: Option<String>,
+    pub pid: Option<i64>,
+    /// `meta.label` (the herdr workspace label for a herdr pane).
+    pub label: Option<String>,
+    pub state: PaneState,
+    pub exit_code: Option<i64>,
+    pub exit_signal: Option<i64>,
+    pub exited_at: Option<Timestamp>,
+    /// The pane's `meta` (herdr's row tokens for a herdr pane).
     pub metadata: Value,
+}
+
+/// One `welcome` from the local terminal holder, for `holder.record`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HolderSeen {
+    pub instance: String,
+    /// The holder's Tiller version.
+    pub version: String,
+    pub boot_id: String,
+    /// The version the poller last saw on this instance, when it saw one:
+    /// a new version on the same instance is a live upgrade.
+    pub previous_version: Option<String>,
+}
+
+/// What `holder.record` made of a `welcome`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "outcome")]
+pub enum HolderRecord {
+    /// No instance was recorded: this one is now.
+    First,
+    /// The recorded instance, at the version last seen.
+    Same,
+    /// The recorded instance, upgraded live from `from`.
+    Upgraded { from: String },
+    /// A new instance with the same boot id: the holder was lost (R21).
+    Lost { previous: String },
+    /// A new instance with a new boot id: the reboot restore (R04).
+    Rebooted { previous: String },
+}
+
+fn write_meta(tx: &mut Tx<'_>, key: &str, value: &str) -> Result<()> {
+    tx.conn().execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
 }
 
 /// One worktree as treehouse and git report it.
@@ -74,8 +131,14 @@ pub struct QuotaReading {
     pub fetch_error: Option<String>,
 }
 
-/// A full snapshot of one host's panes. Panes missing from it are gone.
-fn refresh_panes(tx: &mut Tx<'_>, host_id: &str, panes: &[PaneReading]) -> Result<usize> {
+/// A full snapshot of one host's panes from one holder. That holder's
+/// panes missing from it are gone.
+fn refresh_panes(
+    tx: &mut Tx<'_>,
+    host_id: &str,
+    holder: PaneHolder,
+    panes: &[PaneReading],
+) -> Result<usize> {
     let mut changes = 0;
     for pane in panes {
         let old: Option<Pane> = find(
@@ -84,19 +147,26 @@ fn refresh_panes(tx: &mut Tx<'_>, host_id: &str, panes: &[PaneReading]) -> Resul
             &[&host_id, &pane.pane_id],
         )?;
         tx.conn().execute(
-            "INSERT INTO panes (pane_id, host_id, workspace_label, agent_name, agent_status, session_id, metadata, fetched_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO panes (pane_id, host_id, holder_instance, session_id, pid, label, state,
+                                exit_code, exit_signal, exited_at, metadata, fetched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT (host_id, pane_id) DO UPDATE SET
-               workspace_label = excluded.workspace_label, agent_name = excluded.agent_name,
-               agent_status = excluded.agent_status, session_id = excluded.session_id,
-               metadata = excluded.metadata, fetched_at = excluded.fetched_at, gone_at = NULL",
+               holder_instance = excluded.holder_instance, session_id = excluded.session_id,
+               pid = excluded.pid, label = excluded.label, state = excluded.state,
+               exit_code = excluded.exit_code, exit_signal = excluded.exit_signal,
+               exited_at = excluded.exited_at, metadata = excluded.metadata,
+               fetched_at = excluded.fetched_at, gone_at = NULL",
             params![
                 pane.pane_id,
                 host_id,
-                pane.workspace_label,
-                pane.agent_name,
-                pane.agent_status,
+                pane.holder_instance,
                 pane.session_id,
+                pane.pid,
+                pane.label,
+                pane.state,
+                pane.exit_code,
+                pane.exit_signal,
+                pane.exited_at,
                 pane.metadata,
                 tx.now(),
             ],
@@ -105,10 +175,11 @@ fn refresh_panes(tx: &mut Tx<'_>, host_id: &str, panes: &[PaneReading]) -> Resul
             None => true,
             Some(old) => {
                 old.gone_at.is_some()
-                    || old.agent_status != pane.agent_status
+                    || old.state != pane.state
                     || old.session_id != pane.session_id
-                    || old.workspace_label != pane.workspace_label
-                    || old.agent_name != pane.agent_name
+                    || old.label != pane.label
+                    || old.holder_instance != pane.holder_instance
+                    || old.pid != pane.pid
             }
         };
         if changed {
@@ -122,7 +193,9 @@ fn refresh_panes(tx: &mut Tx<'_>, host_id: &str, panes: &[PaneReading]) -> Resul
                 .payload(json!({
                     "host_id": host_id,
                     "pane_id": pane.pane_id,
-                    "agent_status": pane.agent_status,
+                    "state": pane.state,
+                    "exit_code": pane.exit_code,
+                    "exit_signal": pane.exit_signal,
                     "session_id": pane.session_id,
                     "new": old.is_none(),
                 })),
@@ -130,7 +203,11 @@ fn refresh_panes(tx: &mut Tx<'_>, host_id: &str, panes: &[PaneReading]) -> Resul
         }
     }
     let seen: Vec<&str> = panes.iter().map(|p| p.pane_id.as_str()).collect();
-    let live: Vec<Pane> = list(tx.conn(), "host_id = ?1 AND gone_at IS NULL", &[&host_id])?;
+    let scope = match holder {
+        PaneHolder::Herdr => "host_id = ?1 AND gone_at IS NULL AND holder_instance IS NULL",
+        PaneHolder::Holder => "host_id = ?1 AND gone_at IS NULL AND holder_instance IS NOT NULL",
+    };
+    let live: Vec<Pane> = list(tx.conn(), scope, &[&host_id])?;
     for pane in live
         .into_iter()
         .filter(|p| !seen.contains(&p.pane_id.as_str()))
@@ -316,17 +393,19 @@ fn refresh_quota(tx: &mut Tx<'_>, windows: &[QuotaReading]) -> Result<usize> {
 }
 
 impl Store {
-    /// `cache.refresh` for one host's panes (herdr poller).
+    /// `cache.refresh` for one host's panes from one holder (the holder
+    /// poller, or the herdr poller until the cutover).
     pub fn cache_panes(
         &mut self,
         ctx: &Ctx,
         host_id: &str,
+        holder: PaneHolder,
         panes: Vec<PaneReading>,
     ) -> Result<Applied<usize>> {
         self.write(ctx, "cache.refresh", None, |tx| {
             tx.rebuildable();
             get::<Host>(tx.conn(), "host", host_id)?;
-            refresh_panes(tx, host_id, &panes)
+            refresh_panes(tx, host_id, holder, &panes)
         })
     }
 
@@ -507,27 +586,109 @@ impl Store {
     }
 
     /// `meta.boot_id`, written last in a reboot restore (`recovery.md` R04)
-    /// so a daemon that dies mid-restore repeats it. Natural: the recorded
-    /// id is returned unchanged.
-    pub fn daemon_boot_id(&mut self, ctx: &Ctx, boot_id: &str) -> Result<Applied<String>> {
+    /// so a daemon that dies mid-restore repeats it, and the holder
+    /// `instance` the restore ran against with it, so the new holder is
+    /// never read later as lost (R21). Natural: the recorded id is returned
+    /// unchanged.
+    pub fn daemon_boot_id(
+        &mut self,
+        ctx: &Ctx,
+        boot_id: &str,
+        holder_instance: Option<&str>,
+    ) -> Result<Applied<String>> {
         require_daemon(&ctx.actor, "daemon.start")?;
         required("boot id", boot_id)?;
         self.write(ctx, "daemon.start", None, |tx| {
             let host = local_host_id(tx.conn())?;
             let recorded = super::projects::meta(tx.conn(), "boot_id")?;
+            if let Some(instance) = holder_instance {
+                // Rebuildable, as in `holder_record`.
+                tx.rebuildable();
+                write_meta(tx, "holder_instance", instance)?;
+            }
             if recorded.as_deref() == Some(boot_id) {
                 return Ok(boot_id.to_owned());
             }
-            tx.conn().execute(
-                "INSERT INTO meta (key, value) VALUES ('boot_id', ?1)
-                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-                [boot_id],
-            )?;
+            write_meta(tx, "boot_id", boot_id)?;
             tx.event(
                 NewEvent::new("host", &host, "host.changed")
                     .payload(json!({"boot_id": boot_id, "was": recorded, "restore": "complete"})),
             )?;
             Ok(boot_id.to_owned())
+        })
+    }
+
+    /// `holder.record` (`state.md` section 8): what one `welcome` from the
+    /// local terminal holder says against `meta.holder_instance`.
+    ///
+    /// - Unset: the first holder this database sees. The instance is
+    ///   written, with no event.
+    /// - The same instance with a new holder version: `holder.upgraded`,
+    ///   with both versions (`terminal-holder.md` 6.2).
+    /// - A new instance and the same boot id: a lost holder (R21). Nothing
+    ///   is written: the restore writes the instance last, with
+    ///   `holder.lost` ([`Self::holder_restored`]).
+    /// - A new instance and a new boot id: the reboot restore (R04) owns
+    ///   the sessions. The instance is written now, so the new holder is
+    ///   never taken for a lost one once the boot id is written.
+    ///
+    /// `meta.holder_instance` is written as a rebuildable fact: a rebuild
+    /// that loses it records the next `welcome` as the first one.
+    pub fn holder_record(&mut self, ctx: &Ctx, seen: &HolderSeen) -> Result<Applied<HolderRecord>> {
+        require_daemon(&ctx.actor, "holder.record")?;
+        required("holder instance", &seen.instance)?;
+        self.write(ctx, "holder.record", None, |tx| {
+            tx.rebuildable();
+            let host = local_host_id(tx.conn())?;
+            let Some(recorded) = super::projects::meta(tx.conn(), "holder_instance")? else {
+                write_meta(tx, "holder_instance", &seen.instance)?;
+                return Ok(HolderRecord::First);
+            };
+            if recorded == seen.instance {
+                return Ok(match &seen.previous_version {
+                    Some(from) if *from != seen.version => {
+                        tx.event(
+                            NewEvent::new("host", &host, "holder.upgraded").payload(json!({
+                                "instance": seen.instance,
+                                "from": from,
+                                "to": seen.version,
+                            })),
+                        )?;
+                        HolderRecord::Upgraded { from: from.clone() }
+                    }
+                    _ => HolderRecord::Same,
+                });
+            }
+            let boot = super::projects::meta(tx.conn(), "boot_id")?;
+            if boot.as_ref().is_some_and(|boot| *boot != seen.boot_id) {
+                write_meta(tx, "holder_instance", &seen.instance)?;
+                return Ok(HolderRecord::Rebooted { previous: recorded });
+            }
+            Ok(HolderRecord::Lost { previous: recorded })
+        })
+    }
+
+    /// `holder.record`, last step of a lost-holder restore (R21): the new
+    /// instance becomes the recorded one, with `holder.lost` naming the old
+    /// and the new instance. Natural: the recorded instance again changes
+    /// nothing.
+    pub fn holder_restored(&mut self, ctx: &Ctx, instance: &str) -> Result<Applied<String>> {
+        require_daemon(&ctx.actor, "holder.record")?;
+        required("holder instance", instance)?;
+        self.write(ctx, "holder.record", None, |tx| {
+            let host = local_host_id(tx.conn())?;
+            let previous = super::projects::meta(tx.conn(), "holder_instance")?;
+            if previous.as_deref() == Some(instance) {
+                return Ok(instance.to_owned());
+            }
+            write_meta(tx, "holder_instance", instance)?;
+            let boot_id = super::projects::meta(tx.conn(), "boot_id")?;
+            tx.event(NewEvent::new("host", &host, "holder.lost").payload(json!({
+                "previous": previous,
+                "instance": instance,
+                "boot_id": boot_id,
+            })))?;
+            Ok(instance.to_owned())
         })
     }
 

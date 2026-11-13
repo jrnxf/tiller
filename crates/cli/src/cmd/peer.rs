@@ -37,9 +37,6 @@ pub enum PeerCmd {
         /// Read the peer only; never forward a mutation to it
         #[arg(long)]
         read_only: bool,
-        /// The herdr saved machine name; the label by default
-        #[arg(long)]
-        herdr_machine: Option<String>,
     },
     /// Accept a board host's key on this host; `tiller peer add` runs it
     Accept {
@@ -109,14 +106,13 @@ pub fn run(app: &App, cmd: PeerCmd) -> Done {
             label,
             ssh,
             read_only,
-            herdr_machine,
         } => {
             let scope = if read_only {
                 PeerScope::Read
             } else {
                 PeerScope::Act
             };
-            add(app, &label, &ssh, scope, herdr_machine)
+            add(app, &label, &ssh, scope)
         }
         PeerCmd::Accept {
             from,
@@ -257,13 +253,7 @@ fn serve_start_check(
 
 // -- add, on the board host ------------------------------------------------
 
-fn add(
-    app: &App,
-    label: &str,
-    alias: &str,
-    scope: PeerScope,
-    herdr_machine: Option<String>,
-) -> Done {
+fn add(app: &App, label: &str, alias: &str, scope: PeerScope) -> Done {
     check_label(label)?;
     check_alias(alias)?;
     let mut store = app.write()?;
@@ -342,7 +332,6 @@ fn add(
             &app.ctx(),
             NewPairing {
                 label: label.to_owned(),
-                herdr_machine,
                 scope,
                 peer_host_id: reply.host_id.clone(),
             },
@@ -369,7 +358,6 @@ fn add(
         json!({
             "label": host.label,
             "kind": host.kind,
-            "herdr_machine": host.herdr_machine,
             "peer_scope": host.peer_scope,
             "peer_host_id": host.peer_host_id,
             "ssh": alias,

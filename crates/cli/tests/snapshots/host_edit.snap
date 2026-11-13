@@ -6,7 +6,6 @@ exit: 0
   "data": {
     "bug_project_id": null,
     "disk_floor_mb": null,
-    "herdr_machine": null,
     "id": "<id1>",
     "kind": "local",
     "label": "host-a",

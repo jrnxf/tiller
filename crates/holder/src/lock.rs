@@ -88,6 +88,34 @@ pub fn live_pid(path: &Path) -> Option<u32> {
     is_alive(pid).then_some(pid)
 }
 
+/// The binary the holder of `run_dir` runs now, when one runs: what the
+/// live upgrade compares with the stable profile path (`recovery.md` R22).
+pub fn running_binary(run_dir: &Path) -> Option<PathBuf> {
+    binary_of(live_pid(&lock_path(run_dir))?)
+}
+
+/// The file process `pid` runs. A file deleted since it started reads with
+/// a ` (deleted)` suffix on Linux, so it never matches a live path.
+#[cfg(target_os = "linux")]
+pub fn binary_of(pid: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+/// The file process `pid` runs.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+pub fn binary_of(pid: u32) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let pid = libc::c_int::try_from(pid).ok()?;
+    let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: `buf` is writable for the length passed, and `proc_pidpath`
+    // writes at most that many bytes into it.
+    let len = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    let len = usize::try_from(len).ok().filter(|len| *len > 0)?;
+    buf.truncate(len);
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(&buf)))
+}
+
 /// The pid in a taken lock's file, once it names a live process.
 fn holder_pid(file: &mut File) -> std::io::Result<Option<u32>> {
     for read in 0..PID_READS {
@@ -140,5 +168,18 @@ mod tests {
             HolderLock::acquire(&path).unwrap(),
             Acquired::Held(_)
         ));
+    }
+
+    /// The holder's binary reads from its pid in the lock, and nothing
+    /// reads when no holder holds it.
+    #[test]
+    fn the_running_binary_is_the_lock_holders_executable() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(running_binary(dir.path()), None);
+        let Acquired::Held(_lock) = HolderLock::acquire(&lock_path(dir.path())).unwrap() else {
+            panic!("the take failed");
+        };
+        let exe = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        assert_eq!(running_binary(dir.path()), Some(exe));
     }
 }

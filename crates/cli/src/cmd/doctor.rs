@@ -352,6 +352,84 @@ fn notify(table: Option<&toml::Table>) -> Check {
     }
 }
 
+/// A herdr key that `config.toml` still names, and what to do with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HerdrKey {
+    pub key: &'static str,
+    pub instead: &'static str,
+}
+
+/// The herdr keys and what replaces each (`terminal-holder.md` 11.1).
+const HERDR_KEYS: [HerdrKey; 6] = [
+    HerdrKey {
+        key: "spawn.herdr",
+        instead: "remove it",
+    },
+    HerdrKey {
+        key: "spawn.herdr_socket",
+        instead: "remove it ([holder] socket moves the holder's socket)",
+    },
+    HerdrKey {
+        key: "spawn.herdr_session",
+        instead: "remove it",
+    },
+    HerdrKey {
+        key: "herdr.terminal",
+        instead: "move it to [attach] terminal",
+    },
+    HerdrKey {
+        key: "herdr.terminal_exec",
+        instead: "move it to [attach] terminal_exec",
+    },
+    HerdrKey {
+        key: "herdr",
+        instead: "remove the [herdr] table",
+    },
+];
+
+/// Each herdr key `table` names. A `[herdr]` table is named by its keys,
+/// and by itself only when it holds none of them.
+pub fn herdr_keys(table: &toml::Table) -> Vec<HerdrKey> {
+    let named: Vec<HerdrKey> = HERDR_KEYS
+        .into_iter()
+        .filter(|key| key.key != "herdr")
+        .filter(|key| tiller_core::config_file::get(table, key.key).is_some())
+        .collect();
+    let bare_table =
+        table.contains_key("herdr") && !named.iter().any(|key| key.key.starts_with("herdr."));
+    named
+        .into_iter()
+        .chain(
+            HERDR_KEYS
+                .into_iter()
+                .filter(|key| bare_table && key.key == "herdr"),
+        )
+        .collect()
+}
+
+/// `config.toml` names no herdr key: the terminal holder replaced herdr,
+/// and each one left is named with what to do with it.
+fn herdr_config(table: Option<&toml::Table>) -> Check {
+    const NAME: &str = "herdr config";
+    let keys = table.map(herdr_keys).unwrap_or_default();
+    if keys.is_empty() {
+        return Check::new(NAME, false, Status::Ok, "config.toml names no herdr key");
+    }
+    let named: Vec<String> = keys
+        .iter()
+        .map(|key| format!("{}: {}", key.key, key.instead))
+        .collect();
+    Check::new(
+        NAME,
+        false,
+        Status::Warn,
+        format!(
+            "config.toml names herdr keys the terminal holder replaced: {}",
+            named.join("; ")
+        ),
+    )
+}
+
 /// Every packaged fleet fragment registers `tiller hook <event>` for each
 /// handled event and the guard for `PreToolUse` (`protocol.md` 4.1 and 4.2),
 /// and no Tiller hook sits in the user's own Claude settings, because
@@ -874,6 +952,7 @@ pub fn report(app: &App) -> Report {
     });
     probes.ready(merge_app(&app.home));
     probes.ready(notify(table.as_ref().ok()));
+    probes.ready(herdr_config(table.as_ref().ok()));
     checks.extend(probes.finish());
     let merge_gates = stored(app, &mut checks);
 
@@ -908,7 +987,42 @@ pub fn run(app: &App) -> Done {
 
 #[cfg(test)]
 mod tests {
-    use super::{Status, firstmate, firstmate_scripts, no_mistakes_skew, owner_marker};
+    use super::{
+        Status, firstmate, firstmate_scripts, herdr_config, herdr_keys, no_mistakes_skew,
+        owner_marker,
+    };
+
+    fn keys(text: &str) -> Vec<&'static str> {
+        herdr_keys(&text.parse().unwrap())
+            .into_iter()
+            .map(|key| key.key)
+            .collect()
+    }
+
+    /// Doctor names each herdr key left and what replaces it, and passes
+    /// when none is left.
+    #[test]
+    fn doctor_names_each_herdr_key_to_remove() {
+        assert!(keys("[spawn]\nclaude = \"claude\"\n[attach]\nterminal = \"Ghostty\"").is_empty());
+        assert_eq!(
+            keys(
+                "[spawn]\nherdr = \"herdr\"\nherdr_socket = \"/home/user/h.sock\"\n[herdr]\nterminal = \"Ghostty\""
+            ),
+            ["spawn.herdr", "spawn.herdr_socket", "herdr.terminal"]
+        );
+        assert_eq!(keys("[herdr]"), ["herdr"]);
+
+        let none = herdr_config(Some(&"".parse().unwrap()));
+        assert_eq!(none.status, Status::Ok);
+        let left = herdr_config(Some(&"[herdr]\nterminal_exec = [\"-e\"]".parse().unwrap()));
+        assert_eq!(left.status, Status::Warn);
+        assert!(
+            left.detail
+                .contains("herdr.terminal_exec: move it to [attach] terminal_exec"),
+            "{}",
+            left.detail
+        );
+    }
 
     const FM: &str = "bash /opt/fm/bin/fm-watch.sh\n/bin/zsh -l\nbash /opt/fm/bin/fm-supervise-daemon.sh --loop\n";
 

@@ -149,6 +149,25 @@ impl Store {
             .optional()?)
     }
 
+    /// The problem of the local host's `check` while it is degraded: the
+    /// newest `host.degraded` with no `host.recovered` after it. Health
+    /// shows it as a warning (`recovery.md` R22).
+    pub fn host_degraded(&self, check: &str) -> Result<Option<String>> {
+        let last: Option<(String, Option<String>)> = self
+            .conn()
+            .query_row(
+                "SELECT kind, json_extract(payload, '$.problem') FROM events
+                  WHERE kind IN ('host.degraded', 'host.recovered') AND entity = 'host'
+                    AND entity_id = (SELECT value FROM meta WHERE key = 'host_id')
+                    AND json_extract(payload, '$.check') = ?1
+                  ORDER BY seq DESC LIMIT 1",
+                params![check],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(last.and_then(|(kind, problem)| (kind == "host.degraded").then_some(problem).flatten()))
+    }
+
     /// The newest event `seq`, or 0 on an empty log.
     pub fn last_seq(&self) -> Result<i64> {
         Ok(self.conn().query_row(

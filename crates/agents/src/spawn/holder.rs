@@ -7,7 +7,6 @@
 //! its `meta` names the session, the run and the label, so the pane says
 //! whose it is without herdr's tokens.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 
 use tiller_herdr::routed::CLOSE_GRACE;
@@ -17,32 +16,7 @@ use super::Result;
 
 /// The shell that runs a launch script: `argv[0]` must be absolute, since
 /// the holder does no `PATH` search.
-const SHELL: &str = "/bin/sh";
-
-/// The environment names a pane gets from the process that launches it.
-/// The holder passes on nothing of its own (spec 2.4), and the launch script
-/// adds the session's own variables. The list is short on purpose: a spawn
-/// can run inside an orchestrator's sandbox, whose proxy, temp directory and
-/// session markers must not outlive it in the worker.
-const PASSED: &[&str] = &[
-    "HOME",
-    "USER",
-    "LOGNAME",
-    "SHELL",
-    "PATH",
-    "LANG",
-    "LANGUAGE",
-    "TZ",
-    "SSH_AUTH_SOCK",
-    "XDG_RUNTIME_DIR",
-    "XDG_CONFIG_HOME",
-    "XDG_DATA_HOME",
-    "XDG_STATE_HOME",
-    "XDG_CACHE_HOME",
-    "NIX_PROFILES",
-    "NIX_SSL_CERT_FILE",
-    "SSL_CERT_FILE",
-];
+const SHELL: &str = tiller_panes::env::SHELL;
 
 /// Whose a pane is, for its `meta`.
 pub(crate) struct Owner<'a> {
@@ -51,19 +25,6 @@ pub(crate) struct Owner<'a> {
     pub project: &'a str,
     pub role: &'a str,
     pub label: &'a str,
-}
-
-/// The pane's environment: [`PASSED`] and every `LC_*` this process has.
-fn env() -> BTreeMap<String, String> {
-    passed(std::env::vars_os())
-}
-
-fn passed(
-    vars: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
-) -> BTreeMap<String, String> {
-    vars.filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
-        .filter(|(name, _)| PASSED.contains(&name.as_str()) || name.starts_with("LC_"))
-        .collect()
 }
 
 /// The `spawn` that runs `script` in `cwd` for `owner`.
@@ -81,7 +42,7 @@ pub(crate) fn request(owner: &Owner<'_>, script: &Path, cwd: &Path) -> Spawn {
         key: owner.session.to_owned(),
         argv: vec![SHELL.to_owned(), script.to_string_lossy().into_owned()],
         cwd: cwd.to_string_lossy().into_owned(),
-        env: env(),
+        env: tiller_panes::env::current(),
         size: None,
         meta,
     }
@@ -293,26 +254,8 @@ mod tests {
         assert!(
             req.env
                 .keys()
-                .all(|name| PASSED.contains(&name.as_str()) || name.starts_with("LC_"))
-        );
-    }
-
-    #[test]
-    fn a_pane_gets_the_users_basics_but_not_the_launchers_sandbox_or_session() {
-        let vars = [
-            ("PATH", "/usr/bin"),
-            ("LC_ALL", "C.UTF-8"),
-            ("HTTPS_PROXY", "http://192.0.2.1:3128"),
-            ("TMPDIR", "/home/user/sandbox/tmp"),
-            ("TILLER_SESSION_ID", "S0"),
-            ("CLAUDECODE", "1"),
-            ("TERM", "dumb"),
-        ]
-        .map(|(name, value)| (name.into(), value.into()));
-        let env = passed(vars.into_iter());
-        assert_eq!(
-            env.keys().map(String::as_str).collect::<Vec<_>>(),
-            ["LC_ALL", "PATH"]
+                .all(|name| tiller_panes::env::PASSED.contains(&name.as_str())
+                    || name.starts_with("LC_"))
         );
     }
 }

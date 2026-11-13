@@ -58,7 +58,7 @@ The blast radius is the only point for one holder per session. The design answer
 
 ### 2.3 Socket and security
 
-- **Path:** `$TILLER_HOME/run/holder.sock`, with `$TILLER_HOME/run` at mode `0700`. The default is `~/.tiller/run/holder.sock`. `[holder] socket` in `config.toml` overrides it. The path is checked against the 104-byte `sun_path` limit of macOS at start.
+- **Path:** `$TILLER_HOME/run/holder.sock`, with `$TILLER_HOME/run` at mode `0700`. The default is `~/.tiller/run/holder.sock`. `[holder] socket` in `config.toml` overrides it with an absolute path. The path is checked against the 104-byte `sun_path` limit of macOS at start.
 - **Mode:** the holder binds with `umask 077` and then sets `0600` on the socket.
 - **Peer check:** on every accept the holder reads the peer's uid (`SO_PEERCRED` on Linux, `getpeereid` and `LOCAL_PEERPID` on macOS). A uid that is not the holder's own gets no reply and the socket is closed. The holder logs it with the uid and pid.
 - **No network:** the holder never opens a TCP or UDP socket. A test checks this by listing the holder's fds.
@@ -143,7 +143,7 @@ A `pane` record is:
 
 A PTY has one size. Many clients may want different sizes. The holder keeps a stack of leases per pane:
 
-- `spawn` sets the base size (`[holder] default_size`, default 120 by 40).
+- `spawn` sets the base size (`[holder] default_size`, such as `"100x30"`; default 120 by 40).
 - A lease belongs to the connection that made it. Its id is the client's own string.
 - `resize` with a new lease id pushes a lease. `resize` with a lease id the connection already holds changes that lease and moves it to the top. The top lease sets the PTY size, and the holder sends `SIGWINCH` through `TIOCSWINSZ`. The `resized` event names the top lease.
 - `release`, or the end of the connection that holds the lease, removes it. The size falls back to the next lease. When no lease is left, the size stays as it is, so the app does not redraw for nothing.
@@ -610,7 +610,7 @@ The doc rows land in H01, before the code, so that each builder builds against a
 | Today | After |
 |---|---|
 | `panes` table, "owner: herdr", key `(host_id, pane_id)`, `agent_name`, `agent_status` (herdr's word) | `panes` rebuilt: `pane_id` (holder id), `host_id`, `holder_instance`, `session_id`, `pid`, `label`, `state` (`running`/`exited`), `exit_code`, `exit_signal`, `exited_at`, `metadata`, `fetched_at`, `gone_at`. Old rows are dropped: no herdr pane outlives the cutover |
-| `hosts.herdr_machine` | Dropped (SQLite `DROP COLUMN`). The migration refuses to run while a remote host has a `herdr_machine` and no peer pairing. Its message names the host and the two ways out: `tiller peer add` or `tiller host remove` |
+| `hosts.herdr_machine` | Dropped (SQLite `DROP COLUMN`). The migration refuses to run while a remote host has a `herdr_machine` and no peer pairing. Its message names the host and the way out: `tiller peer add` (D11) |
 | Observation source CHECK `'herdr'` | `'holder'` added. Old rows keep `'herdr'` as history. The CHECK needs a table rebuild in SQLite |
 | `sessions.pane_id`, `outbox.target_pane_id` | Names kept. The values are now holder pane ids |
 | Config `[spawn] herdr`, `herdr_socket`, `[herdr] terminal`, `terminal_exec`, host-config `herdr.terminal`, env `TILLER_HERDR` | `[holder] socket` and `default_size`, `[attach] terminal`, `terminal_exec` and `prefix`, `[notify] command`, and host-config `attach.terminal`. A config that still names a herdr key starts fine, logs a warning, and `tiller doctor` says which key to remove |
@@ -632,7 +632,7 @@ Each step is done by the owner, or by a builder with the owner present, at a che
 |---|---|---|
 | 0 | Check: no running agent (`tiller agents` shows none running), every active run paused or ended, quota checked | - |
 | 1 | `tiller backup now`, and note the version and the backup path | - |
-| 2 | Pair every remote host that is only a saved herdr machine (`tiller peer add`), or remove it | Two-way: unpair |
+| 2 | Pair every remote host that is only a saved herdr machine (`tiller peer add`) | Two-way: unpair |
 | 3 | Bump the Tiller flake input in the dotfiles and switch. The holder service starts. The daemon restarts and runs the migration | **One-way for state.** Back only by restoring the step 1 backup together with the old binary. That loses what was written since |
 | 4 | `tiller doctor`: the `holder` check passes, and no herdr key is left | - |
 | 5 | Start one orchestrator. Check the board's live view, a Fit, `tiller attach`, detach and reattach, a notification card and its click, and `tiller holder upgrade --dry-run` | Stop it |
@@ -690,10 +690,8 @@ Each task but S1P, HA1 and H15 is one builder, one branch, one worktree and one 
 
 ## 14. What stays open
 
-One point is open for the owner, found while H01 wrote the spec amendments:
-- **`tiller host remove`.** The 11.1 migration refusal names it as a way out, but the CLI has no such command, and no spec defines it. A row that names the host (its pane cache, its events) would need a rule, and the command must exist before step 2 of 11.3, which runs on the old binary. The owner picks: add it to `main` before H10 with its own contract, or make `tiller peer add` the only way out. Until then the specs repeat the 11.1 text.
-
 Decided:
+- **D11, no `tiller host remove`.** The 11.1 migration refusal named it as a second way out, but the CLI has no such command and no spec defines it. The owner chose to make `tiller peer add` the only way out: the refusal names it alone, and step 2 of 11.3 pairs each saved herdr machine.
 - **D12, a binary check on `tiller attach`.** `tiller` runs outside the role sandbox, so on a host where hooks do not fire the deny rule is the only verb check against an agent that runs `tiller attach` (`authority.md` section 8). The owner chose a refusal in the binary, as `tiller peer serve` has, that still lets a notification click through. Section 5.2 has the rule.
 
 One point is for a later task, recorded here so it is not lost:

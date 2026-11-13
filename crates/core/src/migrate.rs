@@ -28,7 +28,7 @@ const PROJECT_ID_CHECK_V7: &str = "CHECK (id GLOB '[a-z]*' AND id NOT GLOB '*[^a
     AND length(id) BETWEEN 2 AND 32)";
 
 /// The schema version this binary writes: the length of [`list`].
-pub const LATEST: usize = 19;
+pub const LATEST: usize = 20;
 
 /// Every migration in version order. Add a new one at the end and bump
 /// [`LATEST`].
@@ -107,6 +107,15 @@ fn list() -> Vec<M<'static>> {
         M::up(include_str!("../migrations/0019_load_trigger_key/up.sql"))
             .down(include_str!("../migrations/0019_load_trigger_key/down.sql"))
             .foreign_key_check(),
+        M::up_with_hook(
+            include_str!("../migrations/0020_holder_panes/up.sql"),
+            drop_herdr_machines,
+        )
+        .down_with_hook(
+            include_str!("../migrations/0020_holder_panes/down.sql"),
+            refuse_holder_observations,
+        )
+        .foreign_key_check(),
     ]
 }
 
@@ -176,6 +185,49 @@ fn narrow_project_ids(tx: &Transaction) -> HookResult {
         )));
     }
     rewrite_project_id_check(tx, PROJECT_ID_CHECK_V7, PROJECT_ID_CHECK_V1)
+}
+
+/// Migration 20 up: drops `hosts.herdr_machine` (`terminal-holder.md`
+/// 11.1). It refuses while a remote host is a saved herdr machine with no
+/// peer pairing, since that host would be left with no way to reach it.
+/// The hook runs after the migration's SQL, so the column goes here, once
+/// the check passed.
+fn drop_herdr_machines(tx: &Transaction) -> HookResult {
+    let unpaired: Vec<String> = tx
+        .prepare(
+            "SELECT label FROM hosts
+             WHERE kind = 'remote' AND herdr_machine IS NOT NULL AND peer_scope IS NULL
+             ORDER BY label",
+        )?
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    if !unpaired.is_empty() {
+        return Err(HookError::Hook(format!(
+            "{HOOK_REFUSAL}schema 20 drops saved herdr machines, and these remote hosts are \
+             only a saved herdr machine, with no peer pairing: {}. Pair each one with \
+             `tiller peer add` on the old tiller first",
+            unpaired.join(", ")
+        )));
+    }
+    tx.execute_batch("ALTER TABLE hosts DROP COLUMN herdr_machine")?;
+    Ok(())
+}
+
+/// Migration 20 down: refuses while an observation came from the holder,
+/// since schema 19's check would not take its source.
+fn refuse_holder_observations(tx: &Transaction) -> HookResult {
+    let holder: i64 = tx.query_row(
+        "SELECT count(*) FROM observations WHERE source = 'holder'",
+        [],
+        |row| row.get(0),
+    )?;
+    if holder > 0 {
+        return Err(HookError::Hook(format!(
+            "{HOOK_REFUSAL}schema 19 has no 'holder' observation source, and {holder} \
+             observations came from the terminal holder"
+        )));
+    }
+    Ok(())
 }
 
 /// The schema version of the database, or 0 for an empty one. Fails when the

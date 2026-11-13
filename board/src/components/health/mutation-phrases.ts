@@ -48,6 +48,7 @@ const PHRASE_TEXT: Record<string, string> = {
   "handoff.write": "wrote a handoff",
   "health.relabel": "relabeled a health item",
   "hold.release": "released {card} from hold",
+  "holder.record": "recorded the terminal holder",
   "host.add": "added a machine",
   "host.edit": "edited a machine",
   "import.apply": "imported records",

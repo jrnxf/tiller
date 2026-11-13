@@ -1966,6 +1966,7 @@ dependencies = [
  "tiller-core",
  "tiller-delivery",
  "tiller-herdr",
+ "tiller-holder",
  "tiller-observe",
  "tiller-panes",
  "tiller-reconcile",
@@ -2055,6 +2056,7 @@ dependencies = [
  "thiserror",
  "tiller-core",
  "tokio",
+ "toml",
  "ulid",
 ]
 
@@ -2073,6 +2075,7 @@ dependencies = [
 name = "tiller-reconcile"
 version = "0.1.0"
 dependencies = [
+ "jiff",
  "proptest",
  "rusqlite",
  "serde",
@@ -2082,6 +2085,8 @@ dependencies = [
  "tiller-core",
  "tiller-herdr",
  "tiller-observe",
+ "tiller-panes",
+ "tiller-poll",
  "tracing",
 ]
 

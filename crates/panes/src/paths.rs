@@ -1,5 +1,6 @@
 //! Where the holder's socket lives (`terminal-holder.md` 2.3). The caller
-//! resolves the Tiller home (`TILLER_HOME`) as it does for everything else.
+//! resolves the Tiller home (`TILLER_HOME`) as it does for everything else,
+//! and `[holder] socket` in its `config.toml` may move the socket.
 
 use std::path::{Path, PathBuf};
 
@@ -12,14 +13,25 @@ pub fn run_dir(home: &Path) -> PathBuf {
     home.join("run")
 }
 
-/// The holder's socket, `<home>/run/holder.sock`.
+/// The holder's socket: `[holder] socket`, else `<home>/run/holder.sock`.
+/// A `config.toml` that does not read gives the default here; the holder
+/// itself refuses to start on one (`crate::config::load`).
 pub fn socket_path(home: &Path) -> PathBuf {
+    crate::config::load(home)
+        .ok()
+        .and_then(|config| config.socket)
+        .unwrap_or_else(|| default_socket_path(home))
+}
+
+/// `<home>/run/holder.sock`, where the socket is when `[holder] socket` is
+/// unset.
+pub fn default_socket_path(home: &Path) -> PathBuf {
     run_dir(home).join("holder.sock")
 }
 
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "the holder socket path {} is {len} bytes, over the {SUN_PATH_MAX}-byte limit; set a shorter TILLER_HOME",
+    "the holder socket path {} is {len} bytes, over the {SUN_PATH_MAX}-byte limit; set a shorter TILLER_HOME or [holder] socket",
     path.display()
 )]
 pub struct SocketPathTooLong {
@@ -49,6 +61,18 @@ mod tests {
             socket_path(Path::new("/home/user/.tiller")),
             Path::new("/home/user/.tiller/run/holder.sock")
         );
+    }
+
+    #[test]
+    fn holder_socket_in_the_config_moves_the_socket() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(socket_path(home.path()), default_socket_path(home.path()));
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[holder]\nsocket = \"/home/user/h.sock\"\n",
+        )
+        .unwrap();
+        assert_eq!(socket_path(home.path()), Path::new("/home/user/h.sock"));
     }
 
     #[test]

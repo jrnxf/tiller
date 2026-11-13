@@ -232,7 +232,6 @@ mod tests {
                 &owner(),
                 NewPairing {
                     label: "host-b".into(),
-                    herdr_machine: None,
                     scope: PeerScope::Act,
                     peer_host_id: PEER.into(),
                 },

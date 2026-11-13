@@ -257,7 +257,7 @@ fn read_tail(
     let session = tiller_core::state::runs::live_session(conn, &run.id)
         .map_err(|error| error.to_string())?
         .ok_or("the run has no live session")?;
-    let (pane, machine) = tiller_core::state::runs::focus_target(conn, &session)
+    let pane = tiller_core::state::runs::focus_target(conn, &session)
         .map_err(|_| "the session has no pane".to_owned())?;
     if tiller_core::ids::is_holder_pane(&pane) {
         use tiller_panes::Panes as _;
@@ -276,14 +276,13 @@ fn read_tail(
     }
     let host: tiller_core::domain::Host =
         get(conn, "host", &session.host_id).map_err(|error| error.to_string())?;
-    if host.kind == tiller_core::domain::HostKind::Remote && machine.is_none() {
-        return Err("the session is on a remote host with no saved herdr machine".into());
+    if host.kind == tiller_core::domain::HostKind::Remote {
+        return Err(format!(
+            "the session is on the remote host {}; read it there",
+            host.label
+        ));
     }
     let herdr = super::spawn::configured_herdr(app).map_err(|failure| failure.message.clone())?;
-    let herdr = match machine {
-        Some(machine) => herdr.on_machine(machine),
-        None => herdr,
-    };
     herdr
         .read_visible(&pane)
         .map(|screen| tiller_daemon::api::pane_tail(&screen, keep))

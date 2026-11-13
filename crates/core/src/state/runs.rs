@@ -186,18 +186,17 @@ pub struct Recorded {
     pub observation: Observation,
     /// The session's activity moved to the observation's verdict.
     pub verdict_changed: bool,
-    /// When the hold ends on a `herdr:idle` that a fresh hook `working`
-    /// held (`protocol.md` 4.5); `None` when the observation was not held.
+    /// When the hold ends on a `holder:idle` (or `herdr:idle`) that a fresh
+    /// hook `working` held (`protocol.md` 4.5); `None` when the observation
+    /// was not held.
     #[serde(default)]
     pub idle_held_until: Option<Timestamp>,
 }
 
-/// How long a hook `working` holds against a `herdr:idle` (`protocol.md`
-/// section 4.5): herdr can read idle through a whole turn.
+/// How long a hook `working` holds against a `holder:idle` (`protocol.md`
+/// section 4.5): a screen can read idle through a whole turn.
 pub const HOOK_WORKING_HOLD_MS: i64 = 30_000;
 
-/// A `herdr:idle` never replaces a hook `working` less than 30 s old.
-/// Returns when the hold ends, if it holds.
 /// How far an ended session has settled: a live state is 0, and an ended
 /// session moves only to a higher rank. The match has no catch-all, so a
 /// new state must be placed.
@@ -213,9 +212,14 @@ fn rest_rank(activity: Activity) -> u8 {
     }
 }
 
-fn herdr_idle_held(session: &Session, new: &NewObservation) -> Option<Timestamp> {
-    if new.source != ObservationSource::Herdr
-        || new.verdict != Some(Activity::Idle)
+/// A screen reading's idle (`holder:idle`, and `herdr:idle` until the
+/// cutover drops herdr) never replaces a hook `working` less than 30 s old.
+/// Returns when the hold ends, if it holds.
+fn screen_idle_held(session: &Session, new: &NewObservation) -> Option<Timestamp> {
+    if !matches!(
+        new.source,
+        ObservationSource::Holder | ObservationSource::Herdr
+    ) || new.verdict != Some(Activity::Idle)
         || session.activity != Activity::Working
         || session.activity_source != Some(ObservationSource::Hook)
     {
@@ -263,23 +267,19 @@ pub fn lease_holder(conn: &Connection, run: &Run) -> Result<String> {
 
 /// Where `herdr agent focus` finds a session's agent (`tiller agent focus`,
 /// the board's "Open in herdr"): its pane, from the `panes` cache first and
-/// the session's own `pane_id` after, and the saved herdr machine of a
-/// remote host. An ended session is refused: its pane may hold another.
-pub fn focus_target(conn: &Connection, session: &Session) -> Result<(String, Option<String>)> {
+/// the session's own `pane_id` after. An ended session is refused: its pane
+/// may hold another.
+pub fn focus_target(conn: &Connection, session: &Session) -> Result<String> {
     if session.ended_at.is_some() {
         return Err(Error::refused("session", &session.id, "the session ended"));
     }
-    let host: Host = get(conn, "host", &session.host_id)?;
     let pane = find::<Pane>(conn, "session_id = ?1 AND gone_at IS NULL", &[&session.id])?
         .map(|pane| pane.pane_id)
         .or(session.pane_id.clone())
         .ok_or_else(|| {
             Error::refused("session", &session.id, "the session has no pane to focus")
         })?;
-    let machine = (host.kind == HostKind::Remote)
-        .then_some(host.herdr_machine)
-        .flatten();
-    Ok((pane, machine))
+    Ok(pane)
 }
 
 fn load_run(tx: &Tx<'_>, run: &str) -> Result<Run> {
@@ -2076,7 +2076,7 @@ impl Store {
                 // hosts cannot reopen it.
                 let may_move = session.ended_at.is_none()
                     || rest_rank(verdict) > rest_rank(session.activity);
-                idle_held_until = herdr_idle_held(&session, &new);
+                idle_held_until = screen_idle_held(&session, &new);
                 if newer && may_move && idle_held_until.is_none() {
                     tx.conn().execute(
                         "UPDATE sessions SET activity = ?2, activity_observed_at = ?3, activity_source = ?4 WHERE id = ?1",

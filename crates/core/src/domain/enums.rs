@@ -345,8 +345,14 @@ text_enum!(ObservationSource {
     Hook = "hook",
     Transcript = "transcript",
     Herdr = "herdr",
+    Holder = "holder",
     Liveness = "liveness",
     StatusLine = "status_line",
+});
+
+text_enum!(PaneState {
+    Running = "running",
+    Exited = "exited",
 });
 
 text_enum!(TriggerKind {

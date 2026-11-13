@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -12,13 +13,16 @@ use serde_json::{Value, json};
 use tiller_core::domain::{Card, OutboxKind, Project, Session};
 use tiller_core::ids::HOST_HEALTH_CARD;
 use tiller_core::state::attention::NewAttention;
-use tiller_core::state::caches::{WorktreeReading, landed_heads};
+use tiller_core::state::caches::{PaneHolder, WorktreeReading, landed_heads};
 use tiller_core::state::outbox::{NewMessage, live_orchestrator};
 use tiller_core::state::{find, get, list};
 use tiller_core::{Actor, Ctx, Result, Store, Timestamp};
 use tiller_herdr::client::{Herdr, Snapshot};
 use tiller_herdr::layout;
+use tiller_panes::message::Listing;
 
+use crate::holder::Link;
+use crate::recovery::sessions::Restore;
 use crate::sources::{AgentProbe, Forge, Harness, Launcher, Readings, Scanner, WorktreeScan};
 use crate::thresholds::Thresholds;
 
@@ -59,6 +63,8 @@ impl Config {
 /// The world the engine reads through (`crate::sources`).
 pub struct Sources {
     pub herdr: Box<dyn Herdr + Send>,
+    /// The local terminal holder, when this host runs one.
+    pub holder: Option<Arc<dyn Link>>,
     pub probe: Box<dyn AgentProbe>,
     pub scanner: Box<dyn Scanner>,
     pub forge: Box<dyn Forge>,
@@ -130,8 +136,10 @@ pub struct Reconciler {
     /// Passes refused by the owner marker since the last full pass, so the
     /// flip back runs a full pass (R20).
     pub(crate) was_read_only: bool,
-    /// This pass's herdr snapshot and worktree scans.
+    /// This pass's herdr snapshot, terminal holder `list` and worktree
+    /// scans.
     pub(crate) snapshot: Option<Snapshot>,
+    pub(crate) listing: Option<Listing>,
     pub(crate) scans: HashMap<PathBuf, WorktreeScan>,
     /// Pass keys another actor stored first that this engine has reported,
     /// with that actor and when it stored the key, so each refusal is
@@ -156,6 +164,7 @@ impl Reconciler {
             last_launch: None,
             was_read_only: false,
             snapshot: None,
+            listing: None,
             scans: HashMap::new(),
             planted: HashMap::new(),
             refusals: Vec::new(),
@@ -206,6 +215,16 @@ impl Reconciler {
             }
         };
         report.snapshot_ok = self.snapshot.is_some();
+        self.listing = match &self.sources.holder {
+            Some(holder) => match holder.list() {
+                Ok(listing) => Some(listing),
+                Err(error) => {
+                    tracing::debug!(%error, "holder list failed; the ladder stops at unknown");
+                    None
+                }
+            },
+            None => None,
+        };
         self.scans.clear();
 
         // Step 1: startup, once.
@@ -225,15 +244,31 @@ impl Reconciler {
             // The pane cache the pass reads is the one it just saw.
             match layout::bindings(self.store.conn(), &self.config.host_id) {
                 Ok(bindings) => {
-                    let readings = crate::recovery::evidence::pane_readings(&snapshot, &bindings);
-                    if let Err(error) =
-                        self.store
-                            .cache_panes(&self.ctx(now), &self.config.host_id, readings)
-                    {
+                    let readings = tiller_herdr::poller::readings(&snapshot, &bindings);
+                    if let Err(error) = self.store.cache_panes(
+                        &self.ctx(now),
+                        &self.config.host_id,
+                        PaneHolder::Herdr,
+                        readings,
+                    ) {
                         report.error("pane cache", &error);
                     }
                 }
                 Err(error) => report.error("pane bindings", &error),
+            }
+        }
+        if let Some(listing) = &self.listing {
+            let rows = crate::holder::readings(&self.store, listing);
+            let cached = rows.and_then(|rows| {
+                self.store.cache_panes(
+                    &self.ctx(now),
+                    &self.config.host_id,
+                    PaneHolder::Holder,
+                    rows,
+                )
+            });
+            if let Err(error) = cached {
+                report.error("holder pane cache", &error);
             }
         }
         if let Err(error) = self.import_spool() {
@@ -646,14 +681,33 @@ impl Reconciler {
         )
     }
 
-    /// Whether the reboot restore is still open: a known boot id that
-    /// `meta.boot_id` does not match yet (R04).
-    pub(crate) fn restore_pending(&self) -> Result<bool> {
-        let Some(current) = &self.config.boot_id else {
-            return Ok(false);
+    /// The restore still open, if any: a known boot id that
+    /// `meta.boot_id` does not match yet (R04), else a holder `list` of
+    /// another instance than `meta.holder_instance` (R21). A reboot covers
+    /// a lost holder too and writes the new instance with the boot id.
+    pub(crate) fn open_restore(&self) -> Result<Option<Restore>> {
+        if let Some(current) = &self.config.boot_id {
+            let recorded = tiller_core::state::projects::meta(self.conn(), "boot_id")?;
+            if recorded.is_some_and(|recorded| recorded != *current) {
+                return Ok(Some(Restore::Reboot {
+                    boot_id: current.clone(),
+                }));
+            }
+        }
+        let Some(listing) = &self.listing else {
+            return Ok(None);
         };
-        let recorded = tiller_core::state::projects::meta(self.conn(), "boot_id")?;
-        Ok(recorded.is_some_and(|recorded| recorded != *current))
+        let known = tiller_core::state::projects::meta(self.conn(), "holder_instance")?;
+        Ok(known
+            .filter(|known| *known != listing.instance)
+            .map(|_| Restore::HolderLost {
+                instance: listing.instance.clone(),
+            }))
+    }
+
+    /// Whether a restore (R04 or R21) owns the live sessions this pass.
+    pub(crate) fn restore_pending(&self) -> Result<bool> {
+        Ok(self.open_restore()?.is_some())
     }
 
     /// The bounded pane tail a note carries (P22): the last 40 visible lines.

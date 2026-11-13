@@ -90,6 +90,9 @@ pub struct Config {
     pub orchestrators: Option<Arc<dyn crate::api::OrchestratorStart>>,
     /// The terminal holder, for the panes of agents that run in it.
     pub holder: Option<Arc<dyn crate::holder::Holder>>,
+    /// The same holder as reconcile's observation source (`terminal-holder.md`
+    /// 6.1).
+    pub holder_source: Option<crate::workers::HolderWatch>,
 }
 
 /// How a run ended.
@@ -363,6 +366,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
             .holder
             .clone()
             .map(|holder| -> Arc<dyn tiller_panes::Panes> { holder }),
+        holder_source: config.holder_source.clone(),
         quota: config.quota.clone(),
         gh: config.gh.clone(),
         lavish: config.lavish.clone(),

@@ -491,7 +491,9 @@ fn agent_row(store: &Store, session: &Session) -> Result<AgentRow> {
     };
     let herdr_name = match (&run, &card) {
         (Some(run), Some(card)) => Some(herdr_name(&card.display_id, run)),
-        _ => pane.as_ref().and_then(|pane| pane.agent_name.clone()),
+        _ => pane
+            .as_ref()
+            .and_then(|pane| pane.herdr_agent().map(str::to_owned)),
     };
     // The model: the run's, else the newest one a hook reported.
     let reported: Option<String> = one(
@@ -553,7 +555,7 @@ fn agent_row(store: &Store, session: &Session) -> Result<AgentRow> {
         project_id: session.project_id.clone(),
         run_id: session.run_id.clone(),
         pane_id: session.pane_id.clone(),
-        workspace_label: pane.and_then(|pane| pane.workspace_label),
+        workspace_label: pane.and_then(|pane| pane.label),
         state_since: at_opt(state_since),
         last_output_at: at_opt(last_output_at),
         host: None,
@@ -689,7 +691,8 @@ pub fn machines(store: &Store, local: &LocalHealth, now: Timestamp) -> Result<Ma
         } else {
             store.conn().query_row(
                 "SELECT count(*) FROM panes
-                 WHERE host_id = ?1 AND gone_at IS NULL AND coalesce(agent_status, '') != 'done'",
+                 WHERE host_id = ?1 AND gone_at IS NULL AND state = 'running'
+                   AND coalesce(json_extract(metadata, '$.agent_status'), '') != 'done'",
                 [&host.id],
                 |row| row.get(0),
             )?
@@ -742,6 +745,11 @@ pub fn machines(store: &Store, local: &LocalHealth, now: Timestamp) -> Result<Ma
                 Some(seen) => ("ok", None, Some(seen)),
             }
         };
+        let holder_restarted = if is_local {
+            holder_restarted(store, &host.id, now)?
+        } else {
+            None
+        };
         machines.push(Machine {
             id: host.id,
             label: host.label,
@@ -766,13 +774,26 @@ pub fn machines(store: &Store, local: &LocalHealth, now: Timestamp) -> Result<Ma
             peer_scope: None,
             link_reason: None,
             bug_project: open_bug_project(store, host.bug_project_id)?,
+            holder_restarted_at: at_opt(holder_restarted),
             rev: host.rev,
         });
     }
     Ok(MachinesResponse { machines })
 }
 
-/// One host's machine row, for an SSE `host.changed` event.
+/// How long the Machines row shows a holder restart (R21).
+const HOLDER_RESTART_SHOWN_MINUTES: i64 = 24 * 60;
+
+/// The newest lost holder of `host_id` in the last 24 hours (R21).
+fn holder_restarted(store: &Store, host_id: &str, now: Timestamp) -> Result<Option<Timestamp>> {
+    one(
+        store,
+        "SELECT max(at) FROM events WHERE kind = 'holder.lost' AND entity = 'host'
+           AND entity_id = ?1 AND at >= ?2",
+        &[&host_id, &now.plus_minutes(-HOLDER_RESTART_SHOWN_MINUTES)],
+    )
+}
+
 /// A host's bug project while it is open. A retired one routes nothing, so
 /// Tiller bugs wait in `fleet`.
 fn open_bug_project(store: &Store, id: Option<String>) -> Result<Option<String>> {
@@ -786,6 +807,7 @@ fn open_bug_project(store: &Store, id: Option<String>) -> Result<Option<String>>
     )
 }
 
+/// One host's machine row, for an SSE `host.changed` event.
 pub fn machine(
     store: &Store,
     local: &LocalHealth,
@@ -1344,13 +1366,16 @@ fn freshness(store: &Store, active: Option<&Run>, prs: &[Pr]) -> Result<Vec<Fres
     let newest_pr = prs.iter().max_by_key(|pr| pr.fetched_at);
     Ok(vec![
         Freshness {
-            source: "Pane (herdr)".into(),
+            source: match &pane {
+                Some(pane) if pane.holder_instance.is_some() => "Pane (holder)".into(),
+                _ => "Pane (herdr)".into(),
+            },
             detail: match (&pane, &session) {
                 (Some(pane), _) if pane.gone_at.is_some() => "pane closed".into(),
+                (Some(pane), _) if pane.holder_instance.is_some() => pane.state.to_string(),
                 (Some(pane), _) => pane
-                    .agent_status
-                    .clone()
-                    .unwrap_or_else(|| "no status".into()),
+                    .herdr_status()
+                    .map_or_else(|| "no status".into(), str::to_owned),
                 (None, Some(_)) => "no pane bound".into(),
                 (None, None) => "no live session".into(),
             },
@@ -1600,11 +1625,10 @@ fn routed_text(payload: &Value) -> String {
 
 /// `GET /api/v1/runs/{id}` without its pane tail, which the handler reads
 /// from herdr.
-/// Where a run's live pane is: its id, and the saved machine that runs it
-/// when the session is on a remote host.
+/// Where a run's live pane is: its id, on this host. A pane on a remote
+/// host is read through its peer link (H11), not from here.
 pub struct PaneTarget {
     pub pane: String,
-    pub machine: Option<String>,
 }
 
 pub fn run_detail(store: &Store, reference: &str) -> Result<(RunDetail, Option<PaneTarget>)> {
@@ -1648,14 +1672,7 @@ pub fn run_detail(store: &Store, reference: &str) -> Result<(RunDetail, Option<P
     let pane = match live.and_then(|session| session.pane_id.clone().map(|pane| (session, pane))) {
         Some((session, pane)) => {
             let host: tiller_core::domain::Host = get(store.conn(), "host", &session.host_id)?;
-            let machine = if host.kind == HostKind::Remote {
-                // A remote pane is read through its machine, or not at all.
-                host.herdr_machine
-            } else {
-                None
-            };
-            (host.kind == HostKind::Local || machine.is_some())
-                .then_some(PaneTarget { pane, machine })
+            (host.kind == HostKind::Local).then_some(PaneTarget { pane })
         }
         None => None,
     };
@@ -2112,6 +2129,7 @@ fn peer_machine(host: &tiller_core::domain::Host, view: &PeerView) -> Machine {
         peer_scope: Some(view.scope.to_string()),
         link_reason: view.link_reason.clone(),
         bug_project: cached.and_then(|row| row.bug_project.clone()),
+        holder_restarted_at: cached.and_then(|row| row.holder_restarted_at.clone()),
         rev: host.rev,
     }
 }
@@ -2444,7 +2462,6 @@ mod tests {
             id: "h-peer".into(),
             label: "peer".into(),
             kind: tiller_core::domain::HostKind::Remote,
-            herdr_machine: None,
             lane_capacity: None,
             ram_floor_mb: None,
             disk_floor_mb: None,

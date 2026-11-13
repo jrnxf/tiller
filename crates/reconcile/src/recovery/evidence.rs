@@ -14,41 +14,15 @@ use tiller_core::domain::{
     Session,
 };
 use tiller_core::state::attention::NewAttention;
-use tiller_core::state::caches::PaneReading;
 use tiller_core::state::cards::{landed_evidence, reopened_seq};
 use tiller_core::state::outbox::live_orchestrator;
 use tiller_core::state::publishes::{publish, published_head};
 use tiller_core::state::runs::{Bind, EndRun, lease_holder, live_session};
 use tiller_core::state::{find, get, list};
 use tiller_core::{Result, Timestamp};
-use tiller_herdr::client::Snapshot;
-use tiller_herdr::layout::Binding;
 use tiller_observe::liveness::Probe;
 
 use crate::pass::{Reconciler, Report, canonical, minutes_since};
-
-/// The pane cache rows for one snapshot, as the herdr poller builds them.
-pub fn pane_readings(snapshot: &Snapshot, bindings: &[Binding]) -> Vec<PaneReading> {
-    snapshot
-        .panes
-        .iter()
-        .map(|pane| PaneReading {
-            pane_id: pane.pane_id.clone(),
-            workspace_label: snapshot
-                .workspaces
-                .iter()
-                .find(|w| w.workspace_id == pane.workspace_id)
-                .map(|w| w.label.clone()),
-            agent_name: pane.agent.clone(),
-            agent_status: pane.agent_status.clone(),
-            session_id: bindings
-                .iter()
-                .find(|b| b.pane_id == pane.pane_id)
-                .map(|b| b.session_id.clone()),
-            metadata: json!(pane.tokens),
-        })
-        .collect()
-}
 
 impl Reconciler {
     pub(crate) fn evidence(&mut self, now: Timestamp, report: &mut Report) -> Result<()> {

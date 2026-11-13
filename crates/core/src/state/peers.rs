@@ -43,9 +43,6 @@ pub struct NewPeerKey {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NewPairing {
     pub label: String,
-    /// The herdr saved machine; a new row takes the label, an existing row
-    /// keeps its own unless this names one.
-    pub herdr_machine: Option<String>,
     pub scope: PeerScope,
     /// The peer's `meta.host_id`, from its accept reply.
     pub peer_host_id: String,
@@ -170,9 +167,6 @@ impl Store {
         require_owner(&ctx.actor, "peer.pair")?;
         check_label(&new.label)?;
         check_host_id("peer host id", &new.peer_host_id)?;
-        if let Some(machine) = &new.herdr_machine {
-            required("herdr machine", machine)?;
-        }
         self.write(ctx, "peer.pair", None, |tx| {
             if new.peer_host_id == local_host_id(tx.conn())? {
                 return Err(Error::refused(
@@ -188,8 +182,8 @@ impl Store {
         })
     }
 
-    /// `peer.remove`, on the board host: the row stays as the herdr machine
-    /// it was, with no scope and no peer host id. The caller deletes the key
+    /// `peer.remove`, on the board host: the row stays as a remote host,
+    /// with no scope and no peer host id. The caller deletes the key
     /// file after the commit. A host not paired is a natural no-op
     /// (`protocol.md` 6.4).
     pub fn peer_remove(&mut self, ctx: &Ctx, label: &str) -> Result<Applied<Host>> {
@@ -329,14 +323,10 @@ fn revoke(tx: &mut Tx<'_>, key: &PeerKey, reason: &str) -> Result<()> {
 
 fn insert_pairing(tx: &mut Tx<'_>, new: &NewPairing) -> Result<Host> {
     let id = ids::new_ulid();
-    let machine = new
-        .herdr_machine
-        .clone()
-        .unwrap_or_else(|| new.label.clone());
     tx.conn().execute(
-        "INSERT INTO hosts (id, label, kind, herdr_machine, peer_scope, peer_host_id)
-         VALUES (?1, ?2, 'remote', ?3, ?4, ?5)",
-        params![id, new.label, machine, new.scope, new.peer_host_id],
+        "INSERT INTO hosts (id, label, kind, peer_scope, peer_host_id)
+         VALUES (?1, ?2, 'remote', ?3, ?4)",
+        params![id, new.label, new.scope, new.peer_host_id],
     )?;
     tx.event(
         NewEvent::new("host", &id, "host.added")
@@ -344,7 +334,6 @@ fn insert_pairing(tx: &mut Tx<'_>, new: &NewPairing) -> Result<Host> {
             .payload(json!({
                 "label": new.label,
                 "kind": "remote",
-                "herdr_machine": machine,
                 "peer_scope": new.scope,
                 "peer_host_id": new.peer_host_id,
             })),
@@ -382,22 +371,13 @@ fn update_pairing(tx: &mut Tx<'_>, host: Host, new: &NewPairing) -> Result<Host>
     if host.peer_host_id.as_deref() != Some(&new.peer_host_id) {
         changed.insert("peer_host_id".into(), json!(new.peer_host_id));
     }
-    let machine = new
-        .herdr_machine
-        .clone()
-        .or_else(|| host.herdr_machine.clone())
-        .unwrap_or_else(|| host.label.clone());
-    if host.herdr_machine.as_deref() != Some(&machine) {
-        changed.insert("herdr_machine".into(), json!(machine));
-    }
     if changed.is_empty() {
         return Ok(host);
     }
     let rev = host.rev + 1;
     tx.conn().execute(
-        "UPDATE hosts SET peer_scope = ?2, peer_host_id = ?3, herdr_machine = ?4, rev = ?5
-         WHERE id = ?1",
-        params![host.id, new.scope, new.peer_host_id, machine, rev],
+        "UPDATE hosts SET peer_scope = ?2, peer_host_id = ?3, rev = ?4 WHERE id = ?1",
+        params![host.id, new.scope, new.peer_host_id, rev],
     )?;
     tx.event(
         NewEvent::new("host", &host.id, "host.edited")
@@ -766,7 +746,6 @@ mod tests {
     fn pairing(label: &str, peer_host_id: &str) -> NewPairing {
         NewPairing {
             label: label.into(),
-            herdr_machine: None,
             scope: PeerScope::Act,
             peer_host_id: peer_host_id.into(),
         }
@@ -956,7 +935,6 @@ mod tests {
             .unwrap();
         assert_eq!(kinds(&store, &added.events), ["host.added"]);
         assert_eq!(added.value.kind, HostKind::Remote);
-        assert_eq!(added.value.herdr_machine.as_deref(), Some("host-b"));
         assert_eq!(added.value.peer_scope, Some(PeerScope::Act));
         assert_eq!(added.value.peer_host_id.as_deref(), Some(PEER_HOST));
 
@@ -1064,14 +1042,13 @@ mod tests {
     }
 
     #[test]
-    fn pair_marks_a_herdr_machine_and_remove_leaves_it() {
+    fn pair_marks_a_remote_host_and_remove_leaves_it() {
         let mut store = store();
         store
             .host_add(
                 &owner(),
                 super::super::projects::NewRemoteHost {
                     label: "host-b".into(),
-                    herdr_machine: "machine-b".into(),
                 },
             )
             .unwrap();
@@ -1079,11 +1056,7 @@ mod tests {
             .peer_pair(&owner(), pairing("host-b", PEER_HOST))
             .unwrap();
         assert_eq!(kinds(&store, &paired.events), ["host.edited"]);
-        assert_eq!(
-            paired.value.herdr_machine.as_deref(),
-            Some("machine-b"),
-            "a herdr machine keeps its saved machine id"
-        );
+        assert_eq!(paired.value.peer_host_id.as_deref(), Some(PEER_HOST));
 
         let ctx = session(&store);
         assert_eq!(
@@ -1094,7 +1067,7 @@ mod tests {
         assert_eq!(kinds(&store, &removed.events), ["host.edited"]);
         assert_eq!(removed.value.peer_scope, None);
         assert_eq!(removed.value.peer_host_id, None);
-        assert_eq!(removed.value.herdr_machine.as_deref(), Some("machine-b"));
+        assert_eq!(removed.value.kind, HostKind::Remote, "the row stays");
         assert!(store.paired_hosts().unwrap().is_empty());
         assert!(store.peer_remove(&owner(), "host-b").unwrap().replayed);
         assert_eq!(

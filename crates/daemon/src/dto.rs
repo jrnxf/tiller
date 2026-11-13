@@ -549,6 +549,11 @@ pub struct Machine {
     /// is what its own row reports.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bug_project: Option<String>,
+    /// When this host's terminal holder last restarted and lost its panes,
+    /// for 24 hours after (`recovery.md` R21); absent otherwise. A peer's
+    /// is what its own row reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder_restarted_at: Option<String>,
     pub rev: i64,
 }
 
@@ -795,6 +800,9 @@ pub struct Health {
     pub links: Vec<LinkHealth>,
     /// The merge App key, as `tiller doctor`'s `merge app` line reads it.
     pub merge_app: MergeAppHealth,
+    /// Problems that stop nothing, one line each: "holder upgrade refused:
+    /// <reason>" until it clears (`recovery.md` R22).
+    pub warnings: Vec<String>,
 }
 
 /// The merge App key under `~/.tiller/forge-app/`: names files and the
@@ -1526,7 +1534,11 @@ pub struct StartSettings {
 /// to. `owner_guard.decider_key` is never here.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct HostConfig {
-    /// `herdr.terminal`; absent when unset, so Open in herdr only focuses.
+    /// `attach.terminal`; absent when unset, so Open in terminal only
+    /// focuses.
+    pub attach_terminal: Option<String>,
+    /// `herdr.terminal`, the key `attach.terminal` replaces; absent when
+    /// unset.
     pub herdr_terminal: Option<String>,
     /// `stop_hook_mode`: `off`, `observe` or `block-once`. An unset or
     /// unknown value reads as `observe`.

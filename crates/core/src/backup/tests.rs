@@ -947,7 +947,6 @@ fn a_boundary_changes_only_while_nothing_records_it() {
             &owner(),
             NewRemoteHost {
                 label: "host-b".into(),
-                herdr_machine: "host-b".into(),
             },
         )
         .unwrap()

@@ -38,7 +38,7 @@ use super::serve::{Denied, ServeConfig, ServeError, current_key, refused, skew_m
 use super::{Frame, HelloKey};
 use crate::api::{
     ApiError, fit_sent, herdr_only, holder_error, input_sent, pane_error, pane_gone, pane_target,
-    saved_machine, terminal_keys, type_into,
+    remote_pane, terminal_keys, type_into,
 };
 use crate::dto::{TerminalFit, TerminalHistory};
 use crate::holder;
@@ -562,7 +562,10 @@ pub async fn serve(
     let target = pane_target(&store, &open.session);
     drop(store);
     let answered = match target {
-        Ok((_, _, Some(machine))) => Err(saved_machine(&machine)),
+        Ok((_, _, Some(label))) => Err(remote_pane(
+            &label,
+            "the terminal mirror shows panes on this machine only",
+        )),
         Ok((session_id, pane, None)) => match open.kind {
             PaneKind::History => history(config, &open, session_id, pane).await,
             PaneKind::Stream => {
