@@ -49,3 +49,11 @@ The owner approved the ADR on Tuesday 2026-11-03 (Lisbon time) and took the reco
 - Blast radius grows. Anyone who can read the board host's `~/.tiller` can act as the owner on every peer paired with `act` scope. That attacker is the deliberate adversary with the owner's shell, which `authority.md` section 1 already leaves out of scope. Fleet roles cannot read `~/.tiller` (G20), cannot reach a peer over SSH (G43), and cannot sign a frame. `--read-only` pairings and keeping the work Mac out limit the reach.
 - Six build tasks (F1 to F6), about 13 to 17.5 agent-hours summed, about 10.5 to 14 hours on their own critical path. They run beside the replay gate and finish before the remote host's cutover (T6.3), so the personal Mac's cutover (T6.1) does not move. T6.3 grows by about 0.5 h for pairing and its live check. A new owner checkpoint, CP-F, comes before T6.3.
 - The board's screens stay as they are. It gains a host chip, an "as of" age on a stale peer's cards, and disabled controls with a reason. CP4 can go ahead now.
+
+## Amendment: peer agent parity (D20)
+
+- **Date:** Friday 2026-11-13 (Lisbon time)
+- **Decision:** the owner's decision D20: from the board, the owner can interrupt, answer prompts for, steer, stop, or do anything else for any peer's agent, not just the board host's own.
+- **What changes:** the forwarded owner keeps the board's full row for agents and their records. The tail and the prompt read go as a `query` on the peer link. The prompt answer, interrupt, steer, stop, pause, unpause, resume, relaunch and an attention item's withdraw go as a forwarded `mutate`. Keys and Fit stay on the pane link (HR1). The routes, frames and error codes are in `protocol.md` 7.4 (Agent verbs on a peer) and 10.7, and the rows in `authority.md` section 3, section 4 and G46.
+- **What stays:** the owner only, on the board host, with the `act` scope (the tail excepted), each action signed and checked again by the owning host. A `read` pairing and every fleet role stay refused. No host forwards to a third (G42). The owner-CLI-only powers (grants, away mode, pairing, landing, `tiller spawn`) and the host and project admin (config, projects, host edit, backups, pollers, memory decisions) stay local.
+- **Build task:** HR2 in `docs/design/terminal-holder.md` section 13, after H11 and before H12.
