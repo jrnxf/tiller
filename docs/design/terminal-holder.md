@@ -324,7 +324,7 @@ The holder encodes each name for the app's current mode: legacy, application cur
 | Keys and paste from the board | `api.rs:4526` (`terminal_input`) | `keys` and `paste` |
 | Screen read, prompt read and prompt answer | `api.rs:4645` (`prompt_read`), `api.rs:4691` (`prompt_answer`), `daemon/src/prompt.rs` | `screen(visible)`, then `keys(dialog.keys(option))`. That is a digit for a numbered dialog, or arrow keys and then `enter` for a cursor menu such as the folder trust dialog. `prompt.rs` does not change |
 | History | `api.rs:4808` (`terminal_history`, `read_recent` at 4851, 1,000 rows) | `screen({recent: lines})`, still capped at 1,000 rows for the API |
-| Tail for a saved machine | `api.rs:4873` (`terminal_tail`), `cli/cmd/run.rs:247-275`, `views.rs` `pane_tail_of` | Local panes: `screen(visible)`. Saved machines go away (section 8). A peer's pane has no tail, as `protocol.md` 10.7 says today. Its live view is the peer pane link |
+| Tail for a saved machine | `api.rs:4873` (`terminal_tail`), `cli/cmd/run.rs:247-275`, `views.rs` `pane_tail_of` | Local panes: `screen(visible)`. Saved machines go away (section 8). A peer's tail is a `query` on the peer link, which the peer answers with its own `screen(visible)` (HR2, `protocol.md` 7.4, Agent verbs on a peer). Its live view is the peer pane link |
 | Remote poller per saved machine | `daemon/workers.rs:589-630` (`MachinesSource`, `HerdrSource::remote`) | Goes away. Peers have their own link (section 8) |
 | Local poller | `daemon/workers.rs:809` (`HerdrSource::local`, in `start`) | `HolderSource`: `watch` events, plus `list` every 30 s and after each reconnect. The poller name is `holder` |
 | Token counts reported to herdr | `report_tokens` | Goes away (it was herdr sidebar metadata) |
@@ -370,7 +370,7 @@ The endpoints and the NDJSON line kinds stay. Their meaning changes:
 - **History** is `screen({recent: lines})`, at most 1,000 rows.
 - **Bounds.** The daemon keeps 8 views at most, and each view keeps its queue of 64 lines. A view that falls behind is ended and opens again for a fresh repaint, as today.
 - **Prompt** reads `screen(visible)` and answers with `keys(dialog.keys(option))`: a digit, or arrows and `enter` for a cursor menu. The check and the key are still two calls, so the window between them stays one round trip (`protocol.md` 7.4, Prompt).
-- **Tail** for a local pane is `screen(visible)`. The saved-machine case goes away. A peer's pane still has no tail (`protocol.md` 10.7).
+- **Tail** for a local pane is `screen(visible)`. The saved-machine case goes away. A peer's tail, prompt read and answer run on the peer's own holder, reached as a `query` or a forwarded `mutate` (HR2, `protocol.md` 7.4, Agent verbs on a peer).
 - **Copy.** "Open in herdr" becomes "Open in terminal". The reconnecting banner, the host checks and the degraded copy name the holder. Section 10 lists each file.
 
 ### 5.2 `tiller attach`
@@ -507,12 +507,12 @@ This affects the agents' own cards too, because their panes now carry `TILLER_PA
 
 **Now:**
 - The peer pane link (`protocol.md` 10.7, `daemon/peer/pane.rs`) moves to the peer's own holder. The board host still opens `tiller peer pane` over SSH, and the `pane_open` frame keeps its fields, with an optional `fit`.
-- Remote input from the board (HR1): signed `pane_input` and `pane_fit` frames on the same pane link, allowed only with the `act` scope (`authority.md` G46, `protocol.md` 10.7). They reach the pane through the peer's own input path, holder or herdr, and a peer pane fits the stage and gives its size back as a local one does. Interrupt, prompt answers, steer and stop stay refused for a peer.
+- Remote input from the board (HR1): signed `pane_input` and `pane_fit` frames on the same pane link, allowed only with the `act` scope (`authority.md` G46, `protocol.md` 10.7). They reach the pane through the peer's own input path, holder or herdr, and a peer pane fits the stage and gives its size back as a local one does.
+- Every other agent verb for a peer (HR2, the owner's decision D20 on Friday 2026-11-13): the tail and the prompt read as a `query` on the peer link, and the prompt answer, interrupt, steer, stop, pause, unpause, resume, relaunch and an attention item's withdraw as a forwarded `mutate`. Each needs the `act` scope (the tail excepted), and the peer runs it through the same core function as its own board, on its own holder, with its own checks (`authority.md` section 3 and G46, `protocol.md` 7.4, Agent verbs on a peer). A `read` pairing and every fleet role stay refused, and no host forwards to a third (G42).
 - Saved herdr machines go away: `hosts.herdr_machine`, `tiller peer add --herdr-machine`, the remote herdr poller, the saved-machine tail and `herdr --machine` focus. A remote host must be a paired Tiller peer (ADR 0003). The cutover pairs or removes each saved-machine-only host first (section 11).
 - Open in terminal for a peer's agent uses `ssh -t <alias> tiller attach <session>` (section 5.3).
 
 **Later (not in this build):**
-- The other agent verbs for a peer (interrupt, prompt answers, steer, stop), each a later owner choice with its own authority row.
 - One Fit turn across the peer's own board and its `peer pane` processes: the holder's lease (H11) gives it.
 
 ## 9. The test gate
@@ -681,12 +681,13 @@ Each task but S1P, HA1 and H15 is one builder, one branch, one worktree and one 
 | H09 (`holder-port`) | Agents and delivery on `Panes`, from S1c's wiring: spawn, resume, control, stop, submit, notifier on `[notify] command`, labels. `fake-agent` and the restart tests of 9.2 | S1c, H05, H06 | 6 h |
 | H10 (`holder-port`) | Reconcile, observe and state: `HolderSource`, ladder, R18, R21 and R22, `holder` observations, the migration of 11.1, config keys | H09 | 6 h |
 | H11 (`holder-port`) | Daemon API and peers: live view on `subscribe`, Fit as a lease, history, prompt, input, Open in terminal, peer pane link, the saved-machine paths removed | H10, H07 | 5 h |
-| H12 (`holder-port`) | Board: copy, `terminal-open.ts`, stream semantics, the tail UI for saved machines removed, screenshots in both themes at 1440 and 390 px | H11 | 4 h |
+| HR2 | Peer agent parity (D20): the spec rows first (HR2a: `authority.md` section 3, the matrix and G46, `protocol.md` 7.4 and 10.7, ADR 0003's note), then the code: the agent verbs and the withdraw forwarded as `mutate`, the tail and the prompt read as `query`, the 60 s wait for a proof, and the tests the spec names | H11 | 4 h |
+| H12 (`holder-port`) | Board: copy, `terminal-open.ts`, stream semantics, the tail UI for saved machines removed, every agent control live on a peer's agent (HR2), screenshots in both themes at 1440 and 390 px | H11, HR2 | 4 h |
 | H13 (`holder-port`) | Delete `crates/herdr` and every herdr name left (section 10 code rows, roles, flake, demo, scripts). Set `services.tiller.holder.enable` to default to the daemon's `enable`. `git grep -i herdr` finds only history: `probe/`, `scripts/firstmate-export` and its fixtures, ADRs, superseded docs and the specs' [H] notes on what came before the cutover. Tests with herdr in their name are renamed | H12, H08 | 3 h |
 | H14 (`holder-port`) | End-to-end soak on a test home with `fake-agent` panes: 4 h of daemon restarts, 3 live upgrades and a holder kill, with no gap in any counter. Then the full CI gate and `nix flake check` | H13 | 6 h (4 h is the soak itself) |
 | H15 | Cutover on the live tiller, with the owner (section 11.3), after the owner merges `holder-port` | H14 | 1 h |
 
-**Total:** about 69 hours of agent time: about 9 hours for H00, H01 and the slice, and about 60 hours for H02 to H15 with HA1. H00 runs beside H01, and S1c beside S1b. H06, H07, H08 and HA1 run beside H04 and H05. The critical path is H01, S1a, S1b, the end of S1c (its end-to-end test and review, about 1 h) and S1P, then H02 to H05, then H09 to H15: about 57 hours.
+**Total:** about 73 hours of agent time: about 9 hours for H00, H01 and the slice, and about 64 hours for H02 to H15 with HA1 and HR2. H00 runs beside H01, and S1c beside S1b. H06, H07, H08 and HA1 run beside H04 and H05. The critical path is H01, S1a, S1b, the end of S1c (its end-to-end test and review, about 1 h) and S1P, then H02 to H05, then H09 to H11, HR2 and H12 to H15: about 61 hours. HR2 sits between H11 and H12, so the H12 board covers peer agents too.
 
 ## 14. What stays open
 
@@ -697,4 +698,4 @@ Decided:
 One point is for a later task, recorded here so it is not lost:
 - Shorter Enter pacing with bracketed paste (section 4.5), once raw stream fixtures exist.
 
-Remote input over the peer link (section 8) has its row: `authority.md` G46 and `protocol.md` 10.7.
+Remote input over the peer link (section 8) has its row: `authority.md` G46 and `protocol.md` 10.7. The other agent verbs for a peer have theirs since D20 (HR2): `authority.md` section 3 and G46, and `protocol.md` 7.4, Agent verbs on a peer.
