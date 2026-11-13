@@ -95,32 +95,34 @@ test("the quota footer opens Health", async () => {
 });
 
 test("a Machines row filters by host, shows a chip, and the chip removes the filter", async () => {
-  const router = await renderApp();
+  const router = await renderApp("federated");
 
-  fireEvent.click(screen.getByTestId("machine-host-b"));
-  await vi.waitFor(() => expect(screen.getByTestId("host-chip").textContent).toContain("host-b"));
-  expect(router.state.location.search).toEqual({ host: "01JHOSTB00000000000000000B" });
-  expect(screen.getByTestId("machine-host-b").getAttribute("aria-pressed")).toBe("true");
+  fireEvent.click(screen.getByTestId("machine-host-d"));
+  const filter = { name: "Remove the host-d filter" };
+  await vi.waitFor(() => expect(screen.getByRole("link", filter).textContent).toContain("host-d"));
+  expect(router.state.location.search).toEqual({ host: "01JPEERD0000000000000000D" });
+  expect(screen.getByTestId("machine-host-d").getAttribute("aria-pressed")).toBe("true");
 
-  fireEvent.click(screen.getByTestId("host-chip"));
-  await vi.waitFor(() => expect(screen.queryByTestId("host-chip")).toBeNull());
+  fireEvent.click(screen.getByRole("link", filter));
+  await vi.waitFor(() => expect(screen.queryByRole("link", filter)).toBeNull());
   expect(router.state.location.search).toEqual({});
 });
 
 test("the filter survives moving between screens", async () => {
-  const router = await renderApp("default", "/?host=01JHOSTB00000000000000000B");
-  expect(screen.getByTestId("host-chip").textContent).toContain("host-b");
+  const router = await renderApp("federated", "/?host=01JPEERD0000000000000000D");
+  expect(screen.getByRole("link", { name: "Remove the host-d filter" })).toBeTruthy();
   fireEvent.click(within(screen.getByRole("navigation", { name: "Screens" })).getByText("Agents"));
   await vi.waitFor(() => expect(router.state.location.pathname).toBe("/agents"));
-  expect(router.state.location.search).toEqual({ host: "01JHOSTB00000000000000000B" });
+  expect(router.state.location.search).toEqual({ host: "01JPEERD0000000000000000D" });
 });
 
-test("a stale remote host shows how long ago it answered and why", async () => {
+test("a host whose terminal holder is down shows how long ago it answered and why", async () => {
   await renderApp("stale-machine");
-  const row = screen.getByTestId("machine-host-c");
+  const row = screen.getByTestId("machine-host-a");
   expect(row.textContent).toContain("last seen 17 min ago");
-  expect(row.textContent).toContain("view only");
-  expect(within(row).getByRole("tooltip").textContent).toContain("does not answer");
+  expect(within(row).getByRole("tooltip").textContent).toContain(
+    "The terminal holder on this host does not answer",
+  );
 });
 
 test("Cmd+K opens the palette, filters, and Enter runs the command", async () => {

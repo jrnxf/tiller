@@ -364,7 +364,7 @@ The endpoints and the NDJSON line kinds stay. Their meaning changes:
 | `frame` with `full: false` | a diff on top of the last frame | raw passthrough bytes |
 | `closed` | the pane closed | the child exited, with `reason` and the exit code |
 | `unavailable` | herdr stopped answering | the holder stopped answering |
-| `unfit` | herdr refused the Fit | not sent: a lease cannot be refused. The kind stays in the board's parser for one release |
+| `unfit` | herdr refused the Fit | a local lease cannot be refused, so only a peer's stream sends it: a `read` pairing, or no pane for the agent in this host's rows yet (`protocol.md` 7.4, Stream, and 10.7) |
 
 - **Fit** is a lease on the stream's subscription. A board that changes size sends `.../terminal/fit`, and the daemon moves the lease. When the stream ends, the lease ends with it.
 - **History** is `screen({recent: lines})`, at most 1,000 rows.
@@ -565,7 +565,7 @@ These drive `tiller attach` through a PTY harness in the test:
 
 ### 9.6 Board
 
-- `terminal-stream.test.ts` covers repaint then passthrough, `closed` with an exit code, and `unfit` still parsed.
+- `terminal-stream.test.ts` covers repaint then passthrough, `closed` with an exit code, and `unfit` from a read-scope peer.
 - Screenshots of the Agents view, the card page and Settings host checks, in both themes, at 1440 px and 390 px. They show the new copy and the live view of a `fake-agent` pane.
 
 ## 10. Every spec and doc change

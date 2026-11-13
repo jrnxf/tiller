@@ -18,7 +18,7 @@ const at = (now: number, minutes: number) => new Date(now + minutes * 60_000).to
 
 const SOURCES = [
   "delivery",
-  "herdr:local",
+  "holder",
   "land",
   "machines",
   "merge-gate",
@@ -128,7 +128,7 @@ export function doctorFor(scenario: Scenario, now: number): DoctorReport {
   const checks: DoctorCheck[] = [
     ok("git", "answers --version", "git version 2.47.1"),
     ok("treehouse", "answers --version", "treehouse 0.9.2"),
-    ok("herdr", "reachable, 4 workspaces and 9 panes", "0.7.3"),
+    ok("holder", "answers, protocol 1, 9 panes", "0.1.0-pre.17"),
     ok("claude", "answers --version", "2.1.312 (Claude Code)"),
     ok("gh", "answers --version", "gh version 2.63.0 (2026-10-14)"),
     missingTool

@@ -55,7 +55,7 @@ test("the Inbox badge counts an agent that waits on a dialog, when it is in scop
   const dialog = fixtureSnapshot("dialog").queries;
   const rows = (dialog[boardPath()] as BoardResponse).rows;
   const waits = dialogWaits(dialog[agentsPath()] as AgentsResponse);
-  expect(new Set(waits.map((agent) => agent.herdr_name))).toEqual(
+  expect(new Set(waits.map((agent) => agent.name))).toEqual(
     new Set(["alpha-42-build", "beta-7-build"]),
   );
   const all = new Set(projects.map((project) => project.id));

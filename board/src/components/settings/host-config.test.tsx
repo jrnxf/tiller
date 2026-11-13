@@ -79,7 +79,7 @@ test("the host keys sit in three sections under Starting agents, one row per key
   const peers = await section("Peers and memory");
   const learning = await section("Learning");
   for (const [rows, labels] of [
-    [agents, ["herdr terminal", "Stop hook mode"]],
+    [agents, ["Attach terminal", "Stop hook mode"]],
     [peers, ["Accept peers", "Memory remote"]],
     [
       learning,
@@ -232,13 +232,13 @@ test("another host's rows say where to set them, with the command and no input",
   renderSettings();
   const agents = await section("Agents and hooks");
   fireEvent.click(await agents.findByRole("combobox", { name: "Host" }));
-  const option = await screen.findByRole("option", { name: "host-b" });
+  const option = await screen.findByRole("option", { name: "host-d" });
   fireEvent.pointerDown(option);
   fireEvent.click(option);
 
   await waitFor(() =>
     expect(screen.getByRole("region", { name: "Agents and hooks" }).textContent).toContain(
-      "Read by every new agent on host-b.",
+      "Read by every new agent on host-d.",
     ),
   );
   for (const name of ["Agents and hooks", "Peers and memory", "Learning"]) {
@@ -247,7 +247,7 @@ test("another host's rows say where to set them, with the command and no input",
     expect(part.queryAllByRole("button", { name: "Save" })).toHaveLength(0);
   }
   const stop = screen.getByTestId("setting-stop_hook_mode");
-  expect(stop.textContent).toContain("Set on host-b.");
+  expect(stop.textContent).toContain("Set on host-d.");
   expect(stop.textContent).toContain("tiller config set stop_hook_mode <off|observe|block-once>");
   // Nothing was sent to the other host.
   const sent = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.filter(

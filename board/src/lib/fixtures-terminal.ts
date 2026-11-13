@@ -1,6 +1,6 @@
-// A stand-in herdr pane for the fixture server: the screen an agent might
+// A stand-in holder pane for the fixture server: the screen an agent might
 // have up, as the bytes a terminal would get. The live terminal draws it the
-// way it draws a real pane, so its looks can be checked without herdr. A Fit
+// way it draws a real pane, so its looks can be checked with no holder. A Fit
 // draws the same screen at the size asked for, as an agent would redraw.
 
 export const FIXTURE_COLS = 100;
@@ -113,7 +113,7 @@ function base64(text: string): string {
   return btoa(binary);
 }
 
-// The first frame of a run: the whole screen, cleared first, the way herdr
+// The first frame of a run: the whole screen, cleared first, the way the holder
 // sends one.
 export function fullFrame(typed: string, seconds: number, size: PaneSize = OWN): string {
   const rows = lines(size);
@@ -138,7 +138,7 @@ export function promptFrame(typed: string, size: PaneSize = OWN): string {
   );
 }
 
-// The pane's scrollback as herdr's recent read returns it: earlier work
+// The pane's scrollback as the holder's history read returns it: earlier work
 // first, the screen last, rows split by a bare newline.
 export function historyText(typed: string, seconds: number, size: PaneSize = OWN): string {
   const earlier: string[] = [];
@@ -155,7 +155,7 @@ export function historyText(typed: string, seconds: number, size: PaneSize = OWN
   return `${[...earlier.map((row) => clip(row, size.cols)), ...screenRows(typed, seconds, size)].join("\n")}\n`;
 }
 
-// The pane's screen as herdr's visible read returns it, for a tail: rows
+// The pane's screen as the holder's visible read returns it, for a tail: rows
 // split by a bare newline.
 export function screenText(typed: string, seconds: number, size: PaneSize = OWN): string {
   return `${screenRows(typed, seconds, size).join("\n")}\n`;
@@ -187,7 +187,7 @@ export function typeInto(typed: string, input: { keys?: unknown; text?: unknown 
 // oxlint-disable-next-line no-control-regex
 const visible = (text: string) => [...text.replace(/\x1b\[[0-9;]*m/g, "")];
 
-// A menu Claude Code draws that the board has no layout for, as herdr's
+// A menu Claude Code draws that the board has no layout for, as the holder's
 // visible read returns it: the work above, then the menu in its box.
 export function menuText(size: PaneSize = OWN): string {
   const rule = "─".repeat(size.cols - 4);

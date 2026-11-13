@@ -1,7 +1,7 @@
 import { QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, onTestFinished, test, vi } from "vitest";
 
 import { hydrateFromSnapshot } from "../../lib/boot";
 import { connectionStore } from "../../lib/connection";
@@ -187,7 +187,7 @@ test("a live peer's lane has no note, and a read pairing's says it is view only"
   await renderApp("federated");
   expect(within(screen.getByTestId("lane-host-d/gamma")).queryByTestId("peer-note")).toBeNull();
   const note = within(screen.getByTestId("lane-host-f/atlas")).getByTestId("peer-note");
-  expect(note.textContent).toBe("view only pairing.");
+  expect(note.textContent).toBe("host-f is paired view only, so make changes from that host.");
 });
 
 // The Start orchestrator in a lane's header.
@@ -300,6 +300,34 @@ test("the card page of a peer's card names its host and, when it is down, says a
   expect(within(page).getAllByText(/as of \w{3} \d{2}:\d{2}/).length).toBeGreaterThan(0);
 });
 
+// The peer answers a forwarded card read from its own state.db, so the column
+// it sends names no host and no link (protocol.md, Federated reads).
+test("a peer's card page keeps its host and standing when the read names no host", async () => {
+  const stub = vi.fn(async (input: RequestInfo | URL) => {
+    const path = String(input);
+    const body = fixtureResource(path, "federated") as Record<string, unknown> | undefined;
+    if (body === undefined) return new Response("{}", { status: 404 });
+    if (path.startsWith(`/api/v1/cards/${LEDGER_5_E}?`)) {
+      const {
+        host: _host,
+        as_of: _asOf,
+        link: _link,
+        ...column
+      } = body.column as Record<string, unknown>;
+      return new Response(JSON.stringify({ ...body, column }), { status: 200 });
+    }
+    return new Response(JSON.stringify(body), { status: 200 });
+  });
+  vi.stubGlobal("fetch", stub);
+  await renderApp("federated", `/cards/${LEDGER_5_E}?owner=host-e`);
+  const page = await screen.findByTestId("card-page");
+  expect(stub.mock.calls.some(([input]) => String(input).includes("host=host-e"))).toBe(true);
+  expect(within(page).getAllByTestId("host-chip")[0]?.textContent).toBe("host-e");
+  expect(within(page).getAllByTestId("peer-note")[0]?.textContent).toContain(
+    "host-e is unreachable",
+  );
+});
+
 test("a card of a down peer shows the reason and every control is off", async () => {
   const posted = stubApi("federated");
   await renderApp("federated", `/inbox?item=${ASK_E}`);
@@ -319,7 +347,9 @@ test("a read pairing's card is live but its controls say 'view only pairing'", a
   stubApi("federated");
   await renderApp("federated", `/inbox?item=${ASK_F}`);
   const actions = await screen.findByTestId("card-actions");
-  expect(within(actions).getByTestId("peer-note").textContent).toBe("view only pairing.");
+  expect(within(actions).getByTestId("peer-note").textContent).toBe(
+    "host-f is paired view only, so make changes from that host.",
+  );
   const comment = within(actions).getByLabelText("Comment to the orchestrator") as HTMLInputElement;
   expect(comment.disabled).toBe(true);
   expect(comment.title).toBe("view only pairing");
@@ -461,7 +491,11 @@ test("an ask of a read pairing cannot be answered and says why", async () => {
   const detail = await screen.findByRole("heading", { name: /Which tile size/ });
   expect(detail).toBeTruthy();
   expect(
-    screen.getAllByTestId("peer-note").every((n) => n.textContent === "view only pairing."),
+    screen
+      .getAllByTestId("peer-note")
+      .every(
+        (n) => n.textContent === "host-f is paired view only, so make changes from that host.",
+      ),
   ).toBe(true);
   for (const option of within(screen.getByRole("group", { name: "Answer" })).getAllByRole(
     "button",
@@ -487,7 +521,7 @@ test("an option that changes a peer's project is picked on that host's board", a
   expect(posted[0]?.body).toMatchObject({ answer: "Keep 2", host: "host-d" });
 });
 
-test("the Agents screen shows the host of every agent, and a peer's pane is watched here and opened in herdr only on its host", async () => {
+test("the Agents screen shows the host of every agent, and a peer's pane is watched here and opened in a terminal only on its host", async () => {
   stubApi("federated");
   const agents = (fixtureSnapshot("federated").queries[agentsPath()] as AgentsResponse)
     .orchestrators;
@@ -498,12 +532,14 @@ test("the Agents screen shows the host of every agent, and a peer's pane is watc
     (await screen.findAllByTestId("host-chip")).map((chip) => chip.textContent),
   );
   expect(hosts).toEqual(new Set(["host-a", "host-d", "host-e", "host-f"]));
-  const open = (await screen.findByRole("button", { name: /Open in herdr/ })) as HTMLButtonElement;
+  const open = (await screen.findByRole("button", {
+    name: /Open in terminal/,
+  })) as HTMLButtonElement;
   expect(open.disabled).toBe(true);
   expect(open.title).toBe("host-d owns this pane: open it from that host");
 });
 
-test("a peer's pane streams through its board host, and is never read as a saved machine's tail", async () => {
+test("a peer's pane streams through its board host, never as a tail", async () => {
   stubApi("federated");
   const api = globalThis.fetch;
   const asked: { path: string; body: Record<string, unknown> }[] = [];
@@ -515,8 +551,6 @@ test("a peer's pane streams through its board host, and is never read as a saved
   });
   const agents = (fixtureSnapshot("federated").queries[agentsPath()] as AgentsResponse)
     .orchestrators;
-  // The peer is a remote host in the Machines read, as a saved machine is;
-  // only its link tells the two apart.
   const worker = agents.flatMap((a) => a.workers).find((w) => w.host === "host-d");
   if (!worker) throw new Error("no host-d worker in the fixture");
   await renderApp("federated", `/agents?agent=${worker.session_id}`);
@@ -655,4 +689,146 @@ test("the fleet lane moves the Tiller bugs that wait there to the new bug projec
       "Moved 1 Tiller bug to host-a · tiller",
     ),
   );
+});
+
+// The first agent a peer runs, and the Stage once its header shows it.
+async function peerStage(host: string, worker: boolean) {
+  const agents = (fixtureSnapshot("federated").queries[agentsPath()] as AgentsResponse)
+    .orchestrators;
+  const agent = worker
+    ? agents.flatMap((a) => a.workers).find((w) => w.host === host)
+    : agents.find((a) => a.host === host);
+  if (!agent) throw new Error(`no ${host} agent in the fixture`);
+  await renderApp("federated", `/agents?agent=${agent.session_id}`);
+  await waitFor(() => expect(document.querySelector(".av-card-h .av-who-1 .nm")).toBeTruthy());
+  const acts = document.querySelector<HTMLElement>(".av-acts");
+  if (!acts) throw new Error("no agent on the stage");
+  return { agent, acts };
+}
+
+test("a live act peer's worker pauses through the board host, with its host", async () => {
+  const posted = stubApi("federated");
+  const { agent, acts } = await peerStage("host-d", true);
+  fireEvent.click(within(acts).getByRole("button", { name: "Run actions" }));
+  const menu = await screen.findByRole("menu", { name: "Run actions" });
+  fireEvent.click(within(menu).getByRole("menuitem", { name: "Pause until..." }));
+  const dialog = await screen.findByRole("dialog", { name: /^Pause / });
+  fireEvent.change(within(dialog).getByLabelText("Reason"), {
+    target: { value: "Waiting on the release." },
+  });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Pause" }));
+  await waitFor(() =>
+    expect(posted.find(({ path }) => path.endsWith("/pause"))).toMatchObject({
+      path: `/api/v1/agents/${agent.session_id}/pause`,
+      body: { reason: "Waiting on the release.", host: "host-d" },
+    }),
+  );
+});
+
+test("a live act peer's orchestrator stops through the board host, and cannot be restarted here", async () => {
+  const posted = stubApi("federated");
+  const { agent, acts } = await peerStage("host-d", false);
+  fireEvent.click(within(acts).getByRole("button", { name: "Run actions" }));
+  const menu = await screen.findByRole("menu", { name: "Run actions" });
+  expect(within(menu).queryByRole("menuitem", { name: "Restart..." })).toBeNull();
+  fireEvent.click(within(menu).getByRole("menuitem", { name: "Stop agent..." }));
+  const dialog = await screen.findByRole("dialog", { name: /^Stop / });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Stop agent" }));
+  await waitFor(() =>
+    expect(posted.find(({ path }) => path.endsWith("/stop"))).toMatchObject({
+      path: `/api/v1/agents/${agent.session_id}/stop`,
+      body: { host: "host-d" },
+    }),
+  );
+});
+
+test("a read pairing's or a down peer's agent shows its pane with no controls", async () => {
+  for (const host of ["host-f", "host-e"]) {
+    stubApi("federated");
+    const { acts } = await peerStage(host, true);
+    expect(within(acts).queryByRole("button", { name: "Run actions" })).toBeNull();
+    expect(screen.queryByRole("group", { name: "Answer" })).toBeNull();
+    cleanup();
+  }
+});
+
+// A stream that goes live at once, and the terminal requests the stage made.
+function liveTerminal() {
+  const api = globalThis.fetch;
+  const asked: { path: string; body: Record<string, unknown> }[] = [];
+  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input);
+    if (!/\/terminal(\/\w+)?$/.test(path)) return api(input, init);
+    asked.push({ path, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+    if (!path.endsWith("/terminal")) return Promise.resolve(new Response("{}", { status: 200 }));
+    const lines = [
+      { type: "size", cols: 80, rows: 24 },
+      { type: "frame", seq: 1, full: true, bytes: btoa("screen") },
+    ];
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const line of lines) {
+          controller.enqueue(new TextEncoder().encode(`${JSON.stringify(line)}\n`));
+        }
+      },
+    });
+    return Promise.resolve(new Response(body, { status: 200 }));
+  });
+  return asked;
+}
+
+// A laid out page, which jsdom lacks, so the stage measures a room for the Fit.
+function stubLayout() {
+  for (const [name, value] of [
+    ["offsetHeight", 400],
+    ["clientWidth", 1000],
+    ["clientHeight", 600],
+  ] as const) {
+    vi.spyOn(HTMLElement.prototype, name, "get").mockReturnValue(value);
+  }
+}
+
+test.each([
+  ["host-d", true],
+  ["host-f", false],
+])("%s's stage asks for the Fit only when its pairing acts", async (host, fits) => {
+  stubApi("federated");
+  stubLayout();
+  const asked = liveTerminal();
+  await peerStage(host, true);
+  await waitFor(() => expect(asked).not.toHaveLength(0));
+  if (fits) {
+    await waitFor(() => expect(asked.some(({ body }) => "fit" in body)).toBe(true));
+  } else {
+    await act(() => new Promise((resolve) => setTimeout(resolve, 600)));
+    expect(asked.filter(({ body }) => "fit" in body)).toEqual([]);
+    expect(asked.filter(({ path }) => path.endsWith("/fit"))).toEqual([]);
+    expect(screen.getByTestId("toast").textContent).not.toContain("kept its own size");
+  }
+});
+
+test("a view only peer's soft keys are off, and a tap sends no keys", async () => {
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: query.includes("max-width"),
+    media: query,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    addListener: () => {},
+    removeListener: () => {},
+  }));
+  Element.prototype.scrollTo = () => {};
+  onTestFinished(() => {
+    Reflect.deleteProperty(Element.prototype, "scrollTo");
+  });
+  stubApi("federated");
+  const asked = liveTerminal();
+  await peerStage("host-f", true);
+  fireEvent.click(await screen.findByRole("button", { name: "Expand the terminal" }));
+  const keys = await screen.findByRole("group", { name: "Keys a phone lacks" });
+  await waitFor(() => expect(screen.getByText("View only")).toBeTruthy());
+  const esc = within(keys).getByRole("button", { name: "Esc" }) as HTMLButtonElement;
+  expect(esc.disabled).toBe(true);
+  fireEvent.click(esc);
+  await flush();
+  expect(asked.filter(({ path }) => path.endsWith("/terminal/input"))).toEqual([]);
 });

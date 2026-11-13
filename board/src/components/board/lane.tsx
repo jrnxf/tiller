@@ -14,7 +14,7 @@ import { PeerNote } from "./host-chip";
 import { MiniTile, TileView } from "./tile";
 import { HOST_PROJECT, focusReason, hostField, ownerOf, projectKey } from "../../lib/peers";
 import type { Standing } from "../../lib/peers";
-import { useHerdrFocus } from "./herdr";
+import { FOCUS_TOOLTIP, useOpenInTerminal } from "./terminal-open";
 import { NewCardDialog } from "./new-card";
 import { MoveBugsDialog } from "./triage";
 import {
@@ -182,7 +182,7 @@ export function Lane({
   doneFolded,
   filterName,
 }: LaneProps) {
-  const focus = useHerdrFocus();
+  const focus = useOpenInTerminal();
   const [filing, setFiling] = useState(false);
   const newCard = useRef<HTMLButtonElement>(null);
   const closeFiling = useCallback(() => {
@@ -200,7 +200,7 @@ export function Lane({
   // A peer's project starts on its host, through the forwarded start.
   const startable = !orchestrator && orchestratorsKnown;
   // A silent orchestrator on this machine can be restarted, behind a
-  // confirmation. A peer's or a saved machine's is restarted on its own host.
+  // confirmation. A peer's is restarted on its own host.
   const restartable =
     orchestrator !== undefined &&
     health.kind === "stale" &&
@@ -234,11 +234,11 @@ export function Lane({
                   type="button"
                   className="btn"
                   disabled={health.kind === "disconnected" || off !== null}
-                  title={off ?? "Focus this agent's terminal in herdr"}
+                  title={off ?? FOCUS_TOOLTIP}
                   onClick={() => focus(orchestrator)}
                 >
                   <PaneIcon />
-                  Open in herdr
+                  Open in terminal
                 </button>
               ) : null}
             </>

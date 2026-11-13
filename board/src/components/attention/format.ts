@@ -12,6 +12,12 @@ export function formatAge(iso: string | null): string {
   return `${Math.floor(hours / 24)}d ${hours % 24}h`;
 }
 
+// "4m ago", but "just now" and "unknown" stand alone.
+export function formatAgo(iso: string | null): string {
+  const age = formatAge(iso);
+  return age === "just now" || age === "unknown" ? age : `${age} ago`;
+}
+
 export function formatWhen(iso: string | null): string {
   return formatLisbon(iso) ?? "unknown";
 }

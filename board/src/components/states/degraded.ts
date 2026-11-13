@@ -5,7 +5,8 @@ import { formatAge, formatLisbonMoment, secondsSince } from "../board/format";
 
 // How a lane is doing, from the orchestrator that serves it and the machine
 // that orchestrator runs on (protocol.md section 7.4, recovery.md R05 and R18).
-//   disconnected: the machine's herdr link is down, so nothing there is fresh.
+//   disconnected: the machine's terminal holder does not answer, so nothing
+//   there is fresh.
 //   stale: the machine answers but the orchestrator has been silent too long.
 export type LaneHealth =
   | { kind: "ok" }

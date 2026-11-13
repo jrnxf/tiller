@@ -381,7 +381,8 @@ export function applyChange(
       refetchMatching(queryClient, (path) => PROJECT_GRANTS_PATH.test(path));
       break;
     case "approval":
-      if (hasState(state)) recordProgress(event.entity_id, state.state, event.at);
+      // A peer's approval is recorded under its label (applyPeerChange).
+      if (!peer && hasState(state)) recordProgress(event.entity_id, state.state, event.at);
       // A grant counts the approvals it accepted.
       refetchMatching(queryClient, (path) => PROJECT_GRANTS_PATH.test(path));
       // An attention item embeds its approval's state and head, so a stale or
@@ -483,8 +484,14 @@ function applyPeerChange(queryClient: QueryClient, event: PeerEvent): void {
     onPeerProjectGone(queryClient, event.host, change.entity_id);
     return;
   }
-  // Quota windows and outbox receipts are not tagged by owner: a peer's would
-  // replace this host's window of the same label, or a receipt of this board.
+  // A forwarded mutation's receipt names the peer's outbox row or approval, so
+  // its progress is kept under the peer's label, apart from this host's ids.
+  if (change.entity === "outbox" || change.entity === "approval") {
+    const state = change.entity_state;
+    if (hasState(state)) recordProgress(change.entity_id, state.state, change.at, event.host);
+  }
+  // Quota windows are not tagged by owner: a peer's would replace this host's
+  // window of the same label. An outbox row has no other read.
   if (change.entity === "quota" || change.entity === "outbox") return;
   if (change.entity === "host") {
     // The daemon sends the peer's Machines row with no state: read it again.

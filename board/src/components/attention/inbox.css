@@ -872,7 +872,7 @@ a.irow:hover {
   margin-top: 0;
 }
 
-.ca-herdr {
+.ca-term {
   display: inline-flex;
   align-items: center;
   gap: 10px;
@@ -880,7 +880,7 @@ a.irow:hover {
 }
 
 /* The row's gap already spaces a wrapped alert from the button. */
-.ca-herdr .refusal {
+.ca-term .refusal {
   margin: 0;
 }
 

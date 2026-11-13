@@ -105,8 +105,7 @@ test("a peer's card has its own merge App and gates, grouped by verdict", () => 
 });
 
 test.each([
-  ["herdr:local", "herdr poller"],
-  ["herdr:host-b", "herdr poller for host-b"],
+  ["holder", "Terminal holder poller"],
   ["merge-gate", "Merge gate poller"],
 ])("the %s poller is called the %s", (source, title) => {
   expect(pollerTitle(source)).toBe(title);

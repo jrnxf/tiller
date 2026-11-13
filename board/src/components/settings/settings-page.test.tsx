@@ -146,7 +146,6 @@ test("Settings lists every host in one table, this one a row like the others", a
 
   // No report: no version and no guess.
   expect(within(row("host-g")).getByText("Not reported")).toBeTruthy();
-  expect(within(row("host-b")).getByText("herdr machine, no version to read")).toBeTruthy();
 });
 
 test("a paired host's card has its peer link, and the boards that reach this host follow Hosts", async () => {
@@ -461,22 +460,22 @@ test("the host picker heads Starting agents, and the start folders follow it", a
   // One picker, on the first section it moves.
   expect(screen.getAllByRole("combobox", { name: "Host" })).toHaveLength(1);
   fireEvent.click(within(region).getByRole("combobox", { name: "Host" }));
-  const option = await screen.findByRole("option", { name: "host-b" });
+  const option = await screen.findByRole("option", { name: "host-d" });
   fireEvent.pointerDown(option);
   fireEvent.click(option);
 
   await waitFor(() =>
     expect(region.textContent).toContain(
-      "What a project's orchestrator needs before it can start on host-b.",
+      "What a project's orchestrator needs before it can start on host-d.",
     ),
   );
   const section = within(region);
   expect(section.queryAllByRole("textbox")).toHaveLength(0);
   expect(section.queryAllByRole("button", { name: "Save" })).toHaveLength(0);
   const pool = section.getByTestId("setting-spawn.pool_root");
-  expect(pool.textContent).toContain("Set on host-b.");
+  expect(pool.textContent).toContain("Set on host-d.");
   expect(pool.textContent).toContain("tiller config set spawn.pool_root <path>");
-  // This host's problems and derived folders are not host-b's.
+  // This host's problems and derived folders are not host-d's.
   expect(pool.textContent).not.toContain("is not set");
   expect(section.queryByText("/home/user/.tiller/scratch")).toBeNull();
 });

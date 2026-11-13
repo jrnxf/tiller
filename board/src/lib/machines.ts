@@ -12,9 +12,7 @@ const HEALTH_TONE: Record<MachineHealth, DotTone> = {
 };
 
 const STALE_REASON: Record<StaleReason, string> = {
-  herdr_link_down: "The saved herdr machine does not answer",
-  host_asleep: "herdr reports the remote server is suspended",
-  poll_failed: "The last answer could not be read",
+  holder_down: "The terminal holder on this host does not answer",
   never_seen: "This host has never answered",
   peer_link_down: "The peer link has no frame from it",
   peer_refused: "The peer refused the link",

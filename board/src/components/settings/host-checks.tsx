@@ -220,44 +220,18 @@ function PeerChecks({ machine }: { machine: Machine }) {
   );
 }
 
-// A herdr machine has no daemon to check: this host's herdr poller reads it.
-function HerdrChecks({ machine, board }: { machine: Machine; board: string }) {
-  return (
-    <HostCardSection title="Checks">
-      <ul className="set-lines">
-        <CardLine
-          testid="check-elsewhere"
-          tone={null}
-          title="No daemon to check"
-          detail={[
-            `${machine.label} runs agents through herdr only. Its herdr poller is in the checks of ${board}.`,
-          ]}
-        />
-      </ul>
-    </HostCardSection>
-  );
-}
-
 export function HostChecks({
   machine,
-  peer,
-  board,
   health,
   owner,
 }: {
   machine: Machine;
-  // A paired Tiller peer, not a herdr-only machine.
-  peer: boolean;
-  // The label of the host serving this board.
-  board: string;
   health: DaemonHealth;
   owner: boolean;
 }) {
   return machine.kind === "local" ? (
     <LocalChecks health={health} owner={owner} />
-  ) : peer ? (
-    <PeerChecks machine={machine} />
   ) : (
-    <HerdrChecks machine={machine} board={board} />
+    <PeerChecks machine={machine} />
   );
 }

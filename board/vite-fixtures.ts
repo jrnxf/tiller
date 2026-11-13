@@ -104,9 +104,10 @@ function paneOf(session: string): FixturePane {
 }
 
 // `?term=<mode>` on the page URL picks how the mirror's pane behaves: live (the
-// default), ended, reconnect, unreachable, holder-down (the terminal holder is
-// away), forbidden, or unfit (herdr refuses a Fit). `peer-down` refuses a peer
-// host's pane as an unreachable link; a pane here still streams.
+// default), ended, reconnect, holder-down (the terminal holder is away),
+// forbidden, or unfit (a read-scope peer: the pane keeps its own size).
+// `peer-down` refuses a peer host's pane as an unreachable link; a pane here
+// still streams.
 function terminalMode(referer: string | undefined): string {
   if (!referer) return "live";
   return new URL(referer, "http://localhost").searchParams.get("term") ?? "live";
@@ -135,13 +136,6 @@ function terminalStream(
     return sendJson(res, {
       ok: false,
       error: { code: "forbidden", message: "only the owner sees an agent's terminal" },
-    });
-  }
-  if (mode === "unreachable") {
-    res.statusCode = 503;
-    return sendJson(res, {
-      ok: false,
-      error: { code: "unavailable", message: "herdr is unreachable: no socket" },
     });
   }
   if (mode === "holder-down") {
@@ -178,14 +172,17 @@ function terminalStream(
   };
   const own = { cols: FIXTURE_COLS, rows: FIXTURE_ROWS };
   const fit = fitOf(body);
-  let size = fit && mode !== "unfit" ? fit : own;
+  // As the holder does (protocol.md 7.4): a Fit that cannot be taken says so
+  // first. Then the pane's size and its repaint, and a Fit's size after,
+  // with the redraw at it as partial frames.
   if (fit && mode === "unfit") {
-    send({ type: "size", ...fit });
+    const host = typeof body.host === "string" ? body.host : "host-d";
     send({
       type: "unfit",
-      message: `herdr: terminal ${session} already has an attached client; retry with --takeover`,
+      message: `${host} is paired with a read scope; the view shows the pane at its own size`,
     });
   }
+  let size = own;
   send({ type: "size", ...size });
   send({ type: "frame", seq: frame, full: true, bytes: fullFrame(pane.typed, seconds(), size) });
   if (mode === "ended") {
@@ -201,10 +198,12 @@ function terminalStream(
   const refit = (next: PaneSize) => {
     size = next;
     send({ type: "size", ...size });
-    frame += 1;
-    send({ type: "frame", seq: frame, full: true, bytes: fullFrame(pane.typed, seconds(), size) });
+    diff(fullFrame(pane.typed, seconds(), size));
   };
-  if (size === fit) pane.refit = refit;
+  if (fit && mode !== "unfit") {
+    refit(fit);
+    pane.refit = refit;
+  }
   const ticker = setInterval(() => diff(tickFrame(pane.typed, seconds(), size)), 1000);
   // The response, not the request: the request is done once its body is read.
   res.on("close", () => {
@@ -256,15 +255,15 @@ function terminalHistory(req: IncomingMessage, res: ServerResponse, session: str
   );
 }
 
-// A tail read of a pane on a saved machine: refused like the stream for a
-// forbidden pane, gone for an ended one, and herdr away for an unreachable
-// one.
+// A tail read (protocol.md 7.4, Tail), of a pane here or on a peer: refused
+// like the stream for a forbidden pane, gone for an ended one, and the holder
+// away for a holder-down one.
 function terminalTail(req: IncomingMessage, res: ServerResponse, session: string) {
   const mode = terminalMode(req.headers.referer);
   const refusals: Record<string, [number, string, string]> = {
     forbidden: [403, "forbidden", "only the owner reads an agent's terminal"],
     ended: [404, "not_found", `no pane for ${session}`],
-    unreachable: [503, "unavailable", "herdr is unreachable: no socket"],
+    "holder-down": [503, "unavailable", "the terminal holder is unreachable: no socket"],
   };
   const refused = refusals[mode];
   if (refused) {

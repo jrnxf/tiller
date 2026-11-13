@@ -28,7 +28,7 @@ function agent(id: string, role: string, host: string, extra: Partial<AgentRow> 
     activity: "working",
     activity_observed_at: "2026-11-02T12:00:00.000Z",
     last_status_line: null,
-    herdr_name: null,
+    name: null,
     card_id: null,
     host_id: host,
     workers: [],

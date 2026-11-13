@@ -1,4 +1,4 @@
-/* The live terminal: an agent's herdr pane, mirrored. The pane is a real
+/* The live terminal: an agent's holder pane, mirrored. The pane is a real
    terminal, so its screen stays dark in both themes, in the color xterm
    paints it (SCREEN in live-terminal.tsx). */
 

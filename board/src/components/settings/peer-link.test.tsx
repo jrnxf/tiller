@@ -193,11 +193,9 @@ test("the fixture unpairs as the daemon does: a host not paired is a no-op", () 
   const first = unpair("host-d");
   expect(first.reply.status).toBe(200);
   expect(first.followUps?.map((follow) => follow.event.txn)).toEqual(["peer.remove"]);
-  for (const label of ["host-d", "host-b"]) {
-    const noop = unpair(label);
-    expect(noop.reply.status).toBe(200);
-    expect(noop.followUps ?? []).toEqual([]);
-  }
+  const again = unpair("host-d");
+  expect(again.reply.status).toBe(200);
+  expect(again.followUps ?? []).toEqual([]);
   expect(unpair("host-z").reply.status).toBe(404);
 });
 

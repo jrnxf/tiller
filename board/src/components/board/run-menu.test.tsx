@@ -13,7 +13,7 @@ import { receiptsStore, recordProgress, saveReceipt } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
 import { ActionError } from "../attention/api";
 import { resetBoardLook } from "./board-prefs";
-import { ResumedNote, stopRefusal } from "./run-menu";
+import { PausedNote, ResumedNote, stopRefusal } from "./run-menu";
 import { createTestQueryClient, loadRouteChunks } from "../../test-app";
 
 await loadRouteChunks();
@@ -168,7 +168,7 @@ test("a paused run's primary is Resume, which clears the pause and sends one go 
   expect(itemsOf(await openRunMenu(acts))).toEqual([
     "Pause until...",
     "Relaunch...",
-    "Open in herdr",
+    "Open in terminal",
     "Stop agent...",
   ]);
   fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
@@ -183,7 +183,7 @@ test("a paused run's primary is Resume, which clears the pause and sends one go 
   expect(resumed.closest(".run-paused")?.textContent).toContain("go on");
   expect(screen.queryByText(/^Paused until /)).toBeNull();
   await waitFor(() =>
-    expect(within(acts).getAllByRole("button").at(-1)?.textContent).toContain("Open in herdr"),
+    expect(within(acts).getAllByRole("button").at(-1)?.textContent).toContain("Open in terminal"),
   );
 });
 
@@ -258,7 +258,7 @@ test("a dead worker's primary is Relaunch, which needs a note first", async () =
     body: { note: "The tests pass; open the PR next.", new_attempt: false },
   });
   await waitFor(() =>
-    expect(within(acts).getAllByRole("button").at(-1)?.textContent).toMatch(/^Open in herdr/),
+    expect(within(acts).getAllByRole("button").at(-1)?.textContent).toMatch(/^Open in terminal/),
   );
 });
 
@@ -312,7 +312,7 @@ test("a refused stop says what to do next where the board can, and the daemon's 
       "session s: run r1 is active; end it first with tiller done r1 --outcome <outcome>, then stop its agent; nothing was sent",
     ),
   ).toMatch(/^Not stopped: its run is still open\./);
-  expect(refusal("herdr is down")).toBe("herdr is down");
+  expect(refusal("the holder is down")).toBe("the holder is down");
 });
 
 test("a working agent's stage has no message bar: the terminal takes the input (D15)", async () => {
@@ -342,4 +342,19 @@ test("Resume's go on line shows queued, then typed, or not typed when delivery f
   expect(screen.getByRole("alert").textContent).toBe(
     "Not typed.go onDelivery failed, so the daemon opened a recovery item for it.",
   );
+});
+
+test("a pause forwarded from a paired board host says it was paused by you", () => {
+  render(
+    <PausedNote
+      pause={{
+        until: "2099-01-01T09:00:00Z",
+        at: "2026-11-11T10:00:00Z",
+        by: "board@host-a",
+        reason: "Wait.",
+      }}
+      receiptKey={null}
+    />,
+  );
+  expect(screen.getByRole("status").textContent).toContain("Paused by you,");
 });

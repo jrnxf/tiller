@@ -1,20 +1,22 @@
-// The live mirror of an agent's herdr pane (protocol.md 7.4). The daemon
-// streams `herdr terminal session observe` as NDJSON: a `size` line, then
-// frames, the first of each run a full screen and the rest diffs against the
-// one before. A diff only makes sense on top of the frame before it, so a gap
-// in `seq`, or a diff with no full screen under it, drops the stream and opens
-// it again for a fresh full screen. Keys go back one request at a time.
+// The live mirror of an agent's pane in the terminal holder (protocol.md
+// 7.4). The daemon streams it as NDJSON: a `size` line, the PTY's size; a
+// full frame, the holder's repaint of the screen; then the PTY's own bytes as
+// partial frames. A later `size` (a Fit, another client's resize) resizes the
+// screen in place, and the partial frames after it go on: the agent redraws
+// at the new size in its own bytes. A partial frame only makes sense on top
+// of the one before it, so a gap in `seq`, or a partial frame with no full
+// screen under it, drops the stream and opens it again for a fresh repaint.
+// Keys go back one request at a time.
 //
-// With a Fit the open asks herdr to size the pane to the board's columns and
-// rows while the stream is open; herdr gets its own size back when it ends.
-// Herdr can refuse, and then the stream says so and goes on unfitted. A new
-// size for an open Fit goes in place, so the pane never drops back between
-// two sizes; the stream answers it with a `size` line and a full screen.
-// On a holder pane the daemon resizes the pane for the Fit, one view at a
-// time, and gives it back its size when the stream ends; a second Fit on the
-// pane, or a resize the holder refuses, is `unfit` the same way. A paired
-// peer's pane works the same way through the board host (protocol.md 10.7):
-// every request names the peer as its `host`.
+// With a Fit the open asks the holder for a size lease at the board's columns
+// and rows (terminal-holder.md 2.6): the body starts at the PTY's size, then
+// a `size` at the board's once the holder took it. A new size for an open
+// Fit goes to `.../terminal/fit` in place, so the pane never drops back
+// between two sizes. The lease ends with the stream. `unfit` says the stream
+// shows the pane at its own size instead: a peer paired with a `read` scope,
+// or one whose rows hold no pane for the agent yet. A paired peer's pane works
+// the same way through the board host (protocol.md 10.7): every request names
+// the peer as its `host`.
 
 export const terminalPath = (sessionId: string) => `/api/v1/agents/${sessionId}/terminal`;
 const terminalInputPath = (sessionId: string) => `${terminalPath(sessionId)}/input`;
@@ -25,8 +27,10 @@ export const promptPath = (sessionId: string) => `/api/v1/agents/${sessionId}/pr
 
 // What the mirror draws on: xterm in the board, a recorder in tests.
 export interface Screen {
-  // A new size, or a new run of frames: start again from a blank screen.
+  // A new run of frames: start again from a blank screen at this size.
   reset(cols: number, rows: number): void;
+  // The PTY took a new size mid-stream: keep the screen, change its grid.
+  resize(cols: number, rows: number): void;
   write(bytes: Uint8Array): void;
 }
 
@@ -34,14 +38,12 @@ export type MirrorStatus =
   | { kind: "connecting" }
   | { kind: "live" }
   | { kind: "reconnecting"; attempt: number }
-  // `mark` names what is away, for the status mark: herdr when unset.
-  | { kind: "unreachable"; title: string; detail: string; mark?: string }
+  // `mark` names what is away, for the status mark.
+  | { kind: "unreachable"; title: string; detail: string; mark: string }
   // The pane closed; the screen keeps its last frame.
   | { kind: "ended"; at: Date }
   | { kind: "forbidden" }
   | { kind: "remote"; detail: string }
-  // A pane on a saved machine, read every few seconds: `at` is the last read.
-  | { kind: "tail"; at: string }
   | { kind: "failed"; detail: string };
 
 export interface TerminalSize {
@@ -50,7 +52,7 @@ export interface TerminalSize {
 }
 
 // The Fit: the size to ask for at each open, or null for none, and what to do
-// when herdr will not resize the pane.
+// when the stream says the pane keeps its own size.
 export interface Fitting {
   size: () => TerminalSize | null;
   onUnfit: (message: string) => void;
@@ -66,14 +68,16 @@ type Line =
   | { type: "unavailable"; message: string }
   | { type: "unfit"; message: string };
 
-const UNREACHABLE_TITLE = "Can't reach herdr on this machine";
+const UNREACHABLE_TITLE = "Can't reach the terminal";
 const UNREACHABLE_DETAIL = "The agent may still be running. Tiller tries again on its own, or now.";
-// An agent in the terminal holder: the daemon could not reach the holder.
+const UNREACHABLE_MARK = "terminal unreachable";
+// The daemon could not reach the terminal holder.
 const HOLDER_TITLE = "Can't reach the terminal holder on this machine";
 const HOLDER_DETAIL =
   "The agent may still be running. Run tiller holder to start the holder. Tiller tries again on its own, or now.";
-// Tries in a row with no live screen before the mirror says herdr is gone
-// rather than that the stream dropped.
+const HOLDER_MARK = "holder unreachable";
+// Tries in a row with no live screen before the mirror says the terminal is
+// gone rather than that the stream dropped.
 const QUIET_TRIES = 4;
 const MAX_DELAY = 8000;
 const SLOW_DELAY = 10_000;
@@ -100,8 +104,8 @@ async function errorOf(response: Response): Promise<{ code: string; message: str
 const NOT_OWNER =
   "This browser is not signed in as the owner. Run `tiller board --login` for a login link.";
 
-// The pane's scrollback (protocol.md 7.4, History): its last rows as herdr
-// renders them, oldest first and the screen itself last. The stream carries
+// The pane's scrollback (protocol.md 7.4, History): its last rows as the
+// holder keeps them, oldest first and the screen itself last. The stream carries
 // the screen only, so this is the one way to read back.
 export type History = { ok: true; text: string } | { ok: false; detail: string };
 
@@ -143,7 +147,7 @@ export async function readHistory(
   return read.ok ? { ok: true, text: read.body.text } : { ok: false, detail: read.detail };
 }
 
-// What the terminal reads the pane through: the live stream, or the tail.
+// What the terminal reads the pane through.
 export interface Mirror {
   start(): void;
   stop(): void;
@@ -199,7 +203,7 @@ export class TerminalStream implements Mirror {
     void this.open();
   }
 
-  // The viewer left: dropping the request ends the daemon's observe process.
+  // The viewer left: dropping the request ends the stream and its Fit.
   stop() {
     this.stopped = true;
     if (this.timer !== null) clearTimeout(this.timer);
@@ -248,7 +252,7 @@ export class TerminalStream implements Mirror {
     } catch {
       // The daemon did not answer: a new open asks again.
     }
-    // The stream that held the Fit is gone, or herdr let it go: open again.
+    // The stream that held the Fit is gone (422 with no Fit open): open again.
     if (!sent && !this.stopped && this.abort === stream) this.reopen();
   }
 
@@ -279,7 +283,7 @@ export class TerminalStream implements Mirror {
         kind: "unreachable",
         title: outcome.title ?? UNREACHABLE_TITLE,
         detail: outcome.detail ?? UNREACHABLE_DETAIL,
-        ...(outcome.mark ? { mark: outcome.mark } : {}),
+        mark: outcome.mark ?? UNREACHABLE_MARK,
       });
     } else {
       this.set({ kind: "reconnecting", attempt: this.failures });
@@ -307,8 +311,8 @@ export class TerminalStream implements Mirror {
     if (!response.body) return { next: "retry" };
     const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
     let pending = "";
-    // The size of the next run, applied with its first full screen so the
-    // last screen stays up until a new one can replace it.
+    // The PTY's size: the next full frame repaints at it, and once a screen
+    // is up a new one resizes it in place.
     let size: TerminalSize | null = null;
     let last: number | null = null;
     for (;;) {
@@ -323,14 +327,17 @@ export class TerminalStream implements Mirror {
         if (!text.trim()) continue;
         const line = JSON.parse(text) as Line;
         if (line.type === "size") {
-          size = { cols: line.cols, rows: line.rows };
-          last = null;
+          const next = { cols: line.cols, rows: line.rows };
+          if (last !== null && !sameSize(size, next)) {
+            this.screen.resize(next.cols, next.rows);
+            this.onSize(next);
+          }
+          size = next;
         } else if (line.type === "frame") {
           if (!line.full && (last === null || line.seq !== last + 1)) return { next: "retry" };
           if (line.full && size) {
             this.screen.reset(size.cols, size.rows);
             this.onSize(size);
-            size = null;
           }
           this.screen.write(decode(line.bytes));
           last = line.seq;
@@ -364,149 +371,25 @@ export class TerminalStream implements Mirror {
         next: "retry",
         title: `Can't reach ${this.peer ?? "the peer host"}`,
         detail: "The agent may still be running. Tiller tries again on its own, or now.",
+        mark: `${this.peer ?? "peer"} unreachable`,
       };
     }
     if (response.status === 503 && error.message.startsWith("the terminal holder is unreachable")) {
-      return {
-        next: "retry",
-        title: HOLDER_TITLE,
-        detail: HOLDER_DETAIL,
-        mark: "holder unreachable",
-      };
+      return { next: "retry", title: HOLDER_TITLE, detail: HOLDER_DETAIL, mark: HOLDER_MARK };
     }
     if (response.status === 503) {
-      return error.message.startsWith("herdr is unreachable")
-        ? { next: "retry", title: UNREACHABLE_TITLE, detail: UNREACHABLE_DETAIL }
-        : { next: "retry", title: "The terminal is not available", detail: error.message };
+      return { next: "retry", title: "The terminal is not available", detail: error.message };
     }
     return { next: "stop", status: { kind: "failed", detail: error.message } };
   }
 }
 
-// How often a tail is read: the daemon polls a saved machine at this pace too.
-const TAIL_EVERY = 5000;
-
-// A pane on a saved machine (protocol.md 7.4, Tail). herdr streams only the
-// panes on its own machine, so the tail reads the visible screen through the
-// saved machine every few seconds instead. It never sends keys. While the
-// page is hidden it reads nothing, and it reads at once when the page is back.
-// `POST .../terminal/tail`: the pane's size and its visible rows.
+// `POST .../terminal/tail`: the pane's size and its visible rows, read once
+// (protocol.md 7.4, Tail). A peer's goes as a query on the peer link.
 export interface Tail {
   cols: number;
   rows: number;
   text: string;
-}
-
-export class TerminalTail implements Mirror {
-  private readonly path: string;
-  private readonly screen: Screen;
-  private readonly onStatus: (status: MirrorStatus) => void;
-  private readonly onSize: (size: TerminalSize) => void;
-  private size: TerminalSize | null = null;
-  private abort: AbortController | null = null;
-  private timer: ReturnType<typeof setTimeout> | null = null;
-  private stopped = true;
-  // Counts stops, so a read still in flight from before one is dropped.
-  private run = 0;
-  private status: MirrorStatus = { kind: "connecting" };
-
-  constructor(
-    sessionId: string,
-    screen: Screen,
-    onStatus: (status: MirrorStatus) => void,
-    onSize: (size: TerminalSize) => void,
-  ) {
-    this.path = terminalTailPath(sessionId);
-    this.screen = screen;
-    this.onStatus = onStatus;
-    this.onSize = onSize;
-  }
-
-  start() {
-    if (!this.stopped) return;
-    this.stopped = false;
-    document.addEventListener("visibilitychange", this.onVisible);
-    if (this.status.kind !== "tail") this.set({ kind: "connecting" });
-    void this.read();
-  }
-
-  stop() {
-    this.stopped = true;
-    this.run += 1;
-    document.removeEventListener("visibilitychange", this.onVisible);
-    if (this.timer !== null) clearTimeout(this.timer);
-    this.timer = null;
-    this.abort?.abort();
-    this.abort = null;
-  }
-
-  retry() {
-    this.stop();
-    this.start();
-  }
-
-  // A tail never resizes the pane.
-  refit() {}
-
-  private readonly onVisible = () => {
-    if (document.visibilityState !== "visible" || this.timer === null) return;
-    clearTimeout(this.timer);
-    this.timer = null;
-    void this.read();
-  };
-
-  private set(status: MirrorStatus) {
-    this.status = status;
-    this.onStatus(status);
-  }
-
-  private later() {
-    this.timer = setTimeout(() => {
-      this.timer = null;
-      if (!this.stopped) void this.read();
-    }, TAIL_EVERY);
-  }
-
-  private async read() {
-    if (document.visibilityState === "hidden") {
-      this.later();
-      return;
-    }
-    const run = this.run;
-    const abort = new AbortController();
-    this.abort = abort;
-    const read = await readPane<Tail>(this.path, abort.signal);
-    if (this.stopped || run !== this.run) return;
-    this.abort = null;
-    if (read.ok) this.draw(read.body);
-    else if (read.status === 403) return this.set({ kind: "forbidden" });
-    // The pane closed: the last tail stays up, as a stream's last frame.
-    else if (read.status === 404) return this.set({ kind: "ended", at: new Date() });
-    else if (read.status !== null && read.status < 500) {
-      return this.set({ kind: "failed", detail: read.detail });
-    } else if (this.status.kind !== "tail") {
-      // herdr or the daemon is away. A tail already shown stays, and its age
-      // says it is getting old; either way the next read tries again.
-      const detail = read.status === 503 ? UNREACHABLE_DETAIL : read.detail;
-      this.set({ kind: "unreachable", title: "Can't read the pane", detail });
-    }
-    this.later();
-  }
-
-  private draw(tail: Tail) {
-    if (!sameSize(this.size, tail)) {
-      this.size = { cols: tail.cols, rows: tail.rows };
-      this.screen.reset(tail.cols, tail.rows);
-      this.onSize(this.size);
-    }
-    // herdr splits rows with a bare newline. The whole screen is drawn from
-    // the top each time, colors and cursor reset, with no empty row after
-    // the last. A pane resized between herdr's two reads can send more rows
-    // than its size says: the bottom ones are kept, so nothing scrolls.
-    const rows = tail.text.replace(/\n$/, "").split("\n").slice(-tail.rows).join("\r\n");
-    this.screen.write(new TextEncoder().encode(`\x1b[0m\x1b[H\x1b[2J\x1b[?25l${rows}`));
-    this.set({ kind: "tail", at: new Date().toISOString() });
-  }
 }
 
 // The daemon's limits on one input request (protocol.md 7.4).

@@ -54,7 +54,11 @@ export function useAction<T>({
     setError(null);
     send(key)
       .then((response) => {
-        saveReceipt(slot, { ...response.receipt, replayed: response.replayed });
+        saveReceipt(slot, {
+          ...response.receipt,
+          replayed: response.replayed,
+          ...(response.host ? { host: response.host } : {}),
+        });
         onRecorded?.(response, slot);
       })
       .catch((caught: unknown) => {

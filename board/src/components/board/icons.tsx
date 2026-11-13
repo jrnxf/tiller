@@ -81,13 +81,6 @@ export const ExpandIcon = () => (
   </Glyph>
 );
 
-// The Fit: the pane grows into the stage.
-export const FitIcon = () => (
-  <Glyph>
-    <path d="M2.5 5.5v-3h3M10.5 2.5h3v3M13.5 10.5v3h-3M5.5 13.5h-3v-3" {...stroke} {...round} />
-  </Glyph>
-);
-
 // Full screen: a screen with its corners pushed out, and in again to leave.
 export const FullScreenIcon = () => (
   <Glyph>

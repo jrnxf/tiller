@@ -28,6 +28,7 @@ import {
   signalsPath,
   startSettingsPath,
 } from "./queries";
+import { receiptView, receiptsStore } from "./receipts";
 import { signedOutStore } from "./session";
 import { applyChange, connectEvents } from "./sse";
 import type { EventSourceLike } from "./sse";
@@ -582,6 +583,31 @@ test("a peer event moves the peer's card live, keeps the local resume point and 
   // The peer's seq is not this host's: a local event still applies after it.
   source.emit("change", event({ seq: 4182, entity: "card", card_id: "x", card: moved }));
   expect(board()?.rows.find((row) => row.id === peerRow.id)?.badge).toBe("merged");
+  stop();
+});
+
+test("a peer's outbox event moves a forwarded steer's receipt, not a local row of the same id", () => {
+  const { stop, source } = federatedStream();
+  const recorded = { recorded_at: "2026-11-02T12:00:00.000Z", approval_id: null, replayed: false };
+  const forwarded = { ...recorded, outbox_id: "01JOUTBOXPEER", host: "host-d" };
+  const local = { ...recorded, outbox_id: "01JOUTBOXPEER" };
+  const stage = (receipt: typeof local) => receiptView(receipt, receiptsStore.get()).stage;
+
+  source.emit("peer", {
+    host: "host-d",
+    host_id: "01JPEERD0000000000000000D",
+    as_of: "2026-11-02T12:00:02.000Z",
+    change: event({
+      seq: 9001,
+      kind: "outbox.delivered",
+      entity: "outbox",
+      entity_id: "01JOUTBOXPEER",
+      entity_state: { id: "01JOUTBOXPEER", state: "delivered" },
+    }),
+  });
+
+  expect(stage(forwarded)).toBe("delivered");
+  expect(stage(local)).toBe("recorded");
   stop();
 });
 

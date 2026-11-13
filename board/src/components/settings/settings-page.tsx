@@ -91,9 +91,7 @@ function hostStatus(
     return `${VERSION_MARK_TEXT[view.versionMark]} ${board.label} (${board.version})`;
   }
   if (machine.version) return `Same as ${board.label}`;
-  return view.peer
-    ? "Paired peer, has not reported a version"
-    : "herdr machine, no version to read";
+  return "Paired peer, has not reported a version";
 }
 
 // A start time and process only the serving daemon reports today; a peer's
@@ -211,13 +209,7 @@ function HostRow({
         <tr className="set-card-row">
           <td colSpan={5}>
             <HostCard id={card} host={machine.label}>
-              <HostChecks
-                machine={machine}
-                peer={view.peer}
-                board={board.label}
-                health={health}
-                owner={owner}
-              />
+              <HostChecks machine={machine} health={health} owner={owner} />
               {local ? <HostEdit owner={owner} peers={peers} /> : null}
               {!local && owner ? <PeerLink machine={machine} board={board.label} /> : null}
             </HostCard>

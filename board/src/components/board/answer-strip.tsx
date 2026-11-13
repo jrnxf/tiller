@@ -1,14 +1,16 @@
 import { useQuery } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 
 import type { PromptDialog, PromptRead } from "../../lib/api-types";
 import { formatLisbon } from "../../lib/clock";
-import { runQuery } from "../../lib/queries";
+import { ownerOf } from "../../lib/peers";
+import { agentsQuery, runQuery } from "../../lib/queries";
 import { CheckIcon } from "../shell/icons";
 import { Modal } from "../ui/modal";
 import { Ago } from "./ago";
 import { ShieldIcon, WarnIcon } from "./icons";
+import { ulid } from "../attention/ulid";
 import { promptPath, readPane } from "./terminal-stream";
 import "./answer-strip.css";
 
@@ -35,7 +37,8 @@ type Answer =
       digit: boolean;
       folded: boolean;
     }
-  | { kind: "refused"; at: string; detail: string };
+  // `unsure`: a peer took the answer and did not confirm it (504).
+  | { kind: "refused"; at: string; detail: string; unsure?: boolean };
 
 // A prompt read that failed: `status` is the daemon's, or null when it did
 // not answer or found no dialog yet.
@@ -48,13 +51,68 @@ class PromptReadError extends Error {
   }
 }
 
+// A forwarded answer the peer did not confirm in its proof wait (protocol.md
+// 7.4, Agent verbs on a peer): it may have been typed.
+function unconfirmed(host: string): string {
+  return `${host} did not answer within 60 seconds, so the answer may or may not have been typed. Tap the same option again to retry: it carries the same key, so it is typed once.`;
+}
+
 // A read is tried again only when a later one could find what this one did
-// not: no dialog drawn yet, no answer, or a server fault. A refusal (a saved
-// machine's agent, a session that waits on nothing) stays one.
+// not: no dialog drawn yet, no answer, or a server fault such as an
+// unreachable peer (503) or a late one (504). A refusal (a 502 from a
+// read-scope peer, a 4xx for a session that waits on nothing) stays one.
 function tryAgain(failures: number, error: Error): boolean {
   if (failures >= 2) return false;
   const status = error instanceof PromptReadError ? error.status : null;
-  return status === null || status >= 500;
+  return status === null || (status >= 500 && status !== 502);
+}
+
+// Forwarded answers the peer has not confirmed, by host and session: one in
+// flight, or one a 503 or 504 left open. They outlive the strip, so a view
+// that would hide it while its peer lags keeps it up, and the same tap after
+// it carries the same key, so it is typed once. The agent leaving the wait
+// drops it, so the next wait's taps mint new keys.
+type OpenAnswer = { tap: string; key: string };
+const openAnswers = new Map<string, OpenAnswer>();
+const listeners = new Set<() => void>();
+
+function openKey(host: string, sessionId: string): string {
+  return `${host}\n${sessionId}`;
+}
+
+function setOpen(id: string, answer: OpenAnswer | null) {
+  if (!answer && !openAnswers.has(id)) return;
+  if (answer) openAnswers.set(id, answer);
+  else openAnswers.delete(id);
+  for (const listener of listeners) listener();
+}
+
+// Drops every open answer whose agent the roster shows out of its wait, or
+// no longer lists, so a later wait never replays an old key. Mounted once in
+// the shell, it holds with no strip on screen.
+export function useDropEndedAnswers() {
+  const agents = useQuery(agentsQuery()).data;
+  useEffect(() => {
+    if (!agents || openAnswers.size === 0) return;
+    const waits = new Set<string>();
+    for (const agent of agents.orchestrators.flatMap((row) => [row, ...row.workers])) {
+      const host = ownerOf(agent);
+      const waiting = agent.activity === "waiting_permission" || agent.activity === "waiting_input";
+      if (host && waiting) waits.add(openKey(host, agent.session_id));
+    }
+    for (const id of openAnswers.keys()) if (!waits.has(id)) setOpen(id, null);
+  }, [agents]);
+}
+
+// True while a peer's agent has an answer the peer has not confirmed.
+export function useAnswerOpen(host: string | undefined, sessionId: string): boolean {
+  return useSyncExternalStore(
+    (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    () => (host ? openAnswers.has(openKey(host, sessionId)) : false),
+  );
 }
 
 // The waiting agent, for the question "No, exit" asks first: its name, and
@@ -76,6 +134,7 @@ export function AnswerStrip({
   sessionId,
   waiting,
   observedAt,
+  host,
   agent = null,
   fallback = null,
   reading = null,
@@ -86,6 +145,8 @@ export function AnswerStrip({
   waiting: boolean;
   // Null while the daemon has not read the pane: there is no wait to answer.
   observedAt: string | null;
+  // The peer that owns the agent: the read and the answer go to it.
+  host?: string;
   agent?: StripAgent | null;
   // What shows in the strip's place once a read found no dialog to answer.
   fallback?: ReactNode;
@@ -100,18 +161,26 @@ export function AnswerStrip({
   // The option whose answer waits on the owner's yes: "No, exit" ends the session.
   const [confirm, setConfirm] = useState<{ dialog: PromptDialog; n: number } | null>(null);
   // The wait the strip answers, named by the activity time it began at. A
-  // later observation of the same wait (herdr seeing the dialog after the
-  // hook did) keeps it; a later one after an answer went is the next wait.
+  // later observation of the same wait (the screen verdict seeing the dialog
+  // after the hook did) keeps it; a later one after an answer went is the next wait.
   const [wait, setWait] = useState<string | null>(null);
   const answered = answer?.kind === "sent" && answer.at === wait && answer.seen !== observedAt;
   const next =
     waiting && observedAt !== null ? (wait === null || answered ? observedAt : wait) : null;
   if (next !== wait) setWait(next);
+  useEffect(() => {
+    if (host && !waiting) setOpen(openKey(host, sessionId), null);
+  }, [host, sessionId, waiting]);
   const read = useQuery({
-    queryKey: ["prompt", sessionId, next],
+    queryKey: ["prompt", host ?? null, sessionId, next],
     queryFn: async ({ signal }) => {
-      const result = await readPane<PromptRead>(promptPath(sessionId), signal);
+      const result = await readPane<PromptRead>(
+        promptPath(sessionId),
+        signal,
+        host ? { host } : {},
+      );
       if (!result.ok) throw new PromptReadError(result.detail, result.status);
+      if (host && result.body.reason === "not_waiting") setOpen(openKey(host, sessionId), null);
       if (result.body.reason === "no_dialog") {
         throw new PromptReadError("no dialog on the screen yet", null);
       }
@@ -136,10 +205,22 @@ export function AnswerStrip({
     const seen = observedAt;
     const digit = shown.layout === "permission";
     setAnswer({ kind: "sending", at, n });
+    const same = `${shown.screen}:${n}`;
+    const id = host ? openKey(host, sessionId) : null;
+    const before = id ? openAnswers.get(id) : undefined;
+    const key = before?.tap === same ? before.key : ulid();
+    if (id) setOpen(id, { tap: same, key });
     const sent = await readPane(`${promptPath(sessionId)}/answer`, undefined, {
       option: n,
       screen: shown.screen,
+      ...(host ? { host, idempotency_key: key } : {}),
     });
+    // A 503 never reached the peer: the answer stays open, under its key.
+    if (id && (sent.ok || (sent.status !== 503 && sent.status !== 504))) setOpen(id, null);
+    if (host && !sent.ok && sent.status === 504) {
+      setAnswer({ kind: "refused", at, detail: unconfirmed(host), unsure: true });
+      return;
+    }
     if (sent.ok) {
       setAnswer({ kind: "sent", at, seen, n, text, digit, folded: false });
       onSent?.(digit ? `${n} · ${text}` : text);
@@ -183,7 +264,7 @@ export function AnswerStrip({
           <div className="av-refused" role="alert">
             <WarnIcon />
             <div>
-              <b>Not sent.</b> {current.detail}
+              <b>{current.unsure ? "Sent, not confirmed." : "Not sent."}</b> {current.detail}
             </div>
           </div>
         ) : null}
@@ -254,6 +335,7 @@ export function AnswerStrip({
   const exitDialog = confirm ? (
     <ExitDialog
       agent={agent}
+      host={host}
       folder={confirm.dialog.folder}
       onClose={() => setConfirm(null)}
       onExit={() => {
@@ -281,17 +363,19 @@ export function AnswerStrip({
 // "No, exit" ends the agent's session, so it asks first.
 function ExitDialog({
   agent,
+  host,
   folder,
   onClose,
   onExit,
 }: {
   agent: StripAgent | null;
+  host: string | undefined;
   folder: string | null;
   onClose: () => void;
   onExit: () => void;
 }) {
   const name = agent?.name ?? "the agent";
-  const run = useQuery({ ...runQuery(agent?.runId ?? ""), enabled: Boolean(agent?.runId) });
+  const run = useQuery({ ...runQuery(agent?.runId ?? "", host), enabled: Boolean(agent?.runId) });
   const started = formatLisbon(run.data?.started_at ?? null);
   const card = agent?.card ?? null;
   const keep = useRef<HTMLButtonElement>(null);

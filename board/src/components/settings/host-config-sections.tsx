@@ -41,10 +41,10 @@ const labelOf = (options: { value: string; label: string }[], value: string) =>
 function agentRows(config: HostConfig): Row[] {
   return [
     {
-      key: "herdr.terminal",
-      label: "herdr terminal",
-      hint: "The terminal app herdr opens for Open in herdr. Read when the daemon starts",
-      value: config.herdr_terminal,
+      key: "attach.terminal",
+      label: "Attach terminal",
+      hint: "The terminal app Open in terminal starts when no tiller attach window shows the pane. Read when the daemon starts",
+      value: config.attach_terminal,
       mono: false,
       placeholder: "ghostty",
       valueName: "app",

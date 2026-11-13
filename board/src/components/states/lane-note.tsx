@@ -51,8 +51,8 @@ export function LaneNote({
       <div className="lane-note err" role="status" data-testid="lane-note-disconnected">
         <UnplugIcon />
         <div className="tx">
-          <b>herdr is disconnected</b> for the {hostLabel} host. Showing the last known state from{" "}
-          {when}. Answers and Open in herdr pause until it reconnects.
+          <b>The terminal holder is not answering</b> on the {hostLabel} host. Showing the last
+          known state from {when}. Answers and Open in terminal pause until it is back.
         </div>
       </div>
     );

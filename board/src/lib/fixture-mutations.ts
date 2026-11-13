@@ -1622,8 +1622,12 @@ function handle(
       return { reply: refused(404, "not_found", `no poller reads ${source}`), followUps: [] };
     return { reply: recorded(health, null, null), followUps: [] };
   }
-  if (method === "POST" && /^\/api\/v1\/agents\/[^/]+\/focus$/.test(path)) {
-    return { reply: recorded({}, null, null), followUps: [] };
+  // No `tiller attach` client is open and no terminal app is set, so the
+  // toast gives the command to run by hand.
+  const focus = /^\/api\/v1\/agents\/([^/]+)\/focus$/.exec(path);
+  if (method === "POST" && focus?.[1]) {
+    const opened = { session_id: focus[1], opened: "unseen", terminal: null };
+    return { reply: recorded(opened, null, null), followUps: [] };
   }
   // The permission dialog a waiting agent has up. The first tap finds it
   // changed, to see the board refuse a stale answer; a tap on the new one
@@ -1689,7 +1693,7 @@ function agentLifecycle(
     .flatMap((orchestrator) => [orchestrator, ...orchestrator.workers])
     .find((row) => row.session_id === session);
   if (!agent) return { reply: refused(404, "not_found", `no session ${session}`), followUps: [] };
-  const name = agent.herdr_name ?? session;
+  const name = agent.name ?? session;
   const orchestrator = agent.role === "orchestrator";
   const at = new Date().toISOString();
   const refuse = (fact: string) => ({
@@ -1803,7 +1807,7 @@ function agentControl(
   }
   if (!agent.run_id || agent.activity !== "working") {
     const fact = agent.run_id
-      ? `${agent.herdr_name ?? session} is not working`
+      ? `${agent.name ?? session} is not working`
       : "it has no run to interrupt";
     return { reply: refused(422, "refused", `${fact}; nothing was sent`), followUps: [] };
   }
@@ -1817,7 +1821,7 @@ function agentControl(
     cancel: confirmed ? "confirmed" : "unconfirmed",
     evidence: confirmed
       ? "observation Stop after the Escape"
-      : "no interrupt marker or turn end within 10 s; herdr now shows working",
+      : "no interrupt marker or turn end within 10 s; the screen still shows working",
   };
   return { reply: recorded(data, null, null), followUps: [] };
 }

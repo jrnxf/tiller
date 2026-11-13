@@ -18,25 +18,19 @@ test("a local host reads '3 running, 2 free' with no view-only tag", () => {
   expect(view.tone).toBe("green");
 });
 
-test("a remote host is view only and shows running agents without a free count", () => {
-  const view = machineRowView(machines("default")[1] as Machine, NOW);
-  expect(view.viewOnly).toBe(true);
-  expect(view.summary).toBe("2 running");
-});
-
-test("a stale host shows how long ago it answered, amber, with the reason in the tooltip", () => {
-  const view = machineRowView(machines("stale-machine")[2] as Machine, NOW);
+test("a host whose holder is down shows how long ago it answered, amber, with the reason", () => {
+  const view = machineRowView(machines("stale-machine")[0] as Machine, NOW);
   expect(view.stale).toBe(true);
   expect(view.staleText).toBe("last seen 17 min ago");
   expect(view.tone).toBe("amber");
-  expect(view.tooltip).toContain("does not answer");
+  expect(view.tooltip).toBe("The terminal holder on this host does not answer");
   expect(view.summary).toBeNull();
 });
 
 test("a host that was never seen says so", () => {
   const view = machineRowView(
     {
-      ...(machines("default")[1] as Machine),
+      ...peer("host-d"),
       health: "stale",
       last_seen_at: null,
       stale_reason: "never_seen",
@@ -111,10 +105,7 @@ test("a peer's row carries its reported version and the mark against the board h
   expect(machineRowView(peer("host-d"), NOW, board.version).versionMark).toBeNull();
   expect(machineRowView(peer("host-e"), NOW, board.version).versionMark).toBe("older");
   expect(machineRowView(peer("host-f"), NOW, board.version).versionMark).toBe("newer");
-  // A peer that reports none and a herdr-only machine show no mark.
+  // A peer that reports none shows no mark.
   expect(peer("host-g").version).toBeUndefined();
   expect(machineRowView(peer("host-g"), NOW, board.version).versionMark).toBeNull();
-  expect(machineRowView(machines("default")[1] as Machine, NOW, board.version).versionMark).toBe(
-    null,
-  );
 });

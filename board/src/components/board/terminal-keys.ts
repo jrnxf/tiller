@@ -1,14 +1,14 @@
-// What the owner typed into the mirror, as the key names `herdr pane
-// send-keys` takes. xterm turns each key press into the bytes a terminal
-// would send; this reads them back into names. herdr 0.9.5 has no names for
-// Home, End, Delete, Insert, Page Up and Page Down, and a key name has no
-// Meta, so those are reported instead of sent. Any other escape sequence (a
+// What the owner typed into the mirror, as Tiller's key names
+// (terminal-holder.md 4.3). xterm turns each key press into the bytes a
+// terminal would send; this reads them back into names. The list has no
+// names for Home, End, Delete, Insert, Page Up and Page Down, and a key name
+// has no Meta, so those are reported instead of sent. Any other escape sequence (a
 // terminal's answer to a query, a mouse or focus report) is dropped: only
 // keys a person pressed reach the agent.
 
 export interface TypedKeys {
   keys: string[];
-  // Keys herdr cannot send, by the name a person knows them by.
+  // Keys the list has no name for, by the name a person knows them by.
   unsent: string[];
 }
 
@@ -64,7 +64,7 @@ function withModifiers(param: string | undefined, key: string): { key?: string; 
   return { unsent: `Meta+${name}` };
 }
 
-// One printable character, as herdr names it.
+// One printable character, as the list names it.
 function printable(char: string): string {
   return char === " " ? "space" : char;
 }
@@ -191,19 +191,13 @@ function list(names: string[]): string {
   return `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
 }
 
-// What the board says of keys it did not send. A holder pane takes every key
-// through `tiller attach`, which passes the owner's bytes through as typed; a
-// herdr pane takes them in herdr itself.
-export function unsentNote(unsent: string[], holder: boolean): { title: string; detail: string } {
-  return holder
-    ? {
-        title: `The board can't send ${list(unsent)}`,
-        detail: "Nothing was sent for that key. Use tiller attach for it.",
-      }
-    : {
-        title: `herdr can't send ${list(unsent)}`,
-        detail: "Nothing was sent for that key. Use herdr itself for it.",
-      };
+// What the board says of keys it did not send. A pane takes every key
+// through `tiller attach`, which passes the owner's bytes through as typed.
+export function unsentNote(unsent: string[]): { title: string; detail: string } {
+  return {
+    title: `The board can't send ${list(unsent)}`,
+    detail: "Nothing was sent for that key. Use tiller attach for it.",
+  };
 }
 
 // The controls a press on the stage leaves alone.

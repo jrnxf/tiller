@@ -169,6 +169,7 @@ export interface PromptRead {
 export interface SteerBody {
   idempotency_key: string;
   text: string;
+  host?: string;
 }
 
 // `data` of a steer: the queued outbox message.
@@ -192,12 +193,14 @@ export interface AgentRow extends Federated {
   activity: string;
   activity_observed_at: string | null;
   last_status_line: string | null;
-  herdr_name: string | null;
+  // The agent's name, `<card>-<role>` or `<project>-orch`; null when
+  // the daemon has none for it (protocol.md section 6.1).
+  name: string | null;
   card_id: string | null;
   host_id: string;
   workers: AgentRow[];
   // The project the session works for, the active run (for `GET /runs/{id}`)
-  // and herdr's pane and workspace label (protocol.md section 7.3).
+  // and its holder pane and label (protocol.md section 7.3).
   project_id?: string;
   run_id?: string | null;
   pane_id?: string | null;
@@ -430,9 +433,7 @@ export interface TimelineResponse {
 export type MachineHealth = "ok" | "degraded" | "down" | "stale";
 
 export type StaleReason =
-  | "herdr_link_down"
-  | "host_asleep"
-  | "poll_failed"
+  | "holder_down"
   | "never_seen"
   | "peer_link_down"
   | "peer_refused"
@@ -454,17 +455,17 @@ export interface Machine {
   last_seen_at: string | null;
   stale_reason: StaleReason | null;
   // The `tiller version` string the host runs (`0.1.0-pre.17`); absent for a
-  // herdr-only machine and for a peer that has not reported one.
+  // peer that has not reported one.
   version?: string | null;
   // For a paired peer (section 9): the link state and the pairing's scope; null
-  // or absent for this host and for a herdr-only machine.
+  // or absent for this host.
   link?: LinkState | null;
   peer_scope?: PeerScope | null;
   // Why the peer refused the link (`revoked`, `unknown_key`, `bad_sig`,
   // `clock_skew`, `replayed`, `version`, `accept_off`), when it did.
   link_reason?: string | null;
   // The project that takes Tiller bugs on this host (`bugs.project`), when one
-  // is set and still open; absent for a herdr-only machine.
+  // is set and still open.
   bug_project?: string | null;
   rev: number;
 }
@@ -763,8 +764,9 @@ export interface StartSettings {
 // host's config.toml has them now, with the default each key falls back to.
 // `owner_guard.decider_key` is never here.
 export interface HostConfig {
-  // Null when unset: Open in herdr only focuses.
-  herdr_terminal: string | null;
+  // `attach.terminal`; null when unset: Open in terminal only shows the
+  // pane in an open `tiller attach` window.
+  attach_terminal: string | null;
   // `off`, `observe` or `block-once`; unset reads as `observe`.
   stop_hook_mode: string;
   // Unset reads as true.
@@ -945,6 +947,8 @@ export interface MutationResponse<T = unknown> {
   events: number[];
   receipt: Receipt;
   data: T;
+  // The peer that answered a forwarded mutation; absent for this host.
+  host?: string;
   // What the owner should know about a mutation that applied, such as why a
   // re-added project's cards do not start at 1.
   warning?: string;

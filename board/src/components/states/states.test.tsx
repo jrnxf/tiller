@@ -57,20 +57,21 @@ function lane(project: string) {
   return screen.getByTestId(`lane-${project}`);
 }
 
-test("a lane on a host herdr cannot reach says so, with the last time it was seen", async () => {
-  await renderApp("degraded");
-  const delta = lane("delta");
-  expect(delta.dataset.state).toBe("disconnected");
-  const note = within(delta).getByTestId("lane-note-disconnected");
-  expect(note.textContent).toContain("herdr is disconnected");
-  expect(note.textContent).toContain("host-c");
+test("a lane on a host whose terminal holder is down says so, with the last time it was seen", async () => {
+  await renderApp("stale-machine");
+  const alpha = lane("alpha");
+  expect(alpha.dataset.state).toBe("disconnected");
+  const note = within(alpha).getByTestId("lane-note-disconnected");
+  expect(note.textContent).toContain("The terminal holder is not answering on the host-a host.");
   expect(note.textContent).toMatch(/last known state from .+ \(17 min ago\)/);
-  expect(within(delta).getByText(/orchestrator unreachable, last seen/)).toBeTruthy();
+  expect(note.textContent).toContain("Answers and Open in terminal pause until it is back.");
   // The cards keep their last known state, dimmed, never "observed".
-  const card = within(delta).getByText("Port the exporter to the new schema").closest("a");
-  expect(card?.className).toContain("dim");
-  expect(card?.textContent).toContain("last known");
-  expect(card?.textContent).not.toMatch(/\bobserved\b/);
+  const cards = [...alpha.querySelectorAll("a.dim")];
+  expect(cards.length).toBeGreaterThan(0);
+  for (const card of cards) {
+    expect(card.textContent).toContain("last known");
+    expect(card.textContent).not.toMatch(/\bobserved\b/);
+  }
 });
 
 test("a lane whose orchestrator went quiet reads as stale, and a healthy lane has no note", async () => {
@@ -112,27 +113,29 @@ test("the reconnecting banner shows while the daemon is unreachable and clears w
   expect(screen.getByTestId("degraded-pill").hidden).toBe(true);
 });
 
-test("the banner also shows while the local herdr is down, even with the daemon live", async () => {
+test("the banner also shows while the local terminal holder is down, even with the daemon live", async () => {
   const { queryClient } = await renderApp("default");
   const machines = fixtureResource("/api/v1/machines", "default") as MachinesResponse;
   act(() =>
     queryClient.setQueryData<MachinesResponse>(machinesQuery().queryKey, {
       machines: machines.machines.map((entry) =>
         entry.kind === "local"
-          ? { ...entry, health: "stale" as const, stale_reason: "herdr_link_down" as const }
+          ? { ...entry, health: "stale" as const, stale_reason: "holder_down" as const }
           : entry,
       ),
     }),
   );
   await waitFor(() => expect(screen.getByTestId("degraded-pill").hidden).toBe(false));
-  expect(screen.getByTestId("degraded-pill").textContent).toContain("herdr reconnecting.");
+  expect(screen.getByTestId("degraded-pill").textContent).toContain(
+    "Terminal holder reconnecting.",
+  );
 });
 
-test("a stale remote host shows last seen with its reason in the sidebar", async () => {
-  await renderApp("degraded");
-  const row = screen.getByTestId("machine-host-c");
+test("a host whose terminal holder is down shows last seen with its reason in the sidebar", async () => {
+  await renderApp("stale-machine");
+  const row = screen.getByTestId("machine-host-a");
   expect(row.textContent).toContain("last seen 17 min ago");
-  expect(row.textContent).toContain("The saved herdr machine does not answer");
+  expect(row.textContent).toContain("The terminal holder on this host does not answer");
 });
 
 function machine(over: Partial<Machine>): Machine {
@@ -160,7 +163,7 @@ function orchestrator(minutesAgo: number): AgentRow {
     activity: "working",
     activity_observed_at: new Date(Date.now() - minutesAgo * 60_000).toISOString(),
     last_status_line: null,
-    herdr_name: null,
+    name: null,
     card_id: null,
     host_id: "m",
     workers: [],

@@ -11,7 +11,6 @@ import { loadPrefs, prefsStore } from "../../lib/prefs";
 import { createAppRouter } from "../../lib/router";
 import { createTestQueryClient, loadRouteChunks } from "../../test-app";
 import {
-  FIT_KEY,
   FONT_KEY,
   STAGE_FONT,
   STAGE_FONT_MAX,
@@ -20,7 +19,6 @@ import {
   fontReadout,
   gridCell,
   holdsFont,
-  isHolderPane,
   reloadTerminalPrefs,
 } from "./live-terminal";
 import { showToast } from "./toast";
@@ -165,54 +163,11 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-test("a holder pane id is p and a ULID, and a herdr pane id is not", () => {
-  expect(isHolderPane("p01ARZ3NDEKTSV4RRFFQ69G5FAV")).toBe(true);
-  expect(isHolderPane("p01arz3ndektsv4rrffq69g5fav")).toBe(true);
-  for (const herdr of [
-    "w2:p1",
-    "p1",
-    "p",
-    "",
-    "pane-alpha",
-    "w1:p01ARZ3NDEKTSV4RRFFQ69G5FAV",
-    // The `p` is lower case only, as in `tiller_core::ids::is_holder_pane`.
-    "P01ARZ3NDEKTSV4RRFFQ69G5FAV",
-    // A ULID has no I, L, O or U, and starts at 7 at most.
-    "p01ARZ3NDEKTSV4RRFFQ69G5FAI",
-    "p81ARZ3NDEKTSV4RRFFQ69G5FAV",
-  ]) {
-    expect(isHolderPane(herdr), herdr).toBe(false);
-  }
-  expect(isHolderPane(null)).toBe(false);
-  expect(isHolderPane(undefined)).toBe(false);
-});
-
-test("a holder pane always fits the stage, so it has no Fit pane switch", async () => {
-  localStorage.setItem(FIT_KEY, "0");
-  reloadTerminalPrefs();
-  const bar = await renderStage("holder");
+test("every pane fits the stage, so it has no Fit pane switch", async () => {
+  const bar = await renderStage("default");
   expect(bar.queryByRole("button", { name: "Fit pane" })).toBeNull();
   // The font steps from the choice, which the Fit keeps on screen.
   expect(bar.getByRole("button", { name: /^Font size / }).textContent).toBe(String(STAGE_FONT));
-});
-
-test("a herdr pane keeps its own size until the owner fits it", async () => {
-  const bar = await renderStage("default");
-  const fit = bar.getByRole("button", { name: "Fit pane" });
-  expect(fit.getAttribute("aria-pressed")).toBe("false");
-  expect(fit.getAttribute("title")).toBe(
-    "Size the pane in herdr to fill the stage, until you leave it",
-  );
-  fireEvent.click(fit);
-  await waitFor(() => expect(fit.getAttribute("aria-pressed")).toBe("true"));
-  expect(fit.getAttribute("title")).toBe("Give the pane back its herdr size");
-  expect(localStorage.getItem(FIT_KEY)).toBe("1");
-
-  // A new tab reads the stored choice.
-  reloadTerminalPrefs();
-  cleanup();
-  const again = await renderStage("default");
-  expect(again.getByRole("button", { name: "Fit pane" }).getAttribute("aria-pressed")).toBe("true");
 });
 
 test("the font size steps by one pixel, clamps, persists, and goes back to the default", async () => {
@@ -613,4 +568,18 @@ test("a holder pane the daemon has not read yet says so, with no 'observed never
   await waitFor(() =>
     expect(document.querySelector(".av-card-h .av-who-2")?.textContent).toBe("Not observed yet"),
   );
+});
+
+// How many times the board has opened an agent's stream.
+const opens = () =>
+  vi.mocked(globalThis.fetch).mock.calls.filter(([input]) => String(input).endsWith("/terminal"))
+    .length;
+
+test("the stage opens its agent's stream once, and a resize or a new font does not open it again", async () => {
+  const controls = await renderStage("holder");
+  await waitFor(() => expect(opens()).toBe(1));
+  act(() => window.dispatchEvent(new Event("resize")));
+  fireEvent.click(controls.getByRole("button", { name: /larger/i }));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(opens()).toBe(1);
 });

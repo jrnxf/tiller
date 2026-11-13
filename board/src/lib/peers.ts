@@ -18,7 +18,7 @@ export function isPeerRow(entity: Owned): boolean {
   return entity.link !== undefined && entity.link !== null;
 }
 
-// The paired peers among the machines. A herdr-only machine has no link.
+// The paired peers among the machines: the rows with a link.
 export function peerMachines(machines: Machine[]): Machine[] {
   return machines.filter((machine) => machine.link !== undefined && machine.link !== null);
 }

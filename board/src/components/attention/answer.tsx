@@ -227,7 +227,7 @@ export function AnswerForm({ item }: { item: AttentionItem }) {
           This no longer applies, so answering is off. Withdraw it instead.
         </p>
       ) : null}
-      <ActionFailure error={action.error} host={ownerOf(item)} />
+      <ActionFailure error={action.error} host={ownerOf(item)} proof />
       {receipt}
     </>
   );

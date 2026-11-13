@@ -101,9 +101,7 @@ export function MachinesSection({ activeHost }: { activeHost: string | undefined
                       : "is paired: its cards are live here and changes you make go to it."
                     : view.stale
                       ? `${view.staleText}. ${view.tooltip ? `${view.tooltip}.` : ""} Cards on this machine show their last known state.`
-                      : view.viewOnly
-                        ? "can be watched and opened in herdr from here. Answers and dispatches stay on that machine."
-                        : "runs agents for this board."}
+                      : "runs agents for this board."}
                 {view.versionMark ? (
                   <span className="tq">
                     {`${VERSION_MARK_WORD[view.versionMark]}: runs ${machine.version}, this host runs ${boardVersion}.`}
