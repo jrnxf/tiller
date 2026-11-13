@@ -693,8 +693,6 @@ fn worktree_admin_denied() {
         "git worktree prune",
         "treehouse return",
         "treehouse remove 3",
-        "herdr pane send-keys p1 1",
-        "/usr/bin/herdr pane list",
     ] {
         denied_for_all(command, Code::WorktreeAdmin);
     }
@@ -857,6 +855,10 @@ fn owner_tiller_commands_denied() {
         "tiller project stage alpha launched --rev 4",
         "tiller host edit --lane-capacity 9",
         "tiller daemon",
+        "tiller holder",
+        "tiller holder upgrade",
+        "tiller attach",
+        "tiller attach 01JD --read-only",
         "tiller --json approve 01JABC",
         "/nix/store/abc-tiller-0.1.0/bin/tiller grant revoke 01JABC",
         "sh -c 'tiller approve 01JABC'",

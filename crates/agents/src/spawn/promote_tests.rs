@@ -3,7 +3,7 @@
 use tiller_core::Timestamp;
 use tiller_core::domain::{AttentionKind, CardKind};
 use tiller_core::state::attention::NewAttention;
-use tiller_herdr::testing::owner;
+use tiller_panes::testing::owner;
 
 use super::promote::{self, Request as PromoteRequest};
 use super::tests::{Rig, refusal, world};
@@ -115,6 +115,7 @@ fn promote_scout_reuses_worktree_as_ship_run() {
     let error = rig.cleanup(&scout.run.id).unwrap_err();
     assert!(refusal(&error).contains("in use by run"), "{error}");
     rig.done(&builder.run.id, RunOutcome::Abandoned).unwrap();
+    rig.holder.exit(&builder.pane_id, 0);
     let cleaned = rig.cleanup(&builder.run.id).unwrap();
     assert_eq!(cleaned.returned.as_deref(), Some(scout.worktree.as_str()));
     assert_eq!(
@@ -171,6 +172,7 @@ fn promote_refuses_a_worktree_already_returned() {
     let scout = rig.spawn(&card, RunRole::Scout);
     rig.done(&scout.run.id, RunOutcome::Reported).unwrap();
     // No report waits, so cleanup returns the clean worktree.
+    rig.holder.exit(&scout.pane_id, 0);
     rig.cleanup(&scout.run.id).unwrap();
     let error = rig.try_promote(&card).unwrap_err();
     assert!(refusal(&error).contains("already returned"), "{error}");

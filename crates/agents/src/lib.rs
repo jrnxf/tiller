@@ -15,6 +15,7 @@ pub mod intake;
 pub mod labels;
 pub mod land;
 pub mod numbering;
+pub mod pane;
 pub mod review;
 pub mod roles;
 pub mod spawn;

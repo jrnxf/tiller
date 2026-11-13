@@ -1,7 +1,6 @@
 //! `tiller agent interrupt`, `resume`, `relaunch` and `stop` (T2.5, T4.5;
 //! `protocol.md` 6.4), and the daemon's stop loop for finished runs, over
-//! the same launch files spawn uses. A pane in the terminal holder is
-//! reached through [`World::routed`], which speaks herdr's calls to it.
+//! the same launch files spawn uses, on the terminal holder's panes.
 //!
 //! Each command says what it saw, never what it hoped: an interrupt is
 //! `confirmed` only when the transcript shows the interrupt marker or a hook
@@ -40,19 +39,18 @@ use tiller_core::state::runs::{
 };
 use tiller_core::state::{get, list};
 use tiller_core::{Actor, Applied, Ctx, Store, Timestamp};
-use tiller_herdr::client::{Herdr, PaneInfo};
-use tiller_herdr::composer::{self, Composer};
-use tiller_herdr::layout;
-use tiller_herdr::submit::{self, Pacing, Submit};
 use tiller_observe::tailer;
+use tiller_panes::composer::{self, Composer};
+use tiller_panes::submit::{self, Pacing, Submit};
 use tiller_reconcile::recovery::sessions::{LAUNCH_BIND_SOURCE, MANUAL_RESUME_REASON};
 
+use crate::pane::{Holder, PaneInfo};
 use crate::spawn::launch::{self, LaunchSpec, Start};
 use crate::spawn::memory;
 use crate::spawn::resume;
 use crate::spawn::{
     Cleaned, Result, SpawnError, World, cleanup, delivery_line, dispatch, local_host, project_of,
-    quota_floor, relayout, require_local, role_of, scan_and_record,
+    quota_floor, require_local, role_of, scan_and_record,
 };
 
 /// How long each command waits for its proof, and how often it looks.
@@ -198,7 +196,7 @@ fn worktree_of(run: &Run) -> Result<PathBuf> {
 pub fn interrupt(
     store: &mut Store,
     ctx: &Ctx,
-    herdr: &dyn Herdr,
+    holder: Holder<'_>,
     waits: &Waits,
     run: &Run,
 ) -> Result<Applied<Interrupted>> {
@@ -221,7 +219,7 @@ pub fn interrupt(
         .pane_id
         .clone()
         .ok_or_else(|| SpawnError::Refused(format!("session {} has no pane bound", session.id)))?;
-    let pane = herdr
+    let pane = holder
         .pane(&pane_id)?
         .ok_or_else(|| SpawnError::Refused(format!("pane {pane_id} is gone; nothing was sent")))?;
     if pane.agent.is_none() {
@@ -229,14 +227,14 @@ pub fn interrupt(
             "pane {pane_id} shows no agent; nothing was sent"
         )));
     }
-    // herdr's word wins; the recorded activity counts only without one.
+    // the holder's word wins; the recorded activity counts only without one.
     let working = match pane.agent_status.as_deref() {
         Some(status) => status == "working",
         None => session.activity == Activity::Working,
     };
     if !working {
         return Err(SpawnError::Refused(format!(
-            "session {} is not working (herdr: {}, recorded: {}); a second Escape would reach whatever it does next, so nothing was sent",
+            "session {} is not working (holder: {}, recorded: {}); a second Escape would reach whatever it does next, so nothing was sent",
             session.id,
             pane.agent_status.as_deref().unwrap_or("no status"),
             session.activity
@@ -249,13 +247,13 @@ pub fn interrupt(
         .and_then(|path| std::fs::metadata(path).ok())
         .map_or(0, |meta| meta.len());
     let since = Timestamp::now();
-    herdr.send_escape(&pane_id)?;
+    holder.send_escape(&pane_id)?;
     let recorded = store.observation_record(
         ctx,
         NewObservation {
             session_id: Some(session.id.clone()),
             run_id: Some(run.id.clone()),
-            source: ObservationSource::Herdr,
+            source: ObservationSource::Holder,
             event: "interrupt_sent".into(),
             verdict: None,
             observed_at: since,
@@ -280,9 +278,9 @@ pub fn interrupt(
         None => (
             Proof::Unconfirmed,
             format!(
-                "no interrupt marker or turn end within {} s; herdr now shows {}",
+                "no interrupt marker or turn end within {} s; the holder now shows {}",
                 waits.interrupt.as_secs(),
-                herdr_view(herdr, &pane_id)
+                holder_view(holder, &pane_id)
             ),
         ),
     };
@@ -300,8 +298,8 @@ pub fn interrupt(
 }
 
 /// Resumes the run's live session with `claude --resume <id>` in its
-/// worktree, in its own pane when that pane is still open. A session herdr
-/// shows running is left alone.
+/// worktree, in its own pane when that pane is still open. A session the
+/// holder shows running is left alone.
 pub fn resume(
     store: &mut Store,
     ctx: &Ctx,
@@ -310,11 +308,6 @@ pub fn resume(
     run: &Run,
 ) -> Result<Applied<Resumed>> {
     require_controller(ctx, run, "resume", true)?;
-    let routed = world.routed();
-    let world = &World {
-        herdr: &routed,
-        ..*world
-    };
     require_local(store, run)?;
     require_active(run)?;
     let worktree = worktree_of(run)?;
@@ -334,7 +327,7 @@ pub fn resume(
     };
     // Only a pane still the session's own takes the resume; any other
     // leaves it to a new pane.
-    let pane = own_pane(store, world.herdr, &session)?;
+    let pane = own_pane(store, world.holder(), &session)?;
     // A manual resume clears the run's pause (`run.unpause`). The key is
     // `session.resume`'s alone, so the unpause goes unkeyed.
     let unkeyed = ctx.unkeyed();
@@ -349,7 +342,7 @@ pub fn resume(
                 pane_id: Some(pane.pane_id.clone()),
                 left_alone: true,
                 started: None,
-                evidence: format!("herdr shows {}", describe(pane)),
+                evidence: format!("the holder shows {}", describe(pane)),
                 warning: None,
             },
         });
@@ -397,7 +390,7 @@ pub fn resume(
         pane.map(|p| p.pane_id),
         &launched.script,
     )?;
-    if session.pane_id.as_deref() != Some(target.pane()) {
+    if session.pane_id.as_deref() != Some(target.as_str()) {
         // The key was `session.resume`'s alone, not the bind's.
         events.extend(
             store
@@ -406,7 +399,7 @@ pub fn resume(
                     Bind {
                         session_id: session.id.clone(),
                         claude_session_id: claude_id.clone(),
-                        pane_id: Some(target.pane().to_owned()),
+                        pane_id: Some(target.clone()),
                         transcript_path: None,
                         source: LAUNCH_BIND_SOURCE.to_owned(),
                     },
@@ -414,17 +407,9 @@ pub fn resume(
                 .events,
         );
     }
-    let pane_id = target.pane().to_owned();
-    let warning = start_in(
-        store,
-        world.herdr,
-        run,
-        &session.id,
-        &target,
-        &launched.line,
-    )?;
+    let pane_id = target;
     let (started, evidence) =
-        wait_started(store, world.herdr, waits, &session.id, &pane_id, since)?;
+        wait_started(store, world.holder(), waits, &session.id, &pane_id, since)?;
     // The pause clears once the launch line is typed: a resume whose pane or
     // launch line failed returns above and leaves the run paused. An
     // Unconfirmed start still clears it, so the alarms catch a start that
@@ -438,7 +423,7 @@ pub fn resume(
             left_alone: false,
             started: Some(started),
             evidence,
-            warning,
+            warning: None,
         },
         events,
         replayed: false,
@@ -449,7 +434,7 @@ pub fn resume(
 /// on the same run or as a new attempt (`run.relaunch`). The stop comes
 /// first and must be proven; nothing is recorded when it cannot be.
 /// `key` is the relaunch's idempotency key: a key that already relaunched
-/// replays without touching herdr.
+/// replays without touching holder.
 pub fn relaunch(
     store: &mut Store,
     ctx: &Ctx,
@@ -466,11 +451,6 @@ pub fn relaunch(
     };
     let ctx = &ctx.unkeyed();
     require_controller(ctx, run, "relaunch", false)?;
-    let routed = world.routed();
-    let world = &World {
-        herdr: &routed,
-        ..*world
-    };
     if store.key_recorded(&keyed)? {
         let applied =
             store.run_relaunch(&keyed, &run.id, relaunch_of(&request, None, None, None))?;
@@ -560,7 +540,7 @@ pub fn relaunch(
     let old = live_session(store.conn(), &run.id)?;
     let (stop_proof, old_pane) = match &old {
         Some(session) => {
-            let (proof, pane) = stop(store, world.herdr, waits, session)?;
+            let (proof, pane) = stop(store, world.holder(), waits, session)?;
             (Some(proof), pane)
         }
         None => (None, None),
@@ -608,7 +588,7 @@ pub fn relaunch(
     let (since, pane_id, warning) = launched;
     let (started, evidence) = wait_started(
         store,
-        world.herdr,
+        world.holder(),
         waits,
         &relaunched.session.id,
         &pane_id,
@@ -648,19 +628,19 @@ fn relaunch_of(
 }
 
 /// Stops a live session: `/exit` into its pane, after an Escape when it is
-/// mid-turn, then waits for its `SessionEnd` hook or for herdr to show no
+/// mid-turn, then waits for its `SessionEnd` hook or for the holder to show no
 /// agent. Returns the proof and the pane, when it is still open, for the
 /// next session. Refuses, having changed nothing recorded, when the stop
 /// cannot be proven or would lose a draft in the composer.
 pub(crate) fn stop(
     store: &Store,
-    herdr: &dyn Herdr,
+    holder: Holder<'_>,
     waits: &Waits,
     session: &Session,
 ) -> Result<(String, Option<String>)> {
-    match ready_to_stop(store, herdr, waits, session, true)? {
+    match ready_to_stop(store, holder, waits, session, true)? {
         Ready::Gone(proof) => Ok(proof),
-        Ready::Exit(pane_id) => exit_and_prove(store, herdr, waits, session, &pane_id),
+        Ready::Exit(pane_id) => exit_and_prove(store, holder, waits, session, &pane_id),
     }
 }
 
@@ -677,7 +657,7 @@ enum Ready {
 /// refused, so its turn is never cut short.
 fn ready_to_stop(
     store: &Store,
-    herdr: &dyn Herdr,
+    holder: Holder<'_>,
     waits: &Waits,
     session: &Session,
     interrupt: bool,
@@ -688,40 +668,39 @@ fn ready_to_stop(
             None,
         )));
     };
-    let Some(pane) = herdr.pane(&pane_id)? else {
+    let Some(pane) = holder.pane(&pane_id)? else {
         return Ok(Ready::Gone((
-            format!("herdr shows pane {pane_id} gone"),
+            format!("the holder shows pane {pane_id} gone"),
             None,
         )));
     };
-    // The pane may have gone to another session (a relaunch reuses it, and
-    // herdr gives a closed pane's id to another workspace): what runs there
-    // is not this session's to stop, and the pane not its to close.
-    if let Some(holder) = pane_holder(store, &pane, &session.id)? {
+    // The pane may have gone to another session: what runs there is not
+    // this session's to stop, and the pane not its to close.
+    if let Some(other) = pane_holder(store, &pane, &session.id)? {
         return Ok(Ready::Gone((
-            format!("pane {pane_id} now holds session {holder}"),
+            format!("pane {pane_id} now holds session {other}"),
             None,
         )));
     }
     if pane.agent.is_none() {
         return Ok(Ready::Gone((
-            format!("herdr shows no agent in pane {pane_id}"),
+            format!("the holder shows no agent in pane {pane_id}"),
             tagged(&pane, &session.id).then_some(pane_id),
         )));
     }
     if interrupt {
         if pane.agent_status.as_deref() == Some("working") {
-            herdr.send_escape(&pane_id)?;
+            holder.send_escape(&pane_id)?;
         }
     } else {
-        // herdr's word wins; the recorded activity counts only without one.
+        // the holder's word wins; the recorded activity counts only without one.
         let working = match pane.agent_status.as_deref() {
             Some(status) => status == "working",
             None => session.activity == Activity::Working,
         };
         if working {
             return Err(SpawnError::Refused(format!(
-                "session {} is still working (herdr: {}, recorded: {}); it is stopped once its turn ends",
+                "session {} is still working (holder: {}, recorded: {}); it is stopped once its turn ends",
                 session.id,
                 pane.agent_status.as_deref().unwrap_or("no status"),
                 session.activity
@@ -731,7 +710,7 @@ fn ready_to_stop(
     // `/exit` goes in only at an empty composer: a turn still running would
     // take it as a message, a dialog as an answer, and a draft would be lost.
     let ready = wait(waits, waits.interrupt, || {
-        Ok(match composer::classify(&herdr.read_visible(&pane_id)?) {
+        Ok(match composer::classify(&holder.read_visible(&pane_id)?) {
             Composer::Empty => Some(Ok(())),
             Composer::Holds(draft) => Some(Err(format!(
                 "the composer of pane {pane_id} holds a draft ({draft:?}); send or clear it first"
@@ -753,7 +732,7 @@ fn ready_to_stop(
             return Err(SpawnError::Refused(format!(
                 "pane {pane_id} did not come to an empty composer within {} s ({}); the session was not stopped and nothing was changed",
                 waits.interrupt.as_secs(),
-                herdr_view(herdr, &pane_id)
+                holder_view(holder, &pane_id)
             )));
         }
     }
@@ -771,11 +750,11 @@ fn relaunch_advice(run: &Run) -> String {
 /// `session`'s pane when it is still open and its own: its tokens name the
 /// session (as a stop needs to hand it back) and no other live session is
 /// bound to it.
-fn own_pane(store: &Store, herdr: &dyn Herdr, session: &Session) -> Result<Option<PaneInfo>> {
+fn own_pane(store: &Store, holder: Holder<'_>, session: &Session) -> Result<Option<PaneInfo>> {
     let Some(pane_id) = session.pane_id.as_deref() else {
         return Ok(None);
     };
-    let Some(pane) = herdr.pane(pane_id)? else {
+    let Some(pane) = holder.pane(pane_id)? else {
         return Ok(None);
     };
     if !tagged(&pane, &session.id) {
@@ -795,7 +774,7 @@ fn pane_holder(store: &Store, pane: &PaneInfo, session: &str) -> Result<Option<S
         &[&pane.pane_id, &session],
     )?;
     Ok(bound.into_iter().map(|s| s.id).next().or_else(|| {
-        pane.tokens
+        pane.meta
             .get("session")
             .filter(|named| *named != session)
             .cloned()
@@ -805,7 +784,7 @@ fn pane_holder(store: &Store, pane: &PaneInfo, session: &str) -> Result<Option<S
 /// Whether the pane's tokens name `session`: only such a pane is handed back
 /// to be closed, as `run.clean` closes only those.
 fn tagged(pane: &PaneInfo, session: &str) -> bool {
-    pane.tokens
+    pane.meta
         .get("session")
         .is_some_and(|named| named == session)
 }
@@ -813,40 +792,40 @@ fn tagged(pane: &PaneInfo, session: &str) -> bool {
 /// The half of [`stop`] from `/exit` on: types it and waits for the proof.
 fn exit_and_prove(
     store: &Store,
-    herdr: &dyn Herdr,
+    holder: Holder<'_>,
     waits: &Waits,
     session: &Session,
     pane_id: &str,
 ) -> Result<(String, Option<String>)> {
     let pane_id = pane_id.to_owned();
-    // The pane is reused only once herdr shows Claude gone from it: a
+    // The pane is reused only once the holder shows Claude gone from it: a
     // `SessionEnd` hook can fire while the process is still exiting, and a
     // line typed then would reach the dying composer.
-    let gone = |herdr: &dyn Herdr| -> Result<Option<(String, Option<String>)>> {
-        Ok(match herdr.pane(&pane_id)? {
+    let gone = |holder: Holder<'_>| -> Result<Option<(String, Option<String>)>> {
+        Ok(match holder.pane(&pane_id)? {
             None => Some((format!("pane {pane_id} closed after /exit"), None)),
             Some(p) if p.agent.is_none() => Some((
-                format!("herdr shows no agent in pane {pane_id} after /exit"),
+                format!("the holder shows no agent in pane {pane_id} after /exit"),
                 tagged(&p, &session.id).then(|| pane_id.clone()),
             )),
             Some(_) => None,
         })
     };
-    herdr.send_text(&pane_id, "/exit")?;
+    holder.send_text(&pane_id, "/exit")?;
     thread::sleep(waits.pacing.settle);
     // Claude can read the Enter as a newline, leaving `/exit` typed and the
     // session running: press again while the line stays, as delivery does.
     // Whatever the verdict, the proof below decides the stop.
     if let Submit::Failed(error) = submit::submit(
-        herdr,
+        &holder,
         &pane_id,
         waits.pacing,
         |composer| matches!(composer, Composer::Holds(text) if text == "/exit"),
-        || Ok::<_, SpawnError>(gone(herdr)?.is_some()),
+        || Ok::<_, SpawnError>(gone(holder)?.is_some()),
     )? {
         return Err(error.into());
     }
-    let proof = wait(waits, waits.exit, || gone(herdr))?;
+    let proof = wait(waits, waits.exit, || gone(holder))?;
     let ended: Session = get(store.conn(), "session", &session.id)?;
     match (proof, ended.ended_at) {
         (Some(proof), _) => Ok(proof),
@@ -854,15 +833,15 @@ fn exit_and_prove(
         // session gets a pane of its own.
         (None, Some(_)) => Ok((
             format!(
-                "SessionEnd after /exit ({}); herdr still shows {}, so the pane is not reused",
+                "SessionEnd after /exit ({}); the holder still shows {}, so the pane is not reused",
                 ended.end_reason.as_deref().unwrap_or("no reason"),
-                herdr_view(herdr, &pane_id)
+                holder_view(holder, &pane_id)
             ),
             None,
         )),
         (None, None) => Err(SpawnError::Refused(format!(
-            "after /exit, no SessionEnd hook arrived and herdr still shows {} within {} s; the session is not proven stopped, so nothing was changed",
-            herdr_view(herdr, &pane_id),
+            "after /exit, no SessionEnd hook arrived and the holder still shows {} within {} s; the session is not proven stopped, so nothing was changed",
+            holder_view(holder, &pane_id),
             waits.exit.as_secs()
         ))),
     }
@@ -884,23 +863,23 @@ pub(crate) struct OrchestratorStop {
 }
 
 /// Stops a live orchestrator with [`stop`], ends its row with `reason`, and
-/// closes its pane rather than reusing it: herdr cannot tell a bare shell
-/// from a program running in it. Only a pane herdr shows without an agent,
-/// and whose tokens still name the session, is closed; one Claude still
+/// closes its pane rather than reusing it: a holder pane runs one program
+/// and ends with it. Only a pane the holder shows without an agent, and
+/// whose meta still names the session, is closed; one Claude still
 /// holds after its `SessionEnd` hook is left open with a warning, since a
 /// live pane is never closed.
 pub(crate) fn stop_orchestrator(
     store: &mut Store,
     ctx: &Ctx,
-    herdr: &dyn Herdr,
+    holder: Holder<'_>,
     waits: &Waits,
     session: &Session,
     reason: &str,
 ) -> Result<OrchestratorStop> {
-    let (proof, pane) = stop(store, herdr, waits, session)?;
+    let (proof, pane) = stop(store, holder, waits, session)?;
     let events = store.session_end(ctx, &session.id, reason)?.events;
     let (closed_pane, warning) = match (pane, &session.pane_id) {
-        (Some(pane), _) => match herdr.close_pane(&pane) {
+        (Some(pane), _) => match holder.close_pane(&pane) {
             Ok(()) => (Some(pane), None),
             Err(e) => (
                 None,
@@ -909,7 +888,7 @@ pub(crate) fn stop_orchestrator(
                 )),
             ),
         },
-        (None, Some(pane)) => match herdr.pane(pane) {
+        (None, Some(pane)) => match holder.pane(pane) {
             Ok(Some(open))
                 if open.agent.is_some()
                     && matches!(pane_holder(store, &open, &session.id), Ok(None)) =>
@@ -917,7 +896,7 @@ pub(crate) fn stop_orchestrator(
                 (
                     None,
                     Some(format!(
-                        "the stopped orchestrator ({proof}) left pane {pane} open; close it in herdr once {} exits",
+                        "the stopped orchestrator ({proof}) left pane {pane} open; end {} there with tiller attach",
                         open.agent.as_deref().unwrap_or("its agent")
                     )),
                 )
@@ -963,11 +942,6 @@ pub fn stop_agent(
     waits: &Waits,
     session: &Session,
 ) -> Result<Applied<Stopped>> {
-    let routed = world.routed();
-    let world = &World {
-        herdr: &routed,
-        ..*world
-    };
     // Judged as the session is now, not as the caller last read it.
     let session: Session = get(store.conn(), "session", &session.id)?;
     let run = match &session.run_id {
@@ -1015,7 +989,7 @@ pub fn stop_agent(
     let mut warnings = Vec::new();
     let (stop_proof, events) = match &run {
         Some(run) => {
-            let (proof, _) = stop(store, world.herdr, waits, &session)?;
+            let (proof, _) = stop(store, world.holder(), waits, &session)?;
             let mut events = store.session_end(ctx, &session.id, STOPPED)?.events;
             // The key was `session.end`'s alone, not the cleanup's.
             let unkeyed = ctx.unkeyed();
@@ -1032,19 +1006,9 @@ pub fn stop_agent(
             (proof, events)
         }
         None => {
-            let stopped = stop_orchestrator(store, ctx, world.herdr, waits, &session, STOPPED)?;
+            let stopped = stop_orchestrator(store, ctx, world.holder(), waits, &session, STOPPED)?;
             closed_pane = stopped.closed_pane;
             warnings.extend(stopped.warning);
-            // The row is ended: what is left undone is a warning, not a
-            // failure that would hide the stop.
-            match layout::bindings(store.conn(), &session.host_id) {
-                Ok(bindings) => {
-                    if let Err(e) = relayout(world.herdr, &bindings) {
-                        warnings.push(e);
-                    }
-                }
-                Err(e) => warnings.push(format!("the panes were not relabelled: {e}")),
-            }
             (stopped.proof, stopped.events)
         }
     };
@@ -1094,7 +1058,7 @@ pub struct Swept {
 pub fn stop_finished(
     store: &mut Store,
     ctx: &Ctx,
-    herdr: &dyn Herdr,
+    holder: Holder<'_>,
     waits: &Waits,
 ) -> Result<Vec<Swept>> {
     let host = local_host(store)?;
@@ -1111,7 +1075,7 @@ pub fn stop_finished(
     for session in sessions {
         let mut exit_sent = false;
         let stop =
-            ready_to_stop(store, herdr, waits, &session, false).and_then(|ready| match ready {
+            ready_to_stop(store, holder, waits, &session, false).and_then(|ready| match ready {
                 Ready::Gone(proof) => Ok(proof),
                 Ready::Exit(pane_id) => {
                     // Read just before typing, since a pass waits on each
@@ -1127,7 +1091,7 @@ pub fn stop_finished(
                         NewObservation {
                             session_id: Some(session.id.clone()),
                             run_id: session.run_id.clone(),
-                            source: ObservationSource::Herdr,
+                            source: ObservationSource::Holder,
                             event: EXIT_SENT.into(),
                             verdict: None,
                             observed_at: Timestamp::now(),
@@ -1135,7 +1099,7 @@ pub fn stop_finished(
                         },
                     )?;
                     exit_sent = true;
-                    exit_and_prove(store, herdr, waits, &session, &pane_id)
+                    exit_and_prove(store, holder, waits, &session, &pane_id)
                 }
             });
         let (stopped, failed, evidence) = match stop
@@ -1189,8 +1153,8 @@ struct Again<'a> {
 }
 
 /// Writes the new session's launch, binds it to a pane (the old one when it
-/// is still open) and types the line. Returns when the line went in, the
-/// pane, and a layout repair that failed.
+/// is still open) and starts it there. Returns when it started, the pane,
+/// and a memory load that failed.
 fn start_again(
     store: &mut Store,
     ctx: &Ctx,
@@ -1322,7 +1286,7 @@ fn start_again(
         old_pane,
         &launched.script,
     )?;
-    let pane_id = target.pane().to_owned();
+    let pane_id = target;
     events.extend(
         store
             .run_place(
@@ -1335,44 +1299,14 @@ fn start_again(
             )?
             .events,
     );
-    let warning = start_in(
-        store,
-        world.herdr,
-        run,
-        &session.id,
-        &target,
-        &launched.line,
-    )?;
-    let (loads, loaded) = memory::record_load(store, ctx, &session.id, memory);
+    let (loads, warning) = memory::record_load(store, ctx, &session.id, memory);
     events.extend(loads);
-    let warning = [warning, loaded]
-        .into_iter()
-        .flatten()
-        .reduce(|all, next| format!("{all}; {next}"));
     Ok((since, pane_id, warning))
 }
 
-/// The pane a later session of a run starts in.
-enum Target {
-    /// A herdr pane, which takes the launch line typed.
-    Typed(String),
-    /// A terminal holder pane, which runs the launch script itself.
-    Held(String),
-}
-
-impl Target {
-    fn pane(&self) -> &str {
-        match self {
-            Self::Typed(pane) | Self::Held(pane) => pane,
-        }
-    }
-}
-
-/// Where a later session of `run` starts: in `old`, the stopped session's
-/// herdr pane, while it is open; otherwise in a new pane, in the terminal
-/// holder when the host runs one and else in a new herdr workspace. A
-/// holder pane runs one program and ends with it, so an old holder pane is
-/// closed and forgotten, and the new one runs `script` (4.4).
+/// Where a later session of `run` starts: in a new terminal holder pane
+/// that runs `script`. A holder pane runs one program and ends with it, so
+/// `old`, the stopped session's pane, is closed and forgotten first (4.4).
 fn open_target(
     world: &World<'_>,
     card: &Card,
@@ -1381,74 +1315,29 @@ fn open_target(
     worktree: &Path,
     old: Option<String>,
     script: &Path,
-) -> Result<Target> {
-    match old {
-        Some(pane) if !tiller_core::ids::is_holder_pane(&pane) => return Ok(Target::Typed(pane)),
-        Some(pane) => world.herdr.close_pane(&pane)?,
-        None => {}
+) -> Result<String> {
+    let holder = world.holder();
+    if let Some(pane) = old {
+        holder.close_pane(&pane)?;
     }
-    if let Some(panes) = world.panes {
-        let label = crate::labels::worker_label(&card.display_id, run.role);
-        let role = run.role.to_string();
-        let owner = crate::spawn::holder::Owner {
-            session,
-            run: Some(&run.id),
-            project: &card.project_id,
-            role: &role,
-            label: &label,
-        };
-        let pane = crate::spawn::holder::open(panes, &owner, script, worktree)?;
-        return Ok(Target::Held(pane.pane.to_string()));
-    }
-    let label = layout::worker_label(&card.display_id, run.role, true);
-    Ok(Target::Typed(
-        world
-            .herdr
-            .create_workspace(&label, Some(worktree))?
-            .pane_id,
-    ))
-}
-
-/// Starts the session in `target`: types `line` into a herdr pane, which
-/// a holder pane needs not. Returns a layout repair that failed.
-fn start_in(
-    store: &Store,
-    herdr: &dyn Herdr,
-    run: &Run,
-    session: &str,
-    target: &Target,
-    line: &str,
-) -> Result<Option<String>> {
-    match target {
-        Target::Typed(pane) => type_line(store, herdr, run, session, pane, line),
-        Target::Held(_) => Ok(None),
-    }
-}
-
-/// Reports the session's row tokens on its pane, runs the layout pass and
-/// types the launch line. Returns a layout repair that failed.
-fn type_line(
-    store: &Store,
-    herdr: &dyn Herdr,
-    run: &Run,
-    session: &str,
-    pane_id: &str,
-    line: &str,
-) -> Result<Option<String>> {
-    let bindings = layout::bindings(store.conn(), &run.host_id)?;
-    if let Some(binding) = bindings.iter().find(|b| b.session_id == session) {
-        herdr.report_tokens(pane_id, &binding.tokens())?;
-    }
-    let warning = relayout(herdr, &bindings).err();
-    herdr.send_text(pane_id, line)?;
-    herdr.send_enter(pane_id)?;
-    Ok(warning)
+    let panes = holder.require()?;
+    let label = crate::labels::worker_label(&card.display_id, run.role);
+    let role = run.role.to_string();
+    let owner = crate::spawn::holder::Owner {
+        session,
+        run: Some(&run.id),
+        project: &card.project_id,
+        role: &role,
+        label: &label,
+    };
+    let pane = crate::spawn::holder::open(panes, &owner, script, worktree)?;
+    Ok(pane.pane.to_string())
 }
 
 /// Waits for the session's `SessionStart` hook after a launch.
 fn wait_started(
     store: &Store,
-    herdr: &dyn Herdr,
+    holder: Holder<'_>,
     waits: &Waits,
     session: &str,
     pane_id: &str,
@@ -1464,9 +1353,9 @@ fn wait_started(
         None => (
             Proof::Unconfirmed,
             format!(
-                "no SessionStart hook within {} s; herdr shows {}",
+                "no SessionStart hook within {} s; the holder shows {}",
                 waits.bind.as_secs(),
-                herdr_view(herdr, pane_id)
+                holder_view(holder, pane_id)
             ),
         ),
     })
@@ -1536,9 +1425,9 @@ fn describe(pane: &PaneInfo) -> String {
     }
 }
 
-/// What herdr shows in a pane now, for a report.
-fn herdr_view(herdr: &dyn Herdr, pane_id: &str) -> String {
-    match herdr.pane(pane_id) {
+/// What the holder shows in a pane now, for a report.
+fn holder_view(holder: Holder<'_>, pane_id: &str) -> String {
+    match holder.pane(pane_id) {
         Ok(Some(pane)) => describe(&pane),
         Ok(None) => format!("pane {pane_id} gone"),
         Err(error) => format!("an unreadable pane {pane_id} ({error})"),

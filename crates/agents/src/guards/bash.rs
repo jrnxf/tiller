@@ -322,7 +322,6 @@ const PROTECTED_WORDS: &[&str] = &[
     "telnet",
     "tiller",
     "treehouse",
-    "herdr",
     "claude",
     "codex",
     "npx",
@@ -387,7 +386,7 @@ fn guessed_code(text: &str) -> Code {
         Code::OwnerOnly
     } else if HTTP_CLIENTS.iter().any(|name| has(name)) {
         Code::HttpClient
-    } else if has("worktree") || has("treehouse") || has("herdr") {
+    } else if has("worktree") || has("treehouse") {
         Code::WorktreeAdmin
     } else if has("claude") || has("crontab") || has("codex") {
         Code::Delegation
@@ -2156,10 +2155,10 @@ impl Walker<'_, '_> {
                 );
             }
             "kill" => return self.kill(args, &shown, appended),
-            "treehouse" | "herdr" => {
+            "treehouse" => {
                 return self.deny(
                     Code::WorktreeAdmin,
-                    format!("{name} administers worktrees and panes"),
+                    format!("{name} administers worktrees"),
                     shown,
                 );
             }
@@ -3539,6 +3538,9 @@ impl Walker<'_, '_> {
             }
             "grant" | "away" | "land" | "board" | "import" | "hook" | "guard" | "owner"
             | "init" | "backup" | "export" | "restore" | "daemon" | "host" => true,
+            // The terminal holder and a terminal on its panes: an agent
+            // never drives a pane (`terminal-holder.md` 2.3).
+            "holder" | "attach" => true,
             "migrate" => unseen || second == "down",
             "config" => unseen || second == "set",
             "project" => second != "list",

@@ -1,6 +1,6 @@
 //! Interrupt, resume and relaunch against real git worktrees, the fake
-//! herdr and a file-backed `state.db`, with a thread standing in for
-//! Claude and its hooks.
+//! terminal holder and a file-backed `state.db`, with a thread standing in
+//! for Claude's hooks.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::Write as _;
@@ -9,8 +9,9 @@ use std::thread::JoinHandle;
 use tiller_core::domain::{CardKind, ConfigManifest, Delivery, RunOutcome, Size, Stage};
 use tiller_core::state::find;
 use tiller_core::state::projects::ProjectEdit;
-use tiller_herdr::fake::{FakeHerdr, Screen};
-use tiller_herdr::testing::owner;
+use tiller_panes::FakeClaude;
+use tiller_panes::fake_claude::Screen;
+use tiller_panes::testing::owner;
 
 use super::*;
 use crate::spawn::tests::{Rig, git, world};
@@ -22,7 +23,7 @@ fn quick() -> Waits {
         exit: Duration::from_millis(300),
         bind: Duration::from_millis(300),
         poll: Duration::from_millis(10),
-        pacing: tiller_herdr::submit::Pacing::INSTANT,
+        pacing: tiller_panes::submit::Pacing::INSTANT,
     }
 }
 
@@ -33,7 +34,7 @@ fn patient() -> Waits {
         exit: Duration::from_secs(10),
         bind: Duration::from_secs(10),
         poll: Duration::from_millis(10),
-        pacing: tiller_herdr::submit::Pacing::INSTANT,
+        pacing: tiller_panes::submit::Pacing::INSTANT,
     }
 }
 
@@ -42,7 +43,6 @@ fn patient() -> Waits {
 fn running(rig: &mut Rig) -> Spawned {
     let card = rig.card(CardKind::Ship, Some(Size::M));
     let spawned = rig.spawn(&card, RunRole::Builder);
-    rig.herdr.set_screen(&spawned.pane_id, Screen::Idle);
     rig.fleet.bind(&spawned.session.id, &spawned.pane_id);
     spawned
 }
@@ -64,50 +64,33 @@ fn hook(store: &mut Store, session: &str, event: &str) {
         .unwrap();
 }
 
-/// Claude, as a launch line run at a shell brings it up: the pane comes up
-/// at an empty composer and `SessionStart:<source>` records against the
-/// live session bound to it. Returns that session, or `None` when no
-/// launch line ran within 10 s.
+/// Claude's hooks, as a pane the holder opens brings it up: a pane opened
+/// after this call comes up at an empty composer, and
+/// `SessionStart:<source>` records against the live session its meta
+/// names. Returns that session, or `None` when no pane opened within 10 s.
 fn boot(rig: &Rig, source: &'static str) -> JoinHandle<Option<String>> {
-    let herdr = FakeHerdr::open(rig.herdr.path());
+    let holder = FakeClaude::open(rig.holder.path());
     let mut store = rig.fleet.open();
-    let before: Vec<(String, usize)> = herdr
-        .snapshot()
-        .unwrap()
-        .panes
-        .iter()
-        .map(|p| {
-            (
-                p.pane_id.clone(),
-                herdr.fake_pane(&p.pane_id).submitted.len(),
-            )
-        })
-        .collect();
+    let before = rig.pane_ids();
     thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
-            for pane in herdr.snapshot().unwrap().panes {
-                let fake = herdr.fake_pane(&pane.pane_id);
-                let seen = before
-                    .iter()
-                    .find(|(id, _)| *id == pane.pane_id)
-                    .map_or(0, |(_, n)| *n);
-                let launched = fake.screen == Screen::Shell
-                    && fake.submitted.len() > seen
-                    && fake.submitted.last().is_some_and(|l| l.starts_with("sh '"));
-                if !launched {
+            for pane in holder.panes() {
+                if before.contains(&pane.pane.pane.to_string()) || !pane.running() {
                     continue;
                 }
+                let Some(named) = pane.pane.meta.get("session") else {
+                    continue;
+                };
                 let session: Option<String> = store
                     .conn()
                     .query_row(
-                        "SELECT id FROM sessions WHERE pane_id = ?1 AND ended_at IS NULL",
-                        [&pane.pane_id],
+                        "SELECT id FROM sessions WHERE id = ?1 AND ended_at IS NULL",
+                        [named],
                         |row| row.get(0),
                     )
                     .ok();
                 let Some(session) = session else { continue };
-                herdr.set_screen(&pane.pane_id, Screen::Idle);
                 hook(&mut store, &session, &format!("SessionStart:{source}"));
                 return Some(session);
             }
@@ -117,13 +100,20 @@ fn boot(rig: &Rig, source: &'static str) -> JoinHandle<Option<String>> {
     })
 }
 
+/// The launch script the pane runs.
+fn script_of(rig: &Rig, pane: &str) -> String {
+    let argv = rig.holder.fake_pane(pane).pane.argv;
+    assert_eq!(argv[0], "/bin/sh", "{argv:?}");
+    std::fs::read_to_string(&argv[1]).unwrap()
+}
+
 fn session(rig: &Rig, id: &str) -> Session {
     get(rig.fleet.store.conn(), "session", id).unwrap()
 }
 
 fn interrupt_it(rig: &mut Rig, ctx: &Ctx, waits: &Waits, run: &str) -> Result<Interrupted> {
     let run = rig.run(run);
-    interrupt(&mut rig.fleet.store, ctx, &rig.herdr, waits, &run).map(|a| a.value)
+    interrupt(&mut rig.fleet.store, ctx, world!(rig).holder(), waits, &run).map(|a| a.value)
 }
 
 fn resume_it(rig: &mut Rig, ctx: &Ctx, waits: &Waits, run: &str) -> Result<Resumed> {
@@ -173,15 +163,15 @@ fn note(text: &str) -> RelaunchRequest {
 fn interrupt_confirms_on_the_turn_end_hook() {
     let mut rig = Rig::new();
     let spawned = running(&mut rig);
-    rig.herdr.set_screen(&spawned.pane_id, Screen::Working);
-    let herdr = FakeHerdr::open(rig.herdr.path());
+    rig.holder.set_screen(&spawned.pane_id, Screen::Working);
+    let holder = FakeClaude::open(rig.holder.path());
     let mut store = rig.fleet.open();
     let (pane, session) = (spawned.pane_id.clone(), spawned.session.id.clone());
     let claude = thread::spawn(move || {
-        let sent = format!("send_escape {pane}");
+        let sent = format!("keys {pane} esc");
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
-            if herdr.calls().contains(&sent) {
+            if holder.calls().contains(&sent) {
                 hook(&mut store, &session, "Stop");
                 return;
             }
@@ -196,13 +186,9 @@ fn interrupt_confirms_on_the_turn_end_hook() {
     assert!(done.evidence.contains("Stop"), "{}", done.evidence);
     assert_eq!(done.pane_id, spawned.pane_id);
     // Escape only: nothing typed.
-    let calls = rig.herdr.calls();
-    assert!(
-        !calls.iter().any(
-            |c| c.starts_with(&format!("send_text {}", spawned.pane_id)) && c.contains("/exit")
-        )
-    );
-    assert_eq!(rig.herdr.fake_pane(&spawned.pane_id).screen, Screen::Idle);
+    let calls = rig.holder.calls();
+    assert!(!calls.iter().any(|c| c.starts_with("input")), "{calls:?}");
+    assert_eq!(rig.holder.fake_pane(&spawned.pane_id).screen, Screen::Idle);
 }
 
 #[test]
@@ -220,14 +206,14 @@ fn interrupt_confirms_on_the_transcript_marker() {
         transcript.display(),
         spawned.session.id
     ));
-    rig.herdr.set_screen(&spawned.pane_id, Screen::Working);
-    let herdr = FakeHerdr::open(rig.herdr.path());
+    rig.holder.set_screen(&spawned.pane_id, Screen::Working);
+    let holder = FakeClaude::open(rig.holder.path());
     let pane = spawned.pane_id.clone();
     let path = transcript.clone();
     let claude = thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
-            if herdr.calls().contains(&format!("send_escape {pane}")) {
+            if holder.calls().contains(&format!("keys {pane} esc")) {
                 let mut file = std::fs::OpenOptions::new()
                     .append(true)
                     .open(&path)
@@ -255,7 +241,7 @@ fn interrupt_confirms_on_the_transcript_marker() {
 fn interrupt_without_proof_is_unconfirmed() {
     let mut rig = Rig::new();
     let spawned = running(&mut rig);
-    rig.herdr.set_screen(&spawned.pane_id, Screen::Working);
+    rig.holder.set_screen(&spawned.pane_id, Screen::Working);
 
     let done = interrupt_it(&mut rig, &owner(), &quick(), &spawned.run.id).unwrap();
     // The fake went idle, but busy state is never proof.
@@ -278,23 +264,23 @@ fn interrupt_without_proof_is_unconfirmed() {
 fn a_keyed_interrupt_sends_one_escape_however_often_it_is_retried() {
     let mut rig = Rig::new();
     let spawned = running(&mut rig);
-    rig.herdr.set_screen(&spawned.pane_id, Screen::Working);
+    rig.holder.set_screen(&spawned.pane_id, Screen::Working);
     let board = Ctx::new(Actor::Board).with_key("01KEYEDINTERRUPT0000000000");
 
     let done = interrupt_it(&mut rig, &board, &quick(), &spawned.run.id).unwrap();
     assert_eq!(done.cancel, Proof::Unconfirmed);
     // Still working, so only the key stops a second Escape.
-    rig.herdr.set_screen(&spawned.pane_id, Screen::Working);
+    rig.holder.set_screen(&spawned.pane_id, Screen::Working);
     let error = interrupt_it(&mut rig, &board, &quick(), &spawned.run.id).unwrap_err();
     assert!(matches!(error, SpawnError::Refused(_)), "{error}");
     assert!(error.to_string().contains("sent already"), "{error}");
     let escapes = rig
-        .herdr
+        .holder
         .calls()
         .iter()
-        .filter(|c| c.starts_with("send_escape"))
+        .filter(|c| c.starts_with("keys") && c.ends_with(" esc"))
         .count();
-    assert_eq!(escapes, 1, "{:?}", rig.herdr.calls());
+    assert_eq!(escapes, 1, "{:?}", rig.holder.calls());
 
     // A new key is a new press.
     let again = Ctx::new(Actor::Board).with_key("01KEYEDINTERRUPT0000000001");
@@ -310,16 +296,13 @@ fn interrupt_refuses_a_session_not_working() {
     assert!(matches!(error, SpawnError::Refused(_)), "{error}");
     assert!(error.to_string().contains("is not working"), "{error}");
     assert!(
-        !rig.herdr
-            .calls()
-            .iter()
-            .any(|c| c.starts_with("send_escape")),
+        !rig.holder.calls().iter().any(|c| c.starts_with("keys")),
         "{:?}",
-        rig.herdr.calls()
+        rig.holder.calls()
     );
 
-    // A pane at a shell has no agent to interrupt.
-    rig.herdr.set_screen(&spawned.pane_id, Screen::Shell);
+    // A pane whose child exited has no agent to interrupt.
+    rig.holder.exit(&spawned.pane_id, 0);
     let error = interrupt_it(&mut rig, &owner(), &quick(), &spawned.run.id).unwrap_err();
     assert!(error.to_string().contains("shows no agent"), "{error}");
 }
@@ -328,9 +311,9 @@ fn interrupt_refuses_a_session_not_working() {
 fn control_is_the_supervisor_or_the_owner() {
     let mut rig = Rig::new();
     let spawned = running(&mut rig);
-    rig.herdr.set_screen(&spawned.pane_id, Screen::Working);
+    rig.holder.set_screen(&spawned.pane_id, Screen::Working);
     let worker = Ctx::new(Actor::Session(spawned.session.id.clone()));
-    let calls = rig.herdr.calls().len();
+    let calls = rig.holder.calls().len();
 
     let error = interrupt_it(&mut rig, &worker, &quick(), &spawned.run.id).unwrap_err();
     assert!(error.to_string().contains("may not interrupt"), "{error}");
@@ -338,14 +321,14 @@ fn control_is_the_supervisor_or_the_owner() {
     assert!(error.to_string().contains("may not resume"), "{error}");
     let error = relaunch_it(&mut rig, &worker, &quick(), &spawned.run.id, note("n")).unwrap_err();
     assert!(error.to_string().contains("may not relaunch"), "{error}");
-    assert_eq!(rig.herdr.calls().len(), calls);
+    assert_eq!(rig.holder.calls().len(), calls);
 }
 
 #[test]
 fn resume_leaves_a_running_session_alone() {
     let mut rig = Rig::new();
     let spawned = running(&mut rig);
-    let calls = rig.herdr.calls().len();
+    let calls = rig.holder.calls().len();
 
     let ctx = rig.orchestrator();
     let done = resume_it(&mut rig, &ctx, &quick(), &spawned.run.id).unwrap();
@@ -357,11 +340,11 @@ fn resume_leaves_a_running_session_alone() {
     );
     // A look, no keys.
     assert!(
-        rig.herdr.calls()[calls..]
+        rig.holder.calls()[calls..]
             .iter()
-            .all(|c| !c.starts_with("send_")),
+            .all(|c| !c.starts_with("input") && !c.starts_with("keys")),
         "{:?}",
-        rig.herdr.calls()
+        rig.holder.calls()
     );
 }
 
@@ -392,7 +375,7 @@ fn a_manual_resume_clears_the_pause() {
     assert_eq!(rig.events("run.unpaused", &spawned.run.id), 1);
 
     pause(&mut rig, &spawned.run.id);
-    rig.herdr.set_screen(&spawned.pane_id, Screen::Shell);
+    rig.holder.exit(&spawned.pane_id, 0);
     let claude = boot(&rig, "resume");
     let done = resume_it(&mut rig, &ctx, &patient(), &spawned.run.id).unwrap();
     claude.join().unwrap();
@@ -401,15 +384,15 @@ fn a_manual_resume_clears_the_pause() {
     assert_eq!(rig.events("run.unpaused", &spawned.run.id), 2);
 }
 
-/// A resume whose launch line never reaches the pane leaves the pause in
+/// A resume whose pane never opens leaves the pause in
 /// place, so the run's alarms stay quiet while it is still stopped.
 #[test]
 fn a_manual_resume_that_fails_to_start_keeps_the_pause() {
     let mut rig = Rig::new();
     let spawned = running(&mut rig);
     pause(&mut rig, &spawned.run.id);
-    rig.herdr.set_screen(&spawned.pane_id, Screen::Shell);
-    rig.herdr.refuse("send_text");
+    rig.holder.exit(&spawned.pane_id, 0);
+    rig.holder.refuse("spawn");
     let ctx = rig.orchestrator();
     resume_it(&mut rig, &ctx, &quick(), &spawned.run.id).unwrap_err();
     assert!(rig.run(&spawned.run.id).pause_until.is_some());
@@ -417,11 +400,11 @@ fn a_manual_resume_that_fails_to_start_keeps_the_pause() {
 }
 
 #[test]
-fn resume_relaunches_claude_resume_in_its_pane() {
+fn resume_runs_claude_resume_in_a_new_pane() {
     let mut rig = Rig::new();
     let spawned = running(&mut rig);
-    // Claude died; the shell is left in the pane.
-    rig.herdr.set_screen(&spawned.pane_id, Screen::Shell);
+    // Claude died; the exited pane is left in the holder.
+    rig.holder.exit(&spawned.pane_id, 0);
     let claude = boot(&rig, "resume");
     // A resume records trust again, in case the entry went.
     std::fs::remove_file(rig.claude.store().unwrap()).unwrap();
@@ -435,20 +418,17 @@ fn resume_relaunches_claude_resume_in_its_pane() {
     );
     assert!(!done.left_alone);
     assert_eq!(done.started, Some(Proof::Confirmed), "{}", done.evidence);
-    assert_eq!(done.pane_id.as_deref(), Some(spawned.pane_id.as_str()));
+    // A new pane, since a holder pane ends with its program; the old one
+    // is forgotten.
+    let pane = done.pane_id.clone().unwrap();
+    assert_ne!(pane, spawned.pane_id);
+    assert!(!rig.pane_ids().contains(&spawned.pane_id));
     assert_eq!(done.session.id, spawned.session.id);
+    assert_eq!(done.session.pane_id.as_deref(), Some(pane.as_str()));
     assert!(done.session.ended_at.is_none());
 
-    // The line runs `claude --resume` from the run's worktree.
-    let line = rig
-        .herdr
-        .fake_pane(&spawned.pane_id)
-        .submitted
-        .last()
-        .cloned()
-        .unwrap();
-    let script = line.trim_start_matches("sh '").trim_end_matches('\'');
-    let text = std::fs::read_to_string(script).unwrap();
+    // The pane runs `claude --resume` from the run's worktree.
+    let text = script_of(&rig, &pane);
     assert!(
         text.contains(&format!("'--resume' 'claude-{}'", spawned.session.id)),
         "{text}"
@@ -473,7 +453,7 @@ fn resume_relaunches_claude_resume_in_its_pane() {
 fn resume_opens_a_pane_when_its_own_is_gone() {
     let mut rig = Rig::new();
     let spawned = running(&mut rig);
-    rig.herdr.remove_pane(&spawned.pane_id);
+    rig.holder.remove_pane(&spawned.pane_id);
     let claude = boot(&rig, "resume");
 
     let done = resume_it(&mut rig, &owner(), &patient(), &spawned.run.id).unwrap();
@@ -491,7 +471,7 @@ fn resume_opens_a_pane_when_its_own_is_gone() {
 fn a_keyed_resume_binds_the_new_pane() {
     let mut rig = Rig::new();
     let spawned = running(&mut rig);
-    rig.herdr.remove_pane(&spawned.pane_id);
+    rig.holder.remove_pane(&spawned.pane_id);
     let claude = boot(&rig, "resume");
     let board = Ctx {
         key: Some("board-resume-1".to_owned()),
@@ -508,7 +488,7 @@ fn a_keyed_resume_binds_the_new_pane() {
 fn resume_refuses_under_a_floor_and_without_a_live_session() {
     let mut rig = Rig::new();
     let spawned = running(&mut rig);
-    rig.herdr.set_screen(&spawned.pane_id, Screen::Shell);
+    rig.holder.exit(&spawned.pane_id, 0);
     rig.sql(&format!(
         "UPDATE hosts SET disk_floor_mb = 100000 WHERE id = '{}'",
         spawned.run.host_id
@@ -562,7 +542,7 @@ fn relaunch_resumes_worker_in_own_worktree_with_note() {
     let new = claude.join().unwrap().unwrap();
     assert_eq!(done.started, Proof::Confirmed, "{}", done.evidence);
 
-    // The same run, a new session, in the same pane and worktree.
+    // The same run, a new session, in a new pane and the same worktree.
     assert_eq!(done.run.id, spawned.run.id);
     assert!(done.run.ended_at.is_none());
     assert_eq!(done.session.id, new);
@@ -575,12 +555,16 @@ fn relaunch_resumes_worker_in_own_worktree_with_note() {
         done.stop_proof.as_deref().unwrap().contains("no agent"),
         "{done:?}"
     );
-    assert_eq!(done.pane_id, spawned.pane_id);
+    assert_ne!(done.pane_id, spawned.pane_id);
+    assert!(!rig.pane_ids().contains(&spawned.pane_id));
     let old = session(&rig, &spawned.session.id);
     assert!(old.ended_at.is_some());
     assert_eq!(old.run_id.as_deref(), Some(spawned.run.id.as_str()));
-    let submitted = rig.herdr.fake_pane(&spawned.pane_id).submitted;
-    assert_eq!(submitted[submitted.len() - 2], "/exit");
+    let calls = rig.holder.calls();
+    assert!(
+        calls.contains(&format!("input {} /exit", spawned.pane_id)),
+        "{calls:?}"
+    );
 
     // Nothing was lost.
     assert_eq!(git(&worktree, &["rev-parse", "HEAD"]), head);
@@ -591,12 +575,7 @@ fn relaunch_resumes_worker_in_own_worktree_with_note() {
     assert!(rig.pool.returned().is_empty());
 
     // The new session starts in the worktree from the note.
-    let script = submitted
-        .last()
-        .unwrap()
-        .trim_start_matches("sh '")
-        .trim_end_matches('\'');
-    let text = std::fs::read_to_string(script).unwrap();
+    let text = script_of(&rig, &done.pane_id);
     assert!(text.contains(&spawned.worktree), "{text}");
     assert!(text.contains(&new), "{text}");
     assert!(!text.contains("'--resume'"), "{text}");
@@ -729,7 +708,7 @@ fn relaunch_refuses_a_run_whose_prompt_holds_no_brief() {
 fn relaunch_interrupts_a_working_turn_before_the_exit() {
     let mut rig = Rig::new();
     let spawned = running(&mut rig);
-    rig.herdr.set_screen(&spawned.pane_id, Screen::Working);
+    rig.holder.set_screen(&spawned.pane_id, Screen::Working);
     let claude = boot(&rig, "startup");
 
     let done = relaunched(
@@ -737,14 +716,14 @@ fn relaunch_interrupts_a_working_turn_before_the_exit() {
     );
     claude.join().unwrap();
     assert_eq!(done.started, Proof::Confirmed);
-    let calls = rig.herdr.calls();
+    let calls = rig.holder.calls();
     let escape = calls
         .iter()
-        .position(|c| *c == format!("send_escape {}", spawned.pane_id))
+        .position(|c| *c == format!("keys {} esc", spawned.pane_id))
         .unwrap();
     let exit = calls
         .iter()
-        .position(|c| *c == format!("send_text {} /exit", spawned.pane_id))
+        .position(|c| *c == format!("input {} /exit", spawned.pane_id))
         .unwrap();
     assert!(escape < exit, "{calls:?}");
 }
@@ -755,17 +734,17 @@ fn relaunch_refuses_when_the_stop_is_unproven() {
     let spawned = running(&mut rig);
 
     // A draft in the composer would be lost.
-    rig.herdr.type_draft(&spawned.pane_id, "half a thought");
+    rig.holder.type_draft(&spawned.pane_id, "half a thought");
     let error = relaunch_it(&mut rig, &owner(), &quick(), &spawned.run.id, note("n")).unwrap_err();
     assert!(error.to_string().contains("holds a draft"), "{error}");
     assert_eq!(
-        rig.herdr.fake_pane(&spawned.pane_id).composer,
+        rig.holder.fake_pane(&spawned.pane_id).composer,
         "half a thought"
     );
 
     // A dialog would take `/exit` as its answer.
     let other = running(&mut rig);
-    rig.herdr.set_screen(&other.pane_id, Screen::Permission);
+    rig.holder.set_screen(&other.pane_id, Screen::Permission);
     let error = relaunch_it(&mut rig, &owner(), &quick(), &other.run.id, note("n")).unwrap_err();
     assert!(error.to_string().contains("dialog"), "{error}");
 
@@ -780,13 +759,13 @@ fn relaunch_refuses_when_the_stop_is_unproven() {
 fn relaunch_refuses_when_claude_does_not_exit() {
     let mut rig = Rig::new();
     let spawned = running(&mut rig);
-    rig.herdr.ignore_exit(&spawned.pane_id);
+    rig.holder.ignore_exit(&spawned.pane_id);
 
     let error = relaunch_it(&mut rig, &owner(), &quick(), &spawned.run.id, note("n")).unwrap_err();
     assert!(error.to_string().contains("not proven stopped"), "{error}");
     assert!(error.to_string().contains("claude (idle)"), "{error}");
     assert_eq!(
-        rig.herdr
+        rig.holder
             .fake_pane(&spawned.pane_id)
             .submitted
             .last()
@@ -811,7 +790,7 @@ fn relaunch_refuses_a_worktree_off_its_branch() {
         error.to_string().contains("not the run's branch"),
         "{error}"
     );
-    assert!(!rig.herdr.calls().iter().any(|c| c.contains("/exit")));
+    assert!(!rig.holder.calls().iter().any(|c| c.contains("/exit")));
     assert_eq!(rig.events("run.relaunched", &spawned.run.id), 0);
 }
 
@@ -833,7 +812,7 @@ fn relaunch_new_attempt_on_another_model() {
     claude.join().unwrap();
     assert_eq!(done.started, Proof::Confirmed, "{}", done.evidence);
 
-    // A new run in the same worktree and pane on the asked model; the old
+    // A new run in the same worktree, in a new pane, on the asked model; the old
     // run ends `relaunched` and keeps its row.
     assert_ne!(done.run.id, spawned.run.id);
     assert_eq!(
@@ -846,10 +825,8 @@ fn relaunch_new_attempt_on_another_model() {
     );
     assert_eq!(done.run.branch, spawned.run.branch);
     assert!(done.run.config_hash.is_some());
-    assert_eq!(
-        done.session.pane_id.as_deref(),
-        Some(spawned.pane_id.as_str())
-    );
+    assert_eq!(done.session.pane_id.as_deref(), Some(done.pane_id.as_str()));
+    assert_ne!(done.pane_id, spawned.pane_id);
     let old = rig.run(&spawned.run.id);
     assert!(old.ended_at.is_some());
     assert_eq!(
@@ -860,15 +837,7 @@ fn relaunch_new_attempt_on_another_model() {
     // first prompt.
     let prompt = std::fs::read_to_string(rig.scratch.join(&done.run.id).join("prompt.md")).unwrap();
     assert!(prompt.contains("Do the parser again."), "{prompt}");
-    let line = rig
-        .herdr
-        .fake_pane(&spawned.pane_id)
-        .submitted
-        .last()
-        .cloned()
-        .unwrap();
-    let script =
-        std::fs::read_to_string(line.trim_start_matches("sh '").trim_end_matches('\'')).unwrap();
+    let script = script_of(&rig, &done.pane_id);
     assert!(script.contains("start over on the parser"), "{script}");
     assert!(script.contains(&done.run.id), "{script}");
     assert!(rig.pool.returned().is_empty());
@@ -940,11 +909,11 @@ fn relaunch_model_needs_a_new_attempt_and_the_rule() {
     let ctx = rig.orchestrator();
     let error = relaunch_it(&mut rig, &ctx, &quick(), &spawned.run.id, request).unwrap_err();
     assert!(matches!(error, SpawnError::Downgrade(_)), "{error}");
-    assert!(!rig.herdr.calls().iter().any(|c| c.contains("/exit")));
+    assert!(!rig.holder.calls().iter().any(|c| c.contains("/exit")));
 }
 
 #[test]
-fn relaunch_key_replays_without_touching_herdr() {
+fn relaunch_key_replays_without_touching_the_holder() {
     let mut rig = Rig::new();
     let spawned = running(&mut rig);
     let claude = boot(&rig, "startup");
@@ -955,7 +924,7 @@ fn relaunch_key_replays_without_touching_herdr() {
     );
     claude.join().unwrap();
     assert_eq!(first.started, Proof::Confirmed);
-    let calls = rig.herdr.calls().len();
+    let calls = rig.holder.calls().len();
 
     // The run moved on, but the key answers with what it did.
     let again = keyed_relaunch(&mut rig, &ctx, key, &quick(), &spawned.run, note("n")).unwrap();
@@ -963,14 +932,14 @@ fn relaunch_key_replays_without_touching_herdr() {
         panic!("expected a replay, got {again:?}");
     };
     assert_eq!(session.id, first.session.id);
-    assert_eq!(rig.herdr.calls().len(), calls);
+    assert_eq!(rig.holder.calls().len(), calls);
 
     // A recorded key answers only a caller who may relaunch.
     let worker = Ctx::new(Actor::Session(first.session.id.clone()));
     let error =
         keyed_relaunch(&mut rig, &worker, key, &quick(), &spawned.run, note("n")).unwrap_err();
     assert!(error.to_string().contains("may not relaunch"), "{error}");
-    assert_eq!(rig.herdr.calls().len(), calls);
+    assert_eq!(rig.holder.calls().len(), calls);
 }
 
 #[test]
@@ -995,7 +964,7 @@ fn relaunch_the_record_refuses_leaves_the_agent_running() {
         "{error}"
     );
     // The rehearsal refused before `/exit`: Claude and every row stay.
-    assert!(!rig.herdr.calls().iter().any(|c| c.contains("/exit")));
+    assert!(!rig.holder.calls().iter().any(|c| c.contains("/exit")));
     assert!(session(&rig, &spawned.session.id).ended_at.is_none());
     assert!(rig.run(&spawned.run.id).ended_at.is_none());
     assert_eq!(rig.events("run.relaunched", &spawned.run.id), 0);
@@ -1012,16 +981,16 @@ fn relaunch_the_record_refuses_leaves_the_agent_running() {
 fn relaunch_after_session_end_with_claude_still_up_opens_a_pane() {
     let mut rig = Rig::new();
     let spawned = running(&mut rig);
-    // Claude records `SessionEnd` but herdr still shows it in the pane.
-    rig.herdr.ignore_exit(&spawned.pane_id);
+    // Claude records `SessionEnd` but the holder still shows it in the pane.
+    rig.holder.ignore_exit(&spawned.pane_id);
     let hook_end = {
-        let herdr = FakeHerdr::open(rig.herdr.path());
+        let holder = FakeClaude::open(rig.holder.path());
         let mut store = rig.fleet.open();
         let (session, pane) = (spawned.session.id.clone(), spawned.pane_id.clone());
         thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(10);
             while Instant::now() < deadline {
-                if herdr
+                if holder
                     .fake_pane(&pane)
                     .submitted
                     .iter()
@@ -1054,7 +1023,7 @@ fn relaunch_after_session_end_with_claude_still_up_opens_a_pane() {
     // Nothing more is typed into the pane Claude still holds.
     assert_ne!(done.pane_id, spawned.pane_id);
     assert_eq!(
-        rig.herdr
+        rig.holder
             .fake_pane(&spawned.pane_id)
             .submitted
             .last()
@@ -1077,7 +1046,7 @@ fn sweep_it(rig: &mut Rig, waits: &Waits) -> Vec<Swept> {
     stop_finished(
         &mut rig.fleet.store,
         &Ctx::new(Actor::Daemon),
-        &rig.herdr,
+        world!(rig).holder(),
         waits,
     )
     .unwrap()
@@ -1087,7 +1056,7 @@ fn sweep_it(rig: &mut Rig, waits: &Waits) -> Vec<Swept> {
 fn scouting(rig: &mut Rig) -> Spawned {
     let card = rig.card(CardKind::Scout, None);
     let spawned = rig.spawn(&card, RunRole::Scout);
-    rig.herdr.set_screen(&spawned.pane_id, Screen::Idle);
+    rig.holder.set_screen(&spawned.pane_id, Screen::Idle);
     rig.fleet.bind(&spawned.session.id, &spawned.pane_id);
     spawned
 }
@@ -1103,9 +1072,7 @@ fn landed(rig: &mut Rig) -> Spawned {
 }
 
 fn typed(rig: &Rig, pane: &str, line: &str) -> bool {
-    rig.herdr
-        .calls()
-        .contains(&format!("send_text {pane} {line}"))
+    rig.holder.calls().contains(&format!("input {pane} {line}"))
 }
 
 #[test]
@@ -1164,7 +1131,7 @@ fn stop_presses_enter_again_while_exit_stays_in_the_composer() {
     let mut rig = Rig::new();
     let spawned = running(&mut rig);
     rig.done(&spawned.run.id, RunOutcome::Abandoned).unwrap();
-    rig.herdr.enter_as_newline(&spawned.pane_id, 2);
+    rig.holder.enter_as_newline(&spawned.pane_id, 2);
 
     let stopped = stop_it(&mut rig, &owner(), &quick(), &spawned.session.id).unwrap();
     assert!(stopped.stop_proof.contains("no agent"), "{stopped:?}");
@@ -1179,25 +1146,25 @@ fn stop_that_exit_never_leaves_is_refused_after_a_bounded_number_of_presses() {
     let mut rig = Rig::new();
     let spawned = running(&mut rig);
     rig.done(&spawned.run.id, RunOutcome::Abandoned).unwrap();
-    rig.herdr.enter_as_newline(&spawned.pane_id, 100);
+    rig.holder.enter_as_newline(&spawned.pane_id, 100);
 
     let error = stop_it(&mut rig, &owner(), &quick(), &spawned.session.id).unwrap_err();
     assert!(error.to_string().contains("not proven stopped"), "{error}");
     assert!(session(&rig, &spawned.session.id).ended_at.is_none());
     let presses = enters_after_exit(&rig, &spawned.pane_id);
-    assert_eq!(presses, tiller_herdr::submit::PRESSES as usize);
+    assert_eq!(presses, tiller_panes::submit::PRESSES as usize);
 }
 
 /// The Enters pressed in `pane` after `/exit` was typed.
 fn enters_after_exit(rig: &Rig, pane: &str) -> usize {
-    let calls = rig.herdr.calls();
+    let calls = rig.holder.calls();
     let exit = calls
         .iter()
-        .position(|c| *c == format!("send_text {pane} /exit"))
+        .position(|c| *c == format!("input {pane} /exit"))
         .unwrap();
     calls[exit..]
         .iter()
-        .filter(|c| **c == format!("send_enter {pane}"))
+        .filter(|c| **c == format!("keys {pane} enter"))
         .count()
 }
 
@@ -1241,7 +1208,7 @@ fn stop_refuses_over_a_draft() {
     let mut rig = Rig::new();
     let spawned = running(&mut rig);
     rig.done(&spawned.run.id, RunOutcome::Abandoned).unwrap();
-    rig.herdr.type_draft(&spawned.pane_id, "half a thought");
+    rig.holder.type_draft(&spawned.pane_id, "half a thought");
 
     let error = stop_it(&mut rig, &owner(), &quick(), &spawned.session.id).unwrap_err();
     assert!(error.to_string().contains("holds a draft"), "{error}");
@@ -1271,8 +1238,8 @@ fn the_daemon_stops_the_idle_agent_of_a_finished_run() {
         assert!(typed(&rig, &finished.pane_id, "/exit"));
         let ended = session(&rig, &finished.session.id);
         assert_eq!(ended.end_reason.as_deref(), Some(RUN_ENDED));
-        // Its pane is a bare shell now, for reconcile to close (R15).
-        assert_eq!(rig.herdr.fake_pane(&finished.pane_id).screen, Screen::Shell);
+        // Its pane's child exited, for reconcile to forget (R15).
+        assert!(!rig.holder.fake_pane(&finished.pane_id).running());
     }
 
     // An active run, and a failed one the orchestrator decides about, are
@@ -1290,33 +1257,33 @@ fn the_daemon_waits_for_a_finished_agent_to_be_idle() {
     let mut rig = Rig::new();
     let working = scouting(&mut rig);
     rig.done(&working.run.id, RunOutcome::Reported).unwrap();
-    rig.herdr.set_screen(&working.pane_id, Screen::Working);
+    rig.holder.set_screen(&working.pane_id, Screen::Working);
     let drafting = scouting(&mut rig);
     rig.done(&drafting.run.id, RunOutcome::Reported).unwrap();
-    rig.herdr.type_draft(&drafting.pane_id, "half a thought");
+    rig.holder.type_draft(&drafting.pane_id, "half a thought");
     let asking = scouting(&mut rig);
     rig.done(&asking.run.id, RunOutcome::Reported).unwrap();
-    rig.herdr.set_screen(&asking.pane_id, Screen::Permission);
+    rig.holder.set_screen(&asking.pane_id, Screen::Permission);
 
     let swept = sweep_it(&mut rig, &quick());
     assert_eq!(swept.len(), 3, "{swept:?}");
     assert!(swept.iter().all(|s| !s.stopped), "{swept:?}");
     for spawned in [&working, &drafting, &asking] {
         assert!(!typed(&rig, &spawned.pane_id, "/exit"));
-        let calls = rig.herdr.calls();
+        let calls = rig.holder.calls();
         assert!(
-            !calls.contains(&format!("send_escape {}", spawned.pane_id)),
+            !calls.contains(&format!("keys {} esc", spawned.pane_id)),
             "{calls:?}"
         );
         assert!(session(&rig, &spawned.session.id).ended_at.is_none());
     }
     assert_eq!(
-        rig.herdr.fake_pane(&drafting.pane_id).composer,
+        rig.holder.fake_pane(&drafting.pane_id).composer,
         "half a thought"
     );
 
     // Once the turn ends, the next pass stops it.
-    rig.herdr.set_screen(&working.pane_id, Screen::Idle);
+    rig.holder.set_screen(&working.pane_id, Screen::Idle);
     let swept = sweep_it(&mut rig, &quick());
     let done = swept
         .iter()
@@ -1331,7 +1298,7 @@ fn the_daemon_types_exit_once_into_an_agent_that_ignores_it() {
     let mut rig = Rig::new();
     let stubborn = scouting(&mut rig);
     rig.done(&stubborn.run.id, RunOutcome::Reported).unwrap();
-    rig.herdr.ignore_exit(&stubborn.pane_id);
+    rig.holder.ignore_exit(&stubborn.pane_id);
 
     let swept = sweep_it(&mut rig, &quick());
     let [first] = swept.as_slice() else {
@@ -1345,10 +1312,10 @@ fn the_daemon_types_exit_once_into_an_agent_that_ignores_it() {
     // after a restart too, types `/exit` again.
     assert!(sweep_it(&mut rig, &quick()).is_empty());
     let exits = rig
-        .herdr
+        .holder
         .calls()
         .iter()
-        .filter(|c| **c == format!("send_text {} /exit", stubborn.pane_id))
+        .filter(|c| **c == format!("input {} /exit", stubborn.pane_id))
         .count();
     assert_eq!(exits, 1);
 }
@@ -1397,14 +1364,10 @@ fn the_daemon_never_types_into_a_pane_another_session_now_holds() {
     let mut rig = Rig::new();
     let finished = scouting(&mut rig);
     rig.done(&finished.run.id, RunOutcome::Reported).unwrap();
-    // The agent died without its hook, and herdr gave the closed pane's id
-    // to another workspace, whose agent now sits idle there.
-    rig.herdr
-        .report_tokens(
-            &finished.pane_id,
-            &std::collections::BTreeMap::from([("session".into(), "01OTHERSESSION".into())]),
-        )
-        .unwrap();
+    // The agent died without its hook, and the pane's meta now names
+    // another session, whose agent sits idle there.
+    rig.holder
+        .set_meta(&finished.pane_id, &[("session", "01OTHERSESSION")]);
 
     let swept = sweep_it(&mut rig, &quick());
     assert_eq!(swept.len(), 1);
@@ -1415,45 +1378,6 @@ fn the_daemon_never_types_into_a_pane_another_session_now_holds() {
         swept[0].evidence
     );
     assert!(!typed(&rig, &finished.pane_id, "/exit"));
-}
-
-#[test]
-fn stop_never_types_into_a_pane_the_next_attempt_holds() {
-    let mut rig = Rig::new();
-    let spawned = running(&mut rig);
-    let claude = boot(&rig, "startup");
-    let request = RelaunchRequest {
-        note: "start over".into(),
-        new_attempt: true,
-        brief: Some("Do it again.".into()),
-        asked: None,
-    };
-    let ctx = rig.orchestrator();
-    let done =
-        relaunched(relaunch_it(&mut rig, &ctx, &patient(), &spawned.run.id, request).unwrap());
-    claude.join().unwrap();
-    assert_eq!(
-        done.session.pane_id.as_deref(),
-        Some(spawned.pane_id.as_str())
-    );
-    let exits = |rig: &Rig| {
-        rig.herdr
-            .calls()
-            .iter()
-            .filter(|c| **c == format!("send_text {} /exit", spawned.pane_id))
-            .count()
-    };
-    let before = exits(&rig);
-
-    // The old session's pane now holds the new attempt's agent.
-    let stopped = stop_it(&mut rig, &owner(), &quick(), &spawned.session.id).unwrap();
-    assert!(
-        stopped.stop_proof.contains(&done.session.id),
-        "{}",
-        stopped.stop_proof
-    );
-    assert_eq!(exits(&rig), before);
-    assert!(session(&rig, &done.session.id).ended_at.is_none());
 }
 
 #[test]
@@ -1478,7 +1402,8 @@ fn the_live_orchestrator_stops_an_ended_run_it_inherited() {
 }
 
 fn delete_it(rig: &mut Rig, waits: &Waits) -> Result<ProjectDeleted> {
-    delete_project(&mut rig.fleet.store, &owner(), &rig.herdr, waits, "alpha").map(|a| a.value)
+    let holder = world!(rig).holder();
+    delete_project(&mut rig.fleet.store, &owner(), holder, waits, "alpha").map(|a| a.value)
 }
 
 #[test]
@@ -1527,7 +1452,7 @@ fn delete_refuses_naming_the_agent_that_did_not_stop() {
     let mut rig = Rig::new();
     let spawned = running(&mut rig);
     // `/exit` never leaves the composer, so the stop is never proven.
-    rig.herdr.enter_as_newline(&spawned.pane_id, 100);
+    rig.holder.enter_as_newline(&spawned.pane_id, 100);
 
     let error = delete_it(&mut rig, &quick()).unwrap_err().to_string();
     assert!(error.contains(&spawned.session.id), "{error}");
@@ -1546,7 +1471,7 @@ fn retire_stops_the_orchestrator_only_when_asked() {
         let retired = retire_project(
             &mut rig.fleet.store,
             &owner(),
-            &rig.herdr,
+            world!(rig).holder(),
             &quick(),
             "alpha",
             stop_agents,
@@ -1567,7 +1492,7 @@ fn retire_of_a_retired_project_stops_nothing() {
         retire_project(
             &mut rig.fleet.store,
             &owner(),
-            &rig.herdr,
+            world!(rig).holder(),
             &quick(),
             "alpha",
             stop_agents,
@@ -1586,16 +1511,16 @@ fn retire_of_a_retired_project_stops_nothing() {
     assert!(!typed(&rig, &rig.fleet.orchestrator_pane, "/exit"));
 }
 
-/// The stops wait on herdr between short writes of their own, so another
+/// The stops wait on the holder between short writes of their own, so another
 /// request writes while a delete's agent is still exiting.
 #[test]
 fn delete_holds_no_store_write_while_an_agent_stops() {
     let mut rig = Rig::new();
     running(&mut rig);
     let db = rig.fleet.db.clone();
-    let landed = std::cell::RefCell::new(Vec::new());
+    let landed = std::sync::Mutex::new(Vec::new());
     let other_write = |call: &str, text: &str| {
-        if call != "send_text" || text != "/exit" {
+        if call != "input" || text != "/exit" {
             return;
         }
         let mut other = Store::open_current(&db).unwrap();
@@ -1609,16 +1534,18 @@ fn delete_holds_no_store_write_while_an_agent_stops() {
             ..Default::default()
         };
         landed
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .push(other.project_edit(&owner(), "fleet", rev, edit).map(|_| ()));
     };
     let hooked = crate::spawn::tests::Hooked {
-        herdr: &rig.herdr,
+        panes: &rig.holder,
         hook: &other_write,
     };
+    let holder = crate::pane::Holder::new(Some(&hooked));
 
-    delete_project(&mut rig.fleet.store, &owner(), &hooked, &quick(), "alpha").unwrap();
-    let landed = landed.into_inner();
+    delete_project(&mut rig.fleet.store, &owner(), holder, &quick(), "alpha").unwrap();
+    let landed = landed.into_inner().unwrap();
     assert!(!landed.is_empty(), "no agent was asked to exit");
     for write in landed {
         write.unwrap();
@@ -1647,9 +1574,9 @@ fn relaunch_refused_by_its_memory_leaves_the_old_session_running() {
         assert!(error.to_string().contains("cannot be read"), "{error}");
         assert!(session(&rig, &spawned.session.id).ended_at.is_none());
         assert!(
-            !rig.herdr.calls().iter().any(|c| c.contains("/exit")),
+            !rig.holder.calls().iter().any(|c| c.contains("/exit")),
             "the old session was sent /exit: {:?}",
-            rig.herdr.calls()
+            rig.holder.calls()
         );
         assert_eq!(rig.events("run.relaunched", &spawned.run.id), 0);
     }
@@ -1675,14 +1602,6 @@ fn relaunch_keeps_the_brief_when_the_memory_holds_its_heading() {
     let prompt = std::fs::read_to_string(scratch.join("prompt.md")).unwrap();
     assert_eq!(prompt, first);
     assert_eq!(prompt.matches("A memory paragraph.").count(), 1, "{prompt}");
-}
-
-fn workspaces_opened(rig: &Rig) -> usize {
-    rig.herdr
-        .calls()
-        .iter()
-        .filter(|c| c.starts_with("create_workspace"))
-        .count()
 }
 
 /// A rig with the terminal holder up, as a daemon with `run/holder.sock`.
@@ -1712,7 +1631,7 @@ fn running_held(rig: &mut Rig) -> Spawned {
 }
 
 #[test]
-fn a_relaunch_with_the_terminal_holder_and_no_session_starts_in_a_holder_pane() {
+fn a_relaunch_with_no_live_session_starts_in_a_new_pane() {
     let mut rig = Rig::new();
     let panes = with_holder(&mut rig);
     let card = rig.card(CardKind::Ship, Some(Size::M));
@@ -1721,7 +1640,6 @@ fn a_relaunch_with_the_terminal_holder_and_no_session_starts_in_a_holder_pane() 
         .store
         .session_end(&Ctx::new(Actor::Hook), &spawned.session.id, "logout")
         .unwrap();
-    let opened = workspaces_opened(&rig);
 
     let done =
         relaunched(relaunch_it(&mut rig, &owner(), &quick(), &spawned.run.id, note("n")).unwrap());
@@ -1733,220 +1651,10 @@ fn a_relaunch_with_the_terminal_holder_and_no_session_starts_in_a_holder_pane() 
     assert_eq!(held_for(&panes, &done.session.id), 1, "{:?}", panes.calls());
     assert_eq!(done.session.pane_id.as_deref(), Some(done.pane_id.as_str()));
     assert_eq!(done.started, Proof::Unconfirmed, "{}", done.evidence);
-    assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
 }
 
 #[test]
-fn a_relaunch_with_the_terminal_holder_and_its_herdr_pane_gone_starts_in_a_holder_pane() {
-    let mut rig = Rig::new();
-    let spawned = running(&mut rig);
-    let panes = with_holder(&mut rig);
-    let opened = workspaces_opened(&rig);
-    rig.herdr.remove_pane(&spawned.pane_id);
-    let ctx = rig.orchestrator();
-
-    let done =
-        relaunched(relaunch_it(&mut rig, &ctx, &quick(), &spawned.run.id, note("n")).unwrap());
-    assert!(tiller_core::ids::is_holder_pane(&done.pane_id));
-    assert_eq!(held_for(&panes, &done.session.id), 1, "{:?}", panes.calls());
-    assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
-    assert!(session(&rig, &spawned.session.id).ended_at.is_some());
-    assert_eq!(rig.events("run.relaunched", &spawned.run.id), 1);
-}
-
-#[test]
-fn a_resume_with_the_terminal_holder_and_its_herdr_pane_gone_resumes_in_a_holder_pane() {
-    let mut rig = Rig::new();
-    let spawned = running(&mut rig);
-    let panes = with_holder(&mut rig);
-    let opened = workspaces_opened(&rig);
-    rig.herdr.remove_pane(&spawned.pane_id);
-
-    let done = resume_it(&mut rig, &owner(), &quick(), &spawned.run.id).unwrap();
-    let pane = done.pane_id.clone().unwrap();
-    assert!(tiller_core::ids::is_holder_pane(&pane), "{pane}");
-    assert_eq!(
-        held_for(&panes, &spawned.session.id),
-        1,
-        "{:?}",
-        panes.calls()
-    );
-    assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
-    // The session is bound to its new pane, and the resume is recorded.
-    let kept = session(&rig, &spawned.session.id);
-    assert_eq!(kept.pane_id.as_deref(), Some(pane.as_str()));
-    assert_eq!(
-        rig.events("session.resume_attempted", &spawned.session.id),
-        1
-    );
-}
-
-#[test]
-fn a_resume_with_the_terminal_holder_goes_on_in_its_live_herdr_pane() {
-    let mut rig = Rig::new();
-    let spawned = running(&mut rig);
-    let panes = with_holder(&mut rig);
-    let opened = workspaces_opened(&rig);
-    rig.herdr.set_screen(&spawned.pane_id, Screen::Shell);
-    let claude = boot(&rig, "resume");
-
-    let done = resume_it(&mut rig, &owner(), &patient(), &spawned.run.id).unwrap();
-    claude.join().unwrap();
-    assert_eq!(done.started, Some(Proof::Confirmed), "{}", done.evidence);
-    assert_eq!(done.pane_id.as_deref(), Some(spawned.pane_id.as_str()));
-    assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
-    assert_eq!(
-        held_for(&panes, &spawned.session.id),
-        0,
-        "{:?}",
-        panes.calls()
-    );
-}
-
-#[test]
-fn a_relaunch_with_the_terminal_holder_and_an_untagged_herdr_pane_starts_in_a_holder_pane() {
-    let mut rig = Rig::new();
-    let spawned = running(&mut rig);
-    let panes = with_holder(&mut rig);
-    rig.herdr
-        .set_tokens(&spawned.pane_id, std::collections::BTreeMap::new());
-    let opened = workspaces_opened(&rig);
-    let ctx = rig.orchestrator();
-
-    let done =
-        relaunched(relaunch_it(&mut rig, &ctx, &quick(), &spawned.run.id, note("n")).unwrap());
-    // The agent was stopped, but a pane that is not tagged is never handed
-    // to the next session.
-    assert!(typed(&rig, &spawned.pane_id, "/exit"));
-    assert!(tiller_core::ids::is_holder_pane(&done.pane_id));
-    assert_eq!(held_for(&panes, &done.session.id), 1, "{:?}", panes.calls());
-    assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
-}
-
-#[test]
-fn a_relaunch_with_the_terminal_holder_whose_pane_is_not_reused_starts_in_a_holder_pane() {
-    let mut rig = Rig::new();
-    let spawned = running(&mut rig);
-    let panes = with_holder(&mut rig);
-    // Claude records `SessionEnd` but herdr still shows it in the pane.
-    rig.herdr.ignore_exit(&spawned.pane_id);
-    let hook_end = {
-        let herdr = FakeHerdr::open(rig.herdr.path());
-        let mut store = rig.fleet.open();
-        let (session, pane) = (spawned.session.id.clone(), spawned.pane_id.clone());
-        thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while Instant::now() < deadline {
-                if herdr
-                    .fake_pane(&pane)
-                    .submitted
-                    .iter()
-                    .any(|l| l == "/exit")
-                {
-                    store
-                        .session_end(&Ctx::new(Actor::Hook), &session, "logout")
-                        .unwrap();
-                    return;
-                }
-                thread::sleep(Duration::from_millis(10));
-            }
-        })
-    };
-    let opened = workspaces_opened(&rig);
-    let waits = Waits {
-        exit: Duration::from_secs(1),
-        bind: Duration::from_millis(300),
-        ..patient()
-    };
-
-    let done =
-        relaunched(relaunch_it(&mut rig, &owner(), &waits, &spawned.run.id, note("n")).unwrap());
-    hook_end.join().unwrap();
-    assert!(
-        done.stop_proof
-            .as_deref()
-            .is_some_and(|p| p.contains("the pane is not reused")),
-        "{:?}",
-        done.stop_proof
-    );
-    assert!(tiller_core::ids::is_holder_pane(&done.pane_id));
-    assert_eq!(held_for(&panes, &done.session.id), 1, "{:?}", panes.calls());
-    assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
-}
-
-#[test]
-fn a_relaunch_with_the_terminal_holder_that_fails_in_its_kept_pane_names_the_retry() {
-    let mut rig = Rig::new();
-    let spawned = running(&mut rig);
-    let panes = with_holder(&mut rig);
-    // The stop hands the pane back, then the new session's tokens fail.
-    rig.herdr.refuse("report_tokens");
-    let opened = workspaces_opened(&rig);
-    let ctx = rig.orchestrator();
-
-    let error = relaunch_it(&mut rig, &ctx, &quick(), &spawned.run.id, note("n")).unwrap_err();
-    let text = error.to_string();
-    assert!(
-        text.contains("the relaunch is recorded")
-            && text.contains(&format!("tiller agent relaunch {}", spawned.run.id)),
-        "{text}"
-    );
-    assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
-    assert!(panes.calls().is_empty(), "{:?}", panes.calls());
-}
-
-#[test]
-fn a_resume_with_the_terminal_holder_of_a_herdr_pane_not_its_own_resumes_in_a_holder_pane() {
-    let mut rig = Rig::new();
-    let spawned = running(&mut rig);
-    let panes = with_holder(&mut rig);
-    rig.herdr.set_screen(&spawned.pane_id, Screen::Shell);
-    // herdr gave the id to a pane whose tokens name no session of ours.
-    rig.herdr
-        .set_tokens(&spawned.pane_id, std::collections::BTreeMap::new());
-    let opened = workspaces_opened(&rig);
-
-    let done = resume_it(&mut rig, &owner(), &quick(), &spawned.run.id).unwrap();
-    let calls = rig.herdr.calls();
-    assert!(!calls.iter().any(|c| c.contains("--resume")), "{calls:?}");
-    assert!(!typed(&rig, &spawned.pane_id, "/exit"));
-    assert!(tiller_core::ids::is_holder_pane(
-        done.pane_id.as_deref().unwrap()
-    ));
-    assert_eq!(
-        held_for(&panes, &spawned.session.id),
-        1,
-        "{:?}",
-        panes.calls()
-    );
-    assert_eq!(workspaces_opened(&rig), opened, "{calls:?}");
-}
-
-#[test]
-fn a_relaunch_with_the_terminal_holder_leaves_a_herdr_pane_another_session_is_bound_to() {
-    let mut rig = Rig::new();
-    let spawned = running(&mut rig);
-    let panes = with_holder(&mut rig);
-    // A second live session took the same pane; the tokens still name ours.
-    rig.fleet.worker(&spawned.pane_id);
-    let ctx = rig.orchestrator();
-
-    let done =
-        relaunched(relaunch_it(&mut rig, &ctx, &quick(), &spawned.run.id, note("n")).unwrap());
-    assert!(!typed(&rig, &spawned.pane_id, "/exit"));
-    assert!(
-        done.stop_proof
-            .as_deref()
-            .is_some_and(|p| p.contains("now holds session")),
-        "{:?}",
-        done.stop_proof
-    );
-    assert!(tiller_core::ids::is_holder_pane(&done.pane_id));
-    assert_eq!(held_for(&panes, &done.session.id), 1, "{:?}", panes.calls());
-}
-
-#[test]
-fn a_resume_with_the_terminal_holder_and_no_live_session_advises_a_relaunch() {
+fn a_resume_with_no_live_session_advises_a_relaunch() {
     let mut rig = Rig::new();
     let spawned = running(&mut rig);
     with_holder(&mut rig);
@@ -2005,7 +1713,6 @@ fn a_resume_in_an_exited_holder_pane_forgets_it_and_resumes_in_a_new_one() {
         "{calls:?}"
     );
     assert_eq!(held_for(&panes, &spawned.session.id), 2, "{calls:?}");
-    assert!(herdr_typed_nothing(&rig), "{:?}", rig.herdr.calls());
     let kept = session(&rig, &spawned.session.id);
     assert_eq!(kept.pane_id.as_deref(), Some(pane.as_str()));
 }
@@ -2028,27 +1735,18 @@ fn a_relaunch_in_an_exited_holder_pane_forgets_it_and_starts_in_a_new_one() {
         "{calls:?}"
     );
     assert_eq!(held_for(&panes, &done.session.id), 1, "{calls:?}");
-    assert!(herdr_typed_nothing(&rig), "{:?}", rig.herdr.calls());
     assert_eq!(done.session.pane_id.as_deref(), Some(done.pane_id.as_str()));
 }
 
 #[test]
-fn a_relaunch_of_an_agent_in_a_holder_pane_with_the_holder_down_stops_nothing() {
+fn a_relaunch_with_the_holder_down_stops_nothing() {
     let mut rig = Rig::new();
     let card = rig.card(CardKind::Ship, Some(Size::M));
     let spawned = rig.spawn(&card, RunRole::Builder);
-    // The session ran in a holder pane, and the holder is down now.
-    let held = format!("p{}", tiller_core::ids::new_ulid());
-    rig.fleet
-        .store
-        .conn()
-        .execute(
-            "UPDATE sessions SET pane_id = ?1 WHERE id = ?2",
-            [&held, &spawned.session.id],
-        )
-        .unwrap();
-    assert!(rig.panes.is_none());
-    let opened = workspaces_opened(&rig);
+    rig.fleet.bind(&spawned.session.id, &spawned.pane_id);
+    // The holder is down now.
+    rig.holder.set_unreachable(true);
+    let calls = rig.holder.calls().len();
 
     let ctx = rig.orchestrator();
     let error = relaunch_it(&mut rig, &ctx, &patient(), &spawned.run.id, note("n")).unwrap_err();
@@ -2057,14 +1755,5 @@ fn a_relaunch_of_an_agent_in_a_holder_pane_with_the_holder_down_stops_nothing() 
     assert!(!typed(&rig, &spawned.pane_id, "/exit"));
     assert!(session(&rig, &spawned.session.id).ended_at.is_none());
     assert_eq!(rig.events("run.relaunched", &spawned.run.id), 0);
-    assert_eq!(workspaces_opened(&rig), opened, "{:?}", rig.herdr.calls());
-}
-
-/// Whether nothing made a herdr pane or typed into one.
-fn herdr_typed_nothing(rig: &Rig) -> bool {
-    !rig.herdr.calls().iter().any(|c| {
-        ["create_workspace", "send_text", "send_enter"]
-            .iter()
-            .any(|verb| c.starts_with(verb))
-    })
+    assert_eq!(rig.holder.calls().len(), calls, "{:?}", rig.holder.calls());
 }
