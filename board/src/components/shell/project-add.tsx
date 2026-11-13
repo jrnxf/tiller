@@ -2,14 +2,16 @@ import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-quer
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
-import type { MutationResponse, Project } from "../../lib/api-types";
+import type { Machine, MutationResponse, Project } from "../../lib/api-types";
+import { peerMachines, standingOf } from "../../lib/peers";
 import { projectCheckoutQuery, projectsQuery } from "../../lib/queries";
 import { sendMutation } from "../attention/api";
 import { useAction } from "../attention/use-action";
+import { useMachineRows } from "../board/peer-state";
 import { MinusIcon, PlusIcon } from "./icons";
 import { Segmented } from "../ui/segmented";
 import { Select } from "../ui/select";
-import { ProjectDialog, readFailure } from "./project-dialog";
+import { ProjectDialog, ProjectFailure, readFailure } from "./project-dialog";
 
 // `tiller project add`'s delivery modes, the one CP5 uses first.
 const DELIVERIES = [
@@ -36,6 +38,71 @@ const CHECKOUT_MODES: { value: CheckoutMode; label: string }[] = [
   { value: "later", label: "Later" },
 ];
 
+// Where a project can be added: this host first, then each paired peer. A
+// peer takes the add while its link is live with the `act` scope (D22); any
+// other is listed but off, and says why.
+interface HostChoice {
+  value: string;
+  // The peer's label; absent for this host.
+  host?: string;
+  label: string;
+  reason: string | null;
+}
+
+const HERE = "here";
+const PEER = "peer:";
+
+// The peer a choice's value names; undefined for this host.
+function peerOf(value: string): string | undefined {
+  return value.startsWith(PEER) ? value.slice(PEER.length) : undefined;
+}
+
+function hostChoices(machines: Machine[]): HostChoice[] {
+  const local = machines.find((machine) => machine.kind === "local")?.label ?? null;
+  const peers = peerMachines(machines).map((machine): HostChoice => {
+    const standing = standingOf({ host: machine.label, link: machine.link }, machines);
+    return {
+      value: `${PEER}${machine.label}`,
+      host: machine.label,
+      label: machine.label,
+      reason: standing.canAct ? null : standing.reason,
+    };
+  });
+  return [
+    { value: HERE, label: local ? `${local} (this host)` : "This host", reason: null },
+    ...peers,
+  ];
+}
+
+// "host-b is unreachable since Fri 13:02" says its label already; "view only
+// pairing" does not.
+function choiceLabel(choice: HostChoice): string {
+  const { label, reason } = choice;
+  if (!reason) return label;
+  return reason.startsWith(`${label} `) ? reason : `${label}: ${reason}`;
+}
+
+// The seconds since `running` turned true, counted while it stays true.
+function useElapsed(running: boolean): number {
+  const [seconds, setSeconds] = useState(0);
+  const [was, setWas] = useState(running);
+  if (was !== running) {
+    setWas(running);
+    if (running) setSeconds(0);
+  }
+  useEffect(() => {
+    if (!running) return;
+    const timer = setInterval(() => setSeconds((count) => count + 1), 1000);
+    return () => clearInterval(timer);
+  }, [running]);
+  return seconds;
+}
+
+// "0:07", "4:32".
+function clock(seconds: number): string {
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
 // `value`, once it has stayed the same for `ms`.
 function useSettled(value: string, ms: number): string {
   const [settled, setSettled] = useState(value);
@@ -48,9 +115,16 @@ function useSettled(value: string, ms: number): string {
 
 // The fields `tiller project add` takes that the board asks for, and the
 // local checkout `tiller config set checkouts.<id>` would set. The rest
-// (checks, remote, default branch, deploy) stay on the command line.
+// (checks, remote, default branch, deploy) stay on the command line. With a
+// peer chosen as the host, the folder is checked and the add runs on that
+// peer, under its own checkout rules (D22).
 function AddDialog({ onClose }: { onClose: () => void }) {
   const queryClient = useQueryClient();
+  const choices = hostChoices(useMachineRows());
+  const [hostValue, setHostValue] = useState(HERE);
+  const chosen = choices.find((choice) => choice.value === hostValue);
+  const host = peerOf(hostValue);
+  const hostOff = chosen?.reason ?? null;
   const [id, setId] = useState("");
   const [repo, setRepo] = useState("");
   const [mode, setMode] = useState<CheckoutMode>("use");
@@ -71,6 +145,7 @@ function AddDialog({ onClose }: { onClose: () => void }) {
     repo: repo.trim(),
     path: path.trim(),
     clone: mode === "clone",
+    host,
   };
   // Settled as a string: a new object each render would never settle.
   const wantedKey = JSON.stringify(wanted);
@@ -78,7 +153,7 @@ function AddDialog({ onClose }: { onClose: () => void }) {
   const settled = useMemo(() => JSON.parse(settledKey) as typeof wanted, [settledKey]);
   const check = useQuery({
     ...projectCheckoutQuery(settled),
-    enabled: mode !== "later",
+    enabled: mode !== "later" && hostOff === null,
     placeholderData: keepPreviousData,
   });
   const current = settledKey === wantedKey && !check.isPlaceholderData && !check.isFetching;
@@ -96,9 +171,10 @@ function AddDialog({ onClose }: { onClose: () => void }) {
         delivery,
         capacity,
         checkout: mode === "later" ? null : { path: path.trim(), clone: mode === "clone" },
+        host: peerOf(hostValue),
         idempotency_key,
       }),
-    [capacity, delivery, id, mode, path, repo],
+    [capacity, delivery, hostValue, id, mode, path, repo],
   );
   const recorded = useCallback(
     (response: MutationResponse<Project>) => {
@@ -111,13 +187,17 @@ function AddDialog({ onClose }: { onClose: () => void }) {
   // Each set of values is its own click: a refused id fixed and sent again
   // is a new add, while a retry of the same values reuses its key.
   const action = useAction({
-    binding: `project-add:${id}:${repo}:${mode}:${path}:${delivery}:${capacity}`,
+    binding: `project-add:${hostValue}:${id}:${repo}:${mode}:${path}:${delivery}:${capacity}`,
     send,
     onRecorded: recorded,
   });
   const checkoutReady =
     mode === "later" || (current && checkFailed === null && verdict?.problem === null);
-  const armed = id.trim() !== "" && checkoutReady && !action.pending;
+  const armed = id.trim() !== "" && hostOff === null && checkoutReady && !action.pending;
+  // A clone can take up to 10 min: the dialog counts the time, so it never
+  // looks stuck.
+  const cloning = action.pending && mode === "clone";
+  const elapsed = useElapsed(cloning);
   const submit = () => {
     if (armed) action.trigger();
   };
@@ -148,7 +228,15 @@ function AddDialog({ onClose }: { onClose: () => void }) {
     >
       <h2 id="add-dialog-title">Add project</h2>
       <p id="add-dialog-body">
-        Registers a project on this host, as <code>tiller project add</code> does.
+        {host ? (
+          <>
+            Registers a project on {host}, as <code>tiller project add</code> does there.
+          </>
+        ) : (
+          <>
+            Registers a project on this host, as <code>tiller project add</code> does.
+          </>
+        )}
       </p>
       <form
         onSubmit={(event) => {
@@ -157,6 +245,30 @@ function AddDialog({ onClose }: { onClose: () => void }) {
         }}
       >
         <div className="pa-fields">
+          {choices.length > 1 ? (
+            <div className="pa-f">
+              <label className="pa-l" htmlFor={`${fields}-host`}>
+                Host
+              </label>
+              <Select
+                id={`${fields}-host`}
+                className="form-select"
+                value={hostValue}
+                disabled={action.pending}
+                onValueChange={setHostValue}
+                options={choices.map((choice) => ({
+                  value: choice.value,
+                  label: choiceLabel(choice),
+                  disabled: choice.reason !== null,
+                }))}
+              />
+              {hostOff && chosen ? (
+                <p className="pa-help" data-problem="true" role="alert">
+                  {choiceLabel(chosen)}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
           <div className="pa-f">
             <label className="pa-l" htmlFor={`${fields}-id`}>
               Id
@@ -210,7 +322,7 @@ function AddDialog({ onClose }: { onClose: () => void }) {
             </div>
             {mode === "later" ? (
               <p className="pa-help">
-                Set it before the first builder with{" "}
+                Set it {host ? `on ${host} ` : ""}before the first builder with{" "}
                 <code>tiller config set checkouts.{id.trim() || "<id>"}</code>.
               </p>
             ) : (
@@ -222,7 +334,11 @@ function AddDialog({ onClose }: { onClose: () => void }) {
                   autoCapitalize="off"
                   spellCheck={false}
                   placeholder={
-                    path.trim() === "" && verdict?.path ? verdict.path : "/home/user/src/my-app"
+                    path.trim() === "" && verdict?.path
+                      ? verdict.path
+                      : host
+                        ? `checkouts_root/my-app on ${host}`
+                        : "/home/user/src/my-app"
                   }
                   aria-describedby={`${fields}-path-help`}
                   aria-invalid={current && problem !== null ? true : undefined}
@@ -282,11 +398,13 @@ function AddDialog({ onClose }: { onClose: () => void }) {
             </div>
           </div>
         </div>
-        {action.error ? (
-          <p className="refusal" role="alert">
-            {action.error.message}
+        {cloning ? (
+          <p className="delete-note pa-progress" role="status">
+            Cloning{host ? ` on ${host}` : ""}: {clock(elapsed)} so far. A clone can take up to 10
+            min.
           </p>
         ) : null}
+        <ProjectFailure error={action.error} />
         <div className="dialog-actions">
           <button type="button" className="btn" disabled={action.pending} onClick={onClose}>
             Cancel

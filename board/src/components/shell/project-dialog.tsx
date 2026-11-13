@@ -2,6 +2,8 @@ import type { ReactNode, RefObject } from "react";
 
 import type { ProjectAgent } from "../../lib/api-types";
 import { ReadError } from "../../lib/queries";
+import { ActionFailure } from "../attention/action-failure";
+import type { ActionError } from "../attention/api";
 import { Modal } from "../ui/modal";
 
 // `fleet` is never deleted or archived, so it has neither control.
@@ -32,6 +34,23 @@ export function AgentList({ agents, title }: { agents: ProjectAgent[]; title: st
       </ul>
     </section>
   );
+}
+
+// Why a project add, edit, archive or delete failed. A peer's refusal says
+// which host refused it (D22), unless its message names the host already, as
+// an unreachable peer's does. A forward the peer did not confirm says it may
+// have been applied, after the 11 min a clone and its stops may take.
+export function ProjectFailure({ error }: { error: ActionError | null }) {
+  if (!error) return null;
+  const { host, message } = error;
+  if (host && error.code !== "forward_uncertain" && !message.includes(host)) {
+    return (
+      <p className="refusal" role="alert">
+        {host} refused it: {message}
+      </p>
+    );
+  }
+  return <ActionFailure error={error} host={error.host ?? undefined} project />;
 }
 
 // Why a preview could not be read, as the dialog says it.

@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 
 import type { Project } from "../../lib/api-types";
 import { ownerOf } from "../../lib/peers";
+import { useStanding } from "../board/peer-state";
 import {
   projectGrantsQuery,
   projectSetupQuery,
@@ -313,8 +314,12 @@ export function ProjectDetail({ project, id }: { project: Project; id: string })
   // The board host does not forward a stage switch (protocol.md section 7.4).
   const owner = ownerOf(project);
   const off = owner ? `${owner} owns this project: switch its stage there` : undefined;
-  // Nor an edit: the owner host edits its own project.
-  const editOff = owner ? `${owner} owns this project: edit it there` : undefined;
+  // An edit, an archive and a delete are forwarded to a peer whose link is
+  // live with the `act` scope (D22); grants stay on their own host, so a
+  // peer's project opens on its fields alone.
+  const standing = useStanding(project);
+  const editOff = standing.canAct ? undefined : (standing.reason ?? undefined);
+  const fieldsOnly = project.id === FLEET_PROJECT || owner !== undefined;
 
   // The dialog gives focus back to the button that opened it.
   const close = useCallback(() => {
@@ -334,7 +339,7 @@ export function ProjectDetail({ project, id }: { project: Project; id: string })
         title={editOff}
         onClick={() => setEditing(true)}
       >
-        {project.id === FLEET_PROJECT ? "Edit" : "Grants and settings"}
+        {fieldsOnly ? "Edit" : "Grants and settings"}
       </button>
       {project.id === FLEET_PROJECT ? null : (
         <button
@@ -357,7 +362,7 @@ export function ProjectDetail({ project, id }: { project: Project; id: string })
           project={project}
           onClose={closeEdit}
           onSaved={onRecorded}
-          editOnly={project.id === FLEET_PROJECT}
+          editOnly={fieldsOnly}
         />
       ) : null}
       {confirming ? (
@@ -365,8 +370,8 @@ export function ProjectDetail({ project, id }: { project: Project; id: string })
       ) : null}
       {project.id === FLEET_PROJECT ? null : (
         <div className="pdetail-actions">
-          <ArchiveProject project={project} owner={owner} />
-          <DeleteProject project={project} owner={owner} />
+          <ArchiveProject project={project} standing={standing} />
+          <DeleteProject project={project} standing={standing} />
         </div>
       )}
     </div>

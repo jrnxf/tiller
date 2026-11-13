@@ -277,10 +277,8 @@ test("Revoke asks first, Keep sends nothing, and the revoked grant moves to Ende
 
 test("a peer's project shows no grants: its own host keeps them", async () => {
   renderDetail({ ...alpha, host: "host-b", link: "live" });
-  const button = (await screen.findByRole("button", {
-    name: "Grants and settings",
-  })) as HTMLButtonElement;
-  expect(button.disabled).toBe(true);
+  expect(await screen.findByRole("button", { name: "Edit" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Grants and settings" })).toBeNull();
   expect(screen.queryByText("Grants")).toBeNull();
 });
 

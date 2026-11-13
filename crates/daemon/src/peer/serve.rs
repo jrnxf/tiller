@@ -929,12 +929,15 @@ mod tests {
             Some(Query::DeletePreview("alpha".into()))
         );
         assert_eq!(
-            parse_query("projects/checkout?project=alpha&path=%7E%2Fsrc%2Falpha&clone=true").ok(),
+            parse_query(
+                "projects/checkout?project=alpha&path=%2Fhome%2Fuser%2Fsrc%2Falpha&clone=true"
+            )
+            .ok(),
             Some(Query::Checkout(Box::new(CheckoutQuery {
                 host: None,
                 project: "alpha".into(),
                 repo: None,
-                path: Some("~/src/alpha".into()),
+                path: Some("/home/user/src/alpha".into()),
                 clone: Some(true),
             })))
         );

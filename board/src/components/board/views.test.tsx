@@ -16,6 +16,7 @@ import { hydrateFromSnapshot } from "../../lib/boot";
 import { connectionStore } from "../../lib/connection";
 import { FIXTURE_HEAD_SHA, fixtureResource, fixtureSnapshot } from "../../lib/fixtures";
 import type { Scenario } from "../../lib/fixtures";
+import { standingOf } from "../../lib/peers";
 import { loadPrefs, prefsStore, updatePrefs } from "../../lib/prefs";
 import { receiptsStore } from "../../lib/receipts";
 import { boardPath, projectsPath, queryKeyFor } from "../../lib/queries";
@@ -1381,8 +1382,8 @@ test("the fleet project has no archive or delete control", () => {
   const fleet = { ...gamma, id: "fleet", name: "Fleet" };
   render(
     <>
-      <ArchiveProject project={fleet} owner={undefined} />
-      <DeleteProject project={fleet} owner={undefined} />
+      <ArchiveProject project={fleet} standing={standingOf(fleet, [])} />
+      <DeleteProject project={fleet} standing={standingOf(fleet, [])} />
     </>,
   );
   expect(screen.queryByRole("button")).toBeNull();
@@ -1393,7 +1394,11 @@ test("the fleet project offers only Edit: no stage switch, grants, archive, dele
   const gamma = projects.projects.find((project) => project.id === "gamma");
   if (!gamma) throw new Error("the fixtures lost gamma");
   const fleet = { ...gamma, id: "fleet", name: "Fleet" };
-  const { container } = render(<ProjectDetail project={fleet} id="fleet-detail" />);
+  const { container } = render(
+    <QueryClientProvider client={createTestQueryClient()}>
+      <ProjectDetail project={fleet} id="fleet-detail" />
+    </QueryClientProvider>,
+  );
   expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["Edit"]);
   expect(container.textContent).not.toContain("Checkout");
   expect(container.textContent).toContain("Builders follow");

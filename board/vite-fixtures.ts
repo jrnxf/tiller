@@ -375,10 +375,16 @@ function apiMiddleware(): Connect.NextHandleFunction {
     if (["POST", "PATCH", "PUT", "DELETE"].includes(req.method ?? "")) {
       readBody(req)
         .then((body) => {
-          const { reply, followUps } = fixtureMutation(req.method ?? "POST", url, body, scenario);
-          res.statusCode = reply.status;
-          sendJson(res, reply.body);
-          for (const { delayMs, event } of followUps) setTimeout(() => broadcast(event), delayMs);
+          const result = fixtureMutation(req.method ?? "POST", url, body, scenario);
+          // A clone holds the reply, as the daemon's does while git runs.
+          setTimeout(() => {
+            if (res.writableEnded || res.destroyed) return;
+            res.statusCode = result.reply.status;
+            sendJson(res, result.reply.body);
+            for (const { delayMs, event } of result.followUps) {
+              setTimeout(() => broadcast(event), delayMs);
+            }
+          }, result.replyDelayMs ?? 0);
         })
         .catch((error: unknown) => {
           if (res.writableEnded || res.destroyed) return;
