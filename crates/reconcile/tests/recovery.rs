@@ -723,7 +723,7 @@ fn lost_holder_resumes_sessions_and_notifies_once() {
 fn lost_holder_skips_a_session_whose_launch_files_are_gone() {
     let mut w = World::new();
     w.place();
-    let link = w.use_holder();
+    let link = w.holder.clone();
     let (a, _) = w.holder_worker();
     w.holder_seen();
     let t0 = now();
@@ -783,7 +783,7 @@ fn orchestrator_crash_with_lost_launch_files_asks_the_owner() {
 
     w.launcher
         .refuse_next("session s1 recorded no launch manifest, so its launch cannot be repeated");
-    w.herdr.remove_pane("w1:p1");
+    w.remove_pane("w1:p1");
     let report = w.pass(t0.plus_minutes(1));
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     assert!(w.launcher.launches().is_empty(), "nothing was launched");
@@ -823,7 +823,7 @@ fn orchestrator_crash_with_a_failed_script_tries_again_later() {
 
     w.launcher
         .fail_script_next("config.toml does not parse: expected a value");
-    w.herdr.remove_pane("w1:p1");
+    w.remove_pane("w1:p1");
     let report = w.pass(t0.plus_minutes(1));
     assert!(
         report

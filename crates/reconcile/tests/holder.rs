@@ -195,7 +195,7 @@ fn unreachable_holder_marks_panes_unknown_not_gone() {
 /// stays at 15 s: the holder runs on this host.
 #[test]
 fn backoff_holds_at_fifteen_seconds() {
-    let mut w = World::new();
+    let w = World::new();
     let link = w.holder.clone();
     link.set_down(true);
     let mut poller = poller(&w, &link, None);
@@ -295,7 +295,7 @@ fn a_taken_upgrade_that_keeps_the_version_clears_a_refusal() {
 /// stable binary, the next check clears the warning without asking.
 #[test]
 fn a_refused_upgrade_clears_once_the_holder_runs_the_stable_binary() {
-    let mut w = World::new();
+    let w = World::new();
     let link = w.holder.clone();
     let stable = w.fleet.dir.path().join("stable-tiller");
     std::fs::write(&stable, "").unwrap();
@@ -322,7 +322,7 @@ fn a_refused_upgrade_clears_once_the_holder_runs_the_stable_binary() {
 /// same source run, and the reconnect sends no second upgrade request.
 #[test]
 fn a_refused_upgrade_clears_when_a_new_instance_runs_the_stable_binary() {
-    let mut w = World::new();
+    let w = World::new();
     let link = w.holder.clone();
     let stable = w.fleet.dir.path().join("stable-tiller");
     std::fs::write(&stable, "").unwrap();
