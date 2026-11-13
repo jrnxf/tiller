@@ -81,7 +81,7 @@ impl Holder {
             key: format!("key-{label}"),
             argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
             cwd: world.dir.path().display().to_string(),
-            env: BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]),
+            env: BTreeMap::from([("PATH".to_owned(), common::pane_path())]),
             size: None,
             meta,
         };

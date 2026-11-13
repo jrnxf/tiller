@@ -503,6 +503,25 @@ pub fn snap(world: &World, name: &str, out: &Out) {
     });
 }
 
+/// The `PATH` a test pane gets: this test's own. A pane's env is only what
+/// its spawn names, and the tools a pane script runs are not under
+/// `/usr/bin:/bin` everywhere: the Nix build sandbox has `/bin/sh` and
+/// nothing else there.
+pub fn pane_path() -> String {
+    std::env::var("PATH").unwrap()
+}
+
+/// The absolute path of the tool `name` on [`pane_path`], for a pane's
+/// `argv[0]`, which the holder takes only as an absolute path.
+pub fn bin(name: &str) -> String {
+    std::env::split_paths(&pane_path())
+        .map(|dir| dir.join(name))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| panic!("no {name} on PATH"))
+        .display()
+        .to_string()
+}
+
 /// CPU time (user plus system) of every child this process has reaped. The
 /// difference across one call is that call's own work: unlike wall time it
 /// does not grow while the call waits for a core. It still grows when the

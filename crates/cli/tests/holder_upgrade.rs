@@ -88,7 +88,7 @@ fn spawn_of(world: &World, key: &str, script: &str) -> Spawn {
         key: key.to_owned(),
         argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
         cwd: world.dir.path().display().to_string(),
-        env: BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]),
+        env: BTreeMap::from([("PATH".to_owned(), common::pane_path())]),
         size: None,
         meta: Meta::default(),
     }
@@ -865,7 +865,7 @@ fn agent(client: &HolderClient, world: &World, key: &str, args: &[&str], log: &P
             argv,
             cwd: world.dir.path().display().to_string(),
             env: BTreeMap::from([
-                ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+                ("PATH".to_owned(), common::pane_path()),
                 ("FAKE_AGENT_LOG".to_owned(), log.display().to_string()),
             ]),
             size: None,
