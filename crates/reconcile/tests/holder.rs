@@ -15,7 +15,7 @@ use tiller_core::domain::{Activity, ObservationSource, Session};
 use tiller_core::state::get;
 use tiller_core::state::runs::NewObservation;
 use tiller_core::{Actor, Ctx};
-use tiller_herdr::testing::at;
+use tiller_panes::testing::at;
 use tiller_panes::Panes as _;
 use tiller_panes::message::{Event, PaneId};
 use tiller_poll::{Poller, Registry};
@@ -147,7 +147,7 @@ fn event_payloads(w: &World, kind: &str) -> Vec<Value> {
 fn unreachable_holder_marks_panes_unknown_not_gone() {
     let mut w = World::new();
     w.place();
-    let link = w.use_holder();
+    let link = w.holder.clone();
     let (session, pane) = w.holder_worker();
     show(&link, &pane, "working");
     let mut poller = poller(&w, &link, None);
@@ -155,7 +155,8 @@ fn unreachable_holder_marks_panes_unknown_not_gone() {
     assert!(poller.source().connected());
     assert_eq!(
         w.count("SELECT count(*) FROM panes WHERE gone_at IS NULL AND holder_instance IS NOT NULL"),
-        1
+        3,
+        "the orchestrator's, the exited one and the worker's"
     );
 
     // Each poll is past the 30 s list, so the first one fails whether or
@@ -172,8 +173,8 @@ fn unreachable_holder_marks_panes_unknown_not_gone() {
     assert_eq!(stale_reason(&w).as_deref(), Some(HOLDER_DOWN));
     assert_eq!(
         w.count("SELECT count(*) FROM panes WHERE gone_at IS NULL AND holder_instance IS NOT NULL"),
-        1,
-        "the cache keeps the pane"
+        3,
+        "the cache keeps every pane"
     );
     assert_eq!(holder_events(&w, &session), ["holder:working"]);
 
@@ -195,7 +196,7 @@ fn unreachable_holder_marks_panes_unknown_not_gone() {
 #[test]
 fn backoff_holds_at_fifteen_seconds() {
     let mut w = World::new();
-    let link = w.use_holder();
+    let link = w.holder.clone();
     link.set_down(true);
     let mut poller = poller(&w, &link, None);
     let waits: Vec<u64> = (0..6)
@@ -214,7 +215,7 @@ fn backoff_holds_at_fifteen_seconds() {
 #[test]
 fn a_refused_upgrade_is_a_health_warning() {
     let mut w = World::new();
-    let link = w.use_holder();
+    let link = w.holder.clone();
     let stable = w.fleet.dir.path().join("stable-tiller");
     std::fs::write(&stable, "").unwrap();
     let stable = std::fs::canonicalize(stable).unwrap();
@@ -262,7 +263,7 @@ fn a_refused_upgrade_is_a_health_warning() {
 #[test]
 fn a_taken_upgrade_that_keeps_the_version_clears_a_refusal() {
     let mut w = World::new();
-    let link = w.use_holder();
+    let link = w.holder.clone();
     let stable = w.fleet.dir.path().join("stable-tiller");
     std::fs::write(&stable, "").unwrap();
     let stable = std::fs::canonicalize(stable).unwrap();
@@ -295,7 +296,7 @@ fn a_taken_upgrade_that_keeps_the_version_clears_a_refusal() {
 #[test]
 fn a_refused_upgrade_clears_once_the_holder_runs_the_stable_binary() {
     let mut w = World::new();
-    let link = w.use_holder();
+    let link = w.holder.clone();
     let stable = w.fleet.dir.path().join("stable-tiller");
     std::fs::write(&stable, "").unwrap();
     let stable = std::fs::canonicalize(stable).unwrap();
@@ -322,7 +323,7 @@ fn a_refused_upgrade_clears_once_the_holder_runs_the_stable_binary() {
 #[test]
 fn a_refused_upgrade_clears_when_a_new_instance_runs_the_stable_binary() {
     let mut w = World::new();
-    let link = w.use_holder();
+    let link = w.holder.clone();
     let stable = w.fleet.dir.path().join("stable-tiller");
     std::fs::write(&stable, "").unwrap();
     let stable = std::fs::canonicalize(stable).unwrap();
@@ -363,7 +364,7 @@ fn a_refused_upgrade_clears_when_a_new_instance_runs_the_stable_binary() {
 #[test]
 fn a_holder_on_the_stable_binary_is_not_asked_to_upgrade() {
     let mut w = World::new();
-    let link = w.use_holder();
+    let link = w.holder.clone();
     let stable = w.fleet.dir.path().join("stable-tiller");
     std::fs::write(&stable, "").unwrap();
     let stable = std::fs::canonicalize(stable).unwrap();
@@ -384,7 +385,7 @@ fn a_holder_on_the_stable_binary_is_not_asked_to_upgrade() {
 #[test]
 fn a_list_fills_the_panes_cache_and_runs_every_thirty_seconds() {
     let mut w = World::new();
-    let link = w.use_holder();
+    let link = w.holder.clone();
     let (session, pane) = w.holder_worker();
     let mut poller = poller(&w, &link, None);
     poller.poll_once(at(0));
@@ -422,7 +423,7 @@ fn a_list_fills_the_panes_cache_and_runs_every_thirty_seconds() {
 #[test]
 fn an_exit_is_recorded_once_with_its_code() {
     let mut w = World::new();
-    let link = w.use_holder();
+    let link = w.holder.clone();
     let (session, pane) = w.holder_worker();
     show(&link, &pane, "working");
     let mut poller = poller(&w, &link, None);
@@ -466,7 +467,7 @@ fn an_exit_is_recorded_once_with_its_code() {
 #[test]
 fn notify_and_model_reset_are_recorded_with_no_verdict() {
     let mut w = World::new();
-    let link = w.use_holder();
+    let link = w.holder.clone();
     let (session, pane) = w.holder_worker();
     show(&link, &pane, "working");
     let mut poller = poller(&w, &link, None);
@@ -513,7 +514,7 @@ fn notify_and_model_reset_are_recorded_with_no_verdict() {
 #[test]
 fn a_quiet_screen_is_classified() {
     let mut w = World::new();
-    let link = w.use_holder();
+    let link = w.holder.clone();
     let (session, pane) = w.holder_worker();
     show(&link, &pane, "working");
     let mut poller = poller(&w, &link, None);
@@ -544,7 +545,7 @@ fn a_quiet_screen_is_classified() {
 #[test]
 fn a_new_instance_reports_no_pane_gone_before_its_restore() {
     let mut w = World::new();
-    let link = w.use_holder();
+    let link = w.holder.clone();
     let (session, pane) = w.holder_worker();
     show(&link, &pane, "working");
     let mut poller = poller(&w, &link, None);
@@ -574,7 +575,7 @@ fn a_new_instance_reports_no_pane_gone_before_its_restore() {
 #[test]
 fn a_held_holder_idle_lands_once_the_hold_ends() {
     let mut w = World::new();
-    let link = w.use_holder();
+    let link = w.holder.clone();
     let (worker, pane) = w.holder_worker();
     show(&link, &pane, "working");
     let mut poller = poller(&w, &link, None);
@@ -610,7 +611,7 @@ fn a_held_holder_idle_lands_once_the_hold_ends() {
 #[test]
 fn a_held_holder_idle_waits_for_each_newer_hook_working() {
     let mut w = World::new();
-    let link = w.use_holder();
+    let link = w.holder.clone();
     let (worker, pane) = w.holder_worker();
     let mut poller = poller(&w, &link, None);
     hook(&mut w, &worker, "PreToolUse", Activity::Working, 0);
@@ -672,7 +673,7 @@ fn a_held_holder_idle_is_not_resent_over_a_newer_hook_verdict() {
         ("StopFailure", Activity::Errored),
     ] {
         let mut w = World::new();
-        let link = w.use_holder();
+        let link = w.holder.clone();
         let (worker, pane) = w.holder_worker();
         let mut poller = poller(&w, &link, None);
         hook(&mut w, &worker, "PreToolUse", Activity::Working, 1);
@@ -695,7 +696,7 @@ fn a_held_holder_idle_is_not_resent_over_a_newer_hook_verdict() {
 #[test]
 fn a_pane_bound_to_a_new_holder_session_between_polls_starts_afresh() {
     let mut w = World::new();
-    let link = w.use_holder();
+    let link = w.holder.clone();
     let (first, pane) = w.holder_worker();
     show(&link, &pane, "empty");
     let mut poller = poller(&w, &link, None);
@@ -726,7 +727,7 @@ fn a_pane_bound_to_a_new_holder_session_between_polls_starts_afresh() {
 #[test]
 fn holder_pane_memory_is_pruned_to_the_bound_panes() {
     let mut w = World::new();
-    let link = w.use_holder();
+    let link = w.holder.clone();
     let (gone, gone_pane) = w.holder_worker();
     let (held, held_pane) = w.holder_worker();
     show(&link, &gone_pane, "empty");
@@ -761,7 +762,7 @@ fn holder_pane_memory_is_pruned_to_the_bound_panes() {
 #[test]
 fn a_forgotten_pane_of_the_recorded_instance_is_gone_once() {
     let mut w = World::new();
-    let link = w.use_holder();
+    let link = w.holder.clone();
     let (session, pane) = w.holder_worker();
     let mut poller = poller(&w, &link, None);
     poller.poll_once(at(0));

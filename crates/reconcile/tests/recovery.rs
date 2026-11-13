@@ -1,6 +1,6 @@
 //! End-to-end rows of the recovery table that resume, end, adopt or ask:
 //! R01, R02, R03, R04, R07, R10, R15 (lost work), R16 and R20, against a
-//! file-backed `state.db`, a fake herdr and fake sources.
+//! file-backed `state.db`, a fake holder and fake sources.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
@@ -16,7 +16,6 @@ use tiller_core::state::get;
 use tiller_core::state::outbox::NewMessage;
 use tiller_core::state::projects::{HostEdit, NewProject};
 use tiller_core::state::runs::{NewRun, Relaunch, SpawnChecks};
-use tiller_herdr::fake::Screen;
 use tiller_panes::Panes as _;
 use tiller_reconcile::recovery::approvals::{LANDED_BY_ME, LANDED_NOT_ME, SUPERSEDED};
 use tiller_reconcile::sources::HostReadings;
@@ -50,7 +49,7 @@ fn orchestrator_crash_resumes_and_retargets_outbox() {
         )
         .unwrap()
         .value;
-    w.herdr.remove_pane("w1:p1");
+    w.remove_pane("w1:p1");
     let report = w.pass(t0.plus_minutes(1));
     assert!(report.did("launched"), "{report:?}");
     let launches = w.launcher.launches();
@@ -111,7 +110,7 @@ fn orchestrator_crash_resumes_and_retargets_outbox() {
         )
         .unwrap()
         .value;
-    w.herdr.remove_pane("w2:p1");
+    w.remove_pane("w2:p1");
     w.pass(t0.plus_minutes(4));
     assert!(w.session(&worker).ended_at.is_some());
     let run = w.run_of(&worker);
@@ -148,7 +147,7 @@ fn resume_with_same_id_keeps_session_row() {
     let before = w.count("SELECT count(*) FROM sessions");
     let t0 = now();
     w.pass(t0);
-    w.herdr.remove_pane("w1:p1");
+    w.remove_pane("w1:p1");
     w.pass(t0.plus_minutes(1));
     w.observe(&orchestrator, Activity::Idle, t0.plus_minutes(2));
     w.pass(t0.plus_minutes(3));
@@ -195,7 +194,7 @@ fn worker_crash_keeps_run_worktree_and_reservation() {
     let run = w.run_of(&worker);
     let t0 = now();
     w.pass(t0);
-    w.herdr.remove_pane("w2:p1");
+    w.remove_pane("w2:p1");
     let report = w.pass(t0.plus_minutes(1));
     assert!(report.did("R03"), "{report:?}");
 
@@ -467,7 +466,7 @@ fn reboot_resumes_workers_in_own_worktrees() {
 
     // The machine restarts: panes gone, daemon back with a new boot id.
     for pane in ["w1:p1", "w2:p1", "w3:p1"] {
-        w.herdr.remove_pane(pane);
+        w.remove_pane(pane);
     }
     w.restart();
     w.config.boot_id = Some("boot-1".into());
@@ -567,7 +566,7 @@ fn reboot_resumes_workers_in_own_worktrees() {
 fn lost_holder_resumes_sessions_and_notifies_once() {
     let mut w = World::new();
     w.place();
-    let link = w.use_holder();
+    let link = w.holder.clone();
     let (a, _) = w.holder_worker();
     let (b, _) = w.holder_worker();
     let (c, pane_c) = w.holder_worker();
@@ -576,14 +575,18 @@ fn lost_holder_resumes_sessions_and_notifies_once() {
     w.pass(t0);
     let old = link.instance();
     let pid_c = link.panes().get(&pane_c).unwrap().unwrap().pid;
+    let pid_o = w.pane(&w.fleet.orchestrator_pane.clone()).pid;
     assert_eq!(
         w.count("SELECT count(*) FROM panes WHERE holder_instance IS NOT NULL AND pid IS NOT NULL"),
-        3,
-        "the cache records each pane's pid"
+        5,
+        "the cache records each pane's pid, the placed ones too"
     );
 
-    // The holder is killed. c's child ignored SIGHUP and still runs.
+    // The holder is killed, and the orchestrator's child with it. c's
+    // child ignored SIGHUP and still runs.
     link.restart();
+    w.probe
+        .set_pid(pid_o, tiller_reconcile::sources::Probe::Dead);
     w.probe
         .set_pid(pid_c, tiller_reconcile::sources::Probe::Alive);
     let new = link.instance();
@@ -602,11 +605,17 @@ fn lost_holder_resumes_sessions_and_notifies_once() {
     let t2 = Timestamp::from_millis(t1.as_millis() + 11_000).unwrap();
     w.pass(t2);
     let t3 = Timestamp::from_millis(t2.as_millis() + 11_000).unwrap();
-    let report = w.pass(t3);
+    w.pass(t3);
+    let t4 = Timestamp::from_millis(t3.as_millis() + 11_000).unwrap();
+    let report = w.pass(t4);
     assert!(report.did("R21 restore complete"), "{report:?}");
 
     let launches = w.launcher.launches();
-    assert_eq!(launches.len(), 2, "{launches:?}");
+    assert_eq!(launches.len(), 3, "{launches:?}");
+    assert_eq!(
+        launches[0].session_id, w.fleet.orchestrator_session,
+        "the orchestrator goes first"
+    );
     for worker in [&a, &b] {
         let run = w.run_of(worker);
         let launch = launches
@@ -635,12 +644,6 @@ fn lost_holder_resumes_sessions_and_notifies_once() {
         launches.iter().all(|l| l.session_id != c),
         "c outlived the holder"
     );
-    assert!(
-        launches
-            .iter()
-            .all(|l| l.session_id != w.fleet.orchestrator_session),
-        "a herdr pane did not go with the holder"
-    );
     for session in [&a, &b, &c] {
         assert!(w.session(session).ended_at.is_none(), "rows survive");
         assert!(w.run_of(session).ended_at.is_none());
@@ -668,7 +671,7 @@ fn lost_holder_resumes_sessions_and_notifies_once() {
         w.launcher.notifications(),
         [(
             format!("the terminal holder on {} restarted", host.label),
-            "3 of 3 agents resumed".to_owned()
+            "4 of 4 agents resumed".to_owned()
         )]
     );
     let notes = w.notes();
@@ -691,11 +694,12 @@ fn lost_holder_resumes_sessions_and_notifies_once() {
 
     // The resumed sessions bind; each is woken once. The owner hears
     // nothing more.
-    let t4 = t3.plus_minutes(1);
-    for session in [&a, &b] {
-        w.observe(session, Activity::Idle, t4);
+    let t5 = t4.plus_minutes(1);
+    let orchestrator = w.fleet.orchestrator_session.clone();
+    for session in [&orchestrator, &a, &b] {
+        w.observe(session, Activity::Idle, t5);
     }
-    w.pass(t4.plus_minutes(1));
+    w.pass(t5.plus_minutes(1));
     let wakes: Vec<_> = w
         .messages_to(&a)
         .into_iter()
@@ -707,9 +711,9 @@ fn lost_holder_resumes_sessions_and_notifies_once() {
         "{}",
         wakes[0].body
     );
-    w.pass(t4.plus_minutes(2));
+    w.pass(t5.plus_minutes(2));
     assert_eq!(w.launcher.notifications().len(), 1, "notified once");
-    assert_eq!(w.launcher.launches().len(), 2);
+    assert_eq!(w.launcher.launches().len(), 3);
 }
 
 /// R21, a session whose launch files are gone: its resume is refused before
@@ -860,7 +864,7 @@ fn reboot_restore_is_idempotent_when_interrupted() {
     let t0 = now();
     w.pass(t0);
     for pane in ["w1:p1", "w2:p1"] {
-        w.herdr.remove_pane(pane);
+        w.remove_pane(pane);
     }
     w.restart();
     w.config.boot_id = Some("boot-1".into());
@@ -917,16 +921,8 @@ fn changed_boot_id_with_live_agents_ends_nothing() {
     w.pass(t0);
     w.restart();
     w.config.boot_id = Some("boot-1".into());
-    // A pane the probe cannot read is neither alive nor dead: the restore
-    // waits, and launches nothing beside it.
-    w.probe
-        .set("w2:p1", tiller_reconcile::sources::Probe::Unknown);
+    // The holder still lists the running panes, so nothing needs a probe.
     let report = w.pass(t0.plus_minutes(1));
-    assert!(!report.did("restore complete"), "{report:?}");
-    assert!(w.launcher.launches().is_empty());
-    w.probe
-        .set("w2:p1", tiller_reconcile::sources::Probe::Alive);
-    let report = w.pass(t0.plus_minutes(2));
     assert!(report.did("restore complete"), "{report:?}");
     assert!(w.launcher.launches().is_empty());
     assert!(w.session(&a).ended_at.is_none());
@@ -959,7 +955,7 @@ fn resumed_session_at_trust_prompt_is_never_answered() {
     let t0 = now();
     w.pass(t0);
     // The orchestrator survives; the worker's pane died with the reboot.
-    w.herdr.remove_pane("w2:p1");
+    w.remove_pane("w2:p1");
     w.restart();
     w.config.boot_id = Some("boot-1".into());
     w.launcher.launched_screen(Screen::Permission);
@@ -975,10 +971,11 @@ fn resumed_session_at_trust_prompt_is_never_answered() {
     );
     assert!(report.did("restore complete"), "{report:?}");
     let typed: Vec<String> = w
-        .herdr
+        .holder
+        .panes()
         .calls()
         .into_iter()
-        .filter(|c| c.starts_with("send_text") || c.starts_with("send_enter"))
+        .filter(|c| c.starts_with("input ") || c.starts_with("paste ") || c.starts_with("keys "))
         .collect();
     assert!(
         typed.is_empty(),
@@ -1494,12 +1491,10 @@ fn restore_adopts_live_panes_by_metadata() {
     let mut w = World::new();
     let worker = w.worker("w2:p1");
     w.place();
-    // The restored database says w2:p1; herdr shows the session in w5:p1.
-    let tokens = w.herdr.fake_pane("w2:p1").tokens;
-    w.herdr.remove_pane("w2:p1");
-    w.herdr.add_workspace("w5", "├ alpha-1 build");
-    w.herdr.add_pane("w5", "w5:p1", Screen::Working);
-    w.herdr.set_tokens("w5:p1", tokens);
+    // The restored database says w2:p1; the holder shows the session in w5:p1.
+    let meta = w.pane("w2:p1").meta;
+    w.remove_pane("w2:p1");
+    w.add_pane("w5:p1", &worker, meta, Screen::Working);
     let report = w.pass(now());
     assert!(report.did("R10"), "{report:?}");
     assert_eq!(w.session(&worker).pane_id.as_deref(), Some("w5:p1"));
@@ -1657,11 +1652,9 @@ fn marker_flip_back_rebinds_live_evidence() {
     std::fs::write(&marker, "firstmate\n").unwrap();
     let before = w.count("SELECT count(*) FROM events");
     // Meanwhile the world moved: the worker's session lives in another pane.
-    let tokens = w.herdr.fake_pane("w2:p1").tokens;
-    w.herdr.remove_pane("w2:p1");
-    w.herdr.add_workspace("w5", "├ alpha-1 build");
-    w.herdr.add_pane("w5", "w5:p1", Screen::Idle);
-    w.herdr.set_tokens("w5:p1", tokens);
+    let meta = w.pane("w2:p1").meta;
+    w.remove_pane("w2:p1");
+    w.add_pane("w5:p1", &worker, meta, Screen::Idle);
     let report = w.pass(now());
     assert!(report.read_only);
     assert!(report.repairs.is_empty());

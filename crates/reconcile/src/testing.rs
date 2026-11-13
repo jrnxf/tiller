@@ -20,8 +20,9 @@ use tiller_core::{Actor, Ctx, Store, Timestamp};
 pub use tiller_panes::fake_claude::Screen;
 pub use tiller_panes::testing::{Fleet, owner};
 use tiller_panes::handshake::Welcome;
+pub use tiller_panes::message::Meta;
 use tiller_panes::message::{
-    Exit, Format, Listing, Meta, Pane, PaneId, Read, Screen as PaneScreen, Signal, Spawn,
+    Exit, Format, Listing, Pane, PaneId, Read, Screen as PaneScreen, Signal, Spawn,
 };
 use tiller_panes::{
     Events, FakePanes, Key, Live, Panes, PanesError, Subscribe, Subscription, Upgrade,
@@ -812,9 +813,23 @@ impl World {
         assert!(panes.exit(&pane, Some(0), None), "{pane} is not running");
     }
 
-    /// The holder drops `pane` from its list.
+    /// Sets `set` on `pane`'s metadata and drops the keys in `remove`.
+    pub fn set_meta(&self, pane: &str, set: &[(&str, &str)], remove: &[&str]) {
+        let set = set
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        Panes::set_meta(&self.holder.panes(), &PaneId::from(pane), &set, remove).unwrap();
+    }
+
+    /// The holder drops `pane` from its list, and its child is gone with it.
     pub fn remove_pane(&self, pane: &str) {
-        self.holder.panes().remove(&PaneId::from(pane));
+        let pane = PaneId::from(pane);
+        let panes = self.holder.panes();
+        if let Some(record) = panes.get(&pane).unwrap() {
+            self.probe.set_pid(record.pid, Probe::Dead);
+        }
+        panes.remove(&pane);
     }
 
     /// The holder's record of `pane`.

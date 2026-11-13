@@ -21,7 +21,7 @@ fn one_owner_per_run_after_restart() {
     w.pass(t0);
 
     // Resume with the same id: the owner is unchanged.
-    w.herdr.remove_pane("w1:p1");
+    w.remove_pane("w1:p1");
     w.pass(t0.plus_minutes(1));
     w.observe(&first, Activity::Idle, t0.plus_minutes(2));
     w.restart();
@@ -50,9 +50,7 @@ fn one_owner_per_run_after_restart() {
         .value
         .session
         .id;
-    w.herdr.add_workspace("w7", "alpha");
-    w.herdr
-        .add_pane("w7", "w7:p1", tiller_herdr::fake::Screen::Idle);
+    w.add_pane("w7:p1", &second, Meta::new(), Screen::Idle);
     let report = w.pass(t0.plus_minutes(4));
     assert!(report.did("reowned"), "{report:?}");
     for worker in [&a, &b] {
