@@ -20,7 +20,6 @@ use std::time::{Duration, Instant};
 use axum::http::StatusCode;
 use serde_json::Value;
 use tiller_core::domain::{HostKind, PeerKey, PeerScope};
-use tiller_core::error::READ_ONLY_MARKER;
 use tiller_core::state::peers::PEER_PROTOCOL;
 use tiller_core::{Store, Timestamp};
 
@@ -421,19 +420,19 @@ impl Link<'_> {
             &frame,
             Timestamp::now(),
         ) {
-            Ok(op) => match std::fs::read_to_string(self.config.home.join(READ_ONLY_MARKER)) {
+            Ok(op) => match crate::readonly::marked(&self.config.home) {
                 // The daemon found `state.db` damaged (`recovery.md` R10):
                 // a forwarded write is refused as a local one is.
-                Ok(reason) => Some(crate::api::read_only(reason.trim()).into_result()),
-                Err(_) if op.lane() == Lane::Proof => {
+                Some(reason) => Some(crate::api::read_only(&reason).into_result()),
+                None if op.lane() == Lane::Proof => {
                     self.proofs.ask(frame, op);
                     None
                 }
-                Err(_) if op.lane() == Lane::Project => {
+                None if op.lane() == Lane::Project => {
                     self.projects.ask(frame, op);
                     None
                 }
-                Err(_) => Some(forward::apply(
+                None => Some(forward::apply(
                     &mut self.store,
                     self.config,
                     &self.key,

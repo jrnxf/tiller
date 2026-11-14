@@ -37,7 +37,6 @@ use tiller_core::host_config;
 // The store checks every cap. The API checks them again before a mutation
 // is forwarded, so text over a cap is refused here, not after a trip over
 // the link to a peer.
-use tiller_core::error::READ_ONLY_MARKER;
 use tiller_core::limits::{self, ANSWER_MAX_CHARS, COMMENT_MAX_CHARS, STEER_MAX_CHARS, within};
 use tiller_core::state::approvals::{Decision, NewGrant};
 use tiller_core::state::asks::NewAsk;
@@ -3422,37 +3421,52 @@ fn add_here(
     // The default folder is named after the id, so it is checked first.
     ids::validate_project_id(&new.id)?;
     let plan = checkout_plan(store, home, &new.id, new.repo.as_deref(), &checkout)?;
-    let undo = tiller_agents::checkout::clone(&plan, tiller_agents::checkout::CLONE_LIMIT)
-        .map_err(checkout_refused)?;
+    let path = plan.path().to_path_buf();
+    let cloned = tiller_agents::checkout::clone(
+        &plan,
+        tiller_agents::checkout::CLONE_LIMIT,
+        &clone_locks(home),
+    )
+    .map_err(checkout_refused)?;
+    let Some(cloned) = cloned else {
+        return Ok(add_numbered(store, ctx, home, new, Some(path))?);
+    };
     // A clone can take minutes: the project is added when it is done, not
-    // when it was asked for. A retry that comes while it runs, from another
-    // `peer serve`, finds no folder and clones too, then uses this clone if
-    // it lands first; one after it sees the key.
+    // when it was asked for, with `state.db` opened again. The claim on the
+    // folder is held until the add is done or the clone taken back, so a
+    // retry that comes meanwhile, from this process or another `peer
+    // serve`, is refused; one after it sees the key.
     let ctx = &Ctx {
         now: Timestamp::now(),
         ..ctx.clone()
     };
-    let path = plan.path().to_path_buf();
     let done = reopened(home)
         .and_then(|mut store| Ok(add_numbered(&mut store, ctx, home, new, Some(path))?));
-    if done.is_err()
-        && let Some(undo) = undo
-    {
+    if done.is_err() {
         // Done before the refusal is answered.
-        undo.run();
+        cloned.undo.run();
     }
     done
 }
 
+/// Where the locks a clone holds on its folder live: in the tiller home, so
+/// the daemon and every `peer serve` see the same ones.
+fn clone_locks(home: &std::path::Path) -> PathBuf {
+    home.join("clone-locks")
+}
+
 /// `state.db` opened again for the write after a clone, checked as at the
-/// start of the mutation: a database restored or found damaged while the
-/// clone ran is not written through the handle opened before it.
+/// start of the mutation: a database restored, removed or found damaged
+/// while the clone ran is not written through the handle opened before it.
 fn reopened(home: &std::path::Path) -> Result<Store, Refusal> {
-    if let Ok(reason) = std::fs::read_to_string(home.join(READ_ONLY_MARKER)) {
-        return Err(read_only(reason.trim()).into());
+    if let Some(reason) = crate::readonly::marked(home) {
+        return Err(read_only(&reason).into());
     }
-    tiller_core::owner::check(home)?;
-    Ok(Store::open_current(home.join("state.db"))?)
+    let db = home.join("state.db");
+    if !db.exists() {
+        return Err(uninitialized().into());
+    }
+    Ok(Store::open_current(db)?)
 }
 
 /// What a Local checkout folder would do for project `id`, refused as the
@@ -3478,6 +3492,7 @@ fn checkout_plan(
         clone: checkout.clone,
         root: root.as_deref(),
         home: user_home.as_deref(),
+        locks: &clone_locks(home),
     })
     .map_err(checkout_refused)?;
     // A clone for an id that is taken would be taken back at once.
