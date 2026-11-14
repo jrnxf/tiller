@@ -84,3 +84,27 @@ test("a snapshot refused as signed out boots the signed-out screen", async () =>
   expect(await loadBoot(document, refusedSignedOut)).toEqual({ kind: "signed-out" });
   expect(await loadBoot(document, unreachable)).toEqual({ kind: "board", snapshot: null });
 });
+
+// A machine before `tiller init`: every read answers 503 with the command,
+// and health answers `health`.
+function unset(health: unknown) {
+  return (path: string) =>
+    path === "/api/v1/health"
+      ? Promise.resolve(health)
+      : Promise.reject(new ReadError(path, 503, "no state.db", "tiller init"));
+}
+
+test("a 503 opens the setup screen when health says init has not run", async () => {
+  document.body.innerHTML = "";
+  const full = { ok: false, version: "0.1.0", initialized: false, pollers: [] };
+  expect(await loadBoot(document, unset(full) as never)).toEqual({
+    kind: "setup",
+    command: "tiller init",
+  });
+  // Signed out at a local Host, health is small but still says it.
+  const small = unset({ ok: false, version: "0.1.0", initialized: false }) as never;
+  expect(await loadBoot(document, small)).toEqual({ kind: "setup", command: "tiller init" });
+  // A health answer that does not say it never claims an unset machine.
+  const unsaid = unset({ ok: false, version: "0.1.0" }) as never;
+  expect(await loadBoot(document, unsaid)).toEqual({ kind: "board", snapshot: null });
+});

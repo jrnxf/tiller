@@ -236,13 +236,11 @@ type HostForm = ReturnType<typeof useHostForm>;
 function Foot({
   form,
   valid,
-  owner,
   note,
   onSave,
 }: {
   form: HostForm;
   valid: boolean;
-  owner: boolean;
   note?: string;
   onSave: () => void;
 }) {
@@ -256,34 +254,28 @@ function Foot({
       ) : null}
       <div className="set-hfoot">
         {note ? <span className="set-hnote">{note}</span> : null}
-        {owner ? (
-          <>
-            <button
-              type="button"
-              className="btn"
-              disabled={!changed || action.pending}
-              onClick={form.reset}
-            >
-              Reset
-            </button>
-            {stale ? (
-              <button type="button" className="btn primary" disabled={!ready} onClick={form.load}>
-                Load new values
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="btn primary"
-                disabled={!changed || !valid || action.pending || action.recorded}
-                aria-busy={action.pending || undefined}
-                onClick={onSave}
-              >
-                {action.pending ? "Saving..." : "Save"}
-              </button>
-            )}
-          </>
+        <button
+          type="button"
+          className="btn"
+          disabled={!changed || action.pending}
+          onClick={form.reset}
+        >
+          Reset
+        </button>
+        {stale ? (
+          <button type="button" className="btn primary" disabled={!ready} onClick={form.load}>
+            Load new values
+          </button>
         ) : (
-          <span className="set-line-r">Owner only</span>
+          <button
+            type="button"
+            className="btn primary"
+            disabled={!changed || !valid || action.pending || action.recorded}
+            aria-busy={action.pending || undefined}
+            onClick={onSave}
+          >
+            {action.pending ? "Saving..." : "Save"}
+          </button>
         )}
       </div>
     </>
@@ -329,19 +321,11 @@ function Floor({
 
 // How many agents this host runs at once and the free RAM and disk it keeps
 // (`tiller host edit --lane-capacity --ram-floor-mb --disk-floor-mb`).
-function Capacity({
-  fields,
-  owner,
-  onReadAgain,
-}: {
-  fields: HostFields;
-  owner: boolean;
-  onReadAgain: () => void;
-}) {
+function Capacity({ fields, onReadAgain }: { fields: HostFields; onReadAgain: () => void }) {
   const ids = useId();
   const form = useHostForm(fields, CAPACITY, onReadAgain);
   const { draft, set, action } = form;
-  const busy = action.pending || !owner;
+  const busy = action.pending;
   const valid = validFloor(draft.ram) && validFloor(draft.disk);
   const running = fields.lanes_busy;
   // Agents past the new lane count keep running; a new one waits until
@@ -403,7 +387,6 @@ function Capacity({
       <Foot
         form={form}
         valid={valid}
-        owner={owner}
         note="No new agent starts while free RAM or disk is under its floor."
         onSave={action.trigger}
       />
@@ -415,12 +398,10 @@ function Capacity({
 // backups and exports carry (`tiller host edit --label --boundary`).
 function Identity({
   fields,
-  owner,
   peers,
   onReadAgain,
 }: {
   fields: HostFields;
-  owner: boolean;
   peers: string[];
   onReadAgain: () => void;
 }) {
@@ -428,7 +409,7 @@ function Identity({
   const form = useHostForm(fields, IDENTITY, onReadAgain);
   const { draft, set, action, edit } = form;
   const [confirming, setConfirming] = useState(false);
-  const busy = action.pending || !owner;
+  const busy = action.pending;
   const labelBad = !LABEL.test(draft.label.trim());
   const paired = peers.length > 0;
   const recordedBy = fields.boundary_recorded_by;
@@ -485,7 +466,7 @@ function Identity({
           <p className="pa-help">{boundaryHelp}</p>
         </div>
       </div>
-      <Foot form={form} valid={!labelBad} owner={owner} onSave={save} />
+      <Foot form={form} valid={!labelBad} onSave={save} />
       {confirming ? (
         <Modal
           className="dialog"
@@ -524,7 +505,7 @@ function Identity({
 
 // This host's own settings in its card, under the checks: the ones
 // `tiller host edit` sets, read fresh each time the card opens.
-export function HostEdit({ owner, peers }: { owner: boolean; peers: string[] }) {
+export function HostEdit({ peers }: { peers: string[] }) {
   const read = useQuery(hostFieldsQuery());
   const { refetch } = read;
   const readAgain = useCallback(() => void refetch(), [refetch]);
@@ -543,8 +524,8 @@ export function HostEdit({ owner, peers }: { owner: boolean; peers: string[] }) 
   }
   return (
     <>
-      <Capacity fields={read.data} owner={owner} onReadAgain={readAgain} />
-      <Identity fields={read.data} owner={owner} peers={peers} onReadAgain={readAgain} />
+      <Capacity fields={read.data} onReadAgain={readAgain} />
+      <Identity fields={read.data} peers={peers} onReadAgain={readAgain} />
     </>
   );
 }

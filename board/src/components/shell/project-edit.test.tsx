@@ -48,7 +48,6 @@ function serve(other?: Partial<ProjectFields>, reads: string[] = [], base = FIEL
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       reads.push(String(input));
       const path = String(input).replace("?host=host-b", "");
-      if (path === "/api/v1/session") return json({ owner: true });
       if (path.endsWith("/setup")) {
         return json({
           project: "alpha",
@@ -281,7 +280,6 @@ test("a peer's refusal of an edit names the peer", async () => {
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
-      if (path === "/api/v1/session") return json({ owner: true });
       if (path === "/api/v1/projects/alpha" && init?.method === "PATCH") {
         return json(
           {
@@ -334,7 +332,6 @@ test("the fleet project has an Edit button that opens the fields alone, with no 
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);
-      if (path === "/api/v1/session") return json({ owner: true });
       if (path === "/api/v1/projects/fleet") {
         return json({ ...FIELDS, id: "fleet", name: "fleet", repo: null, remote: null });
       }

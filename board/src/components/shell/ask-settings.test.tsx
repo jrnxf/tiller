@@ -49,7 +49,6 @@ function stub() {
       const path = String(input);
       const body = JSON.parse(String(init?.body ?? "{}"));
       if (init?.method !== "POST") {
-        if (path === "/api/v1/session") return json({ owner: true });
         if (path === "/api/v1/start-settings") {
           return json({
             pool_root: null,

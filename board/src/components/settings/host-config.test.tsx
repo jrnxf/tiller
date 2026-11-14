@@ -12,11 +12,10 @@ import { createTestQueryClient } from "../../test-app";
 
 // This host's other keys, served beside the rest. A POST is answered by the
 // stand-in server's rules, which mirror the daemon's.
-function serve(owner: boolean, config: Partial<HostConfig> = {}) {
+function serve(config: Partial<HostConfig> = {}) {
   const posts: Record<string, unknown>[] = [];
   const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
-    if (path === "/api/v1/session") return new Response(JSON.stringify({ owner }));
     if (path === "/api/v1/host-config") {
       return new Response(JSON.stringify({ ...hostConfigFor(), ...config }));
     }
@@ -73,7 +72,7 @@ const section = async (name: string) =>
   within(await screen.findByRole("region", { name }, { timeout: 3000 }));
 
 test("the host keys sit in three sections under Starting agents, one row per key with Save on the right", async () => {
-  serve(true);
+  serve();
   renderSettings();
   const agents = await section("Agents and hooks");
   const peers = await section("Peers and memory");
@@ -110,7 +109,7 @@ test("the host keys sit in three sections under Starting agents, one row per key
 });
 
 test("a row shows what config.toml holds and Save arms only on a change", async () => {
-  serve(true);
+  serve();
   renderSettings();
   const learning = await section("Learning");
   const sample = learning.getByRole("form", { name: "Retro sample" });
@@ -126,7 +125,7 @@ test("a row shows what config.toml holds and Save arms only on a change", async 
 });
 
 test("a count is saved as its text and a bad one is refused in plain words", async () => {
-  const posts = serve(true);
+  const posts = serve();
   renderSettings();
   const learning = await section("Learning");
   const form = learning.getByRole("form", { name: "Measure window" });
@@ -143,7 +142,7 @@ test("a count is saved as its text and a bad one is refused in plain words", asy
 });
 
 test("Off and Observe save", async () => {
-  const posts = serve(true);
+  const posts = serve();
   renderSettings();
   const agents = await section("Agents and hooks");
   const form = agents.getByRole("form", { name: "Stop hook mode" });
@@ -161,7 +160,7 @@ test("Off and Observe save", async () => {
 });
 
 test("Block once is refused by the switching rule, with the numbers behind it", async () => {
-  const posts = serve(true);
+  const posts = serve();
   renderSettings();
   const agents = await section("Agents and hooks");
   const form = agents.getByRole("form", { name: "Stop hook mode" });
@@ -196,7 +195,7 @@ test("Block once is refused by the switching rule, with the numbers behind it", 
 });
 
 test("Accept peers is On or Off and Memory remote may be cleared", async () => {
-  const posts = serve(true);
+  const posts = serve();
   renderSettings();
   const peers = await section("Peers and memory");
   const accept = peers.getByRole("form", { name: "Accept peers" });
@@ -214,21 +213,8 @@ test("Accept peers is On or Off and Memory remote may be cleared", async () => {
   setConfigFixture({ key: "memory.remote", value: "git@example.com:team/memory.git" }, "default");
 });
 
-test("a browser that is not the owner reads the values and cannot change them", async () => {
-  serve(false);
-  renderSettings();
-  const learning = await section("Learning");
-  expect(learning.getByText("5 cards")).toBeTruthy();
-  expect(learning.getByText("sonnet")).toBeTruthy();
-  expect(learning.queryAllByRole("textbox")).toHaveLength(0);
-  expect(learning.queryAllByRole("button", { name: "Save" })).toHaveLength(0);
-  const agents = await section("Agents and hooks");
-  expect(agents.getByText("Observe")).toBeTruthy();
-  expect(agents.queryAllByRole("button")).toHaveLength(0);
-});
-
 test("another host's rows say where to set them, with the command and no input", async () => {
-  serve(true);
+  serve();
   renderSettings();
   const agents = await section("Agents and hooks");
   fireEvent.click(await agents.findByRole("combobox", { name: "Host" }));
@@ -257,7 +243,7 @@ test("another host's rows say where to set them, with the command and no input",
 });
 
 test("a config.toml that cannot be read is said instead of the rows", async () => {
-  serve(true, { config_error: "config.toml does not parse: expected `=`" });
+  serve({ config_error: "config.toml does not parse: expected `=`" });
   renderSettings();
   const part = await section("Host config");
   expect(part.getByText("config.toml does not parse: expected =")).toBeTruthy();

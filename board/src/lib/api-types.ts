@@ -1081,11 +1081,6 @@ export interface SignalsResponse {
   first_event_at: string | null;
 }
 
-// `GET /api/v1/session`: whether this browser holds a live owner cookie.
-export interface SessionView {
-  owner: boolean;
-}
-
 // `GET /api/v1/health`: the daemon's own state, answered before `tiller init`
 // too. Only what the board reads.
 export interface DaemonHealth {
@@ -1105,6 +1100,19 @@ export interface DaemonHealth {
   // not found.
   tools: Record<string, string | null> | null;
 }
+
+// `GET /api/v1/health` signed out, at a local `Host` only: liveness, and
+// whether `tiller init` has run, so a fresh machine shows the setup screen.
+// Every other field needs the owner cookie.
+interface HealthSignedOut {
+  ok: boolean;
+  version: string;
+  initialized: boolean;
+}
+
+// What `GET /api/v1/health` answers: in full with the owner cookie, else
+// the signed-out shape.
+export type HealthAnswer = DaemonHealth | HealthSignedOut;
 
 // One poller's record in `/api/v1/health`. A failing poller backs off and
 // polls again; it never stops.

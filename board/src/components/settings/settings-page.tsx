@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 
 import type { DaemonHealth, Machine, StartSettings } from "../../lib/api-types";
 import { machineRowView } from "../../lib/machines";
@@ -11,7 +11,6 @@ import {
   doctorQuery,
   healthQuery,
   machinesQuery,
-  sessionQuery,
   hostConfigQuery,
   startSettingsQuery,
 } from "../../lib/queries";
@@ -108,12 +107,12 @@ function Uptime({ startedAt }: { startedAt: string }) {
 
 // One row per host, this one among them: version, start, process and status.
 // A click opens the host's card under it; a row whose checks need the owner
-// says how many in its status.
+// says how many in its status. Only a browser signed in as the owner sees
+// Settings at all: without the cookie every read is refused (G24).
 function HostRow({
   machine,
   board,
   health,
-  owner,
   peers,
   attention,
   open,
@@ -122,7 +121,6 @@ function HostRow({
   machine: Machine;
   board: { label: string; version: string };
   health: DaemonHealth;
-  owner: boolean;
   // The paired peers' labels: each knows this host by its label.
   peers: string[];
   attention: { tone: Tone; text: string } | null;
@@ -209,9 +207,9 @@ function HostRow({
         <tr className="set-card-row">
           <td colSpan={5}>
             <HostCard id={card} host={machine.label}>
-              <HostChecks machine={machine} health={health} owner={owner} />
-              {local ? <HostEdit owner={owner} peers={peers} /> : null}
-              {!local && owner ? <PeerLink machine={machine} board={board.label} /> : null}
+              <HostChecks machine={machine} health={health} />
+              {local ? <HostEdit peers={peers} /> : null}
+              {!local ? <PeerLink machine={machine} board={board.label} /> : null}
             </HostCard>
           </td>
         </tr>
@@ -239,15 +237,7 @@ const serving = (health: DaemonHealth): Machine => ({
 
 // Every host the same way, so one look shows whether a release reached each
 // machine; then Add a host, which pairs another through ssh.
-function Hosts({
-  machines,
-  health,
-  owner,
-}: {
-  machines: Machine[] | undefined;
-  health: DaemonHealth;
-  owner: boolean;
-}) {
+function Hosts({ machines, health }: { machines: Machine[] | undefined; health: DaemonHealth }) {
   const [adding, setAdding] = useState(false);
   const [paired, setPaired] = useState<Paired | null>(null);
   const [opened, setOpened] = useState<ReadonlySet<string>>(() => new Set());
@@ -289,29 +279,21 @@ function Hosts({
         <div>
           <h2>Hosts</h2>
           <p>
-            {owner ? (
-              <>
-                Pair another machine through ssh, as <code>tiller peer add</code> does.
-              </>
-            ) : (
-              "Sign this browser in as the owner to add one"
-            )}
+            Pair another machine through ssh, as <code>tiller peer add</code> does.
           </p>
         </div>
-        {owner ? (
-          <button
-            ref={opener}
-            type="button"
-            className="btn"
-            onClick={() => {
-              setPaired(null);
-              setAdding(true);
-            }}
-          >
-            <PlusIcon />
-            Add a host
-          </button>
-        ) : null}
+        <button
+          ref={opener}
+          type="button"
+          className="btn"
+          onClick={() => {
+            setPaired(null);
+            setAdding(true);
+          }}
+        >
+          <PlusIcon />
+          Add a host
+        </button>
       </div>
       <div className="set-panel">
         <table className="set-hosts">
@@ -331,7 +313,6 @@ function Hosts({
                 machine={machine}
                 board={board}
                 health={health}
-                owner={owner}
                 peers={peers}
                 attention={machine.kind === "local" ? attention : null}
                 open={opened.has(machine.id)}
@@ -376,13 +357,11 @@ const problemOf = (settings: StartSettings, key: string) =>
 // config write (authority.md section 3).
 function StartSettingsSection({
   settings,
-  owner,
   host,
   viewing,
   picker,
 }: {
   settings: StartSettings;
-  owner: boolean;
   host: string | null;
   // Whose config the section shows.
   viewing: string;
@@ -434,27 +413,17 @@ function StartSettingsSection({
             <span className="set-status fail">{settings.config_error.replaceAll("`", "")}</span>
           </Fact>
         ) : (
-          rows.map((row) =>
-            owner ? (
-              <SettingField
-                key={row.key}
-                settingKey={row.key}
-                label={row.label}
-                hint={row.hint}
-                value={row.value}
-                problem={problemOf(settings, row.key)}
-                placeholder={row.placeholder}
-              />
-            ) : (
-              <Fact key={row.key} label={row.label} hint={row.hint}>
-                {row.value ? (
-                  <code>{row.value}</code>
-                ) : (
-                  <span className="set-status missing">Not set</span>
-                )}
-              </Fact>
-            ),
-          )
+          rows.map((row) => (
+            <SettingField
+              key={row.key}
+              settingKey={row.key}
+              label={row.label}
+              hint={row.hint}
+              value={row.value}
+              problem={problemOf(settings, row.key)}
+              placeholder={row.placeholder}
+            />
+          ))
         )}
         {!other && settings.orchestrator_home ? (
           <Fact label="Orchestrator homes" hint="Follows from the folders above">
@@ -466,11 +435,6 @@ function StartSettingsSection({
             <code>{settings.scratch_root}</code>
           </Fact>
         ) : null}
-        {owner || other ? null : (
-          <Fact label="Change these" hint="Sign this browser in as the owner">
-            <span className="set-status missing">Not signed in</span>
-          </Fact>
-        )}
       </div>
     </section>
   );
@@ -478,17 +442,9 @@ function StartSettingsSection({
 
 // Signing out ends this browser's owner cookie on the daemon, not the other
 // devices signed in with their own codes.
-function BrowserSession({ owner }: { owner: boolean }) {
+function BrowserSession() {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const queryClient = useQueryClient();
-  if (!owner) {
-    return (
-      <Fact label="Owner" hint="Run tiller board --login to sign this browser in">
-        <span className="set-status missing">Not signed in</span>
-      </Fact>
-    );
-  }
   return (
     <div className="set-row set-action" data-testid="browser-session">
       <div className="set-text">
@@ -505,12 +461,8 @@ function BrowserSession({ owner }: { owner: boolean }) {
           setPending(true);
           setError(null);
           void signOut().then((result) => {
-            // The app swaps to the signed-out screen.
-            if (result.ok) {
-              void queryClient.invalidateQueries({ queryKey: sessionQuery().queryKey });
-            } else {
-              setError(result.message.replaceAll("`", ""));
-            }
+            // On success the app swaps to the signed-out screen.
+            if (!result.ok) setError(result.message.replaceAll("`", ""));
             setPending(false);
           });
         }}
@@ -524,7 +476,6 @@ function BrowserSession({ owner }: { owner: boolean }) {
 export function SettingsPage() {
   const prefs = useStore(prefsStore);
   const health = useQuery(healthQuery()).data;
-  const session = useQuery(sessionQuery()).data;
   const machines = useQuery(machinesQuery()).data?.machines;
   const startSettings = useQuery(startSettingsQuery()).data;
   const hostConfig = useQuery(hostConfigQuery()).data;
@@ -552,15 +503,12 @@ export function SettingsPage() {
           are never forwarded (protocol.md 7.3 and 7.4), so each names this
           host instead. */}
       {health ? <MergeAppSection app={health.merge_app} host={host} /> : null}
-      {health ? (
-        <Hosts machines={machines} health={health} owner={session?.owner ?? false} />
-      ) : null}
-      {session?.owner ? <BoardsReach board={host ?? "this host"} /> : null}
-      {session?.owner ? <Backups host={host} /> : null}
+      {health ? <Hosts machines={machines} health={health} /> : null}
+      <BoardsReach board={host ?? "this host"} />
+      <Backups host={host} />
       {startSettings ? (
         <StartSettingsSection
           settings={startSettings}
-          owner={session?.owner ?? false}
           host={host}
           viewing={viewing}
           picker={picker}
@@ -569,7 +517,6 @@ export function SettingsPage() {
       {hostConfig ? (
         <HostConfigSections
           config={hostConfig}
-          owner={session?.owner ?? false}
           host={host}
           viewing={viewing}
           picker={startSettings ? null : picker}
@@ -583,7 +530,7 @@ export function SettingsPage() {
           </div>
         </div>
         <div className="set-panel">
-          {session ? <BrowserSession owner={session.owner} /> : null}
+          <BrowserSession />
           <Choice
             label="Theme"
             hint="Follow the system, or stay light or dark"

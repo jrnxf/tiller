@@ -222,6 +222,33 @@ test("the setup screen opens the board once tiller init has run", async () => {
   expect(onReady).toHaveBeenCalledTimes(1);
 });
 
+test("signed out, the setup screen opens the sign-in once tiller init has run", async () => {
+  vi.useFakeTimers();
+  let initialized = false;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(() =>
+      Promise.resolve(
+        initialized
+          ? new Response(
+              JSON.stringify({ error: { code: "signed_out", message: "not signed in" } }),
+              { status: 403 },
+            )
+          : new Response(JSON.stringify(UNINITIALIZED), { status: 503 }),
+      ),
+    ),
+  );
+  const onReady = vi.fn();
+  render(<SetupScreen command={SETUP_COMMANDS} onReady={onReady} />);
+  await act(() => vi.advanceTimersByTimeAsync(SETUP_POLL_MS));
+  expect(onReady).not.toHaveBeenCalled();
+  // Once there is a snapshot it is refused as signed out: the reload boots
+  // the sign-in screen.
+  initialized = true;
+  await act(() => vi.advanceTimersByTimeAsync(SETUP_POLL_MS * 3));
+  expect(onReady).toHaveBeenCalledTimes(1);
+});
+
 test("a one-command hint shows one block with no number and no order to follow", () => {
   stubDaemon({});
   render(

@@ -137,50 +137,31 @@ function learningRows(config: HostConfig): Row[] {
   ];
 }
 
-// One row per key: the control and Save for the owner on this host, the
-// command to run for a host that keeps its own, and the value for a browser
-// that cannot change it.
+// One row per key: the control and Save on this host, and the command to
+// run for a host that keeps its own.
 function Rows({
   rows,
-  owner,
   other,
 }: {
   rows: Row[];
-  owner: boolean;
   // The peer whose config the rows stand for; null for this host.
   other: string | null;
 }) {
-  return rows.map((row) => {
-    if (other || owner) {
-      return (
-        <SettingField
-          key={row.key}
-          settingKey={row.key}
-          label={row.label}
-          hint={row.hint}
-          value={row.value}
-          control={row.control}
-          mono={row.mono}
-          allowEmpty={row.allowEmpty}
-          placeholder={row.placeholder}
-          valueName={row.valueName}
-          host={other}
-        />
-      );
-    }
-    const text = row.shown ?? row.value;
-    return (
-      <Fact key={row.key} label={row.label} hint={row.hint}>
-        {!text ? (
-          <span className="set-status missing">Not set</span>
-        ) : row.control || row.mono === false || !row.value ? (
-          <span>{text}</span>
-        ) : (
-          <code>{text}</code>
-        )}
-      </Fact>
-    );
-  });
+  return rows.map((row) => (
+    <SettingField
+      key={row.key}
+      settingKey={row.key}
+      label={row.label}
+      hint={row.hint}
+      value={row.value}
+      control={row.control}
+      mono={row.mono}
+      allowEmpty={row.allowEmpty}
+      placeholder={row.placeholder}
+      valueName={row.valueName}
+      host={other}
+    />
+  ));
 }
 
 function Section({
@@ -216,13 +197,11 @@ function Section({
 // peer link does not carry a config write (authority.md section 3).
 export function HostConfigSections({
   config,
-  owner,
   host,
   viewing,
   picker,
 }: {
   config: HostConfig;
-  owner: boolean;
   // The host serving this board, by its label; null until the list loads.
   host: string | null;
   // Whose config the sections show, as the Settings page's host picker says.
@@ -255,25 +234,22 @@ export function HostConfigSections({
         intro={`Read by every new agent on ${on}.`}
         action={picker}
       >
-        <Rows rows={agentRows(config)} owner={owner} other={other} />
+        <Rows rows={agentRows(config)} other={other} />
       </Section>
       <Section
         name="Peers and memory"
         testid="host-config-peers"
         intro={`What other hosts may do on ${on}, and where its memory is pushed.`}
       >
-        <Rows rows={peerRows(config)} owner={owner} other={other} />
+        <Rows rows={peerRows(config)} other={other} />
       </Section>
       <Section
         name="Learning"
         testid="host-config-learning"
         intro={`How retros on ${on} sample cards and how the curator runs.`}
       >
-        <Rows rows={learningRows(config)} owner={owner} other={other} />
+        <Rows rows={learningRows(config)} other={other} />
       </Section>
-      {owner ? null : (
-        <p className="set-note">Sign this browser in as the owner to change these.</p>
-      )}
     </>
   );
 }

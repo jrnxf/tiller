@@ -13,6 +13,7 @@ import type {
   ContributionsResponse,
   DaemonHealth,
   DoctorReport,
+  HealthAnswer,
   HostConfig,
   HostFields,
   MachinesResponse,
@@ -30,7 +31,6 @@ import type {
   RepliesResponse,
   RetrosResponse,
   RunDetail,
-  SessionView,
   SignalsResponse,
   StartSettings,
   TimelineResponse,
@@ -155,13 +155,31 @@ export const machinesQuery = () => readQuery<MachinesResponse>(machinesPath);
 export const quotaPath: QueryPath = "/api/v1/quota";
 export const quotaQuery = () => readQuery<QuotaResponse>(quotaPath);
 
-// Whether this browser is signed in as the owner, for Settings' Sign out.
+// Whether this browser still holds the owner cookie: the event stream asks
+// it when the daemon refuses or cuts the stream.
 export const sessionPath: QueryPath = "/api/v1/session";
-export const sessionQuery = () => readQuery<SessionView>(sessionPath);
 
 // The daemon's own facts (version, start time, merge App), for Settings.
 const healthPath: QueryPath = "/api/v1/health";
-export const healthQuery = () => readQuery<DaemonHealth>(healthPath);
+
+// Whether a health answer is the full one, not the signed-out `ok`,
+// `version` and `initialized` only.
+function isFullHealth(health: HealthAnswer): health is DaemonHealth {
+  return "pollers" in health;
+}
+
+// Signed out at a local `Host` the daemon still answers, with only `ok`,
+// `version` and `initialized`. That answer means the cookie is gone, as a 403
+// `signed_out` does.
+export const healthQuery = () =>
+  queryOptions({
+    queryKey: queryKeyFor(healthPath),
+    queryFn: async ({ signal }): Promise<DaemonHealth> => {
+      const health = await fetchJson<HealthAnswer>(healthPath, signal);
+      if (isFullHealth(health)) return health;
+      throw new ReadError(healthPath, 403, "signed out", null, "signed_out");
+    },
+  });
 
 // The checks `tiller doctor` runs, run on the board's host each time the host
 // card opens or the owner asks again, so never cached. With a peer's label

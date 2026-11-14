@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
-import { ReadError, agentsQuery, boardQuery } from "./queries";
+import { ReadError, agentsQuery, boardQuery, healthQuery } from "./queries";
 import { sendMutation } from "../components/attention/api";
 import { codeDigits, isSignedOut, signIn, signOut, signedOutStore } from "./session";
 import { createTestQueryClient } from "../test-app";
@@ -111,4 +111,18 @@ test("any read refused as signed out flips the board to the signed-out screen", 
   answer(403, refusal("signed_out"));
   await queryClient.fetchQuery({ ...agentsQuery(), retry: false }).catch(() => {});
   expect(signedOutStore.get()).toBe(true);
+});
+
+test("health with only ok, version and initialized means the cookie is gone", async () => {
+  const queryClient = createTestQueryClient();
+  answer(200, { ok: true, version: "0.1.0", initialized: true });
+  await expect(queryClient.fetchQuery({ ...healthQuery(), retry: false })).rejects.toThrow(
+    ReadError,
+  );
+  expect(signedOutStore.get()).toBe(true);
+
+  signedOutStore.set(false);
+  answer(200, { ok: true, version: "0.1.0", initialized: true, pollers: [] });
+  await queryClient.fetchQuery({ ...healthQuery(), staleTime: 0, retry: false });
+  expect(signedOutStore.get()).toBe(false);
 });
