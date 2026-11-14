@@ -120,7 +120,9 @@ CREATE TABLE projects (
   reviewed_through_sha TEXT,               -- last commit a batched review covered
   stage_changed_at TEXT,
   -- when rev last moved (migration 0018); a trigger fills it from added_at on insert
-  edited_at      TEXT
+  edited_at      TEXT,
+  -- builders and verifiers may bind and connect to local ports (migration 0021; authority.md G24)
+  local_binding  INTEGER NOT NULL DEFAULT 0 CHECK (local_binding IN (0, 1))
 ) STRICT;
 
 -- ---------------------------------------------------------------------------

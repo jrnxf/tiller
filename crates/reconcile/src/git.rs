@@ -266,6 +266,7 @@ mod tests {
             reviewed_through_sha: None,
             stage_changed_at: None,
             edited_at: Timestamp::now(),
+            local_binding: false,
         }
     }
 

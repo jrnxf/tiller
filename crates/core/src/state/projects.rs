@@ -9,6 +9,7 @@ use super::attention::{NewAttention, open_attention};
 use super::cards::{NewCard, create_card};
 use super::deletion::LiveAgent;
 use super::{check_rev, find, get, required};
+use crate::authority::require_local_binding_scope;
 use crate::domain::*;
 use crate::error::{Error, Result};
 use crate::ids::{self, FLEET_PROJECT, HOST_HEALTH_CARD};
@@ -93,6 +94,10 @@ pub struct ProjectEdit {
     pub deploy_workflow: Option<Option<String>>,
     pub deploy_environment: Option<Option<String>>,
     pub deploy_timeout_minutes: Option<i64>,
+    /// Whether builders and verifiers may bind and connect to local ports.
+    /// The project's orchestrator sets it too, through
+    /// [`Store::project_local_binding`].
+    pub local_binding: Option<bool>,
 }
 
 /// [`Store::project_retire_preview`].
@@ -304,6 +309,7 @@ pub(crate) fn edit_project(
     apply!(deploy_workflow);
     apply!(deploy_environment);
     apply!(deploy_timeout_minutes);
+    apply!(local_binding);
     let Some(named) = named else {
         return Ok(project);
     };
@@ -362,7 +368,8 @@ pub(crate) fn edit_project(
     tx.conn().execute(
         "UPDATE projects SET name = ?2, repo = ?3, remote = ?4, default_branch = ?5, delivery = ?6,
                     checks = ?7, capacity = ?8, deploy_workflow = ?9, deploy_environment = ?10,
-                    deploy_timeout_minutes = ?11, rev = rev + 1, edited_at = ?12
+                    deploy_timeout_minutes = ?11, local_binding = ?13, rev = rev + 1,
+                    edited_at = ?12
              WHERE id = ?1",
         params![
             next.id,
@@ -377,6 +384,7 @@ pub(crate) fn edit_project(
             next.deploy_environment,
             next.deploy_timeout_minutes,
             tx.now(),
+            next.local_binding,
         ],
     )?;
     // An edit that ran the forge check records the forge it found, as
@@ -740,6 +748,50 @@ impl Store {
         }
         self.write(ctx, "project.edit", None, |tx| {
             edit_project(tx, project_id, expected_rev, &edit)
+        })
+    }
+
+    /// `project.local_binding`: whether the project's builders and verifiers
+    /// may bind and connect to local ports in their sandbox
+    /// (`sandbox.network.allowLocalBinding`). The owner may set it, and so
+    /// may the project's own live orchestrator ([`require_local_binding_scope`]).
+    /// It is a write of that one field with no rev check, so the last write
+    /// wins: it reads the project, sets the value and moves the project to
+    /// the next rev in one transaction, and writes a `project.edited` event
+    /// with no `expected_rev`. The same value writes nothing. The board's
+    /// Edit tab sends the field in [`Store::project_edit`] instead, which
+    /// checks its rev. An unknown project is `not_found` for every caller;
+    /// the scope is checked next, in the same transaction, so an
+    /// orchestrator superseded before it lands is refused. A running worker
+    /// keeps the fragment it launched with: the change applies from its
+    /// next launch or attempt.
+    pub fn project_local_binding(
+        &mut self,
+        ctx: &Ctx,
+        project_id: &str,
+        on: bool,
+    ) -> Result<Applied<Project>> {
+        self.write(ctx, "project.local_binding", None, |tx| {
+            let project: Project = get(tx.conn(), "project", project_id)?;
+            require_local_binding_scope(tx.conn(), tx.actor(), &project.id)?;
+            // A retired project is refused even when nothing would change,
+            // so the answer never depends on the value already set.
+            if project.retired_at.is_some() {
+                return Err(Error::refused("project", &project.id, "project is retired"));
+            }
+            if project.local_binding == on {
+                return Ok(project);
+            }
+            tx.conn().execute(
+                "UPDATE projects SET local_binding = ?2, rev = rev + 1, edited_at = ?3 WHERE id = ?1",
+                params![project.id, on, tx.now()],
+            )?;
+            tx.event(
+                NewEvent::new("project", &project.id, "project.edited")
+                    .rev(project.rev + 1)
+                    .payload(json!({"changed": {"local_binding": on}})),
+            )?;
+            get(tx.conn(), "project", &project.id)
         })
     }
 

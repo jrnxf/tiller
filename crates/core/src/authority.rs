@@ -153,6 +153,33 @@ pub fn require_reply_scope(conn: &Connection, actor: &Actor, project_id: &str) -
     }
 }
 
+/// Refuses `actor` a `project.local_binding` in `project_id` unless the
+/// role matrix allows it (`authority.md` section 4, "Turn local binding on
+/// or off"). The owner, the board and a peer board may; so may the
+/// project's own live orchestrator, which then tells the owner in a note.
+/// No other session, the daemon, a hook, the import, the curator or a
+/// script may.
+pub fn require_local_binding_scope(
+    conn: &Connection,
+    actor: &Actor,
+    project_id: &str,
+) -> Result<()> {
+    match actor {
+        Actor::Owner | Actor::Board | Actor::Peer(_) => Ok(()),
+        Actor::Session(id) => match live_orchestrator(conn, project_id)? {
+            Some(live) if &live.id == id => Ok(()),
+            _ => Err(Error::Forbidden(format!(
+                "{actor} is not the live orchestrator of {project_id} and may not turn its local binding on or off"
+            ))),
+        },
+        Actor::Daemon | Actor::Hook | Actor::Import | Actor::Curator(_) | Actor::Script => {
+            Err(Error::Forbidden(format!(
+                "{actor} may not turn local binding on or off; the owner or the project's orchestrator does"
+            )))
+        }
+    }
+}
+
 /// The guard a decision by the wrong principal breaches: only the owner
 /// decides an approval, or a grant (G04).
 pub const DECISION_GUARD: &str = "G04";
@@ -941,7 +968,7 @@ mod tests {
 
     /// The rows core scopes by principal and project, and the mutations
     /// each row covers.
-    const ROWS: [(&str, &[Probe]); 4] = [
+    const ROWS: [(&str, &[Probe]); 5] = [
         (
             "Resolve an ask, create or edit a card",
             &[Probe::ResolveAsk, Probe::Create, Probe::Edit, Probe::Reopen],
@@ -961,6 +988,10 @@ mod tests {
         (
             "Close a card",
             &[Probe::CloseCompleted, Probe::CloseLanded, Probe::Cancel],
+        ),
+        (
+            "Turn local binding on or off for a project's builders and verifiers (`project.local_binding`)",
+            &[Probe::LocalBindingOn, Probe::LocalBindingOff],
         ),
     ];
 
@@ -1013,6 +1044,8 @@ mod tests {
         CloseCompleted,
         CloseLanded,
         Cancel,
+        LocalBindingOn,
+        LocalBindingOff,
     }
 
     impl Probe {
@@ -1349,6 +1382,9 @@ mod tests {
                 .card_close(ctx, &t.landed, CardOutcome::Landed, None, None)
                 .map(drop),
             Probe::Cancel => store.card_cancel(ctx, &t.open.id, "not needed").map(drop),
+            Probe::LocalBindingOn | Probe::LocalBindingOff => store
+                .project_local_binding(ctx, project, probe == Probe::LocalBindingOn)
+                .map(drop),
         }
     }
 
@@ -1432,6 +1468,99 @@ mod tests {
             error.to_string().contains("another host owns it"),
             "{error}"
         );
+    }
+
+    /// An orchestrator that is no longer the live one may not turn local
+    /// binding on: the scope is read in the write's own transaction, and
+    /// nothing is written.
+    #[test]
+    fn a_superseded_orchestrator_may_not_turn_local_binding_on() {
+        let now = Timestamp::now();
+        let mut fx = fixture(now);
+        let ctx = Ctx::at(Actor::Session(fx.orchestrator.clone()), now);
+        let on = fx.store.project_local_binding(&ctx, "alpha", true).unwrap();
+        assert!(on.value.local_binding);
+        fx.store
+            .conn()
+            .execute(
+                "UPDATE sessions SET ended_at = ?1 WHERE id = ?2",
+                rusqlite::params![now.to_string(), fx.orchestrator],
+            )
+            .unwrap();
+        let error = fx
+            .store
+            .project_local_binding(&ctx, "alpha", false)
+            .unwrap_err();
+        assert_eq!(error.code(), "forbidden");
+        assert!(error.to_string().contains("live orchestrator"), "{error}");
+        let project = fx.store.project("alpha").unwrap();
+        assert!(project.local_binding);
+        assert_eq!(project.rev, on.value.rev);
+    }
+
+    /// Local binding takes no rev: the last write wins, each change moves
+    /// the project one rev and records no `expected_rev`. An unknown
+    /// project is `not_found` for every caller, not a scope refusal.
+    #[test]
+    fn local_binding_is_a_rev_free_write_and_an_unknown_project_is_not_found() {
+        let now = Timestamp::now();
+        let mut fx = fixture(now);
+        let rev = fx.store.project("alpha").unwrap().rev;
+        let owner = Ctx::at(Actor::Owner, now);
+        let orchestrator = Ctx::at(Actor::Session(fx.orchestrator.clone()), now);
+        let on = fx
+            .store
+            .project_local_binding(&owner, "alpha", true)
+            .unwrap();
+        let off = fx
+            .store
+            .project_local_binding(&orchestrator, "alpha", false)
+            .unwrap();
+        assert_eq!((on.value.rev, off.value.rev), (rev + 1, rev + 2));
+        assert!(!off.value.local_binding);
+        let again = fx
+            .store
+            .project_local_binding(&orchestrator, "alpha", false)
+            .unwrap();
+        assert_eq!(again.value.rev, rev + 2);
+        let payload: String = fx
+            .store
+            .conn()
+            .query_row(
+                "SELECT payload FROM events WHERE kind = 'project.edited' ORDER BY seq DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({"changed": {"local_binding": false}})
+        );
+        for ctx in [&owner, &orchestrator, &Ctx::at(Actor::Script, now)] {
+            let error = fx
+                .store
+                .project_local_binding(ctx, "alhpa", true)
+                .unwrap_err();
+            assert_eq!(error.code(), "not_found", "{error}");
+        }
+        // A retired project is refused, even for the value it already has.
+        fx.store
+            .conn()
+            .execute(
+                "UPDATE projects SET retired_at = ?1 WHERE id = 'alpha'",
+                rusqlite::params![now.to_string()],
+            )
+            .unwrap();
+        for value in [false, true] {
+            let error = fx
+                .store
+                .project_local_binding(&owner, "alpha", value)
+                .unwrap_err();
+            assert_eq!(error.code(), "refused", "{value}: {error}");
+            assert!(error.to_string().contains("retired"), "{error}");
+        }
+        assert_eq!(fx.store.project("alpha").unwrap().rev, rev + 2);
     }
 
     /// A create in another project may not cite that project's ask: the
