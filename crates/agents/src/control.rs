@@ -1228,6 +1228,7 @@ fn start_again(
         review_hosts: &world.config.spawn.review_allowed_hosts,
         no_mistakes_socket: world.config.spawn.no_mistakes_socket.as_deref(),
         gh_login_readable: project.effective_delivery() == Delivery::NoMistakes,
+        local_binding: project.local_binding,
         claude: &world.config.spawn.claude,
         claude_config: world.claude_config,
         claude_version: claude_version.as_deref(),

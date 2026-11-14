@@ -379,7 +379,7 @@
       "allowUnixSockets": [
         "<no_mistakes_socket>"
       ],
-      "allowLocalBinding": false
+      "allowLocalBinding": "<local_binding>"
     }
   }
 }

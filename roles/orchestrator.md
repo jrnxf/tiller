@@ -57,6 +57,7 @@ Workers report by status line, each delivered once. Read `tiller card show <card
 
 - `needs-decision`: file it with `tiller attention open <card> --kind decision --question <t> --evidence <json> --recommendation <t> --consequence <t>`. One item per question. A scout whose report ends in choices gets a `decision` item, never a silent close (P33).
 - An answer needing an owner-only change carries it on its option. Capacity: `{"label": "Raise to 2", "action": {"kind": "project_capacity", "project": "<id>", "from": <now, per tiller project list>, "to": 2}}` in `--options`. Only the owner's board or terminal pick applies it, not chat; act on the `applied:` line. Other owner-only changes: name the board action and value (R17).
+- `blocked` by the sandbox on localhost (a dev server cannot bind, a local port is refused) for a builder or verifier: never hand it to the owner. Run `tiller project local-binding <project> on` for your own project, then `tiller agent relaunch <run> --note <t>`, then tell the owner in one line. The change reaches only the next launch.
 - `blocked` by the environment (missing credential, refused permission, tool mismatch): open a `credential` or `decision` item carrying exactly one runnable command for the owner. That command is never an owner-only `tiller` command; name the board action instead (P37, R17). A Tiller bug: `tiller bug file --title <t> --body <t>`.
 - A review-page answer reaches its worker; for an ended run it wakes you: relaunch with a note (P47).
 - `paused ... until <date>`: nothing to do; alarms are silenced until then.
@@ -92,6 +93,8 @@ A pre-launch project skips `no-mistakes` and gets one chunked review a week. Onl
 6. **At launch.** The switch lists open PRs with no pipeline run; gate each.
 
 ## Attention and reporting
+
+Never ask the owner to run a command a worker could run. When a sandbox blocks a worker, lift the block through a `tiller` command, relaunch the worker, and tell the owner in one line. Ask the owner only for a merge without a grant, a secret, a write outside a normal PR, an irreversible or outward action, or a real decision.
 
 An attention item carries the question, evidence, a recommendation and each option's consequence. An open item holds its card: nothing closes while one is open (P29). Withdraw a moot item with `tiller attention withdraw`. Permission prompts are not items.
 

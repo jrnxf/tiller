@@ -1116,6 +1116,47 @@ fn orchestrator_bare_approve_is_denied() {
     }
 }
 
+/// The orchestrator may run exactly `tiller project local-binding <id>
+/// on|off` (`authority.md` section 4); core keeps it to its own project.
+/// Every other project form, and this one for any other role, stays the
+/// owner's.
+#[test]
+fn orchestrator_may_set_local_binding_and_nothing_else() {
+    for command in [
+        "tiller project local-binding alpha on",
+        "tiller project local-binding alpha off",
+        "tiller --json project local-binding alpha on",
+        "tiller project local-binding alpha off --json",
+    ] {
+        allowed(Role::Orchestrator, command);
+        for role in [Role::Scout, Role::Builder, Role::Reviewer, Role::Verifier] {
+            denied(role, command, Code::OwnerOnly);
+        }
+    }
+    for command in [
+        "tiller project local-binding alpha",
+        "tiller project local-binding alpha yes",
+        "tiller project local-binding alpha on off",
+        "tiller project local-binding alpha beta on",
+        "tiller project local-binding on",
+        "tiller project local-binding \"$PROJECT\" on",
+        "tiller project local-binding alpha \"$SWITCH\"",
+        "tiller project local-binding alpha on --db /home/user/other.db",
+        "tiller project local-binding alpha on --key k1",
+        "tiller project local-binding --help",
+        "echo on | xargs tiller project local-binding alpha",
+        "echo local-binding alpha on | xargs tiller project",
+        "tiller project edit alpha --rev 3 --capacity 9",
+        "tiller project stage alpha launched --rev 4",
+        "tiller project add beta --name Beta",
+        "tiller project retire alpha",
+        "tiller project delete alpha --yes",
+        "tiller project",
+    ] {
+        denied(Role::Orchestrator, command, Code::OwnerOnly);
+    }
+}
+
 #[test]
 fn identity_stripping_denied() {
     for command in [
@@ -2534,6 +2575,7 @@ fn fill(role: Role) -> Placeholders {
         network_allow: vec!["github.com".into()],
         no_mistakes_socket: None,
         gh_login_readable: false,
+        local_binding: false,
     }
 }
 

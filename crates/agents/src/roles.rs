@@ -101,6 +101,11 @@ pub struct Placeholders {
     /// `<gh_login_rule>` and `<gh_login_path>` expand to the deny entries
     /// that keep it out; on, they are removed.
     pub gh_login_readable: bool,
+    /// The project lets its builders and verifiers bind and connect to local
+    /// ports (`projects.local_binding`). Fills the `<local_binding>` value
+    /// placeholder, which only those two templates carry; every other role
+    /// keeps `allowLocalBinding` false in its template.
+    pub local_binding: bool,
 }
 
 /// The packaged MCP config: no servers. Tiller ships no MCP server in v1.
@@ -127,6 +132,11 @@ pub const LIST_PLACEHOLDERS: [&str; 4] = [
     "<gh_login_rule>",
     "<gh_login_path>",
 ];
+
+/// The value placeholders: a string that is exactly one of these is
+/// replaced by a JSON value of another type. `<local_binding>` becomes
+/// `true` or `false`.
+pub const VALUE_PLACEHOLDERS: [&str; 1] = ["<local_binding>"];
 
 /// What `<gh_login_rule>` and `<gh_login_path>` expand to while the owner's
 /// GitHub login is hidden: a file tool deny rule and a sandbox read deny.
@@ -352,6 +362,9 @@ fn fill_string(text: &str, fill: &Placeholders) -> String {
 
 fn fill_value(value: &mut Value, fill: &Placeholders) {
     match value {
+        Value::String(text) if text == "<local_binding>" => {
+            *value = Value::Bool(fill.local_binding);
+        }
         Value::String(text) => *text = fill_string(text, fill),
         Value::Array(items) => {
             let mut filled = Vec::with_capacity(items.len());
@@ -396,6 +409,7 @@ fn first_placeholder(value: &Value) -> Option<String> {
         Value::String(text) => STRING_PLACEHOLDERS
             .iter()
             .chain(LIST_PLACEHOLDERS.iter())
+            .chain(VALUE_PLACEHOLDERS.iter())
             .find(|p| text.contains(**p))
             .map(|p| (*p).to_string()),
         Value::Array(items) => items.iter().find_map(first_placeholder),
@@ -764,6 +778,7 @@ mod tests {
             network_allow: vec!["github.com".into(), "api.github.com".into()],
             no_mistakes_socket: Some("/run/user/1000/no-mistakes.sock".into()),
             gh_login_readable: false,
+            local_binding: false,
         }
     }
 
@@ -928,12 +943,16 @@ mod tests {
     }
 
     /// P58, P59 and point 31 as prose: the orchestrator never edits project
-    /// code, the reviewer has no memory tool.
+    /// code, the reviewer has no memory tool. The orchestrator lifts a
+    /// worker's sandbox block itself and never hands the owner a command a
+    /// worker could run (`authority.md`, "Amended: local binding opt-in").
     #[test]
     fn role_prose_states_the_hard_guardrails() {
         let orchestrator = Role::Orchestrator.prompt_body().unwrap();
         assert!(orchestrator.contains("Never edit project code"));
         assert!(orchestrator.contains("Never start work Tiller does not track"));
+        assert!(orchestrator.contains("Never ask the owner to run a command a worker could run"));
+        assert!(orchestrator.contains("tiller project local-binding <project> on"));
         let reviewer = Role::Reviewer.prompt_body().unwrap();
         assert!(reviewer.contains("You have no memory tool"));
         assert!(reviewer.contains("Never edit, commit, push, or approve anything"));
@@ -1046,8 +1065,15 @@ mod tests {
                 ["<tiller>", "<tiller> *"],
                 "{role}: excluded commands"
             );
+            // Builders and verifiers take the project's opt-in; every other
+            // role never binds or reaches a local port (authority.md G24).
+            let local = if matches!(role, Role::Builder | Role::Verifier) {
+                serde_json::json!("<local_binding>")
+            } else {
+                serde_json::json!(false)
+            };
             assert_eq!(
-                sandbox["network"]["allowLocalBinding"], false,
+                sandbox["network"]["allowLocalBinding"], local,
                 "{role}: localhost"
             );
             let deny_read = strings(&sandbox["filesystem"]["denyRead"]);
@@ -1113,7 +1139,11 @@ mod tests {
         for role in Role::ALL {
             let rendered = render_settings(role, &sample_fill(role)).unwrap();
             let text = rendered.to_string();
-            for placeholder in STRING_PLACEHOLDERS.iter().chain(LIST_PLACEHOLDERS.iter()) {
+            for placeholder in STRING_PLACEHOLDERS
+                .iter()
+                .chain(LIST_PLACEHOLDERS.iter())
+                .chain(VALUE_PLACEHOLDERS.iter())
+            {
                 assert!(
                     !text.contains(placeholder),
                     "{role}: {placeholder} left in fragment"
@@ -1175,6 +1205,25 @@ mod tests {
         );
     }
 
+    /// Local binding follows the project's opt-in for a builder and a
+    /// verifier, and stays off for every other role whatever the fill says.
+    #[test]
+    fn local_binding_reaches_only_builders_and_verifiers() {
+        for on in [false, true] {
+            for role in Role::ALL {
+                let mut fill = sample_fill(role);
+                fill.local_binding = on;
+                let rendered = render_settings(role, &fill).unwrap();
+                let want = on && matches!(role, Role::Builder | Role::Verifier);
+                assert_eq!(
+                    rendered["sandbox"]["network"]["allowLocalBinding"],
+                    Value::Bool(want),
+                    "{role}, opt-in {on}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn render_drops_an_absent_socket_and_an_empty_network_list() {
         let mut fill = sample_fill(Role::Scout);
@@ -1205,8 +1254,9 @@ mod tests {
                 let tail = &rest[start..];
                 let Some(end) = tail.find('>') else { break };
                 let token = &tail[..=end];
-                let known =
-                    STRING_PLACEHOLDERS.contains(&token) || LIST_PLACEHOLDERS.contains(&token);
+                let known = STRING_PLACEHOLDERS.contains(&token)
+                    || LIST_PLACEHOLDERS.contains(&token)
+                    || VALUE_PLACEHOLDERS.contains(&token);
                 assert!(known, "{role}: unknown placeholder {token}");
                 rest = &tail[end + 1..];
             }

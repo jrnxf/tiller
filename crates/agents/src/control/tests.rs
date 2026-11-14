@@ -688,6 +688,43 @@ fn relaunch_follows_the_projects_delivery_in_the_brief_and_the_gh_login_rule() {
     assert_eq!(prompt.matches("Delivery: ").count(), 1, "{prompt}");
 }
 
+/// The orchestrator turns local binding on for its own project. The running
+/// builder keeps the fragment it launched with; its relaunch takes the new
+/// value, under a new config hash.
+#[test]
+fn a_relaunch_takes_the_projects_local_binding() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    let scratch = rig.scratch.join(&spawned.run.id);
+    let local = |scratch: &std::path::Path| {
+        let text = std::fs::read_to_string(scratch.join("settings.json")).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&text).unwrap();
+        settings["sandbox"]["network"]["allowLocalBinding"].clone()
+    };
+    assert_eq!(local(&scratch), serde_json::json!(false));
+    let ctx = rig.orchestrator();
+    {
+        let mut store = rig.fleet.open();
+        let project = store
+            .project_local_binding(&ctx, "alpha", true)
+            .unwrap()
+            .value;
+        assert!(project.local_binding);
+    }
+    assert_eq!(
+        local(&scratch),
+        serde_json::json!(false),
+        "a running worker keeps its fragment"
+    );
+    let claude = boot(&rig, "startup");
+    let done =
+        relaunched(relaunch_it(&mut rig, &ctx, &patient(), &spawned.run.id, note("n")).unwrap());
+    claude.join().unwrap().unwrap();
+    assert_eq!(done.started, Proof::Confirmed, "{}", done.evidence);
+    assert_eq!(local(&scratch), serde_json::json!(true));
+    assert_ne!(done.run.config_hash, spawned.run.config_hash);
+}
+
 #[test]
 fn relaunch_refuses_a_run_whose_prompt_holds_no_brief() {
     let mut rig = Rig::new();

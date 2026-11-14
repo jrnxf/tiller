@@ -216,6 +216,8 @@ pub fn start(
         review_hosts: &world.config.spawn.review_allowed_hosts,
         no_mistakes_socket: world.config.spawn.no_mistakes_socket.as_deref(),
         gh_login_readable: false,
+        // The orchestrator never binds or reaches a local port (G24).
+        local_binding: false,
         claude: &world.config.spawn.claude,
         claude_config: world.claude_config,
         claude_version: claude_version.as_deref(),
