@@ -1,14 +1,18 @@
 //! The board API over axum (`protocol.md` section 7): reads, mutations
 //! through the core's writer functions, the change stream, the login link
-//! and the app shell with its boot snapshot.
+//! and the app shell.
 //!
 //! Every request passes the `Host` check first (421 otherwise, against DNS
-//! rebinding). Every request then needs the owner cookie too, at loopback as
-//! at an `--allow-host` name, except the signed-out screen and the two ways
-//! to sign in: a local Host is no credential (G24). At a local Host, signed
-//! out, health still answers its liveness fields, and before `tiller init`
-//! the other reads answer 503 with the setup commands ([`owner_gate`]).
-//! Mutations also need the owner cookie, a JSON body,
+//! rebinding). Every request then needs the owner session too, at loopback
+//! as at an `--allow-host` name, except the signed-out screen and the two
+//! ways to sign in: a local Host is no credential (G24). The session is the
+//! owner cookie and its owner token (`X-Tiller-Owner`) together: a cookie
+//! reaches every port of its host, so a server on another loopback port
+//! could be handed it, but the token lives in the board origin's
+//! `localStorage` alone ([`auth`]). At a local Host, signed out, health
+//! still answers its liveness fields, and before `tiller init` the other
+//! reads answer 503 with the setup commands ([`owner_gate`]). Mutations
+//! also need the owner session, a JSON body,
 //! `Sec-Fetch-Site: same-origin` and the board's own `Origin` (`http://` on
 //! loopback, `https://` at an `--allow-host` name); no CORS header is ever
 //! sent.
@@ -690,37 +694,46 @@ fn not_owner() -> ApiError {
 }
 
 tokio::task_local! {
-    /// The live owner cookie [`owner_gate`] verified for the request this
-    /// task serves, so a handler does not read the owner file again.
-    static OWNER: String;
+    /// The live owner session [`owner_gate`] verified for the request this
+    /// task serves, so a handler does not check it again. [`detached`]
+    /// carries it into the task it spawns.
+    static OWNER: auth::Owner;
 }
 
-/// The owner cookie the owner gate verified for this request, if any.
-fn verified_owner() -> Option<String> {
+/// The owner session the owner gate verified for this request, if any.
+fn verified_owner() -> Option<auth::Owner> {
     OWNER.try_with(Clone::clone).ok()
 }
 
-/// The request's owner cookie, when it is a live one.
-async fn live_cookie(state: &AppState, headers: &HeaderMap) -> Option<String> {
+/// The request's owner session, when its cookie and its owner token
+/// ([`auth::TOKEN_HEADER`]) are one live session. Either alone is none.
+async fn live_owner(state: &AppState, headers: &HeaderMap) -> Option<auth::Owner> {
     let cookie = headers
         .get(header::COOKIE)
         .and_then(|value| value.to_str().ok())
-        .and_then(auth::cookie_value)?
-        .to_owned();
-    owner_cookie_is_live(state, &cookie).await.then_some(cookie)
+        .and_then(auth::cookie_value)?;
+    let token = headers
+        .get(auth::TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok())?;
+    let owner = auth::Owner {
+        cookie: cookie.to_owned(),
+        token: token.to_owned(),
+    };
+    owner_is_live(state, &owner).await.then_some(owner)
 }
 
-/// Whether `cookie` is a live owner cookie. The daemon keeps the owner
-/// cookies in memory ([`auth::cached_owner`]); only the first check reads
-/// the owner file, on the blocking pool, so a slow disk holds up that one
-/// request and never the runtime.
-async fn owner_cookie_is_live(state: &AppState, cookie: &str) -> bool {
+/// Whether `owner` is a live session. The daemon keeps the sessions in
+/// memory ([`auth::cached_owner`]); only a check after the kept copy is
+/// [`auth::OWNER_FILE_RECHECK`] old looks at the owner file, on the
+/// blocking pool, so a slow disk holds up that request and never the
+/// runtime.
+async fn owner_is_live(state: &AppState, owner: &auth::Owner) -> bool {
     let now = Timestamp::now();
-    if let Some(owner) = auth::cached_owner(&state.0.home, cookie, now) {
-        return owner;
+    if let Some(answer) = auth::cached_owner(&state.0.home, owner, now) {
+        return answer;
     }
     let home = state.0.home.clone();
-    let asked = cookie.to_owned();
+    let asked = owner.clone();
     tokio::task::spawn_blocking(move || auth::is_owner(&home, &asked, now))
         .await
         .unwrap_or(false)
@@ -768,20 +781,22 @@ fn same_origin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Marks a request the owner gate let through without the owner cookie: the
-/// app shell then serves the signed-out screen, with no boot snapshot.
+/// Marks a request the owner gate let through without the owner session:
+/// health then answers its signed-out form.
 #[derive(Clone, Copy)]
 struct SignedOut;
 
-/// The owner cookie for everything but what the signed-out screen needs,
+/// The owner session (the cookie and its owner token, [`live_owner`]) for
+/// everything but what the signed-out screen needs,
 /// as each route declares it in [`SIGNED_OUT_ROUTES`] beside the router
 /// ([`signed_out_policy`]). Loopback is gated as an `--allow-host` name
 /// is: a worker sandbox that may reach localhost (`project.local_binding`)
-/// gets no read without the owner cookie (G24). The CLI reads the state
-/// database itself, so it never needs the cookie.
+/// gets no read without the owner session (G24), and a cookie it was
+/// handed on another port is no session without its token. The CLI reads
+/// the state database itself, so it never needs the session.
 ///
 /// The built files are the same for everyone, so they pass before the
-/// owner cookie is looked at. A live cookie is kept for the handler
+/// session is looked at. A live session is kept for the handler
 /// ([`verified_owner`]).
 async fn owner_gate(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
     let route = request
@@ -797,8 +812,8 @@ async fn owner_gate(State(state): State<AppState>, mut request: Request, next: N
     if policy == SignedOutPolicy::Asset {
         return next.run(request).await;
     }
-    if let Some(cookie) = live_cookie(&state, request.headers()).await {
-        return OWNER.scope(cookie, next.run(request)).await;
+    if let Some(owner) = live_owner(&state, request.headers()).await {
+        return OWNER.scope(owner, next.run(request)).await;
     }
     // The Host check let only loopback or an allowed name through.
     let local = !at_allowed_host(&state, request.headers());
@@ -881,16 +896,27 @@ pub(crate) fn request_args() -> Option<Value> {
 }
 
 /// Runs `work` in its own task, so a browser that goes away does not stop
-/// it halfway, with this request's arguments still bound ([`bind_args`]): a
-/// new task does not inherit the task-local, and without it the key would
-/// replay another request's answer.
+/// it halfway, with this request's task-locals still bound: its arguments
+/// ([`bind_args`]) and its verified owner ([`owner_gate`]). A new task
+/// does not inherit a task-local: without the arguments the key would
+/// replay another request's answer, and without the owner an owner-only
+/// check in `work` would refuse the owner.
 pub(crate) async fn detached<T: Send + 'static>(
     work: impl Future<Output = ApiResult<T>> + Send + 'static,
 ) -> ApiResult<T> {
-    let task = match request_args() {
-        Some(args) => tokio::spawn(REQUEST_ARGS.scope(args, work)),
-        None => tokio::spawn(work),
-    };
+    let (args, owner) = (request_args(), verified_owner());
+    let task = tokio::spawn(async move {
+        let work = async move {
+            match args {
+                Some(args) => REQUEST_ARGS.scope(args, work).await,
+                None => work.await,
+            }
+        };
+        match owner {
+            Some(owner) => OWNER.scope(owner, work).await,
+            None => work.await,
+        }
+    });
     match task.await {
         Ok(result) => result,
         Err(error) => Err(Error::Internal(error.to_string()).into()),
@@ -1903,10 +1929,10 @@ async fn events(
     let after = sse::start(last, query.since);
     let pollers = state.0.pollers.clone();
     let peers = state.0.peers.clone();
-    let Some(cookie) = verified_owner() else {
+    let Some(owner) = verified_owner() else {
         return not_owner().into_response();
     };
-    let Some(slot) = state.0.streams.open(&cookie) else {
+    let Some(slot) = state.0.streams.open(&owner.cookie) else {
         return ApiError::new(
             StatusCode::TOO_MANY_REQUESTS,
             "too_many_streams",
@@ -1924,7 +1950,7 @@ async fn events(
         let state = state.clone();
         async move {
             let _slot = slot;
-            until_signed_out(state, cookie).await;
+            until_signed_out(state, owner).await;
         }
     };
     sse::stream(
@@ -1943,16 +1969,16 @@ async fn events(
 /// that runs out (30 days) ends with no sign-out to wake it.
 const RECHECK: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Resolves once `cookie` is no longer an owner cookie: checked on each
+/// Resolves once `owner` is no longer a live session: checked on each
 /// sign-out and every [`RECHECK`].
-async fn until_signed_out(state: AppState, cookie: String) {
+async fn until_signed_out(state: AppState, owner: auth::Owner) {
     // Subscribed before the first check, so a sign-out between the owner
     // gate and here is seen by that check or wakes `changed`.
     let mut sign_outs = state.0.sessions.sign_outs();
     let mut recheck = tokio::time::interval(RECHECK);
     recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        if !owner_cookie_is_live(&state, &cookie).await {
+        if !owner_is_live(&state, &owner).await {
             return;
         }
         tokio::select! {
@@ -1971,7 +1997,7 @@ async fn until_signed_out(state: AppState, cookie: String) {
 /// cookie (the owner gate lets none reach a mirror) is stopped at once.
 fn stop_or_signed_out(state: &AppState) -> watch::Receiver<bool> {
     let mut stop = state.0.stop.clone();
-    let ended = verified_owner().map(|cookie| until_signed_out(state.clone(), cookie));
+    let ended = verified_owner().map(|owner| until_signed_out(state.clone(), owner));
     let ended = async move {
         if let Some(ended) = ended {
             ended.await;
@@ -6364,7 +6390,7 @@ const HEALTH_PATH: &str = "/api/v1/health";
 
 /// Whether this browser holds a live owner cookie, for the board's Sign out.
 #[utoipa::path(get, path = "/api/v1/session", tag = "session",
-    responses((status = 200, body = SessionView), (status = 403, body = ErrorBody, description = "`signed_out`: without the owner cookie")))]
+    responses((status = 200, body = SessionView), (status = 403, body = ErrorBody, description = "`signed_out`: without the owner cookie and its owner token")))]
 async fn session() -> Json<SessionView> {
     Json(SessionView {
         owner: verified_owner().is_some(),
@@ -6372,14 +6398,16 @@ async fn session() -> Json<SessionView> {
 }
 
 /// Signs in with the 8-digit code `tiller board --login` prints, as the
-/// link does: sets the owner cookie. It passes the mutation checks but the
-/// cookie. The limits count per client (`auth::Client`): a client's wrong
-/// code counts against every pending code, each of which burns for that
-/// client on its third, and each client has only so many tries a minute;
-/// a pending code burns for everyone only at `auth::CODE_MISS_CEILING`.
+/// link does: sets the owner cookie and answers the owner token, which the
+/// board keeps in `localStorage` and sends as `auth::TOKEN_HEADER`. It
+/// passes the mutation checks but the session. The limits count per client
+/// (`auth::Client`): a client's wrong code counts against every pending
+/// code, each of which burns for that client on its third, and each client
+/// has only so many tries a minute; a pending code burns for everyone only
+/// at `auth::CODE_MISS_CEILING`.
 /// The code is never logged.
 #[utoipa::path(post, path = "/api/v1/login", tag = "session", request_body = CodeLoginBody,
-    responses((status = 200, body = SessionView, description = "signed in: the response sets the owner cookie"),
+    responses((status = 200, body = SignedIn, description = "signed in: the response sets the owner cookie and names the session's owner token, which only signing in hands out"),
               (status = 400, body = ErrorBody, description = "not 8 digits"),
               (status = 403, body = ErrorBody, description = "`wrong_code`: wrong, used, expired or burned for this client; `code_burned`: too many wrong codes, so the pending code no longer works for this client; or a failed origin check"),
               (status = 429, body = ErrorBody, description = "`too_many_tries`: this client, or its IPv6 network, had its tries for this minute; nothing was checked")))]
@@ -6409,11 +6437,14 @@ async fn login_code(
     .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?;
     let hint = "run tiller board --login again for a new code";
     match redeemed {
-        auth::CodeLogin::Owner(cookie) => {
+        auth::CodeLogin::Owner(owner) => {
             let secure = at_allowed_host(&state, &headers);
             Ok((
-                [(header::SET_COOKIE, auth::set_cookie(&cookie, secure))],
-                Json(SessionView { owner: true }),
+                [(header::SET_COOKIE, auth::set_cookie(&owner.cookie, secure))],
+                Json(SignedIn {
+                    owner: true,
+                    owner_token: owner.token,
+                }),
             )
                 .into_response())
         }
@@ -6489,7 +6520,7 @@ fn forwarded_client(headers: &HeaderMap) -> auth::Client {
               (status = 403, body = ErrorBody)))]
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, ApiError> {
     same_origin(&state, &headers)?;
-    let cookie = verified_owner().ok_or_else(not_owner)?;
+    let cookie = verified_owner().ok_or_else(not_owner)?.cookie;
     let home = state.0.home.clone();
     tokio::task::spawn_blocking(move || auth::sign_out(&home, &cookie, Timestamp::now()))
         .await
@@ -6504,7 +6535,15 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Res
         .into_response())
 }
 
-/// The one-time login link: sets the owner cookie and goes to the board.
+/// What the login link's redirect puts before the owner token, in the
+/// board's URL fragment. A browser never sends a fragment, so the token
+/// reaches no request line, log or `Referer`; the board stores it and takes
+/// it out of the address bar.
+const OWNER_FRAGMENT: &str = "owner=";
+
+/// The one-time login link: starts a session and goes to the board, with
+/// the cookie set and the owner token in the URL fragment
+/// ([`OWNER_FRAGMENT`]).
 /// At an allowed host the cookie is `Secure`: that host is reached over https
 /// through a proxy (its mutations come only from its `https://` origin), so
 /// the daemon need not trust a forwarded header to know it.
@@ -6519,9 +6558,13 @@ async fn login(
         tokio::task::spawn_blocking(move || auth::redeem_login(&home, &token, Timestamp::now()))
             .await;
     match redeemed {
-        Ok(Ok(Some(cookie))) => (
-            [(header::SET_COOKIE, auth::set_cookie(&cookie, secure))],
-            Redirect::to("/"),
+        Ok(Ok(Some(owner))) => (
+            [
+                (header::SET_COOKIE, auth::set_cookie(&owner.cookie, secure)),
+                // The answer names the owner token: no cache keeps it.
+                (header::CACHE_CONTROL, "no-store".to_owned()),
+            ],
+            Redirect::to(&format!("/#{OWNER_FRAGMENT}{}", owner.token)),
         )
             .into_response(),
         Ok(Ok(None)) => (
@@ -6537,9 +6580,8 @@ async fn login(
     }
 }
 
-/// Built files, and for every other path the app shell: with the boot
-/// snapshot inlined for the owner, without it signed out at any `Host`
-/// ([`SignedOutPolicy::Shell`]). An unknown API path is a JSON 404.
+/// Built files, and for every other path the app shell, the same for
+/// everyone ([`SignedOutPolicy::Shell`]). An unknown API path is a JSON 404.
 async fn app_shell(
     State(state): State<AppState>,
     method: Method,
@@ -6565,37 +6607,16 @@ async fn app_shell(
     let Some(index) = state.0.assets.index() else {
         return assets::unbuilt();
     };
-    // Signed out, at a local Host or an allowed one: the shell alone, with
-    // no snapshot inlined. It asks for the snapshot, is refused (or, before
-    // `tiller init` at a local Host, gets the setup commands) and shows the
-    // signed-out screen (or the setup screen).
-    if request.extensions().get::<SignedOut>().is_some() {
-        return (
-            [
-                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-                (header::CACHE_CONTROL, "no-cache"),
-            ],
-            index,
-        )
-            .into_response();
-    }
-    let local = state.own_health();
-    let snapshot = read(&state, move |store| {
-        let snapshot = views::snapshot(store, &local, Timestamp::now())?;
-        Ok(serde_json::to_string(&snapshot)?)
-    })
-    .await;
-    let html = match snapshot {
-        Ok(json) => assets::with_boot(&index, &json),
-        // Before `tiller init` the board boots empty and fetches.
-        Err(_) => index,
-    };
+    // The shell alone, with no snapshot inlined, signed in or not: a page
+    // load is a navigation, which sends the owner cookie but never the owner
+    // token, and the cookie alone reads nothing. The board reads its
+    // snapshot from `GET /api/v1/snapshot`, with the token (protocol.md 7.6).
     (
         [
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        html,
+        index,
     )
         .into_response()
 }
@@ -6606,7 +6627,7 @@ async fn app_shell(
 /// route above and the SSE message schemas (`protocol.md` 7.1).
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    info(title = "Tiller board API", version = "1", description = "The daemon's board API (docs/spec/protocol.md section 7). Every path answers only on 127.0.0.1, localhost or an --allow-host name; at an --allow-host name every path but the signed-out screen and signing in needs the owner cookie; mutations need the owner cookie and the board's own origin."),
+    info(title = "Tiller board API", version = "1", description = "The daemon's board API (docs/spec/protocol.md section 7). Every path answers only on 127.0.0.1, localhost or an --allow-host name; at every Host, every path but the shell, the built files, health at a local Host and signing in needs the owner session: the tiller_owner cookie and, in the X-Tiller-Owner header, the owner token that signing in handed the board with it (section 7.1); mutations also need the board's own origin."),
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health, doctor, run_poller,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, add_dep, remove_dep, close,
@@ -6768,10 +6789,10 @@ pub(crate) mod tests {
     ) -> Router {
         let (_newest_tx, newest) = watch::channel(0);
         let (_stop_tx, stop) = watch::channel(false);
-        // Reads need the owner cookie at every Host (G24), so [`get`] sends
+        // Reads need the owner session at every Host (G24), so [`get`] sends
         // this one.
-        auth::register_owner(home, SIGNED_IN, Timestamp::now()).unwrap();
-        router(AppState::new(Inner {
+        auth::register_owner(home, &signed_in(), Timestamp::now()).unwrap();
+        as_board(router(AppState::new(Inner {
             home: home.to_owned(),
             port: PORT,
             allowed_hosts: vec!["board.example.com".into()],
@@ -6794,7 +6815,7 @@ pub(crate) mod tests {
             evals,
             backups: crate::backups::BackupJobs::default(),
             retros: crate::retros::Retros::default(),
-        }))
+        })))
     }
 
     pub(crate) struct Answer {
@@ -6818,6 +6839,60 @@ pub(crate) mod tests {
     /// The owner cookie every test app knows ([`app_holding`]), which
     /// [`get`] sends.
     pub(crate) const SIGNED_IN: &str = "test-owner-cookie";
+    /// The owner token that goes with [`SIGNED_IN`].
+    pub(crate) const SIGNED_IN_TOKEN: &str = "test-owner-token";
+
+    /// The owner session every test app knows.
+    pub(crate) fn signed_in() -> auth::Owner {
+        auth::Owner {
+            cookie: SIGNED_IN.into(),
+            token: SIGNED_IN_TOKEN.into(),
+        }
+    }
+
+    /// The owner tokens the board tab of a test holds, by cookie: what the
+    /// board keeps in localStorage once it signs in.
+    static BOARD_TABS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::LazyLock::new(|| {
+            Mutex::new(std::collections::HashMap::from([(
+                SIGNED_IN.to_owned(),
+                SIGNED_IN_TOKEN.to_owned(),
+            )]))
+        });
+
+    /// `owner` as a board tab that signed in holds it, so a request that
+    /// sends its cookie also sends its token.
+    pub(crate) fn hold_in_board_tab(owner: &auth::Owner) {
+        BOARD_TABS
+            .lock()
+            .unwrap()
+            .insert(owner.cookie.clone(), owner.token.clone());
+    }
+
+    /// `app` behind a board tab: a request that sends the cookie of an owner
+    /// session the tab holds ([`hold_in_board_tab`]) and no owner token gets
+    /// that session's token, as the board adds it to every fetch. A cookie
+    /// the tab does not hold, or a request that names its own token, goes
+    /// through as it is, which is how the tests of the pair itself send.
+    pub(crate) fn as_board(app: Router) -> Router {
+        app.layer(axum::middleware::from_fn(
+            |mut request: Request<Body>, next: axum::middleware::Next| async move {
+                let held = request
+                    .headers()
+                    .get(header::COOKIE)
+                    .filter(|_| !request.headers().contains_key(auth::TOKEN_HEADER))
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(auth::cookie_value)
+                    .and_then(|cookie| BOARD_TABS.lock().unwrap().get(cookie).cloned());
+                if let Some(token) = held {
+                    request
+                        .headers_mut()
+                        .insert(auth::TOKEN_HEADER, token.parse().unwrap());
+                }
+                next.run(request).await
+            },
+        ))
+    }
 
     /// GET `path` at loopback, signed in as the owner.
     pub(crate) async fn get(app: &Router, path: &str) -> Answer {
@@ -7032,13 +7107,14 @@ pub(crate) mod tests {
         assert_eq!(stored, None);
     }
 
-    /// The first owner check of a process reads `board-owner` on the
-    /// blocking pool: a slow read (here a FIFO no one writes yet) holds up
-    /// that one request, never the runtime under every other.
+    /// An owner check the kept copy cannot answer reads `board-owner` on
+    /// the blocking pool: a slow read (here a FIFO whose writer holds it
+    /// open) holds up that one request, and another request on the same
+    /// one-thread runtime answers while it waits.
     #[cfg(unix)]
     #[test]
     fn the_owner_check_never_blocks_the_runtime() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::os::unix::fs::OpenOptionsExt;
         let fleet = Fleet::new();
         let home = fleet.dir.path().to_owned();
         // Built first: it writes the owner file, which the FIFO replaces.
@@ -7051,60 +7127,80 @@ pub(crate) mod tests {
             .status()
             .unwrap();
         assert!(made.success());
-        // Opens and closes the FIFO's write end until the test is done, so
-        // the reader sees an empty file and moves on.
-        let done = Arc::new(AtomicBool::new(false));
+        // The writer opens the FIFO once a reader has it open (a
+        // non-blocking open for writing fails until then), says so, and
+        // holds it, so the read waits, until `release` (or ten seconds, so a
+        // check on the runtime thread fails the test and never hangs it).
+        // Closing it ends the read with an empty file.
+        let (reading_tx, reading) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
         let writer = {
-            let (done, owner) = (done.clone(), owner.clone());
+            let owner = owner.clone();
             std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                while !done.load(Ordering::SeqCst) {
-                    let opened = std::fs::OpenOptions::new()
-                        .read(true)
+                let held = loop {
+                    match std::fs::OpenOptions::new()
                         .write(true)
-                        .open(&owner);
-                    drop(opened);
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
+                        .custom_flags(libc::O_NONBLOCK)
+                        .open(&owner)
+                    {
+                        Ok(file) => break file,
+                        Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
+                    }
+                };
+                let _ = reading_tx.send(());
+                let _ = released.recv_timeout(std::time::Duration::from_secs(10));
+                drop(held);
             })
         };
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        let (waited, status, took) = runtime.block_on(async {
+        let (health, waiting, status) = runtime.block_on(async {
             let request = Request::get("/api/v1/session")
                 .header(header::HOST, "board.example.com")
-                .header(header::COOKIE, "tiller_owner=not-a-live-cookie")
+                .header(header::COOKIE, format!("tiller_owner={SIGNED_IN}"))
+                .header(auth::TOKEN_HEADER, SIGNED_IN_TOKEN)
                 .body(Body::empty())
                 .unwrap();
-            let started = std::time::Instant::now();
-            let pending = tokio::spawn(async move { send(&app, request).await.status });
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            let waited = started.elapsed();
-            let status = pending.await.unwrap();
-            (waited, status, started.elapsed())
+            let pending = tokio::spawn({
+                let app = app.clone();
+                async move { send(&app, request).await.status }
+            });
+            reading.await.unwrap();
+            let health = send(
+                &app,
+                Request::get("/api/v1/health")
+                    .header(header::HOST, HOST)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            let waiting = !pending.is_finished();
+            let _ = release.send(());
+            (health.status, waiting, pending.await.unwrap())
         });
-        done.store(true, Ordering::SeqCst);
         writer.join().unwrap();
+        assert_eq!(health, StatusCode::OK);
+        assert!(waiting, "the owner check ended before its read could");
+        // The FIFO read as empty: no session is live.
         assert_eq!(status, StatusCode::FORBIDDEN);
-        assert!(
-            took >= std::time::Duration::from_secs(1),
-            "the request took {took:?}, so it never waited on the FIFO"
-        );
-        assert!(
-            waited < std::time::Duration::from_millis(500),
-            "a 50 ms sleep took {waited:?} while the owner file was read"
-        );
     }
 
     /// The owner cookie, minted and redeemed as the login link does.
     pub(crate) fn owner_cookie(home: &std::path::Path) -> String {
+        let owner = fresh_owner(home);
+        hold_in_board_tab(&owner);
+        format!("tiller_owner={}", owner.cookie)
+    }
+
+    /// A new owner session at `home`, signed in through a login link, that
+    /// no board tab holds: a test sends its cookie and its token itself.
+    pub(crate) fn fresh_owner(home: &std::path::Path) -> auth::Owner {
         let token = auth::mint_login(home, Timestamp::now()).unwrap().token;
-        let cookie = auth::redeem_login(home, &token, Timestamp::now())
+        auth::redeem_login(home, &token, Timestamp::now())
             .unwrap()
-            .unwrap();
-        format!("tiller_owner={cookie}")
+            .unwrap()
     }
 
     /// `POST /api/v1/cards` as the board sends it, with `headers` set over
@@ -7302,33 +7398,26 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn root_serves_the_app_shell_with_the_boot_snapshot() {
+    async fn root_serves_the_app_shell_and_never_a_snapshot_in_it() {
         let fleet = Fleet::new();
         let app = app(fleet.dir.path(), Assets::of::<Fixture>());
         let root = get(&app, "/").await;
         assert_eq!(root.status, StatusCode::OK);
         assert_eq!(cache(&root), Some("no-cache"));
-        assert!(
-            root.body
-                .contains(r#"<script type="application/json" id="tiller-boot">"#)
-        );
         assert!(root.body.contains("app-abc123.js"));
+        // A navigation sends the cookie and never the owner token, so the
+        // shell holds no read: the board fetches the snapshot with both.
+        assert!(!root.body.contains("tiller-boot"), "{}", root.body);
+        assert!(!root.body.contains("alpha"), "{}", root.body);
     }
 
     #[tokio::test]
-    async fn the_boot_snapshot_holds_exactly_what_each_get_returns() {
+    async fn the_snapshot_holds_exactly_what_each_get_returns() {
         let fleet = Fleet::new();
         let app = app(fleet.dir.path(), Assets::of::<Fixture>());
-        let root = get(&app, "/").await;
-        let boot = root
-            .body
-            .split_once(r#"id="tiller-boot">"#)
-            .unwrap()
-            .1
-            .split_once("</script>")
-            .unwrap()
-            .0;
-        let boot: Value = serde_json::from_str(boot).unwrap();
+        let boot = get(&app, "/api/v1/snapshot").await;
+        assert_eq!(boot.status, StatusCode::OK, "{}", boot.body);
+        let boot: Value = serde_json::from_str(&boot.body).unwrap();
         assert_eq!(boot["v"], 1);
         let queries = boot["queries"].as_object().unwrap();
         assert_eq!(queries.len(), views::SNAPSHOT_PATHS.len());
@@ -7670,6 +7759,23 @@ pub(crate) mod tests {
         assert_eq!(cards(&fleet), before + 1);
     }
 
+    /// The owner session a login link's redirect hands the browser: the
+    /// cookie it sets, and the token in the fragment of the board it sends
+    /// the browser to.
+    pub(crate) fn owner_of(answer: &Answer) -> auth::Owner {
+        let set = answer.headers[header::SET_COOKIE].to_str().unwrap();
+        let cookie = auth::cookie_value(set.split(';').next().unwrap()).unwrap();
+        let location = answer.headers[header::LOCATION].to_str().unwrap();
+        let token = location
+            .strip_prefix("/#owner=")
+            .unwrap_or_else(|| panic!("{location} hands no owner token"));
+        assert!(!token.is_empty() && token.bytes().all(|b| b.is_ascii_hexdigit()));
+        auth::Owner {
+            cookie: cookie.to_owned(),
+            token: token.to_owned(),
+        }
+    }
+
     /// `GET /login/<token>` at `host`.
     async fn redeem(app: &Router, host: &str, token: &str) -> Answer {
         let request = Request::get(format!("/login/{token}"))
@@ -7695,11 +7801,11 @@ pub(crate) mod tests {
         let token = auth::mint_login(home, Timestamp::now()).unwrap().token;
         let signed = redeem(&app, "board.example.com", &token).await;
         assert_eq!(signed.status, StatusCode::SEE_OTHER, "{}", signed.body);
-        assert_eq!(signed.headers[header::LOCATION], "/");
         let set = cookie_of(&signed);
         assert!(set.ends_with("; Secure"), "{set}");
-        let value = auth::cookie_value(set.split(';').next().unwrap()).unwrap();
-        assert!(auth::is_owner(home, value, Timestamp::now()));
+        assert_eq!(cache(&signed), Some("no-store"));
+        let owner = owner_of(&signed);
+        assert!(auth::is_owner(home, &owner, Timestamp::now()));
         // Once: not again there, nor on loopback.
         for host in ["board.example.com", HOST] {
             let again = redeem(&app, host, &token).await;
@@ -7954,7 +8060,7 @@ pub(crate) mod tests {
         }
         // The owner cookie opens it all.
         let page = get_at(&app, host, "/", Some(&cookie)).await;
-        assert!(page.body.contains("tiller-boot"));
+        assert!(page.body.contains("app-abc123.js"), "{}", page.body);
         for path in ["/api/v1/board", "/api/v1/session"] {
             let read = get_at(&app, host, path, Some(&cookie)).await;
             assert_eq!(read.status, StatusCode::OK, "{path}");
@@ -8058,6 +8164,17 @@ pub(crate) mod tests {
         let set = signed.headers[header::SET_COOKIE].to_str().unwrap();
         assert!(set.ends_with("; Secure"), "{set}");
         let cookie = set.split(';').next().unwrap().to_owned();
+        // The answer hands the board its owner token, and only it.
+        let body: Value = serde_json::from_str(&signed.body).unwrap();
+        let token = body["owner_token"].as_str().unwrap();
+        assert!(!token.is_empty() && token.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(body.as_object().unwrap().len(), 2, "{body}");
+        let alone = get_at(&app, host, "/api/v1/board", Some(&cookie)).await;
+        assert_eq!(error_code(&alone), "signed_out");
+        hold_in_board_tab(&auth::Owner {
+            cookie: auth::cookie_value(&cookie).unwrap().to_owned(),
+            token: token.to_owned(),
+        });
         let board = get_at(&app, host, "/api/v1/board", Some(&cookie)).await;
         assert_eq!(board.status, StatusCode::OK);
         // Once: the code is spent, and so is its link.
@@ -10555,6 +10672,142 @@ pub(crate) mod tests {
         );
     }
 
+    /// Every owner-gated route takes the owner session as its pair: the
+    /// cookie and the token signing in handed the board with it. A cookie
+    /// alone (as another loopback port could be handed it), a token alone,
+    /// or a cookie with another session's token reads, writes, streams and
+    /// mirrors nothing; the pair does it all.
+    #[tokio::test]
+    async fn the_owner_session_is_its_cookie_and_its_own_token_together() {
+        let mut fleet = Fleet::new();
+        let holder = tiller_panes::FakePanes::new();
+        let pane = holder_pane(&holder, "s-1");
+        let session = fleet.worker(pane.as_str());
+        let home = fleet.dir.path();
+        let app = holder_app(home, &holder);
+        let (mine, other) = (fresh_owner(home), fresh_owner(home));
+        let cookie = format!("tiller_owner={}", mine.cookie);
+        let mirror = format!("/api/v1/agents/{session}/terminal");
+        let cases: [(&str, Option<&str>, Option<&str>); 4] = [
+            ("the cookie alone", Some(&cookie), None),
+            ("the token alone", None, Some(&mine.token)),
+            ("another session's token", Some(&cookie), Some(&other.token)),
+            ("the pair", Some(&cookie), Some(&mine.token)),
+        ];
+        for host in [HOST, "board.example.com"] {
+            let origin = if host == HOST {
+                format!("http://{HOST}")
+            } else {
+                format!("https://{host}")
+            };
+            for (case, cookie, token) in cases {
+                let accepted = case == "the pair";
+                let mut headers = vec![("host", host), ("origin", origin.as_str())];
+                headers.extend(cookie.map(|cookie| ("cookie", cookie)));
+                headers.extend(token.map(|token| (auth::TOKEN_HEADER, token)));
+                let read = |path: &str| {
+                    let mut request = Request::get(path);
+                    for (name, value) in &headers {
+                        request = request.header(*name, *value);
+                    }
+                    request.body(Body::empty()).unwrap()
+                };
+                let expect = |what: &str, status: StatusCode| {
+                    if accepted {
+                        assert_eq!(status, StatusCode::OK, "{case} at {host}: {what}");
+                    } else {
+                        assert_eq!(status, StatusCode::FORBIDDEN, "{case} at {host}: {what}");
+                    }
+                };
+                let board = send(&app, read("/api/v1/board")).await;
+                expect("a read", board.status);
+                if !accepted {
+                    assert_eq!(error_code(&board), "signed_out", "{case} at {host}");
+                }
+                let before = cards(&fleet);
+                let card = json!({"idempotency_key": format!("k-{host}"), "project": "alpha", "kind": "ship", "title": "Undo strokes"});
+                let write = send(&app, mutation("POST", "/api/v1/cards", card, &headers)).await;
+                expect("a mutation", write.status);
+                assert_eq!(cards(&fleet), before + i64::from(accepted), "{case}");
+                let stream = app.clone().oneshot(read("/api/v1/events")).await.unwrap();
+                expect("the stream", stream.status());
+                let opened = app
+                    .clone()
+                    .oneshot(mutation("POST", &mirror, json!({}), &headers))
+                    .await
+                    .unwrap();
+                expect("the mirror", opened.status());
+                if accepted {
+                    let mut body = opened.into_body().into_data_stream();
+                    let mut pending = String::new();
+                    assert_eq!(next_line(&mut body, &mut pending).await["type"], "size");
+                }
+            }
+        }
+    }
+
+    /// No route but signing in hands out the owner token: a signed-in
+    /// read of the session, the shell or the snapshot never holds it.
+    #[tokio::test]
+    async fn only_signing_in_hands_out_the_owner_token() {
+        let fleet = Fleet::new();
+        let home = fleet.dir.path();
+        let app = app(home, Assets::of::<Fixture>());
+        let mine = fresh_owner(home);
+        hold_in_board_tab(&mine);
+        let cookie = format!("tiller_owner={}", mine.cookie);
+        for path in [
+            "/",
+            "/api/v1/session",
+            "/api/v1/snapshot",
+            "/api/v1/health",
+            "/login",
+        ] {
+            let answer = get_at(&app, HOST, path, Some(&cookie)).await;
+            assert!(
+                !answer.body.contains(&mine.token),
+                "{path}: {}",
+                answer.body
+            );
+            assert!(
+                !answer.body.contains("owner_token"),
+                "{path}: {}",
+                answer.body
+            );
+            for value in answer.headers.values() {
+                let value = value.to_str().unwrap_or_default();
+                assert!(!value.contains(&mine.token), "{path}: {value}");
+            }
+        }
+        let session = get_at(&app, HOST, "/api/v1/session", Some(&cookie)).await;
+        assert_eq!(session.body, r#"{"owner":true}"#);
+    }
+
+    /// Work [`detached`] into its own task keeps the request's verified
+    /// owner and arguments, so an owner-only check inside it still passes.
+    #[tokio::test]
+    async fn detached_work_keeps_the_owner_and_the_arguments() {
+        let args = json!({"label": "host-b"});
+        let (owner, kept) = OWNER
+            .scope(
+                signed_in(),
+                REQUEST_ARGS.scope(args.clone(), async {
+                    detached(async { Ok(Json((verified_owner(), request_args()))) })
+                        .await
+                        .unwrap()
+                        .0
+                }),
+            )
+            .await;
+        assert_eq!(owner, Some(signed_in()));
+        assert_eq!(kept, Some(args));
+        let outside = detached(async { Ok(Json((verified_owner(), request_args()))) })
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(outside, (None, None));
+    }
+
     /// A plain shell in the fake holder, as a spawn starts it.
     pub(crate) fn holder_pane(holder: &tiller_panes::FakePanes, key: &str) -> tiller_panes::PaneId {
         use tiller_panes::Panes;
@@ -11714,10 +11967,10 @@ pub(crate) mod tests {
     ) -> Router {
         let (_newest_tx, newest) = watch::channel(0);
         let (_stop_tx, stop) = watch::channel(false);
-        // Reads need the owner cookie at every Host (G24), so [`get`] sends
+        // Reads need the owner session at every Host (G24), so [`get`] sends
         // this one.
-        auth::register_owner(home, SIGNED_IN, Timestamp::now()).unwrap();
-        router(AppState::new(Inner {
+        auth::register_owner(home, &signed_in(), Timestamp::now()).unwrap();
+        as_board(router(AppState::new(Inner {
             home: home.to_owned(),
             port: PORT,
             allowed_hosts: vec!["board.example.com".into()],
@@ -11740,7 +11993,7 @@ pub(crate) mod tests {
             evals: memory::eval::Evals::default(),
             backups: crate::backups::BackupJobs::default(),
             retros,
-        }))
+        })))
     }
 
     /// A starter that accepts a path only when it is absolute, and reports

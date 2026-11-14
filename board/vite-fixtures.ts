@@ -1,6 +1,4 @@
-import { readFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { resolve } from "node:path";
 
 import type { Connect, Plugin } from "vite";
 
@@ -10,7 +8,6 @@ import {
   DIALOG_SESSIONS,
   FixtureRefusal,
   SCENARIOS,
-  bootScript,
   fixtureResource,
   fixtureSnapshot,
 } from "./src/lib/fixtures.ts";
@@ -28,9 +25,9 @@ import {
 } from "./src/lib/fixtures-terminal.ts";
 import type { PaneSize } from "./src/lib/fixtures-terminal.ts";
 
-// Stands in for the daemon until T2.8 lands: serves the board API from
-// fixtures and inlines the boot snapshot into index.html the way the daemon
-// will. `?fixture=<scenario>` on the page URL picks the scenario.
+// Stands in for the daemon: serves the board API from fixtures. The page
+// carries no snapshot, as the daemon's does not: the board reads
+// `/api/v1/snapshot`. `?fixture=<scenario>` on the page URL picks the scenario.
 function scenarioOf(url: string | undefined, referer: string | undefined): Scenario {
   for (const candidate of [url, referer]) {
     if (!candidate) continue;
@@ -339,7 +336,8 @@ function sessionRoute(req: IncomingMessage, res: ServerResponse, path: string): 
       } else {
         return refuse(res, "wrong_code", "that code is wrong or has expired");
       }
-      sendJson(res, { owner: signedIn });
+      // A login answers the owner token too, as the daemon's does.
+      sendJson(res, signedIn ? { owner: true, owner_token: "f1c7" } : { owner: false });
     })
     .catch(() => res.destroy());
   return true;
@@ -434,30 +432,8 @@ export function tillerFixtures(): Plugin {
     configureServer(server) {
       server.middlewares.use(apiMiddleware());
     },
-    transformIndexHtml: {
-      order: "pre",
-      handler(html, ctx) {
-        if (!ctx.server) return html;
-        if (!signedIn) return html;
-        const scenario = scenarioOf(ctx.originalUrl, undefined);
-        return html.replace("</head>", `${bootScript(snapshotOf(scenario))}</head>`);
-      },
-    },
     configurePreviewServer(server) {
       server.middlewares.use(apiMiddleware());
-      server.middlewares.use((req, res, next) => {
-        const path = (req.url ?? "").split("?")[0];
-        if (path !== "/" && path !== "/index.html") return next();
-        const dist = resolve(server.config.root, server.config.build.outDir, "index.html");
-        readFile(dist, "utf8")
-          .then((html) => {
-            res.setHeader("content-type", "text/html");
-            if (!signedIn) return res.end(html);
-            const scenario = scenarioOf(req.url, undefined);
-            res.end(html.replace("</head>", `${bootScript(snapshotOf(scenario))}</head>`));
-          })
-          .catch(next);
-      });
     },
   };
 }

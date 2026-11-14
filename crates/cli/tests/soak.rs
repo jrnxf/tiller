@@ -576,7 +576,7 @@ struct Soak {
     out: PathBuf,
     holder: Holder,
     daemon: Option<(Running, u16)>,
-    cookie: String,
+    cookie: tiller_daemon::testing::SignedIn,
     orchestrator: String,
     counters: Vec<Counter>,
     messages: Vec<Message>,

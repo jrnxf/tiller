@@ -18,6 +18,8 @@
 // the same way through the board host (protocol.md 10.7): every request names
 // the peer as its `host`.
 
+import { ownerFetch } from "../../lib/owner";
+
 export const terminalPath = (sessionId: string) => `/api/v1/agents/${sessionId}/terminal`;
 const terminalInputPath = (sessionId: string) => `${terminalPath(sessionId)}/input`;
 const terminalFitPath = (sessionId: string) => `${terminalPath(sessionId)}/fit`;
@@ -119,7 +121,7 @@ export async function readPane<T>(
   body: object = {},
 ): Promise<PaneRead<T>> {
   try {
-    const response = await fetch(path, {
+    const response = await ownerFetch(path, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json" },
       body: JSON.stringify(body),
@@ -243,7 +245,7 @@ export class TerminalStream implements Mirror {
     this.fitted = size;
     let sent = false;
     try {
-      const response = await fetch(this.fitPath, {
+      const response = await ownerFetch(this.fitPath, {
         method: "POST",
         headers: { "content-type": "application/json", accept: "application/json" },
         body: JSON.stringify({ ...size, ...(this.peer ? { host: this.peer } : {}) }),
@@ -301,7 +303,7 @@ export class TerminalStream implements Mirror {
   private async read(signal: AbortSignal): Promise<Outcome> {
     const fit = this.fitting?.size() ?? null;
     this.fitted = fit;
-    const response = await fetch(this.path, {
+    const response = await ownerFetch(this.path, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/x-ndjson" },
       body: JSON.stringify({ ...(fit ? { fit } : {}), ...(this.peer ? { host: this.peer } : {}) }),
@@ -486,7 +488,7 @@ export class TerminalInput {
     for (let tries = 0; ; tries += 1) {
       let response: Response;
       try {
-        response = await fetch(this.path, {
+        response = await ownerFetch(this.path, {
           method: "POST",
           headers: { "content-type": "application/json", accept: "application/json" },
           body: JSON.stringify({ ...input, ...(this.peer ? { host: this.peer } : {}) }),

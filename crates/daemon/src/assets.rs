@@ -105,35 +105,6 @@ pub fn unbuilt() -> Response {
         .into_response()
 }
 
-/// JSON made safe to inline in HTML: `<`, `>`, `&` and U+2028/2029 as `\u`
-/// escapes, so no string in it can close the script element.
-pub fn escape_json(json: &str) -> String {
-    let mut out = String::with_capacity(json.len());
-    for c in json.chars() {
-        match c {
-            '<' => out.push_str("\\u003c"),
-            '>' => out.push_str("\\u003e"),
-            '&' => out.push_str("\\u0026"),
-            '\u{2028}' => out.push_str("\\u2028"),
-            '\u{2029}' => out.push_str("\\u2029"),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-/// The app shell with the snapshot inlined just before `</head>`.
-pub fn with_boot(index: &str, snapshot_json: &str) -> String {
-    let script = format!(
-        r#"<script type="application/json" id="tiller-boot">{}</script>"#,
-        escape_json(snapshot_json)
-    );
-    match index.find("</head>") {
-        Some(at) => format!("{}{script}{}", &index[..at], &index[at..]),
-        None => format!("{script}{index}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,26 +130,5 @@ mod tests {
             assets.file("/assets/gone-2.js").err(),
             Some(StatusCode::NOT_FOUND)
         );
-    }
-
-    #[test]
-    fn inlined_json_cannot_close_the_script() {
-        let json = "{\"title\":\"</script><script>alert(1)</script> & \u{2028}\"}";
-        let html = with_boot("<html><head></head><body></body></html>", json);
-        assert_eq!(html.matches("</script>").count(), 1);
-        assert!(!html.contains('\u{2028}'));
-        let inner = html
-            .split_once(r#"id="tiller-boot">"#)
-            .unwrap()
-            .1
-            .split_once("</script>")
-            .unwrap()
-            .0;
-        let back: serde_json::Value = serde_json::from_str(inner).unwrap();
-        assert_eq!(
-            back["title"],
-            "</script><script>alert(1)</script> & \u{2028}"
-        );
-        assert!(html.find("tiller-boot").unwrap() < html.find("</head>").unwrap());
     }
 }

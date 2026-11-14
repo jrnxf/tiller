@@ -26,7 +26,8 @@ fn changes(world: &World, port: u16) -> mpsc::Receiver<String> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     write!(
         stream,
-        "GET /api/v1/events HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAccept: text/event-stream\r\nCookie: tiller_owner={cookie}\r\n\r\n"
+        "GET /api/v1/events HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAccept: text/event-stream\r\n{}\r\n",
+        cookie.headers()
     )
     .unwrap();
     let (tx, rx) = mpsc::channel();
@@ -117,7 +118,8 @@ fn fetch(world: &World, port: u16, path: &str) -> String {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     write!(
         stream,
-        "GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nCookie: tiller_owner={cookie}\r\n\r\n"
+        "GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n{}\r\n",
+        cookie.headers()
     )
     .unwrap();
     let mut answer = String::new();

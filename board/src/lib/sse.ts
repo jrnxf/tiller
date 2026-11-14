@@ -46,6 +46,7 @@ import {
   startSettingsPath,
 } from "./queries";
 import type { QueryPath } from "./queries";
+import { FetchEventSource } from "./fetch-events";
 
 const EVENTS_PATH = "/api/v1/events";
 
@@ -610,15 +611,14 @@ export interface EventsOptions {
 const CLOSED = 2;
 
 // Connects the stream and writes each event into the Query cache. Returns a
-// function that stops it. The browser reconnects by itself and sends
-// `Last-Event-ID`; a stream it gave up on reopens after the last applied
-// seq. Either way a short gap replays and a long one arrives as `reset`.
+// function that stops it. The stream is read over `fetch`, so it carries the
+// owner token (fetch-events.ts); one that ends or is cut reopens after the
+// last applied seq. A short gap replays and a long one arrives as `reset`.
 // Without a boot snapshot the stream starts live and the snapshot is fetched
 // once it opens, so nothing is replayed from the start of the log.
 export function connectEvents(options: EventsOptions): () => void {
   const { queryClient } = options;
-  const createEventSource =
-    options.createEventSource ?? ((url) => new EventSource(url) as EventSourceLike);
+  const createEventSource = options.createEventSource ?? ((url) => new FetchEventSource(url));
   const fetchSnapshot = options.fetchSnapshot ?? (() => fetchJson<Snapshot>(SNAPSHOT_PATH));
   const fetchSession = options.fetchSession ?? (() => fetchJson(sessionPath));
 

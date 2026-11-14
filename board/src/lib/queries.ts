@@ -35,6 +35,7 @@ import type {
   StartSettings,
   TimelineResponse,
 } from "./api-types.ts";
+import { ownerFetch } from "./owner.ts";
 
 // A query key is the request path with its query string, exactly as the boot
 // snapshot keys its entries (protocol.md section 7.6), so hydrating never
@@ -103,7 +104,7 @@ async function readError(path: string, response: Response): Promise<ReadError> {
 }
 
 export async function fetchJson<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const response = await fetch(path, { headers: { accept: "application/json" }, signal });
+  const response = await ownerFetch(path, { headers: { accept: "application/json" }, signal });
   if (!response.ok) {
     throw await readError(path, response);
   }

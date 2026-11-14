@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Tiller board API",
-    "description": "The daemon's board API (docs/spec/protocol.md section 7). Every path answers only on 127.0.0.1, localhost or an --allow-host name; at an --allow-host name every path but the signed-out screen and signing in needs the owner cookie; mutations need the owner cookie and the board's own origin.",
+    "description": "The daemon's board API (docs/spec/protocol.md section 7). Every path answers only on 127.0.0.1, localhost or an --allow-host name; at every Host, every path but the shell, the built files, health at a local Host and signing in needs the owner session: the tiller_owner cookie and, in the X-Tiller-Owner header, the owner token that signing in handed the board with it (section 7.1); mutations also need the board's own origin.",
     "license": {
       "name": "MIT",
       "identifier": "MIT"
@@ -3732,7 +3732,7 @@
         "tags": [
           "session"
         ],
-        "summary": "Signs in with the 8-digit code `tiller board --login` prints, as the\nlink does: sets the owner cookie. It passes the mutation checks but the\ncookie. The limits count per client (`auth::Client`): a client's wrong\ncode counts against every pending code, each of which burns for that\nclient on its third, and each client has only so many tries a minute;\na pending code burns for everyone only at `auth::CODE_MISS_CEILING`.\nThe code is never logged.",
+        "summary": "Signs in with the 8-digit code `tiller board --login` prints, as the\nlink does: sets the owner cookie and answers the owner token, which the\nboard keeps in `localStorage` and sends as `auth::TOKEN_HEADER`. It\npasses the mutation checks but the session. The limits count per client (`auth::Client`): a client's wrong\ncode counts against every pending code, each of which burns for that\nclient on its third, and each client has only so many tries a minute;\na pending code burns for everyone only at `auth::CODE_MISS_CEILING`.\nThe code is never logged.",
         "operationId": "login_code",
         "requestBody": {
           "content": {
@@ -3746,11 +3746,11 @@
         },
         "responses": {
           "200": {
-            "description": "signed in: the response sets the owner cookie",
+            "description": "signed in: the response sets the owner cookie and names the session's owner token, which only signing in hands out",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SessionView"
+                  "$ref": "#/components/schemas/SignedIn"
                 }
               }
             }
@@ -6008,7 +6008,7 @@
             }
           },
           "403": {
-            "description": "`signed_out`: without the owner cookie",
+            "description": "`signed_out`: without the owner cookie and its owner token",
             "content": {
               "application/json": {
                 "schema": {
@@ -11871,14 +11871,14 @@
       },
       "SessionView": {
         "type": "object",
-        "description": "`GET /api/v1/session`, and the answer to signing in or out.",
+        "description": "`GET /api/v1/session`, and the answer to signing out.",
         "required": [
           "owner"
         ],
         "properties": {
           "owner": {
             "type": "boolean",
-            "description": "Whether this browser holds a live owner cookie."
+            "description": "Whether this browser holds a live owner session: its cookie and\nits owner token."
           }
         }
       },
@@ -12248,9 +12248,27 @@
           }
         }
       },
+      "SignedIn": {
+        "type": "object",
+        "description": "The answer to signing in with a code: the session's owner token, which\nthe board keeps in its origin's `localStorage` and sends as\n`X-Tiller-Owner` on every request. Only signing in hands it out.",
+        "required": [
+          "owner",
+          "owner_token"
+        ],
+        "properties": {
+          "owner": {
+            "type": "boolean",
+            "description": "Always true: this browser now holds a live owner session."
+          },
+          "owner_token": {
+            "type": "string",
+            "description": "The token that, sent with the session's cookie, makes a request the\nowner's."
+          }
+        }
+      },
       "Snapshot": {
         "type": "object",
-        "description": "The inlined `<script id=\"tiller-boot\">` body and `GET /api/v1/snapshot`.",
+        "description": "`GET /api/v1/snapshot`: what the board hydrates from before its first\nrender. The shell never inlines it (protocol.md section 7.6).",
         "required": [
           "v",
           "server_time",

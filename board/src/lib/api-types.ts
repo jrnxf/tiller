@@ -972,7 +972,7 @@ export interface ApiErrorBody {
   };
 }
 
-// The inlined `<script id="tiller-boot">` body and `GET /api/v1/snapshot`.
+// `GET /api/v1/snapshot`, what the board boots from.
 export interface SnapshotPeer {
   host: string;
   host_id: string;

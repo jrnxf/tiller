@@ -281,7 +281,8 @@ fn get(world: &World, port: u16, path: &str) -> (String, String) {
     let (head, body) = exchange(
         port,
         &format!(
-            "GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nCookie: tiller_owner={cookie}\r\n\r\n"
+            "GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n{}\r\n",
+            cookie.headers()
         ),
     );
     (head.lines().next().unwrap().to_owned(), body)
@@ -294,9 +295,9 @@ fn post_as_board(world: &World, port: u16, path: &str, body: &str) -> (String, V
         port,
         &format!(
             "POST {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\n\
-             Sec-Fetch-Site: same-origin\r\nCookie: {}={cookie}\r\n\
+             Sec-Fetch-Site: same-origin\r\n{}\
              Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-            tiller_daemon::auth::COOKIE,
+            cookie.headers(),
             body.len()
         ),
     );
@@ -532,7 +533,13 @@ fn the_login_link_signs_in_once_at_an_allowed_host() {
         .find_map(|line| line.strip_prefix("set-cookie: "))
         .unwrap_or_else(|| panic!("no cookie: {head}"));
     assert!(set.ends_with("; Secure"), "{set}");
-    let cookie = set.split(';').next().unwrap().to_owned();
+    // The redirect hands the board its owner token in the fragment.
+    let token_line = head
+        .lines()
+        .find_map(|line| line.strip_prefix("location: /#owner="))
+        .unwrap_or_else(|| panic!("no owner token: {head}"));
+    let cookie_only = format!("Cookie: {}\r\n", set.split(';').next().unwrap());
+    let cookie = format!("{cookie_only}X-Tiller-Owner: {token_line}\r\n");
     // The link works once, wherever it is used next.
     let (again, _) = exchange(port, &login);
     assert!(again.starts_with("HTTP/1.0 403"), "{again}");
@@ -542,21 +549,25 @@ fn the_login_link_signs_in_once_at_an_allowed_host() {
     );
     assert!(local_again.starts_with("HTTP/1.0 403"), "{local_again}");
 
-    let ask = |origin: &str| {
+    let ask = |origin: &str, cookie: &str| {
         let body = r#"{"idempotency_key":"k1","text":"From the phone"}"#;
         exchange(
             port,
             &format!(
                 "POST /api/v1/projects/alpha/asks HTTP/1.0\r\nHost: tiller.example.com\r\n\
-                 Origin: {origin}\r\nSec-Fetch-Site: same-origin\r\nCookie: {cookie}\r\n\
+                 Origin: {origin}\r\nSec-Fetch-Site: same-origin\r\n{cookie}\
                  Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             ),
         )
     };
-    let (refused, body) = ask("http://tiller.example.com");
+    let (refused, body) = ask("http://tiller.example.com", &cookie);
     assert!(refused.starts_with("HTTP/1.0 403"), "{refused} {body}");
-    let (written, body) = ask("https://tiller.example.com");
+    // The cookie alone, as a server on another port could be handed it,
+    // writes nothing.
+    let (alone, body) = ask("https://tiller.example.com", &cookie_only);
+    assert!(alone.starts_with("HTTP/1.0 403"), "{alone} {body}");
+    let (written, body) = ask("https://tiller.example.com", &cookie);
     assert!(written.starts_with("HTTP/1.0 200"), "{written} {body}");
 
     assert!(terminate(&mut daemon).success());
@@ -581,9 +592,7 @@ fn the_login_code_signs_in_at_an_allowed_host_until_sign_out() {
     let read = |cookie: &str| {
         exchange(
             port,
-            &format!(
-                "GET /api/v1/board HTTP/1.0\r\nHost: tiller.example.com\r\nCookie: {cookie}\r\n\r\n"
-            ),
+            &format!("GET /api/v1/board HTTP/1.0\r\nHost: tiller.example.com\r\n{cookie}\r\n"),
         )
     };
     let post = |path: &str, cookie: &str, body: &str| {
@@ -592,14 +601,15 @@ fn the_login_code_signs_in_at_an_allowed_host_until_sign_out() {
             &format!(
                 "POST {path} HTTP/1.0\r\nHost: tiller.example.com\r\n\
                  Origin: https://tiller.example.com\r\nSec-Fetch-Site: same-origin\r\n\
-                 Cookie: {cookie}\r\nContent-Type: application/json\r\n\
+                 {cookie}Content-Type: application/json\r\n\
                  Content-Length: {}\r\n\r\n{body}",
                 body.len()
             ),
         )
     };
 
-    let (head, body) = read("tiller_owner=none");
+    let none = "Cookie: tiller_owner=none\r\n";
+    let (head, body) = read(none);
     assert!(head.starts_with("HTTP/1.0 403"), "{head}");
     assert!(body.contains("signed_out"), "{body}");
     // The signed-out page carries no snapshot. A build without board/dist,
@@ -621,23 +631,26 @@ fn the_login_code_signs_in_at_an_allowed_host_until_sign_out() {
     );
     let (wrong, body) = post(
         "/api/v1/login",
-        "tiller_owner=none",
+        none,
         &format!(r#"{{"code":"{}"}}"#, next_code(&code)),
     );
     assert!(wrong.starts_with("HTTP/1.0 403"), "{wrong}");
     assert!(body.contains("wrong_code"), "{body}");
-    let (signed, body) = post(
-        "/api/v1/login",
-        "tiller_owner=none",
-        &format!(r#"{{"code":"{code}"}}"#),
-    );
+    let (signed, body) = post("/api/v1/login", none, &format!(r#"{{"code":"{code}"}}"#));
     assert!(signed.starts_with("HTTP/1.0 200"), "{signed} {body}");
     let set = signed
         .lines()
         .find_map(|line| line.strip_prefix("set-cookie: "))
         .unwrap_or_else(|| panic!("no cookie: {signed}"));
     assert!(set.ends_with("; Secure"), "{set}");
-    let cookie = set.split(';').next().unwrap().to_owned();
+    // The answer hands the board its owner token; the cookie alone reads
+    // nothing.
+    let answer: Value = serde_json::from_str(&body).unwrap();
+    let token = answer["owner_token"].as_str().unwrap();
+    let cookie_only = format!("Cookie: {}\r\n", set.split(';').next().unwrap());
+    let cookie = format!("{cookie_only}X-Tiller-Owner: {token}\r\n");
+    let (head, _) = read(&cookie_only);
+    assert!(head.starts_with("HTTP/1.0 403"), "{head}");
     let (head, _) = read(&cookie);
     assert!(head.starts_with("HTTP/1.0 200"), "{head}");
 
@@ -648,7 +661,7 @@ fn the_login_code_signs_in_at_an_allowed_host_until_sign_out() {
     assert!(head.starts_with("HTTP/1.0 403"), "{head}");
     // A local Host is no credential (G24): loopback reads need the cookie
     // too, and the signed-out one is refused there as well.
-    for sent in ["", &format!("Cookie: {cookie}\r\n")] {
+    for sent in ["", &cookie] {
         let (local, body) = exchange(
             port,
             &format!("GET /api/v1/board HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n{sent}\r\n"),

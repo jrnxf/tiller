@@ -9,8 +9,6 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
-
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
@@ -45,8 +43,8 @@ fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
 struct Daemon {
     port: u16,
     pid: u32,
-    /// The owner cookie its reads send: a local Host is no credential (G24).
-    cookie: String,
+    /// The owner session its reads send: a local Host is no credential (G24).
+    cookie: tiller_daemon::testing::SignedIn,
 }
 
 impl Daemon {
@@ -87,7 +85,7 @@ impl Daemon {
             .trim()
             .parse()
             .unwrap();
-        let cookie = common::sign_in(home, port);
+        let cookie = tiller_daemon::testing::sign_in(home, port);
         Self { port, pid, cookie }
     }
 
@@ -99,8 +97,8 @@ impl Daemon {
             .unwrap();
         write!(
             stream,
-            "GET /api/v1/health HTTP/1.1\r\nHost: {host}\r\nCookie: tiller_owner={}\r\nConnection: close\r\n\r\n",
-            self.cookie
+            "GET /api/v1/health HTTP/1.1\r\nHost: {host}\r\n{}Connection: close\r\n\r\n",
+            self.cookie.headers()
         )
         .unwrap();
         let mut raw = String::new();

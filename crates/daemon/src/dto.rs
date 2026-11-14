@@ -955,7 +955,8 @@ impl Doctor {
     }
 }
 
-/// The inlined `<script id="tiller-boot">` body and `GET /api/v1/snapshot`.
+/// `GET /api/v1/snapshot`: what the board hydrates from before its first
+/// render. The shell never inlines it (protocol.md section 7.6).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Snapshot {
     /// Always 1.
@@ -1155,11 +1156,24 @@ pub struct CodeLoginBody {
     pub code: String,
 }
 
-/// `GET /api/v1/session`, and the answer to signing in or out.
+/// `GET /api/v1/session`, and the answer to signing out.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct SessionView {
-    /// Whether this browser holds a live owner cookie.
+    /// Whether this browser holds a live owner session: its cookie and
+    /// its owner token.
     pub owner: bool,
+}
+
+/// The answer to signing in with a code: the session's owner token, which
+/// the board keeps in its origin's `localStorage` and sends as
+/// `X-Tiller-Owner` on every request. Only signing in hands it out.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct SignedIn {
+    /// Always true: this browser now holds a live owner session.
+    pub owner: bool,
+    /// The token that, sent with the session's cookie, makes a request the
+    /// owner's.
+    pub owner_token: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]

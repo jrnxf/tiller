@@ -13,8 +13,6 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod common;
-
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -169,7 +167,7 @@ struct World {
     board_daemon: Daemon,
     peer_daemon: Daemon,
     cookie: String,
-    /// The owner's cookie on the peer's own board, which reads need at
+    /// The owner session on the peer's own board, which reads need at
     /// loopback too (G24).
     peer_cookie: String,
     /// The shim records the `peer serve` pid here, then execs it.
@@ -389,9 +387,10 @@ exec "{tiller}" "$@"
 
 // -- http -------------------------------------------------------------------
 
-/// A signed-in owner's `Cookie` value for the daemon of `home` on `port`.
+/// A signed-in owner's header lines for the daemon of `home` on `port`:
+/// its cookie and its owner token.
 fn owner_cookie(home: &Path, port: u16) -> String {
-    format!("tiller_owner={}", common::sign_in(home, port))
+    tiller_daemon::testing::sign_in(home, port).headers()
 }
 
 fn parse(body: &str) -> Value {
@@ -417,7 +416,7 @@ fn http(
         );
     }
     if let Some(cookie) = cookie {
-        request += &format!("Cookie: {cookie}\r\n");
+        request += cookie;
     }
     request += "\r\n";
     request += body.as_deref().unwrap_or_default();
@@ -463,7 +462,7 @@ fn sse(port: u16, cookie: &str) -> mpsc::Receiver<String> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     write!(
         stream,
-        "GET /api/v1/events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: text/event-stream\r\nCookie: {cookie}\r\n\r\n"
+        "GET /api/v1/events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: text/event-stream\r\n{cookie}\r\n"
     )
     .unwrap();
     let (tx, rx) = mpsc::channel();

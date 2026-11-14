@@ -2,10 +2,14 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { ReadError, agentsQuery, boardQuery, healthQuery } from "./queries";
 import { sendMutation } from "../components/attention/api";
+import { ownerToken } from "./owner";
 import { codeDigits, isSignedOut, signIn, signOut, signedOutStore } from "./session";
 import { createTestQueryClient } from "../test-app";
 
-beforeEach(() => signedOutStore.set(false));
+beforeEach(() => {
+  signedOutStore.set(false);
+  window.localStorage.clear();
+});
 afterEach(() => vi.unstubAllGlobals());
 
 function answer(status: number, body: unknown) {
@@ -31,14 +35,21 @@ test("only a 403 signed_out read means this browser is signed out", () => {
   expect(isSignedOut(new Error("signed_out"))).toBe(false);
 });
 
-test("the code goes to the login endpoint as JSON", async () => {
-  const fetch = answer(200, { owner: true });
+test("the code goes to the login endpoint as JSON, and the owner token is kept", async () => {
+  const fetch = answer(200, { owner: true, owner_token: "f1c7" });
   expect(await signIn("12345678")).toEqual({ ok: true });
   expect(fetch).toHaveBeenCalledWith("/api/v1/login", {
     method: "POST",
     headers: { "content-type": "application/json", accept: "application/json" },
     body: '{"code":"12345678"}',
   });
+  expect(ownerToken()).toBe("f1c7");
+});
+
+test("a sign-in answer without an owner token is no sign-in", async () => {
+  answer(200, { owner: true });
+  expect((await signIn("12345678")).ok).toBe(false);
+  expect(ownerToken()).toBeNull();
 });
 
 test("each refusal reads as plain text", async () => {
@@ -77,8 +88,10 @@ test("signing out shows the signed-out screen only once the daemon has ended the
 
   // Every read needs the cookie, on loopback too (G24), so no read is needed
   // to know the board is now signed out.
+  window.localStorage.setItem("tiller-owner-token", "f1c7");
   const fetch = signOutAnswers([200, { owner: false }], [200, { owner: false }]);
   expect(await signOut()).toEqual({ ok: true });
+  expect(ownerToken()).toBeNull();
   expect(fetch).toHaveBeenCalledWith("/api/v1/logout", expect.objectContaining({ method: "POST" }));
   expect(fetch).toHaveBeenCalledTimes(1);
   expect(signedOutStore.get()).toBe(true);

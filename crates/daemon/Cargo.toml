@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+# The owner sign-in of a running daemon, for other crates' end-to-end tests.
+testing = []
+
 [dependencies]
 axum.workspace = true
 base64.workspace = true
@@ -36,7 +40,9 @@ utoipa.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+libc.workspace = true
 tempfile.workspace = true
+tiller-daemon = { path = ".", features = ["testing"] }
 tiller-panes = { workspace = true, features = ["testing"] }
 tiller-reconcile = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["io-util"] }

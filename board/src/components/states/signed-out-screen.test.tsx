@@ -49,7 +49,7 @@ test("the screen is one numeric field, focused, that asks for the printed code",
 });
 
 test("the code is sent as the eighth digit lands, and not before", async () => {
-  const fetch = answers([200, { owner: true }]);
+  const fetch = answers([200, { owner: true, owner_token: "f1c7" }]);
   const onSignedIn = vi.fn();
   render(<SignedOutScreen onSignedIn={onSignedIn} />);
 
@@ -62,7 +62,7 @@ test("the code is sent as the eighth digit lands, and not before", async () => {
 });
 
 test("a pasted code with a space or dash is read as its eight digits", async () => {
-  const fetch = answers([200, { owner: true }]);
+  const fetch = answers([200, { owner: true, owner_token: "f1c7" }]);
   const onSignedIn = vi.fn();
   render(<SignedOutScreen onSignedIn={onSignedIn} />);
 
@@ -74,7 +74,7 @@ test("a pasted code with a space or dash is read as its eight digits", async () 
 test("a wrong code clears the field and says so in plain text, and the next try goes out", async () => {
   const fetch = answers(
     [403, { ok: false, error: { code: "wrong_code", message: "wrong" } }],
-    [200, { owner: true }],
+    [200, { owner: true, owner_token: "f1c7" }],
   );
   const onSignedIn = vi.fn();
   render(<SignedOutScreen onSignedIn={onSignedIn} />);

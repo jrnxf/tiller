@@ -20,6 +20,8 @@ pub mod retros;
 pub mod server;
 pub mod sse;
 pub mod stale;
+#[cfg(feature = "testing")]
+pub mod testing;
 mod threads;
 pub mod views;
 pub mod workers;

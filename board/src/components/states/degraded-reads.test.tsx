@@ -174,7 +174,7 @@ test("the Retry on a failed section is a bordered button like the other secondar
 
 test("a machine nobody has set up boots to the setup screen with the daemon's command", async () => {
   stubDaemon({ "/api/v1/health": { ok: false, version: "0.1.0", initialized: false } });
-  const boot = await loadBoot(document.implementation.createHTMLDocument());
+  const boot = await loadBoot();
   expect(boot).toEqual({
     kind: "setup",
     command: "tiller owner set tiller\ntiller init --host-label <label> --lane-capacity <n>",
@@ -183,7 +183,7 @@ test("a machine nobody has set up boots to the setup screen with the daemon's co
 
 test("a 503 from a set-up daemon boots the board, not the setup screen", async () => {
   stubDaemon({ "/api/v1/health": { ok: false, version: "0.1.0", initialized: true } });
-  const boot = await loadBoot(document.implementation.createHTMLDocument());
+  const boot = await loadBoot();
   expect(boot).toEqual({ kind: "board", snapshot: null });
 });
 
