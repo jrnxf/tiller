@@ -21,6 +21,7 @@ import {
   hostConfigPath,
   machinesPath,
   peersPath,
+  projectFieldsPath,
   projectsPath,
   queryKeyFor,
   quotaPath,
@@ -699,6 +700,29 @@ test("a peer project that is deleted leaves only that host's list", () => {
 
   expect(projects()).toHaveLength(before - 1);
   expect(projects().some((p) => p.host === "host-d" && p.id === peer.id)).toBe(false);
+  stop();
+});
+
+test("a peer project edit marks that host's Edit project fields stale, not this host's", () => {
+  const { queryClient, stop, source } = federatedStream();
+  const peer = queryClient
+    .getQueryData<ProjectsResponse>(queryKeyFor(projectsPath))
+    ?.projects.find((project) => project.host === "host-d");
+  if (!peer) throw new Error("fixture has no host-d project");
+  const theirs = queryKeyFor(projectFieldsPath(peer.id, "host-d"));
+  const ours = queryKeyFor(projectFieldsPath(peer.id));
+  queryClient.setQueryData(theirs, { id: peer.id });
+  queryClient.setQueryData(ours, { id: peer.id });
+
+  source.emit("peer", {
+    host: "host-d",
+    host_id: "01JPEERD0000000000000000D",
+    as_of: null,
+    change: event({ kind: "project.edited", entity: "project", entity_id: peer.id }),
+  });
+
+  expect(queryClient.getQueryState(theirs)?.isInvalidated).toBe(true);
+  expect(queryClient.getQueryState(ours)?.isInvalidated).toBe(false);
   stop();
 });
 

@@ -57,6 +57,15 @@
   background: var(--bg-card);
 }
 
+/* Why a peer's edit, archive and delete are off: its link or its scope. */
+.pdetail-off {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--fg-3);
+  overflow-wrap: anywhere;
+}
+
 .stage-facts {
   display: flex;
   flex-direction: column;

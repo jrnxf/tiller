@@ -155,17 +155,16 @@ function writeProject(queryClient: QueryClient, project: Project) {
   );
 }
 
-// A deleted or archived (retired) project leaves this host's list at once; a
-// peer's row of the same id is another project and stays. Its cards, runs,
+// A deleted or archived (retired) project leaves the list at once: this
+// host's, or with `host` that peer's. A row of the same id on another host is
+// another project and stays. Its cards, runs,
 // sessions and items went or were stopped with it, so every read that may
 // still show one is fetched again.
-export function onProjectGone(queryClient: QueryClient, projectId: string) {
+export function onProjectGone(queryClient: QueryClient, projectId: string, host?: string) {
+  const gone = (other: Project) =>
+    other.id === projectId && (host ? isPeerRow(other) && other.host === host : !isPeerRow(other));
   queryClient.setQueryData<ProjectsResponse | undefined>(queryKeyFor(projectsPath), (old) =>
-    old
-      ? {
-          projects: old.projects.filter((other) => other.id !== projectId || isPeerRow(other)),
-        }
-      : old,
+    old ? { projects: old.projects.filter((other) => !gone(other)) } : old,
   );
   void queryClient.invalidateQueries({ queryKey: API_KEY_PREFIX, refetchType: "active" });
 }
@@ -456,23 +455,6 @@ export function applyChange(
 
 // A peer's project is gone: only its row leaves, a project of the same id on
 // this host or another stays. What it owned is read again.
-function onPeerProjectGone(queryClient: QueryClient, host: string, projectId: string) {
-  queryClient.setQueryData<ProjectsResponse | undefined>(queryKeyFor(projectsPath), (old) =>
-    old
-      ? {
-          projects: old.projects.filter(
-            (other) => other.id !== projectId || ownerOf(other) !== host,
-          ),
-        }
-      : old,
-  );
-  void queryClient.invalidateQueries({ queryKey: API_KEY_PREFIX, refetchType: "active" });
-  void queryClient.invalidateQueries({
-    queryKey: queryKeyFor(projectSetupPath(projectId)),
-    refetchType: "active",
-  });
-}
-
 // `event: peer`. The daemon tagged the change as the peer's, so the entity
 // writers key a row by its owner as well as its id.
 function applyPeerChange(queryClient: QueryClient, event: PeerEvent): void {
@@ -481,7 +463,7 @@ function applyPeerChange(queryClient: QueryClient, event: PeerEvent): void {
     change.entity === "project" &&
     (change.kind === "project.deleted" || change.kind === "project.retired")
   ) {
-    onPeerProjectGone(queryClient, event.host, change.entity_id);
+    onProjectGone(queryClient, change.entity_id, event.host);
     return;
   }
   // A forwarded mutation's receipt names the peer's outbox row or approval, so
@@ -502,6 +484,13 @@ function applyPeerChange(queryClient: QueryClient, event: PeerEvent): void {
     return;
   }
   applyChange(queryClient, change, { peer: true });
+  // Edit project on this peer reads the peer's fields of that id.
+  if (change.entity === "project") {
+    void queryClient.invalidateQueries({
+      queryKey: queryKeyFor(projectFieldsPath(change.entity_id, event.host)),
+      refetchType: "active",
+    });
+  }
 }
 
 function ofHost<T extends { host?: string; link?: Machine["link"] }>(host: string) {

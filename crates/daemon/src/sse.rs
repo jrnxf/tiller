@@ -540,10 +540,10 @@ mod tests {
 
     /// A raw SSE client at the `--allow-host` name with `cookie`, past the
     /// opening comment.
-    async fn connect_signed_in(addr: SocketAddr, cookie: &str) -> TcpStream {
+    async fn connect_signed_in(addr: SocketAddr, cookie: &str, query: &str) -> TcpStream {
         let mut stream = TcpStream::connect(addr).await.unwrap();
         let request = format!(
-            "GET /api/v1/events HTTP/1.0\r\nHost: board.example.com\r\nCookie: {cookie}\r\nAccept: text/event-stream\r\n\r\n"
+            "GET /api/v1/events{query} HTTP/1.0\r\nHost: board.example.com\r\nCookie: {cookie}\r\nAccept: text/event-stream\r\n\r\n"
         );
         stream.write_all(request.as_bytes()).await.unwrap();
         let mut head = String::new();
@@ -603,7 +603,7 @@ mod tests {
         let other = crate::api::tests::owner_cookie(home);
         let mut open = Vec::new();
         for _ in 0..STREAMS_PER_SESSION {
-            open.push(connect_signed_in(addr, &mine).await);
+            open.push(connect_signed_in(addr, &mine, "").await);
         }
 
         // One more for the same session is refused, with why.
@@ -643,8 +643,11 @@ mod tests {
         let _stop = serve(home, listener);
         let mine = crate::api::tests::owner_cookie(home);
         let other = crate::api::tests::owner_cookie(home);
-        let mut mine_stream = connect_signed_in(addr, &mine).await;
-        let mut other_stream = connect_signed_in(addr, &other).await;
+        let mut mine_stream = connect_signed_in(addr, &mine, "").await;
+        // From a known seq: a stream with none starts at the newest row when
+        // it opens the store, and under load that can be after the card below.
+        let since = fleet.open().last_seq().unwrap();
+        let mut other_stream = connect_signed_in(addr, &other, &format!("?since={since}")).await;
 
         let mut out = TcpStream::connect(addr).await.unwrap();
         let request = format!(

@@ -23,7 +23,9 @@ import { RUN_MS, retroMutation } from "./fixtures-retros.ts";
 import {
   DIALOG_SESSIONS,
   FIXTURE_HEAD_SHA,
+  FixtureRefusal,
   fixtureResource,
+  projectReadHost,
   restartStaleFixture,
   fixtureResponses,
   orchestratorLive,
@@ -68,6 +70,8 @@ interface FollowUp {
 export interface MutationResult {
   reply: Reply;
   followUps: FollowUp[];
+  // How long the stand-in server holds the reply: a clone takes a while.
+  replyDelayMs?: number;
 }
 
 const replies = new Map<string, MutationResult>();
@@ -193,6 +197,12 @@ function projectFieldsFor(id: string): ProjectFields | undefined {
   if (!project || project.host || gone(id)) return undefined;
   const saved = edited.get(id);
   if (saved) return { ...saved, rev: project.rev };
+  return fieldsOf(project);
+}
+
+// A fixture project's fields before any edit.
+function fieldsOf(project: Project): ProjectFields {
+  const id = project.id;
   const alpha = id === "alpha";
   return {
     id,
@@ -262,11 +272,14 @@ function positive(value: unknown): boolean {
 }
 
 // `project.edit`, as `tiller project edit` runs it: the `rev` first, then each
-// field checked, and an empty text clears an optional one.
-function editProject(id: string, body: Record<string, unknown>): MutationResult {
-  const fields = projectFieldsFor(id);
-  const project = added.get(id) ?? currentProject(id);
-  if (!fields || !project) return refusal(404, "not_found", `no project ${id}`);
+// field checked, and an empty text clears an optional one. The fields and
+// row it leaves, or the refusal.
+function editedFields(
+  fields: ProjectFields,
+  project: Project,
+  body: Record<string, unknown>,
+): { next: ProjectFields; row: Project } | MutationResult {
+  const id = fields.id;
   if (body.rev !== fields.rev) {
     const first = EDIT_FIELDS.find(
       (field) => field in body && JSON.stringify(body[field]) !== JSON.stringify(fields[field]),
@@ -333,6 +346,16 @@ function editProject(id: string, body: Record<string, unknown>): MutationResult 
     edited_at: new Date().toISOString(),
     effective_delivery: project.stage === "pre-launch" && direct ? "direct-pr" : next.delivery,
   };
+  return { next, row };
+}
+
+function editProject(id: string, body: Record<string, unknown>): MutationResult {
+  const fields = projectFieldsFor(id);
+  const project = added.get(id) ?? currentProject(id);
+  if (!fields || !project) return refusal(404, "not_found", `no project ${id}`);
+  const edit = editedFields(fields, project, body);
+  if ("reply" in edit) return edit;
+  const { next, row } = edit;
   edited.set(id, next);
   if (added.has(id)) added.set(id, row);
   else switched.set(id, row);
@@ -378,10 +401,30 @@ export function withoutDeleted(path: string, body: unknown, scenario: Scenario):
     return saved ? { ...fresh, repo: saved.repo } : fresh;
   }
   const fields = /^\/api\/v1\/projects\/([^/]+)$/.exec(pathname);
+  const url = new URL(path, "http://localhost");
+  // A peer's project read: its fields, its archived list and its previews,
+  // as the peer has them now.
+  const on = url.searchParams.has("host") ? projectReadHost(scenario, url, Date.now()) : null;
+  if (on instanceof FixtureRefusal) return on;
+  const host = on?.host;
+  if (host) {
+    if (fields?.[1] && body === undefined) return peerFieldsFor(scenario, host, fields[1]);
+    if (pathname === projectsPath && url.searchParams.has("retired")) {
+      return peerRetiredFor(scenario, host);
+    }
+    const preview = /^\/api\/v1\/projects\/([^/]+)\/(delete|retire)$/.exec(pathname);
+    if (preview?.[1]) {
+      const id = preview[1];
+      const live = preview[2] === "delete" ? peerProjectNow : peerLive;
+      if (!live(scenario, host, id)) return undefined;
+      return body ?? (preview[2] === "delete" ? freshDeletePreview(id) : freshRetirePreview(id));
+    }
+  }
   if (fields?.[1] && body === undefined) return projectFieldsFor(fields[1]);
   const grants = /^\/api\/v1\/projects\/([^/]+)\/grants$/.exec(pathname);
   if (grants?.[1]) return localProject(grants[1]) ? grantsFor(grants[1]) : undefined;
-  if (deleted.size + retired.size + added.size + switched.size === 0 || body === undefined) {
+  const changed = deleted.size + retired.size + added.size + switched.size;
+  if (changed + peerRows.size + peerRetired.size === 0 || body === undefined) {
     return body;
   }
   const preview = /^\/api\/v1\/projects\/([^/]+)\/(delete|retire)$/.exec(pathname);
@@ -404,12 +447,12 @@ export function withoutDeleted(path: string, body: unknown, scenario: Scenario):
   if (pathname === "/api/v1/projects") {
     const { projects } = body as ProjectsResponse;
     return {
-      projects: [
+      projects: withPeerProjects([
         ...projects
           .filter((project) => project.host || !gone(project.id))
           .map((project) => (project.host ? project : (switched.get(project.id) ?? project))),
         ...[...added.values()].filter((project) => !gone(project.id)),
-      ],
+      ]),
     };
   }
   if (pathname === "/api/v1/agents") {
@@ -424,7 +467,11 @@ export function withoutDeleted(path: string, body: unknown, scenario: Scenario):
     const board = body as BoardResponse;
     return {
       ...board,
-      rows: board.rows.filter((row) => row.host || !deleted.has(row.project_id)),
+      rows: board.rows.filter((row) =>
+        row.host
+          ? peerRows.get(peerKey(row.host, row.project_id)) !== null
+          : !deleted.has(row.project_id),
+      ),
     };
   }
   if (pathname === "/api/v1/attention") {
@@ -515,6 +562,37 @@ function projectGone(kind: string, txn: string, id: string): FollowUp {
 
 // `project.add`: an archived project keeps its id taken, a deleted one frees it.
 function addProject(body: Record<string, unknown>): MutationResult {
+  const project = addedProject(
+    body,
+    (id) => id === "fleet" || added.has(id) || (!!currentProject(id) && !deleted.has(id)),
+  );
+  if ("reply" in project) return project;
+  added.set(project.id, project);
+  return {
+    replyDelayMs: cloned(body),
+    reply: recorded(project, null, null),
+    followUps: [
+      {
+        delayMs: 100,
+        event: {
+          kind: "project.added",
+          txn: "project.add",
+          entity: "project",
+          entity_id: project.id,
+          rev_after: 1,
+          card_id: null,
+          entity_state: project,
+        },
+      },
+    ],
+  };
+}
+
+// The row `project.add` makes, or why it refuses the id.
+function addedProject(
+  body: Record<string, unknown>,
+  taken: (id: string) => boolean,
+): Project | MutationResult {
   const id = typeof body.id === "string" ? body.id : "";
   // An absent or empty name is the id, as the daemon reads it.
   const name = (typeof body.name === "string" ? body.name.trim() : "") || id;
@@ -525,9 +603,7 @@ function addProject(body: Record<string, unknown>): MutationResult {
       `project id "${id}" must be words of lowercase letters and digits`,
     );
   }
-  if (id === "fleet" || added.has(id) || (currentProject(id) && !deleted.has(id))) {
-    return refusal(422, "refused", `project ${id}: project id is taken`);
-  }
+  if (taken(id)) return refusal(422, "refused", `project ${id}: project id is taken`);
   const delivery = String(body.delivery);
   const project: Project = {
     id,
@@ -545,24 +621,7 @@ function addProject(body: Record<string, unknown>): MutationResult {
     review_overdue: false,
     review_open: null,
   };
-  added.set(id, project);
-  return {
-    reply: recorded(project, null, null),
-    followUps: [
-      {
-        delayMs: 100,
-        event: {
-          kind: "project.added",
-          txn: "project.add",
-          entity: "project",
-          entity_id: id,
-          rev_after: 1,
-          card_id: null,
-          entity_state: project,
-        },
-      },
-    ],
-  };
+  return project;
 }
 
 // tiller_core::not_initialized(): init-hint.test.ts keeps the two equal.
@@ -573,20 +632,210 @@ function refusal(status: number, code: string, message: string): MutationResult 
   return { reply: refused(status, code, message), followUps: [] };
 }
 
+// How long a clone holds the stand-in server's reply to an add: long enough
+// to watch the dialog count the time.
+const CLONE_MS = 45_000;
+
+function cloned(body: Record<string, unknown>): number | undefined {
+  const checkout = body.checkout as { clone?: unknown } | null | undefined;
+  return checkout?.clone === true ? CLONE_MS : undefined;
+}
+
+// The peers' projects as the board changed them since the server started,
+// each by `<host>/<id>`: a forwarded add, edit, archive or delete runs on the
+// peer (protocol.md section 7.4), and the peer's rows here follow it. A row
+// maps to null once deleted, `peerRetired` maps an archived one to when.
+const peerRows = new Map<string, Project | null>();
+const peerFields = new Map<string, ProjectFields>();
+const peerRetired = new Map<string, string>();
+
+const peerKey = (host: string, id: string) => `${host}/${id}`;
+
+// Forgets the peers' project changes, so a test starts from the fixture.
+export function resetPeerProjectsFixture(): void {
+  peerRows.clear();
+  peerFields.clear();
+  peerRetired.clear();
+}
+
+// A peer's project as the peer has it now, archived or not.
+function peerProjectNow(scenario: Scenario, host: string, id: string): Project | undefined {
+  const key = peerKey(host, id);
+  if (peerRows.has(key)) return peerRows.get(key) ?? undefined;
+  const { projects } = fixtureResource(projectsPath, scenario) as ProjectsResponse;
+  return projects.find((project) => project.host === host && project.id === id);
+}
+
+// A peer's live project, not deleted or archived.
+function peerLive(scenario: Scenario, host: string, id: string): Project | undefined {
+  return peerRetired.has(peerKey(host, id)) ? undefined : peerProjectNow(scenario, host, id);
+}
+
+// `GET /api/v1/projects/{id}?host=`: a peer's project fields, as its Edit
+// dialog reads them.
+function peerFieldsFor(scenario: Scenario, host: string, id: string): ProjectFields | undefined {
+  const project = peerLive(scenario, host, id);
+  if (!project) return undefined;
+  return peerFields.get(peerKey(host, id)) ?? fieldsOf(project);
+}
+
+// The previews of a project the board added on a peer: nothing recorded for
+// it yet, so nothing blocks either.
+function freshDeletePreview(id: string): ProjectDeletePreview {
+  return {
+    project: id,
+    removed: {
+      projects: 1,
+      cards: 0,
+      runs: 0,
+      sessions: 0,
+      attention: 0,
+      artifacts: 0,
+      memories: 0,
+      memory_revisions: 0,
+      events: 1,
+    },
+    unlinked: {},
+    refused: null,
+    unblock: null,
+    agents: [],
+    unlanded: [],
+    open_prs: [],
+  };
+}
+
+function freshRetirePreview(id: string): ProjectRetirePreview {
+  return { project: id, refused: null, agents: [] };
+}
+
+// The projects list with each peer's changes since the server started.
+function withPeerProjects(projects: Project[]): Project[] {
+  const listed = new Set(projects.flatMap((p) => (p.host ? [peerKey(p.host, p.id)] : [])));
+  return [
+    ...projects.flatMap((project) => {
+      if (!project.host) return [project];
+      const key = peerKey(project.host, project.id);
+      if (peerRetired.has(key)) return [];
+      return peerRows.has(key) ? (peerRows.get(key) ?? []) : [project];
+    }),
+    ...[...peerRows]
+      .filter(([key, row]) => row && !listed.has(key) && !peerRetired.has(key))
+      .flatMap(([, row]) => (row ? [row] : [])),
+  ];
+}
+
+// A peer's archived projects, as `GET /api/v1/projects?retired=true&host=`
+// reads them.
+function peerRetiredFor(scenario: Scenario, host: string): ProjectsResponse {
+  return {
+    projects: [...peerRetired].flatMap(([key, at]) => {
+      const [owner, id] = key.split("/");
+      if (owner !== host || !id) return [];
+      const project = peerProjectNow(scenario, host, id);
+      return project ? [{ ...project, retired_at: at }] : [];
+    }),
+  };
+}
+
+// A forwarded project add, edit, archive or delete, run as the peer runs it:
+// the same checks a local one has, and a refusal names the peer.
+function peerProjectMutation(
+  method: string,
+  path: string,
+  body: Record<string, unknown>,
+  host: string,
+  scenario: Scenario,
+): MutationResult | null {
+  const named = (result: MutationResult): MutationResult => {
+    if (result.reply.status === 200) return result;
+    const reply = result.reply.body as { ok: false; error: object };
+    return {
+      ...result,
+      reply: { ...result.reply, body: { ...reply, error: { ...reply.error, host } } },
+    };
+  };
+  if (method === "POST" && path === projectsPath) {
+    const made = addedProject(body, (id) => !!peerProjectNow(scenario, host, id));
+    if ("reply" in made) return named(made);
+    const row: Project = { ...made, host, link: "live", as_of: new Date().toISOString() };
+    const key = peerKey(host, row.id);
+    peerRows.set(key, row);
+    peerFields.delete(key);
+    return { reply: recorded(row, null, null), followUps: [], replyDelayMs: cloned(body) };
+  }
+  const edit = /^\/api\/v1\/projects\/([^/]+)$/.exec(path);
+  if (method === "PATCH" && edit?.[1]) {
+    const id = edit[1];
+    const fields = peerFieldsFor(scenario, host, id);
+    const project = peerLive(scenario, host, id);
+    if (!fields || !project) return named(refusal(404, "not_found", `no project ${id}`));
+    const result = editedFields(fields, project, body);
+    if ("reply" in result) return named(result);
+    peerFields.set(peerKey(host, id), result.next);
+    peerRows.set(peerKey(host, id), result.row);
+    return { reply: recorded(result.row, null, null), followUps: [] };
+  }
+  const action = /^\/api\/v1\/projects\/([^/]+)\/(delete|retire)$/.exec(path);
+  if (method !== "POST" || !action?.[1]) return null;
+  const id = action[1];
+  const key = peerKey(host, id);
+  const preview = fixtureResource(`${path}?host=${host}`, scenario) as
+    | ProjectDeletePreview
+    | ProjectRetirePreview
+    | undefined;
+  const exists =
+    action[2] === "delete" ? peerProjectNow(scenario, host, id) : peerLive(scenario, host, id);
+  if (!exists) return named(refusal(404, "not_found", `no project ${id}`));
+  if (action[2] === "delete") {
+    if (body.confirm !== id)
+      return named(refusal(400, "usage", `type ${id} to delete the project`));
+    const removed = preview as ProjectDeletePreview | undefined;
+    if (removed?.refused)
+      return named(refusal(422, "refused", `project ${id}: ${removed.refused}`));
+    peerRows.set(key, null);
+    peerFields.delete(key);
+    peerRetired.delete(key);
+    return {
+      reply: recorded(
+        {
+          project: id,
+          removed: removed?.removed ?? null,
+          unlinked: removed?.unlinked ?? {},
+          stopped: [],
+          cancelled_cards: [],
+          warnings: [],
+        },
+        null,
+        null,
+      ),
+      followUps: [],
+    };
+  }
+  if (preview?.refused) return named(refusal(422, "refused", `project ${id}: ${preview.refused}`));
+  peerRetired.set(key, new Date().toISOString());
+  return {
+    reply: recorded(
+      { project: exists, stopped: [], cancelled_cards: [], warnings: [] },
+      null,
+      null,
+    ),
+    followUps: [],
+  };
+}
+
 function forwarded(
   method: string,
   path: string,
   body: Record<string, unknown>,
+  scenario: Scenario,
 ): MutationResult | null {
   const host = body.host;
   if (typeof host !== "string") return null;
   if (
-    /\/(stage|focus|label|delete|retire|bug-project|grants)$/.test(path) ||
+    /\/(stage|focus|label|bug-project|grants)$/.test(path) ||
     path.startsWith("/api/v1/grants/") ||
     path.startsWith("/api/v1/peers/") ||
     path.startsWith("/api/v1/peer-keys/") ||
-    path === projectsPath ||
-    (method === "PATCH" && /^\/api\/v1\/projects\/[^/]+$/.test(path)) ||
     /\/memory\//.test(path) ||
     path.startsWith("/api/v1/pollers/")
   ) {
@@ -598,6 +847,8 @@ function forwarded(
   if (host === "host-f") {
     return refusal(502, "peer_refused", "host-f paired with a read scope: view only pairing");
   }
+  const project = peerProjectMutation(method, path, body, host, scenario);
+  if (project) return project;
   const key = typeof body.idempotency_key === "string" ? body.idempotency_key : null;
   const text = [body.text, body.title, body.answer].find((value) => typeof value === "string");
   if (key && host === "host-d" && /uncertain/i.test(String(text)) && !unsure.has(key)) {
@@ -1205,7 +1456,7 @@ function handle(
   body: Record<string, unknown>,
   scenario: Scenario,
 ): MutationResult {
-  const peer = forwarded(method, path, body);
+  const peer = forwarded(method, path, body, scenario);
   if (peer) return peer;
   if (method === "POST" && path === "/api/v1/bug-project") return pickBugProject(body, scenario);
   if (method === "PATCH" && path === "/api/v1/host") return editHost(body, scenario);

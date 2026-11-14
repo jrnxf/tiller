@@ -60,6 +60,7 @@ rust-embed = { version = "8", features = ["mime-guess"] }
 rustix = { version = "1", features = ["fs", "termios"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
+serde_urlencoded = "0.7"
 sha2 = "0.11"
 signal-hook = { version = "0.4", default-features = false }
 thiserror = "2"

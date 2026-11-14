@@ -2,18 +2,28 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { Project } from "../../lib/api-types";
+import { hostField, ownerOf, projectKey } from "../../lib/peers";
+import type { Standing } from "../../lib/peers";
 import { projectRetireQuery } from "../../lib/queries";
 import { onProjectGone } from "../../lib/sse";
 import { sendMutation } from "../attention/api";
 import { useAction } from "../attention/use-action";
 import { ConfirmDelete } from "./project-delete";
-import { AgentList, FLEET_PROJECT, ProjectDialog, agentCount, readFailure } from "./project-dialog";
+import {
+  AgentList,
+  FLEET_PROJECT,
+  ProjectDialog,
+  ProjectFailure,
+  agentCount,
+  readFailure,
+} from "./project-dialog";
 
 // The confirm step of a project archive (`project.retire`). With agents still
 // running it asks whether to stop them, and never leaves them running unsaid.
 // An open card refuses the archive before any stop, so the agents a stop
 // reaches are those left on closed cards, in practice the orchestrator; with
-// one open it offers the delete instead, which stops them all.
+// one open it offers the delete instead, which stops them all. A peer's
+// project is read from and archived on that peer (D22).
 function ConfirmArchive({
   project,
   onClose,
@@ -24,27 +34,29 @@ function ConfirmArchive({
   onDelete: () => void;
 }) {
   const queryClient = useQueryClient();
-  const preview = useQuery(projectRetireQuery(project.id));
+  const host = ownerOf(project);
+  const preview = useQuery(projectRetireQuery(project.id, host));
 
   const recorded = useCallback(() => {
     onClose();
-    onProjectGone(queryClient, project.id);
-  }, [onClose, project.id, queryClient]);
+    onProjectGone(queryClient, project.id, host);
+  }, [onClose, project.id, host, queryClient]);
   const retire = useCallback(
     (stop_agents: boolean) => (idempotency_key: string) =>
       sendMutation("POST", `/api/v1/projects/${project.id}/retire`, {
         stop_agents,
+        ...hostField(project),
         idempotency_key,
       }),
-    [project.id],
+    [project],
   );
   const stopping = useAction({
-    binding: `${project.id}:retire:stop`,
+    binding: `${projectKey(project)}:retire:stop`,
     send: retire(true),
     onRecorded: recorded,
   });
   const keeping = useAction({
-    binding: `${project.id}:retire:keep`,
+    binding: `${projectKey(project)}:retire:keep`,
     send: retire(false),
     onRecorded: recorded,
   });
@@ -53,9 +65,11 @@ function ConfirmArchive({
   // A refused stop may have stopped some agents first: read what is left.
   useEffect(() => {
     if (error) {
-      void queryClient.invalidateQueries({ queryKey: projectRetireQuery(project.id).queryKey });
+      void queryClient.invalidateQueries({
+        queryKey: projectRetireQuery(project.id, host).queryKey,
+      });
     }
-  }, [error, project.id, queryClient]);
+  }, [error, project.id, host, queryClient]);
 
   const refused = preview.data?.refused ?? null;
   const agents = preview.data?.agents ?? [];
@@ -76,10 +90,13 @@ function ConfirmArchive({
 
   return (
     <ProjectDialog name="archive" pending={pending} onClose={onClose} initial={cancel}>
-      <h2 id="archive-dialog-title">Archive {project.name}?</h2>
+      <h2 id="archive-dialog-title">
+        Archive {project.name}
+        {host ? ` on ${host}` : ""}?
+      </h2>
       <p id="archive-dialog-body">
-        The project leaves the board and takes no new work. Its cards and history stay on this host,
-        and its id stays taken.
+        The project leaves the board and takes no new work. Its cards and history stay on{" "}
+        {host ?? "this host"}, and its id stays taken.
       </p>
       {preview.data ? null : failure ? null : (
         <p className="delete-note" role="status">
@@ -107,7 +124,7 @@ function ConfirmArchive({
           </p>
           <p className="delete-note">
             Or delete the project instead: that stops its agents, cancels its cards and removes it
-            from this host.
+            from {host ?? "this host"}.
           </p>
         </>
       ) : refused ? (
@@ -119,11 +136,7 @@ function ConfirmArchive({
           {failure}
         </p>
       ) : null}
-      {error ? (
-        <p className="refusal" role="alert">
-          {error.message}
-        </p>
-      ) : null}
+      <ProjectFailure error={error} />
       <div className={running && remote.length === 0 ? "dialog-actions three" : "dialog-actions"}>
         <button ref={cancel} type="button" className="btn" disabled={pending} onClick={onClose}>
           Cancel
@@ -175,17 +188,12 @@ function ConfirmArchive({
 }
 
 // The archive control in a project's actions row: the plain one, beside the
-// delete. A peer's project is archived on its own host.
-export function ArchiveProject({
-  project,
-  owner,
-}: {
-  project: Project;
-  owner: string | undefined;
-}) {
+// delete. A peer's project is archived on that peer, forwarded while its link
+// is live with the `act` scope; otherwise the control is off with the reason.
+export function ArchiveProject({ project, standing }: { project: Project; standing: Standing }) {
   // The archive's confirm step, or the delete it offers in its place.
   const [confirming, setConfirming] = useState<"archive" | "delete" | null>(null);
-  const off = owner ? `${owner} owns this project: archive it there` : undefined;
+  const off = standing.canAct ? undefined : (standing.reason ?? undefined);
   // The dialog gives focus back to the button that opened it.
   const close = useCallback(() => {
     setConfirming(null);

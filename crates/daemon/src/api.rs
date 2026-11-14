@@ -863,22 +863,31 @@ pub(crate) async fn mutate(
     key: String,
     mutation: impl FnOnce(&mut Store, &Ctx, &str) -> tiller_core::Result<Done> + Send + 'static,
 ) -> ApiResult<MutationResponse> {
+    mutate_or(state, key, move |store, ctx, key| {
+        mutation(store, ctx, key).map_err(Refusal::State)
+    })
+    .await
+}
+
+/// [`mutate`] for a mutation the board can refuse as well as the store.
+async fn mutate_or(
+    state: &AppState,
+    key: String,
+    mutation: impl FnOnce(&mut Store, &Ctx, &str) -> Result<Done, Refusal> + Send + 'static,
+) -> ApiResult<MutationResponse> {
     writable(state)?;
     let db = state.db();
     let damage = state.0.damage.clone();
     let args = request_args();
     let joined = tokio::task::spawn_blocking(move || {
-        if !db.exists() {
-            return Err(uninitialized());
-        }
-        let done = Store::open_current(&db).and_then(|mut store| {
+        let done = open_for_write(&db).and_then(|mut store| {
             let ctx = board_ctx(&key, args.as_ref());
             mutation(&mut store, &ctx, &key)
         });
-        if let Err(error) = &done {
+        if let Err(Refusal::State(error)) = &done {
             damage.suspect(&db, error);
         }
-        Ok(done?)
+        done.map_err(ApiError::from)
     })
     .await;
     let done = match joined {
@@ -1441,7 +1450,8 @@ async fn quota(State(state): State<AppState>) -> ApiResult<QuotaResponse> {
 pub struct ProjectsQuery {
     /// A host id or label.
     pub host: Option<String>,
-    /// `true` lists this host's retired projects instead.
+    /// `true` lists the retired projects instead: this host's, or with
+    /// `host` that peer's, read from it.
     pub retired: Option<bool>,
 }
 
@@ -1452,9 +1462,15 @@ async fn projects(
     Query(query): Query<ProjectsQuery>,
 ) -> ApiResult<ProjectsResponse> {
     if query.retired == Some(true) {
-        // Peers cache only live projects, so the archive is this host's.
-        if query.host.is_some() {
-            return Err(ApiError::usage("retired=true lists this host only"));
+        // Peers cache only live projects, so a peer's archive is read from
+        // the peer itself, for the delete it offers (D22).
+        let path = "projects?retired=true".to_owned();
+        if let Some(mut retired) =
+            host_read(&state, query.host.as_deref(), || Ok(path), true).await?
+            && let Some(host) = query.host.as_deref()
+        {
+            views::tag_peer_projects(&state.0.peers.federation(), host, &mut retired)?;
+            return Ok(Json(retired));
         }
         return read(&state, |store| {
             views::retired_projects(store, Timestamp::now())
@@ -1878,6 +1894,17 @@ enum Parsed {
     Unpause,
     Resume,
     Relaunch(BoardRelaunch),
+    /// The project to add, and the Local checkout folder to use or clone.
+    ProjectAdd(
+        Box<tiller_core::state::projects::NewProject>,
+        Option<NewCheckout>,
+    ),
+    /// The `rev` the edit is against, and the fields it changes.
+    ProjectEdit(i64, Box<tiller_core::state::projects::ProjectEdit>),
+    /// Stop the project's running agents first.
+    ProjectRetire(bool),
+    /// The id typed again matched.
+    ProjectDelete,
 }
 
 impl Mutation {
@@ -2077,6 +2104,80 @@ impl Mutation {
                     Parsed::Relaunch(relaunch),
                 )
             }
+            Op::ProjectAdd => {
+                let request: AddProject = body(bytes)?;
+                let delivery: Delivery = request.delivery.parse()?;
+                let name = request
+                    .name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map_or_else(|| request.id.clone(), str::to_owned);
+                let new = tiller_core::state::projects::NewProject {
+                    id: request.id,
+                    name,
+                    repo: request.repo,
+                    remote: None,
+                    default_branch: None,
+                    delivery,
+                    checks: None,
+                    capacity: request.capacity,
+                    deploy_workflow: None,
+                    deploy_environment: None,
+                    deploy_timeout_minutes: None,
+                };
+                (
+                    request.idempotency_key,
+                    request.host,
+                    Parsed::ProjectAdd(Box::new(new), request.checkout),
+                )
+            }
+            Op::ProjectEdit => {
+                let request: EditProject = body(bytes)?;
+                let delivery = request
+                    .delivery
+                    .as_deref()
+                    .map(str::parse::<Delivery>)
+                    .transpose()?;
+                // An empty text clears an optional field, as `tiller project
+                // edit`'s empty flag does.
+                let clearable =
+                    |text: Option<String>| text.map(|text| Some(text).filter(|t| !t.is_empty()));
+                let edit = tiller_core::state::projects::ProjectEdit {
+                    name: request.name,
+                    repo: clearable(request.repo),
+                    remote: clearable(request.remote),
+                    default_branch: request.default_branch,
+                    delivery,
+                    checks: request.checks,
+                    capacity: request.capacity,
+                    deploy_workflow: clearable(request.deploy_workflow),
+                    deploy_environment: clearable(request.deploy_environment),
+                    deploy_timeout_minutes: request.deploy_timeout_minutes,
+                };
+                (
+                    request.idempotency_key,
+                    request.host,
+                    Parsed::ProjectEdit(request.rev, Box::new(edit)),
+                )
+            }
+            Op::ProjectRetire => {
+                let request: RetireProject = body(bytes)?;
+                (
+                    request.idempotency_key,
+                    request.host,
+                    Parsed::ProjectRetire(request.stop_agents),
+                )
+            }
+            Op::ProjectDelete => {
+                let request: DeleteProject = body(bytes)?;
+                // Checked again on the peer, against the id the frame names.
+                let id = target.as_deref().unwrap_or_default();
+                if request.confirm.trim() != id {
+                    return Err(ApiError::usage(format!("type {id} to delete the project")));
+                }
+                (request.idempotency_key, request.host, Parsed::ProjectDelete)
+            }
         };
         Ok(Self {
             op,
@@ -2230,16 +2331,20 @@ impl Mutation {
                 let (_, run) = session_run(store, id, "resume")?;
                 Done::of(store.run_unpause(ctx, &run.id)?)
             }
-            // Need the daemon's starter or the agent's pane, so they never
-            // reach the store alone.
+            Parsed::ProjectEdit(rev, edit) => Done::of(store.project_edit(ctx, id, rev, *edit)?),
+            // Need the daemon's starter, the agent's pane or this host's
+            // home, so they never reach the store alone.
             Parsed::StartOrchestrator(_)
             | Parsed::RestartStale(_)
             | Parsed::PromptAnswer(..)
             | Parsed::Interrupt
             | Parsed::Stop
             | Parsed::Resume
-            | Parsed::Relaunch(_) => Err(Error::Internal(
-                "a start, a restart or an agent control runs through its starter or its pane"
+            | Parsed::Relaunch(_)
+            | Parsed::ProjectAdd(..)
+            | Parsed::ProjectRetire(_)
+            | Parsed::ProjectDelete => Err(Error::Internal(
+                "a start, a restart, an agent control or a project add, retire or delete runs through its starter, its pane or its home"
                     .into(),
             )),
         }
@@ -2268,6 +2373,12 @@ impl Mutation {
             Parsed::Resume => resume_here(hands.controls()?, store, ctx, id),
             Parsed::Relaunch(relaunch) => {
                 relaunch_here(hands.controls()?, store, ctx, id, relaunch)
+            }
+            parsed
+            @ (Parsed::ProjectAdd(..) | Parsed::ProjectRetire(_) | Parsed::ProjectDelete) => {
+                let done =
+                    Self { parsed, ..self }.apply_project(store, ctx, hands.home, hands.panes())?;
+                return Ok(done.response());
             }
             parsed => return Self { parsed, ..self }.apply_with(store, ctx, hands.starter),
         };
@@ -2306,6 +2417,73 @@ impl Mutation {
                 }
                 Err(error)
             }
+        }
+    }
+}
+
+impl Mutation {
+    /// A project add, retire or delete (D22), the same on this host's board
+    /// and in `peer serve`: they need this host's home, for `config.toml`
+    /// and a clone, and its panes, for the agents a retire or a delete
+    /// stops.
+    fn apply_project(
+        self,
+        store: &mut Store,
+        ctx: &Ctx,
+        home: &std::path::Path,
+        panes: tiller_agents::pane::Holder<'_>,
+    ) -> Result<Done, Refusal> {
+        let id = self.target.as_deref().unwrap_or_default();
+        let waits = tiller_agents::control::Waits::default();
+        match self.parsed {
+            Parsed::ProjectAdd(new, checkout) => add_here(store, ctx, home, *new, checkout),
+            Parsed::ProjectRetire(stop_agents) => {
+                let retired = tiller_agents::control::retire_project(
+                    store,
+                    ctx,
+                    panes,
+                    &waits,
+                    id,
+                    stop_agents,
+                )
+                .map_err(|error| stopped_or(id, error))?;
+                Ok(Done::of(retired)?)
+            }
+            Parsed::ProjectDelete => {
+                let deleted = tiller_agents::control::delete_project(store, ctx, panes, &waits, id)
+                    .map_err(|error| stopped_or(id, error))?;
+                Ok(Done::of(deleted)?)
+            }
+            _ => Err(Error::Internal("not a project add, retire or delete".into()).into()),
+        }
+    }
+}
+
+/// Why a mutation that does more than store calls was refused: a store
+/// error, which the daemon checks for damage, or the board's own refusal,
+/// such as a Local checkout folder that does not suit.
+pub(crate) enum Refusal {
+    State(Error),
+    Board(ApiError),
+}
+
+impl From<Error> for Refusal {
+    fn from(error: Error) -> Self {
+        Self::State(error)
+    }
+}
+
+impl From<ApiError> for Refusal {
+    fn from(error: ApiError) -> Self {
+        Self::Board(error)
+    }
+}
+
+impl From<Refusal> for ApiError {
+    fn from(refusal: Refusal) -> Self {
+        match refusal {
+            Refusal::State(error) => error.into(),
+            Refusal::Board(error) => error,
         }
     }
 }
@@ -2366,6 +2544,8 @@ pub(crate) struct Hands<'a> {
     pub(crate) holder: Option<&'a Arc<dyn Holder>>,
     /// The input rate a prompt answer spends, as the board's own does.
     pub(crate) mirrors: &'a Mirrors,
+    /// This host's `~/.tiller`, for a project add's `config.toml` and clone.
+    pub(crate) home: &'a std::path::Path,
 }
 
 impl Hands<'_> {
@@ -2679,6 +2859,47 @@ async fn agent_read<T: for<'de> Deserialize<'de>>(
     what: &str,
     act: bool,
 ) -> Result<Option<T>, ApiError> {
+    host_read(state, host, || Ok(format!("agents/{session}/{what}")), act).await
+}
+
+/// The peer query path for project `id`, then `tail`. The peer splits the
+/// path on `/` and reads each part as it is, so an id that is not a project
+/// id is not found here, rather than sent as another path (D22).
+fn peer_project_path(id: &str, tail: &str) -> Result<String, ApiError> {
+    if ids::validate_project_id(id).is_err() {
+        return Err(Error::NotFound {
+            entity: "project",
+            id: id.to_owned(),
+            candidates: Vec::new(),
+        }
+        .into());
+    }
+    Ok(format!("projects/{id}{tail}"))
+}
+
+/// [`host_read`] of project `id`, then `tail`, which needs `act`. The id
+/// rules apply only once `host` is a peer: this host reads its own
+/// projects by any id they have.
+async fn project_read<T: for<'de> Deserialize<'de>>(
+    state: &AppState,
+    host: Option<&str>,
+    id: &str,
+    tail: &str,
+) -> Result<Option<T>, ApiError> {
+    host_read(state, host, || peer_project_path(id, tail), true).await
+}
+
+/// A one-shot read of a record on the paired peer `host` names, as a
+/// `query` on its link (`protocol.md` 10.2); `None` when `host` is this
+/// host. `path` makes the query path once `host` is a peer. `act` says the
+/// read needs the `act` scope. The answer, or the refusal, carries the
+/// peer's label.
+async fn host_read<T: for<'de> Deserialize<'de>>(
+    state: &AppState,
+    host: Option<&str>,
+    path: impl FnOnce() -> Result<String, ApiError>,
+    act: bool,
+) -> Result<Option<T>, ApiError> {
     let view = match addressed(state, host).await? {
         Addressed::Here => return Ok(None),
         Addressed::Peer(view) => view,
@@ -2691,8 +2912,7 @@ async fn agent_read<T: for<'de> Deserialize<'de>>(
     if act && view.scope != PeerScope::Act {
         return Err(ApiError::read_scope(label));
     }
-    let path = format!("agents/{session}/{what}");
-    peer_query(state, &view, path, || None)
+    peer_query(state, &view, path()?, || None)
         .await
         .map(Some)
         .map_err(|error| error.host(label))
@@ -3041,14 +3261,27 @@ fn restart_done(restarted: &RestartStaleResponse) -> Result<Done, Error> {
 }
 
 #[utoipa::path(get, path = "/api/v1/projects/{id}/delete", tag = "reads",
-    params(("id" = String, Path)),
-    responses((status = 200, body = ProjectDeletePreview), (status = 404, body = ErrorBody)))]
+    params(("id" = String, Path), HostQuery),
+    responses((status = 200, body = ProjectDeletePreview), (status = 404, body = ErrorBody),
+              (status = 503, body = ErrorBody, description = "`peer_unreachable`: the peer `host` names did not answer")))]
 async fn project_delete_preview(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<HostQuery>,
 ) -> ApiResult<ProjectDeletePreview> {
-    let preview = read(&state, move |store| store.project_delete_preview(&id)).await?;
-    Ok(Json(ProjectDeletePreview {
+    if let Some(preview) = project_read(&state, query.host.as_deref(), &id, "/delete").await? {
+        return Ok(Json(preview));
+    }
+    read(&state, move |store| delete_preview(store, &id))
+        .await
+        .map(Json)
+}
+
+/// What deleting project `id` would remove, and what blocks it, as the
+/// board and a peer's query read it.
+pub(crate) fn delete_preview(store: &Store, id: &str) -> tiller_core::Result<ProjectDeletePreview> {
+    let preview = store.project_delete_preview(id)?;
+    Ok(ProjectDeletePreview {
         project: preview.deletion.project,
         removed: preview.deletion.removed,
         unlinked: preview.deletion.unlinked,
@@ -3079,7 +3312,7 @@ async fn project_delete_preview(
                 url: pr.url,
             })
             .collect(),
-    }))
+    })
 }
 
 fn delete_action(action: tiller_core::state::deletion::UnblockAction) -> DeleteAction {
@@ -3135,25 +3368,7 @@ async fn delete_project(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers).await?;
-    let request: DeleteProject = body(&bytes)?;
-    not_forwarded(&state, request.host.as_deref(), "a project delete").await?;
-    if request.confirm.trim() != id {
-        return Err(ApiError::usage(format!("type {id} to delete the project")));
-    }
-    let holder = state.0.holder.clone();
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, _| {
-            let waits = tiller_agents::control::Waits::default();
-            let deleted =
-                tiller_agents::control::delete_project(store, ctx, panes(&holder), &waits, &id)
-                    .map_err(|error| stopped_or(&id, error))?;
-            Done::of(deleted)
-        },
-    )
-    .await
+    submit_project(state, headers, Op::ProjectDelete, Some(id), bytes).await
 }
 
 #[utoipa::path(post, path = "/api/v1/projects", tag = "mutations", request_body = AddProject,
@@ -3166,76 +3381,105 @@ async fn add_project(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
+    submit_project(state, headers, Op::ProjectAdd, None, bytes).await
+}
+
+/// A project add, retire or delete (D22): applied here, or with a peer
+/// `host`, forwarded to it. In its own task: a browser that goes away
+/// mid-clone does not leave a clone with no project, or a project with no
+/// checkout, and a forwarded one still gets its answer.
+async fn submit_project(
+    state: AppState,
+    headers: HeaderMap,
+    op: Op,
+    target: Option<String>,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
     guard(&state, &headers).await?;
-    let request: AddProject = body(&bytes)?;
-    not_forwarded(&state, request.host.as_deref(), "a project add").await?;
-    let delivery: Delivery = request.delivery.parse()?;
-    let key = key(&request.idempotency_key)?;
-    let name = request
-        .name
-        .as_deref()
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map_or_else(|| request.id.clone(), str::to_owned);
-    let new = tiller_core::state::projects::NewProject {
-        id: request.id,
-        name,
-        repo: request.repo,
-        remote: None,
-        default_branch: None,
-        delivery,
-        checks: None,
-        capacity: request.capacity,
-        deploy_workflow: None,
-        deploy_environment: None,
-        deploy_timeout_minutes: None,
-    };
-    let Some(checkout) = request.checkout else {
-        return add_numbered(&state, key, new, None).await;
+    let mutation = Mutation::parse(op, target, &bytes)?;
+    if let Some(view) = peer_for(&state, mutation.host()).await? {
+        return detached(async move { forward(&state, &view, mutation, &bytes).await }).await;
+    }
+    detached(async move {
+        let (home, holder) = (state.0.home.clone(), state.0.holder.clone());
+        let key = mutation.key.clone();
+        mutate_or(&state, key, move |store, ctx, _| {
+            mutation.apply_project(store, ctx, &home, panes(&holder))
+        })
+        .await
+    })
+    .await
+}
+
+/// Add project on `store`, as the board and a forwarded add run it: with a
+/// Local checkout, the folder checked and the clone it asks for run, then
+/// `project.add` and `checkouts.<id>`. A clone is taken back when the add
+/// is refused. A retry of an add that landed replays it, with no clone.
+fn add_here(
+    store: &mut Store,
+    ctx: &Ctx,
+    home: &std::path::Path,
+    new: tiller_core::state::projects::NewProject,
+    checkout: Option<NewCheckout>,
+) -> Result<Done, Refusal> {
+    let checkout = match checkout {
+        Some(checkout) if !store.key_recorded(ctx)? => checkout,
+        _ => return Ok(add_numbered(store, ctx, home, new, None)?),
     };
     // The default folder is named after the id, so it is checked first.
     ids::validate_project_id(&new.id)?;
-    writable(&state)?;
-    // Its own task: a browser that goes away mid-clone does not leave a
-    // clone with no project, or a project with no checkout.
-    detached(add_with_checkout(state, key, new, checkout)).await
-}
-
-/// Add project with a Local checkout: the folder checked, the clone it
-/// asks for run, then `project.add` and `checkouts.<id>`. A clone is taken
-/// back when the add is refused.
-async fn add_with_checkout(
-    state: AppState,
-    key: String,
-    new: tiller_core::state::projects::NewProject,
-    checkout: NewCheckout,
-) -> ApiResult<MutationResponse> {
-    let home = state.0.home.clone();
-    let plan = {
-        let (id, repo) = (new.id.clone(), new.repo.clone());
-        read(&state, move |store| {
-            Ok(checkout_plan(store, &home, &id, repo.as_deref(), &checkout))
-        })
-        .await??
+    let plan = checkout_plan(store, home, &new.id, new.repo.as_deref(), &checkout)?;
+    let path = plan.path().to_path_buf();
+    let cloned = tiller_agents::checkout::clone(
+        &plan,
+        tiller_agents::checkout::CLONE_LIMIT,
+        &clone_locks(home),
+    )
+    .map_err(checkout_refused)?;
+    let Some(cloned) = cloned else {
+        return Ok(add_numbered(store, ctx, home, new, Some(path))?);
     };
-    let undo = {
-        let plan = plan.clone();
-        tokio::task::spawn_blocking(move || {
-            tiller_agents::checkout::clone(&plan, tiller_agents::checkout::CLONE_LIMIT)
-        })
-        .await
-        .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
-        .map_err(checkout_refused)?
+    // A clone can take minutes: the project is added when it is done, not
+    // when it was asked for, with `state.db` opened again. The claim on the
+    // folder is held until the add is done or the clone taken back, so a
+    // retry that comes meanwhile, from this process or another `peer
+    // serve`, is refused; one after it sees the key.
+    let ctx = &Ctx {
+        now: Timestamp::now(),
+        ..ctx.clone()
     };
-    let done = add_numbered(&state, key, new, Some(plan.path().to_path_buf())).await;
-    if done.is_err()
-        && let Some(undo) = undo
-    {
-        // Taking back a whole clone is disk work: off the runtime, and done
-        // before the refusal is answered.
-        let _ = tokio::task::spawn_blocking(move || undo.run()).await;
+    let done = reopened(home)
+        .and_then(|mut store| Ok(add_numbered(&mut store, ctx, home, new, Some(path))?));
+    if done.is_err() {
+        // Done before the refusal is answered.
+        cloned.undo.run();
     }
     done
+}
+
+/// Where the locks a clone holds on its folder live: in the tiller home, so
+/// the daemon and every `peer serve` see the same ones.
+fn clone_locks(home: &std::path::Path) -> PathBuf {
+    home.join("clone-locks")
+}
+
+/// `state.db` opened for a mutation, refused while it is not there.
+fn open_for_write(db: &std::path::Path) -> Result<Store, Refusal> {
+    if !db.exists() {
+        return Err(uninitialized().into());
+    }
+    Store::open_current(db).map_err(Refusal::State)
+}
+
+/// `state.db` opened again for the write after a clone: a database
+/// restored, removed or found damaged while the clone ran is not written
+/// through the handle opened before it. The read-only marker is the check
+/// the daemon and each `peer serve` share, as the add runs in either.
+fn reopened(home: &std::path::Path) -> Result<Store, Refusal> {
+    if let Some(reason) = crate::readonly::marked(home) {
+        return Err(read_only(&reason).into());
+    }
+    open_for_write(&home.join("state.db"))
 }
 
 /// What a Local checkout folder would do for project `id`, refused as the
@@ -3246,7 +3490,7 @@ fn checkout_plan(
     id: &str,
     repo: Option<&str>,
     checkout: &NewCheckout,
-) -> Result<tiller_agents::checkout::Plan, ApiError> {
+) -> Result<tiller_agents::checkout::Plan, Refusal> {
     let config = config_toml::load(&home.join("config.toml")).map_err(|error| {
         ApiError::from(Error::Unavailable(format!(
             "{error}; fix it before setting a checkout"
@@ -3261,21 +3505,25 @@ fn checkout_plan(
         clone: checkout.clone,
         root: root.as_deref(),
         home: user_home.as_deref(),
+        locks: &clone_locks(home),
     })
     .map_err(checkout_refused)?;
     // A clone for an id that is taken would be taken back at once.
     if matches!(plan, tiller_agents::checkout::Plan::Clone { .. }) {
         match store.project(id) {
             Ok(_) => {
-                return Err(Error::Refused {
-                    entity: "project",
-                    id: id.to_owned(),
-                    fact: "project id is taken".into(),
-                }
-                .into());
+                return Err(Refusal::Board(
+                    Error::Refused {
+                        entity: "project",
+                        id: id.to_owned(),
+                        fact: "project id is taken".into(),
+                    }
+                    .into(),
+                ));
             }
             Err(Error::NotFound { .. }) => {}
-            Err(error) => return Err(error.into()),
+            // A store error stays one, so the store is checked for damage.
+            Err(error) => return Err(Refusal::State(error)),
         }
     }
     Ok(plan)
@@ -3303,60 +3551,42 @@ fn checkout_refused(error: tiller_agents::checkout::CheckoutError) -> ApiError {
 /// `project.add`, then `checkouts.<id>` when a checkout is given. The key
 /// is written after the add, so a refused add leaves `config.toml` as it
 /// was; a key that cannot be written is a warning on the added project.
-async fn add_numbered(
-    state: &AppState,
-    key: String,
+fn add_numbered(
+    store: &mut Store,
+    ctx: &Ctx,
+    home: &std::path::Path,
     new: tiller_core::state::projects::NewProject,
     checkout: Option<PathBuf>,
-) -> ApiResult<MutationResponse> {
-    let home = state.0.home.clone();
-    let (new, numbering, note) = {
-        let (home, checkout) = (home.clone(), checkout.clone());
-        read(state, move |store| {
-            // A config.toml that does not parse only hides the checkout: the
-            // remote is still looked at.
-            let checkout = checkout.or_else(|| {
-                checkout_of(&home, &new.id)
-                    .ok()
-                    .flatten()
-                    .map(PathBuf::from)
-            });
-            let (numbering, note) =
-                tiller_agents::numbering::numbering(store, &new, checkout.as_deref())?;
-            Ok((new, numbering, note))
-        })
-        .await?
-    };
-    mutate(state, key, move |store, ctx, _| {
-        let id = new.id.clone();
-        let mut done = Done::of(store.project_add_numbered(ctx, new, numbering)?)?;
-        let mut notes: Vec<String> = note.into_iter().collect();
-        if let Some(path) = checkout {
-            let path = path.to_string_lossy().into_owned();
-            let config_key = format!("checkouts.{id}");
-            match write_checkout(&home, &config_key, &path) {
-                Ok(false) => {}
-                Ok(true) => match store.config_changed(
-                    &ctx.unkeyed(),
-                    &config_key,
-                    json!(path),
-                ) {
-                    Ok(applied) => done.events.extend(applied.events),
-                    Err(error) => {
-                        tracing::warn!(%error, "recording the project's checkout failed");
-                        notes.push(format!(
-                            "{config_key} is in config.toml, but its config.changed event was not recorded: {error}"
-                        ));
-                    }
-                },
-                Err(error) => notes.push(format!(
-                    "the project is added, but {config_key} could not be written ({error}); run tiller config set {config_key} {path}"
-                )),
-            }
+) -> tiller_core::Result<Done> {
+    // A config.toml that does not parse only hides the checkout: the remote
+    // is still looked at.
+    let looked = checkout
+        .clone()
+        .or_else(|| checkout_of(home, &new.id).ok().flatten().map(PathBuf::from));
+    let (numbering, note) = tiller_agents::numbering::numbering(store, &new, looked.as_deref())?;
+    let id = new.id.clone();
+    let mut done = Done::of(store.project_add_numbered(ctx, new, numbering)?)?;
+    let mut notes: Vec<String> = note.into_iter().collect();
+    if let Some(path) = checkout {
+        let path = path.to_string_lossy().into_owned();
+        let config_key = format!("checkouts.{id}");
+        match write_checkout(home, &config_key, &path) {
+            Ok(false) => {}
+            Ok(true) => match store.config_changed(&ctx.unkeyed(), &config_key, json!(path)) {
+                Ok(applied) => done.events.extend(applied.events),
+                Err(error) => {
+                    tracing::warn!(%error, "recording the project's checkout failed");
+                    notes.push(format!(
+                        "{config_key} is in config.toml, but its config.changed event was not recorded: {error}"
+                    ));
+                }
+            },
+            Err(error) => notes.push(format!(
+                "the project is added, but {config_key} could not be written ({error}); run tiller config set {config_key} {path}"
+            )),
         }
-        Ok(done.with_warning((!notes.is_empty()).then(|| notes.join("; "))))
-    })
-    .await
+    }
+    Ok(done.with_warning((!notes.is_empty()).then(|| notes.join("; "))))
 }
 
 /// Sets `key` in `<home>/config.toml` to `path`; `false` when it already was.
@@ -3385,8 +3615,11 @@ fn write_config(
     Ok(true)
 }
 
-#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::IntoParams)]
 pub struct CheckoutQuery {
+    /// A paired peer's label or id: the folder is checked on that host,
+    /// under its own `spawn.checkouts_root` (D22).
+    pub host: Option<String>,
     /// The project id; an empty Local checkout folder is named after it.
     /// Absent is the same as empty: the board drops empty parameters.
     #[serde(default)]
@@ -3405,55 +3638,77 @@ async fn project_checkout(
     State(state): State<AppState>,
     Query(query): Query<CheckoutQuery>,
 ) -> ApiResult<CheckoutCheck> {
-    let home = state.0.home.clone();
-    read(&state, move |store| {
-        let checkout = NewCheckout {
-            path: query.path.unwrap_or_default(),
-            clone: query.clone.unwrap_or(false),
-        };
-        let repo = query
-            .repo
-            .as_deref()
-            .map(str::trim)
-            .filter(|r| !r.is_empty());
-        let id = query.project.trim();
-        if checkout.path.trim().is_empty() && ids::validate_project_id(id).is_err() {
-            return Ok(Ok(CheckoutCheck {
-                path: None,
-                plan: None,
-                remote: None,
-                problem: Some("fill in the id first: the folder is named after it".into()),
-            }));
-        }
-        Ok(match checkout_plan(store, &home, id, repo, &checkout) {
-            Ok(plan) => {
-                let path = Some(plan.path().to_string_lossy().into_owned());
-                Ok(match plan {
-                    tiller_agents::checkout::Plan::Use { .. } => CheckoutCheck {
-                        path,
-                        plan: Some("use".into()),
-                        remote: None,
-                        problem: None,
-                    },
-                    tiller_agents::checkout::Plan::Clone { remote, .. } => CheckoutCheck {
-                        path,
-                        plan: Some("clone".into()),
-                        remote: Some(remote),
-                        problem: None,
-                    },
-                })
-            }
-            Err(error) if error.status == StatusCode::SERVICE_UNAVAILABLE => Err(error),
-            Err(error) => Ok(CheckoutCheck {
-                path: None,
-                plan: None,
-                remote: None,
-                problem: Some(error.body.error.message.clone()),
-            }),
+    if query.host.is_some() {
+        // The parameters as the board sent them, but `host`: the peer reads
+        // them as this host would.
+        let params = serde_urlencoded::to_string(CheckoutQuery {
+            host: None,
+            ..query.clone()
         })
-    })
-    .await?
-    .map(Json)
+        .map_err(|error| ApiError::from(Error::Usage(format!("the checkout query: {error}"))))?;
+        let path = format!("projects/checkout?{params}");
+        if let Some(check) = host_read(&state, query.host.as_deref(), || Ok(path), true).await? {
+            return Ok(Json(check));
+        }
+    }
+    let home = state.0.home.clone();
+    read(&state, move |store| Ok(checkout_check(store, &home, query)))
+        .await?
+        .map(Json)
+}
+
+/// What Add project would do with a Local checkout folder on this host, as
+/// the board and a peer's query check it. 503 when `config.toml` does not
+/// parse; any other refusal is the `problem`.
+pub(crate) fn checkout_check(
+    store: &Store,
+    home: &std::path::Path,
+    query: CheckoutQuery,
+) -> Result<CheckoutCheck, ApiError> {
+    let checkout = NewCheckout {
+        path: query.path.unwrap_or_default(),
+        clone: query.clone.unwrap_or(false),
+    };
+    let repo = query
+        .repo
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty());
+    let id = query.project.trim();
+    if checkout.path.trim().is_empty() && ids::validate_project_id(id).is_err() {
+        return Ok(CheckoutCheck {
+            path: None,
+            plan: None,
+            remote: None,
+            problem: Some("fill in the id first: the folder is named after it".into()),
+        });
+    }
+    match checkout_plan(store, home, id, repo, &checkout).map_err(ApiError::from) {
+        Ok(plan) => {
+            let path = Some(plan.path().to_string_lossy().into_owned());
+            Ok(match plan {
+                tiller_agents::checkout::Plan::Use { .. } => CheckoutCheck {
+                    path,
+                    plan: Some("use".into()),
+                    remote: None,
+                    problem: None,
+                },
+                tiller_agents::checkout::Plan::Clone { remote, .. } => CheckoutCheck {
+                    path,
+                    plan: Some("clone".into()),
+                    remote: Some(remote),
+                    problem: None,
+                },
+            })
+        }
+        Err(error) if error.status == StatusCode::SERVICE_UNAVAILABLE => Err(error),
+        Err(error) => Ok(CheckoutCheck {
+            path: None,
+            plan: None,
+            remote: None,
+            problem: Some(error.body.error.message.clone()),
+        }),
+    }
 }
 
 /// What Add a host reads before it reaches the new host.
@@ -3779,18 +4034,31 @@ fn paired_done(
 }
 
 #[utoipa::path(get, path = "/api/v1/projects/{id}/retire", tag = "reads",
-    params(("id" = String, Path)),
-    responses((status = 200, body = ProjectRetirePreview), (status = 404, body = ErrorBody)))]
+    params(("id" = String, Path), HostQuery),
+    responses((status = 200, body = ProjectRetirePreview), (status = 404, body = ErrorBody),
+              (status = 503, body = ErrorBody, description = "`peer_unreachable`: the peer `host` names did not answer")))]
 async fn project_retire_preview(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<HostQuery>,
 ) -> ApiResult<ProjectRetirePreview> {
-    let preview = read(&state, move |store| store.project_retire_preview(&id)).await?;
-    Ok(Json(ProjectRetirePreview {
+    if let Some(preview) = project_read(&state, query.host.as_deref(), &id, "/retire").await? {
+        return Ok(Json(preview));
+    }
+    read(&state, move |store| retire_preview(store, &id))
+        .await
+        .map(Json)
+}
+
+/// What retiring project `id` would stop, and what blocks it, as the board
+/// and a peer's query read it.
+pub(crate) fn retire_preview(store: &Store, id: &str) -> tiller_core::Result<ProjectRetirePreview> {
+    let preview = store.project_retire_preview(id)?;
+    Ok(ProjectRetirePreview {
         project: preview.project,
         refused: preview.refused,
         agents: preview.agents.into_iter().map(project_agent).collect(),
-    }))
+    })
 }
 
 #[utoipa::path(get, path = "/api/v1/projects/{id}/setup", tag = "reads",
@@ -3822,31 +4090,40 @@ async fn project_setup(
 }
 
 #[utoipa::path(get, path = "/api/v1/projects/{id}", tag = "reads",
-    params(("id" = String, Path)),
-    responses((status = 200, body = ProjectFields), (status = 404, body = ErrorBody)))]
+    params(("id" = String, Path), HostQuery),
+    responses((status = 200, body = ProjectFields), (status = 404, body = ErrorBody),
+              (status = 503, body = ErrorBody, description = "`peer_unreachable`: the peer `host` names did not answer")))]
 async fn project_fields(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<HostQuery>,
 ) -> ApiResult<ProjectFields> {
-    read(&state, move |store| {
-        let project = store.project(&id)?;
-        Ok(ProjectFields {
-            id: project.id,
-            name: project.name,
-            repo: project.repo,
-            remote: project.remote,
-            default_branch: project.default_branch,
-            delivery: project.delivery.to_string(),
-            checks: project.checks,
-            capacity: project.capacity,
-            deploy_workflow: project.deploy_workflow,
-            deploy_environment: project.deploy_environment,
-            deploy_timeout_minutes: project.deploy_timeout_minutes,
-            rev: project.rev,
-        })
+    if let Some(fields) = project_read(&state, query.host.as_deref(), &id, "").await? {
+        return Ok(Json(fields));
+    }
+    read(&state, move |store| fields_of(store, &id))
+        .await
+        .map(Json)
+}
+
+/// Project `id`'s fields as Edit project shows them, with the `rev` an edit
+/// is against.
+pub(crate) fn fields_of(store: &Store, id: &str) -> tiller_core::Result<ProjectFields> {
+    let project = store.project(id)?;
+    Ok(ProjectFields {
+        id: project.id,
+        name: project.name,
+        repo: project.repo,
+        remote: project.remote,
+        default_branch: project.default_branch,
+        delivery: project.delivery.to_string(),
+        checks: project.checks,
+        capacity: project.capacity,
+        deploy_workflow: project.deploy_workflow,
+        deploy_environment: project.deploy_environment,
+        deploy_timeout_minutes: project.deploy_timeout_minutes,
+        rev: project.rev,
     })
-    .await
-    .map(Json)
 }
 
 #[utoipa::path(patch, path = "/api/v1/projects/{id}", tag = "mutations", request_body = EditProject,
@@ -3862,36 +4139,7 @@ async fn edit_project(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers).await?;
-    let request: EditProject = body(&bytes)?;
-    not_forwarded(&state, request.host.as_deref(), "a project edit").await?;
-    let delivery = request
-        .delivery
-        .as_deref()
-        .map(str::parse::<Delivery>)
-        .transpose()?;
-    // An empty text clears an optional field, as `tiller project edit`'s
-    // empty flag does.
-    let clearable = |text: Option<String>| text.map(|text| Some(text).filter(|t| !t.is_empty()));
-    let edit = tiller_core::state::projects::ProjectEdit {
-        name: request.name,
-        repo: clearable(request.repo),
-        remote: clearable(request.remote),
-        default_branch: request.default_branch,
-        delivery,
-        checks: request.checks,
-        capacity: request.capacity,
-        deploy_workflow: clearable(request.deploy_workflow),
-        deploy_environment: clearable(request.deploy_environment),
-        deploy_timeout_minutes: request.deploy_timeout_minutes,
-    };
-    let rev = request.rev;
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, _| Done::of(store.project_edit(ctx, &id, rev, edit)?),
-    )
-    .await
+    submit(&state, &headers, Op::ProjectEdit, Some(id), &bytes).await
 }
 
 #[utoipa::path(get, path = "/api/v1/projects/{id}/grants", tag = "reads",
@@ -4418,29 +4666,7 @@ async fn retire_project(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers).await?;
-    let request: RetireProject = body(&bytes)?;
-    not_forwarded(&state, request.host.as_deref(), "a project retire").await?;
-    let holder = state.0.holder.clone();
-    let stop_agents = request.stop_agents;
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, _| {
-            let waits = tiller_agents::control::Waits::default();
-            let retired = tiller_agents::control::retire_project(
-                store,
-                ctx,
-                panes(&holder),
-                &waits,
-                &id,
-                stop_agents,
-            )
-            .map_err(|error| stopped_or(&id, error))?;
-            Done::of(retired)
-        },
-    )
-    .await
+    submit_project(state, headers, Op::ProjectRetire, Some(id), bytes).await
 }
 
 #[utoipa::path(post, path = "/api/v1/interventions/{id}/label", tag = "mutations", request_body = RelabelBody,
@@ -9561,8 +9787,8 @@ pub(crate) mod tests {
     }
 
     /// The board's Archived list: a retired project leaves the projects
-    /// read and shows on `?retired=true`, which lists this host only, and
-    /// its delete still works from there.
+    /// read and shows on `?retired=true`, and its delete still works from
+    /// there.
     #[tokio::test]
     async fn retired_projects_list_apart_and_still_delete() {
         let mut fleet = Fleet::new();
@@ -9611,8 +9837,9 @@ pub(crate) mod tests {
         assert_eq!(ids(&archived.body), ["gamma"], "{}", archived.body);
         let body: Value = serde_json::from_str(&archived.body).unwrap();
         assert!(body["projects"][0]["retired_at"].is_string(), "{body}");
+        // A peer's archive is read from the peer itself (D22).
         let peer = get(&app, "/api/v1/projects?retired=true&host=laptop").await;
-        assert_eq!(peer.status, StatusCode::BAD_REQUEST, "{}", peer.body);
+        assert_eq!(peer.status, StatusCode::NOT_FOUND, "{}", peer.body);
 
         let cookie = owner_cookie(home);
         let deleted = send(
@@ -13501,6 +13728,43 @@ pub(crate) mod tests {
         assert!(
             committed == generated,
             "contract/openapi.json is stale: run TILLER_WRITE_CONTRACT=1 cargo nextest run -p tiller-daemon contract"
+        );
+    }
+
+    #[test]
+    fn a_peer_project_path_takes_only_a_project_id() {
+        assert_eq!(
+            peer_project_path("alpha-web", "/retire").unwrap(),
+            "projects/alpha-web/retire"
+        );
+        for id in ["alpha/retire", "alpha?before=1", "../doctor", "Alpha"] {
+            let refused = peer_project_path(id, "").unwrap_err();
+            assert_eq!(refused.status, StatusCode::NOT_FOUND, "{id}");
+        }
+    }
+
+    #[test]
+    fn a_forwarded_checkout_query_is_encoded_without_host() {
+        let query = CheckoutQuery {
+            host: Some("peer".into()),
+            project: "alpha".into(),
+            repo: Some("example/alpha".into()),
+            path: Some("/home/user/src/a&b=c".into()),
+            clone: Some(true),
+        };
+        let params = serde_urlencoded::to_string(CheckoutQuery {
+            host: None,
+            ..query.clone()
+        })
+        .unwrap();
+        assert!(!params.contains("host"), "{params}");
+        let read: CheckoutQuery = serde_urlencoded::from_str(&params).unwrap();
+        assert_eq!(
+            read,
+            CheckoutQuery {
+                host: None,
+                ..query
+            }
         );
     }
 }

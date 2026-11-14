@@ -202,9 +202,10 @@ export const awayBriefQuery = () =>
 export const projectsPath: QueryPath = "/api/v1/projects";
 export const projectsQuery = () => readQuery<ProjectsResponse>(projectsPath);
 
-// This host's archived (retired) projects, which only a delete still touches.
-export const retiredProjectsQuery = () =>
-  readQuery<ProjectsResponse>(withParams(projectsPath, { retired: "true" }));
+// The archived (retired) projects of this host, or with `host` of that peer:
+// only a delete still touches them.
+export const retiredProjectsQuery = (host?: string) =>
+  readQuery<ProjectsResponse>(withParams(projectsPath, { retired: "true", host }));
 
 // The prefix of every contributions read, with or without a project filter.
 export const CONTRIBUTIONS_PREFIX = "/api/v1/contributions";
@@ -215,27 +216,33 @@ export const contributionsQuery = (project?: string) =>
 
 // Counted fresh each time the delete dialog opens: it is never in the boot
 // snapshot and never shared with another read.
-export const projectDeleteQuery = (projectId: string) =>
+export const projectDeleteQuery = (projectId: string, host?: string) =>
   queryOptions({
-    ...readQuery<ProjectDeletePreview>(`/api/v1/projects/${projectId}/delete`),
+    ...readQuery<ProjectDeletePreview>(
+      withParams(`/api/v1/projects/${projectId}/delete`, { host }),
+    ),
     staleTime: 0,
     gcTime: 0,
   });
 
 // What archiving a project would do: always read fresh, like the delete's.
-export const projectRetireQuery = (projectId: string) =>
+export const projectRetireQuery = (projectId: string, host?: string) =>
   queryOptions({
-    ...readQuery<ProjectRetirePreview>(`/api/v1/projects/${projectId}/retire`),
+    ...readQuery<ProjectRetirePreview>(
+      withParams(`/api/v1/projects/${projectId}/retire`, { host }),
+    ),
     staleTime: 0,
     gcTime: 0,
   });
 
-// What Add project would do with a local checkout, asked as the owner types.
+// What Add project would do with a Local checkout folder, asked as the owner
+// types: on this host, or with `host` on that peer, under its own root.
 export const projectCheckoutQuery = (params: {
   project: string;
   repo: string;
   path: string;
   clone: boolean;
+  host?: string;
 }) =>
   queryOptions({
     ...readQuery<CheckoutCheck>(
@@ -244,6 +251,7 @@ export const projectCheckoutQuery = (params: {
         repo: params.repo,
         path: params.path,
         clone: params.clone ? "true" : undefined,
+        host: params.host,
       }),
     ),
     staleTime: 0,
@@ -269,11 +277,12 @@ export const projectSetupPath = (projectId: string): QueryPath =>
 export const projectSetupQuery = (projectId: string) =>
   queryOptions({ ...readQuery<ProjectSetup>(projectSetupPath(projectId)), staleTime: 0 });
 
-// One of this host's projects as the Edit tab shows it. The dialog reads it
+// A project as the Edit tab shows it, with `host` a peer's. The dialog reads it
 // fresh each time it opens, and a `project` event refreshes it (lib/sse.ts).
-export const projectFieldsPath = (projectId: string): QueryPath => `/api/v1/projects/${projectId}`;
-export const projectFieldsQuery = (projectId: string) =>
-  queryOptions({ ...readQuery<ProjectFields>(projectFieldsPath(projectId)), staleTime: 0 });
+export const projectFieldsPath = (projectId: string, host?: string): QueryPath =>
+  withParams(`/api/v1/projects/${projectId}`, { host });
+export const projectFieldsQuery = (projectId: string, host?: string) =>
+  queryOptions({ ...readQuery<ProjectFields>(projectFieldsPath(projectId, host)), staleTime: 0 });
 
 // Every grant of one of this host's projects, live and ended. A `grant` event
 // refreshes it, and so does an `approval` one, which moves a grant's uses

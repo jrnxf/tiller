@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 
 import type { Project } from "../../lib/api-types";
+import { ownerOf } from "../../lib/peers";
 import { Segmented } from "../ui/segmented";
 import { ProjectDialog } from "./project-dialog";
 import { EditProject } from "./project-edit";
@@ -11,7 +12,9 @@ type Tab = "grants" | "edit";
 // One project's settings on this host, as tabs: its grants, as
 // `tiller grant create` and `tiller grant revoke` manage them, and the fields
 // `tiller project edit` sets. The dialog opens on the grants, so the whole
-// policy is in view before one more grant joins it.
+// policy is in view before one more grant joins it. A peer's project shows its
+// fields alone: the edit is forwarded to that peer (D22), and grants stay on
+// their own host.
 export function ProjectSettings({
   project,
   onClose,
@@ -24,6 +27,7 @@ export function ProjectSettings({
   // The fleet project merges nothing, so it has no grants: only the fields.
   editOnly?: boolean;
 }) {
+  const host = ownerOf(project);
   const newGrant = useRef<HTMLButtonElement>(null);
   const firstField = useRef<HTMLInputElement>(null);
   const [pending, setPending] = useState(false);
@@ -39,7 +43,10 @@ export function ProjectSettings({
       onClose={onClose}
       initial={editOnly ? firstField : newGrant}
     >
-      <h2 id="project-settings-dialog-title">{project.name}</h2>
+      <h2 id="project-settings-dialog-title">
+        {project.name}
+        {host ? ` on ${host}` : ""}
+      </h2>
       {editOnly ? null : (
         <Segmented
           className="ps-tabs"
@@ -64,8 +71,8 @@ export function ProjectSettings({
       {editSeen ? (
         <div hidden={tab !== "edit"}>
           <p className="ps-edit-intro">
-            Changes this project on this host, as <code>tiller project edit</code> does. The id{" "}
-            <code>{project.id}</code> stays fixed.
+            Changes this project on {host ?? "this host"}, as <code>tiller project edit</code> does.
+            The id <code>{project.id}</code> stays fixed.
           </p>
           <EditProject
             project={project}

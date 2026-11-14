@@ -14,6 +14,15 @@ use rusqlite::{Connection, OpenFlags};
 use tiller_core::Error;
 use tiller_core::error::{DAMAGED_PREFIX, READ_ONLY_MARKER};
 
+/// Why `<home>/read-only` says the daemon is read-only, when it does: what a
+/// process with no [`Damage`] of its own, such as `peer serve` or a write
+/// after a long clone, goes by.
+pub fn marked(home: &Path) -> Option<String> {
+    std::fs::read_to_string(home.join(READ_ONLY_MARKER))
+        .ok()
+        .map(|reason| reason.trim().to_owned())
+}
+
 /// Whether the live database is damaged, and why. Cheap to clone; every
 /// clone sees the same answer.
 #[derive(Clone, Default)]

@@ -237,6 +237,14 @@ impl Hello {
 /// proposed, so it is this one constant.
 pub const PROOF_WAIT: Duration = Duration::from_secs(60);
 
+/// How long the board host waits for the `result` of a forwarded project
+/// add, retire or delete (`protocol.md` 10.3 step 6, D22): an add may clone
+/// for up to [`tiller_agents::checkout::CLONE_LIMIT`], and a retire or a
+/// delete stops each live agent in turn. The clone limit, plus a minute for
+/// the add and the link.
+pub const PROJECT_WAIT: Duration =
+    Duration::from_secs(tiller_agents::checkout::CLONE_LIMIT.as_secs() + 60);
+
 /// Every interval a link keeps (`protocol.md` 10.2). Tests shrink them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Timing {
@@ -256,6 +264,9 @@ pub struct Timing {
     /// How long a forwarded agent verb that waits for its proof waits for
     /// its `result` ([`PROOF_WAIT`]).
     pub proof: Duration,
+    /// How long a forwarded project add, retire or delete waits for its
+    /// `result` ([`PROJECT_WAIT`]).
+    pub project: Duration,
     /// How far a `hello`'s `ts` may be from the peer's clock.
     pub skew: Duration,
     /// Reconnect delays; the last repeats.
@@ -284,6 +295,7 @@ impl Default for Timing {
             refresh: s(2),
             query: s(10),
             proof: PROOF_WAIT,
+            project: PROJECT_WAIT,
             skew: s(120),
             backoff: [s(5), s(15), s(30), s(60)],
             refused_retry: s(60),

@@ -2,9 +2,9 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 
-import type { Project, ProjectFields, ProjectsResponse } from "../../lib/api-types";
+import type { Machine, Project, ProjectFields, ProjectsResponse } from "../../lib/api-types";
 import { fixtureResponses } from "../../lib/fixtures";
-import { projectsPath } from "../../lib/queries";
+import { machinesPath, projectsPath, queryKeyFor } from "../../lib/queries";
 import { ProjectDetail } from "./project-stage";
 import { createTestQueryClient } from "../../test-app";
 
@@ -35,15 +35,18 @@ const FIELDS: ProjectFields = {
 };
 
 // The project the daemon stands in for, and every PATCH it is sent. `other`
-// is an edit made elsewhere before the first save.
-function serve(other?: Partial<ProjectFields>) {
+// is an edit made elsewhere before the first save. A read of the peer
+// host-b's copy (`?host=host-b`) is answered from the same project, and
+// lands in `reads`.
+function serve(other?: Partial<ProjectFields>, reads: string[] = []) {
   let stored = { ...FIELDS };
   let otherPending = other;
   const patches: Record<string, unknown>[] = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const path = String(input);
+      reads.push(String(input));
+      const path = String(input).replace("?host=host-b", "");
       if (path === "/api/v1/session") return json({ owner: true });
       if (path.endsWith("/setup")) {
         return json({
@@ -75,7 +78,7 @@ function serve(other?: Partial<ProjectFields>) {
             409,
           );
         }
-        const { rev: _rev, idempotency_key: _key, ...changes } = body;
+        const { rev: _rev, idempotency_key: _key, host: _host, ...changes } = body;
         stored = { ...stored, ...(changes as Partial<ProjectFields>), rev: stored.rev + 1 };
         return json({
           ok: true,
@@ -93,9 +96,30 @@ function serve(other?: Partial<ProjectFields>) {
   return patches;
 }
 
-function renderDetail(project: Project = alpha) {
+// host-b as the Machines read lists it: live with the `act` scope unless
+// `machine` says otherwise.
+function peerB(machine: Partial<Machine> = {}): Machine {
+  return {
+    id: "host-b-id",
+    label: "host-b",
+    kind: "remote",
+    view_only: false,
+    running_agents: null,
+    capacity: null,
+    free_slots: null,
+    last_seen_at: "2026-11-13T10:00:00Z",
+    stale_reason: null,
+    link: "live",
+    peer_scope: "act",
+    ...machine,
+  } as Machine;
+}
+
+function renderDetail(project: Project = alpha, machines: Machine[] = []) {
+  const client = createTestQueryClient();
+  client.setQueryData(queryKeyFor(machinesPath), { machines });
   render(
-    <QueryClientProvider client={createTestQueryClient()}>
+    <QueryClientProvider client={client}>
       <ProjectDetail project={project} id="detail" />
     </QueryClientProvider>,
   );
@@ -189,14 +213,81 @@ test("a project changed elsewhere is not overwritten: the dialog says what moved
   });
 });
 
-test("a project a peer owns is edited on that host", async () => {
+const onB: Project = { ...alpha, host: "host-b", link: "live" };
+
+test("a peer's project is edited from here: the read and the save go to that peer", async () => {
+  const reads: string[] = [];
+  const patches = serve(undefined, reads);
+  renderDetail(onB, [peerB()]);
+  // Grants stay on their own host, so the button opens the fields alone.
+  expect(screen.queryByRole("button", { name: "Grants and settings" })).toBeNull();
+  fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "alpha on host-b" }));
+  expect(dialog.getByText(/Changes this project on host-b/)).toBeTruthy();
+  expect(dialog.queryByRole("button", { name: "Grants" })).toBeNull();
+  await dialog.findByLabelText("Name");
+  expect(reads).toContain("/api/v1/projects/alpha?host=host-b");
+  expect(reads.some((path) => path.includes("/grants"))).toBe(false);
+
+  fireEvent.click(dialog.getByRole("button", { name: "One slot more" }));
+  fireEvent.click(dialog.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(patches).toEqual([
+    { capacity: 3, rev: alpha.rev, host: "host-b", idempotency_key: expect.any(String) },
+  ]);
+});
+
+test("a peer's refusal of an edit names the peer", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === "/api/v1/session") return json({ owner: true });
+      if (path === "/api/v1/projects/alpha" && init?.method === "PATCH") {
+        return json(
+          {
+            ok: false,
+            error: { code: "refused", message: "project alpha is retired", host: "host-b" },
+          },
+          422,
+        );
+      }
+      if (path === "/api/v1/projects/alpha?host=host-b") return json(FIELDS);
+      return json({}, 404);
+    }),
+  );
+  renderDetail(onB, [peerB()]);
+  fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "alpha on host-b" }));
+  await dialog.findByLabelText("Name");
+  fireEvent.click(dialog.getByRole("button", { name: "One slot more" }));
+  fireEvent.click(dialog.getByRole("button", { name: "Save" }));
+  expect((await dialog.findByRole("alert")).textContent).toBe(
+    "host-b refused it: project alpha is retired",
+  );
+});
+
+test("a peer the board cannot act on shows Edit, Archive and Delete off, with the reason", async () => {
   serve();
-  renderDetail({ ...alpha, host: "host-b", link: "live" });
-  const button = (await screen.findByRole("button", {
-    name: "Grants and settings",
-  })) as HTMLButtonElement;
-  expect(button.disabled).toBe(true);
-  expect(button.title).toBe("host-b owns this project: edit it there");
+  const cases: [Machine, string, string][] = [
+    [peerB({ peer_scope: "read" }), "view only pairing", "host-b: view only pairing"],
+    [
+      peerB({ link: "down" }),
+      "host-b is unreachable since Fri 10:00",
+      "host-b is unreachable since Fri 10:00",
+    ],
+  ];
+  for (const [machine, reason, shown] of cases) {
+    renderDetail({ ...onB, link: machine.link ?? null }, [machine]);
+    // A tooltip does not show on a touch screen, so the panel says it too.
+    expect(await screen.findByText(shown, { selector: ".pdetail-off" })).toBeTruthy();
+    for (const name of ["Edit", "Archive", "Delete"]) {
+      const button = (await screen.findByRole("button", { name })) as HTMLButtonElement;
+      expect(button.disabled).toBe(true);
+      expect(button.title).toBe(reason);
+    }
+    cleanup();
+  }
 });
 
 test("the fleet project has an Edit button that opens the fields alone, with no grants", async () => {

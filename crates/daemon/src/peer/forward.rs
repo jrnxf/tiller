@@ -26,7 +26,8 @@ use crate::mirror::Mirrors;
 // -- the allowlist ----------------------------------------------------------------
 
 /// A mutation the board may forward to a peer: exactly the 7.4 list, with
-/// the agent verbs of `authority.md` G46. `stage`, `focus` and memory
+/// the agent verbs of `authority.md` G46 and the project add, edit, retire
+/// and delete of D22. `stage`, `focus`, grants, config and memory
 /// decisions are not on it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
@@ -54,10 +55,27 @@ pub enum Op {
     Unpause,
     Resume,
     Relaunch,
+    ProjectAdd,
+    ProjectEdit,
+    ProjectRetire,
+    ProjectDelete,
+}
+
+/// Where the peer runs a forwarded op, which also sets how long the board
+/// host waits for its `result` (`protocol.md` 10.3 step 6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lane {
+    /// On the link thread, at once: the board host waits `timing.query`.
+    Inline,
+    /// An agent verb that waits for its proof: `timing.proof`.
+    Proof,
+    /// A project add, which may clone, or a retire or delete, which stops
+    /// agents: `timing.project`.
+    Project,
 }
 
 impl Op {
-    pub const ALL: [Op; 24] = [
+    pub const ALL: [Op; 28] = [
         Op::CreateCard,
         Op::EditCard,
         Op::Comment,
@@ -82,6 +100,10 @@ impl Op {
         Op::Unpause,
         Op::Resume,
         Op::Relaunch,
+        Op::ProjectAdd,
+        Op::ProjectEdit,
+        Op::ProjectRetire,
+        Op::ProjectDelete,
     ];
 
     /// The 7.4 endpoint, as a `mutate` frame's `op` names it.
@@ -111,17 +133,23 @@ impl Op {
             Op::Unpause => "POST /api/v1/agents/{session}/unpause",
             Op::Resume => "POST /api/v1/agents/{session}/resume",
             Op::Relaunch => "POST /api/v1/agents/{session}/relaunch",
+            Op::ProjectAdd => "POST /api/v1/projects",
+            Op::ProjectEdit => "PATCH /api/v1/projects/{id}",
+            Op::ProjectRetire => "POST /api/v1/projects/{id}/retire",
+            Op::ProjectDelete => "POST /api/v1/projects/{id}/delete",
         }
     }
 
-    /// True for a verb that waits for its proof on the peer, so the board
-    /// host waits [`super::PROOF_WAIT`] for its `result`, not the query
+    /// Where the peer runs the op. A verb that waits for its proof makes
+    /// the board host wait [`super::PROOF_WAIT`] for its `result`, and a
+    /// project add, retire or delete [`super::PROJECT_WAIT`], not the query
     /// wait (`protocol.md` 7.4).
-    pub fn waits_for_proof(self) -> bool {
-        matches!(
-            self,
-            Op::Interrupt | Op::Stop | Op::Resume | Op::Relaunch | Op::PromptAnswer
-        )
+    pub fn lane(self) -> Lane {
+        match self {
+            Op::Interrupt | Op::Stop | Op::Resume | Op::Relaunch | Op::PromptAnswer => Lane::Proof,
+            Op::ProjectAdd | Op::ProjectRetire | Op::ProjectDelete => Lane::Project,
+            _ => Lane::Inline,
+        }
     }
 
     /// The op an endpoint names; `None` for one off the allowlist.
@@ -315,6 +343,13 @@ fn target_project(store: &Store, op: Op, frame: &Mutate) -> tiller_core::Result<
             .get("project")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        // A new project's id is in the body. One another host owns already
+        // is refused here; one that does not exist yet is the add's to make.
+        Op::ProjectAdd => frame
+            .body
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         Op::Answer | Op::Withdraw => {
             match found(resolve_id(conn, "attention", "attention", target))? {
                 Some(id) => {
@@ -333,7 +368,11 @@ fn target_project(store: &Store, op: Op, frame: &Mutate) -> tiller_core::Result<
             None => None,
         },
         // The path names the project by its id, as the core calls read it.
-        Op::AskNote | Op::StartOrchestrator => Some(target.to_owned()),
+        Op::AskNote
+        | Op::StartOrchestrator
+        | Op::ProjectEdit
+        | Op::ProjectRetire
+        | Op::ProjectDelete => Some(target.to_owned()),
         // Every stale session on this host: no project to own.
         Op::RestartStale => None,
         Op::EditCard
@@ -443,6 +482,7 @@ fn applied(
         starter: config.orchestrators.as_deref(),
         holder: config.holder.as_ref(),
         mirrors,
+        home: &config.home,
     };
     mutation.apply_here(store, &ctx, &hands)
 }
@@ -474,7 +514,12 @@ mod tests {
             assert_eq!(Op::named(op.as_str()), Some(op));
         }
         for refused in [
+            // Stage, grants, config and the host stay this host's own (D22).
             "POST /api/v1/projects/{id}/stage",
+            "POST /api/v1/projects/{id}/grants",
+            "POST /api/v1/config",
+            "PATCH /api/v1/host",
+            "POST /api/v1/peers",
             "POST /api/v1/agents/{session}/focus",
             // Reads go as queries, and keys and the Fit on the pane link.
             "POST /api/v1/agents/{session}/prompt",

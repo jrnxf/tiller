@@ -2,6 +2,8 @@ import type { ReactNode, RefObject } from "react";
 
 import type { ProjectAgent } from "../../lib/api-types";
 import { ReadError } from "../../lib/queries";
+import { ActionFailure } from "../attention/action-failure";
+import type { ActionError } from "../attention/api";
 import { Modal } from "../ui/modal";
 
 // `fleet` is never deleted or archived, so it has neither control.
@@ -32,6 +34,36 @@ export function AgentList({ agents, title }: { agents: ProjectAgent[]; title: st
       </ul>
     </section>
   );
+}
+
+// The codes this host answers for a peer, in words that name the peer
+// already: its link is down, it was paired to read only, or it did not
+// answer in time.
+const SAID_HERE = new Set(["peer_unreachable", "read_scope", "forward_uncertain"]);
+
+// Why a project add, edit, archive or delete failed. A peer's refusal says
+// which host refused it (D22), unless this host said it for the peer. An
+// `internal` error is no refusal: it names the host it came from, once. A
+// forward the peer did not confirm says it may have been applied, after the
+// 11 min a clone and its stops may take, or the 10 s an `inline` edit waits.
+export function ProjectFailure({
+  error,
+  inline = false,
+}: {
+  error: ActionError | null;
+  inline?: boolean;
+}) {
+  if (!error) return null;
+  const { host, message } = error;
+  if (host && !SAID_HERE.has(error.code)) {
+    const named = message.startsWith(`${host} `) ? message : `${host}: ${message}`;
+    return (
+      <p className="refusal" role="alert">
+        {error.code === "internal" ? named : `${host} refused it: ${message}`}
+      </p>
+    );
+  }
+  return <ActionFailure error={error} host={error.host ?? undefined} project={!inline} />;
 }
 
 // Why a preview could not be read, as the dialog says it.

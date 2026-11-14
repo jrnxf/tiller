@@ -665,7 +665,7 @@ kbd {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 3px 8px;
+  gap: 3px 6px;
   color: var(--fg-1);
   font-size: var(--fs-small);
 }

@@ -1686,22 +1686,35 @@ function blockerFor(
   return unblocked;
 }
 
+// Whether a fixture project is on `host` (this host's when undefined).
+function onHost(scenario: Scenario, projectId: string, host: string | undefined, now: number) {
+  return projectsFor(scenario, now).projects.some(
+    (project) => project.id === projectId && (project.host ?? undefined) === host,
+  );
+}
+
+// The board rows of one project on `host`.
+function projectRows(board: BoardResponse, projectId: string, host: string | undefined) {
+  return board.rows.filter(
+    (row) => row.project_id === projectId && (row.host ?? undefined) === host,
+  );
+}
+
 // What deleting a fixture project would remove, counted from its board rows,
-// and the agents it stops first: a working card's builder among them.
+// and the agents it stops first: a working card's builder among them. A
+// peer's preview counts its rows as the peer would.
 function deletePreviewFor(
   scenario: Scenario,
   board: BoardResponse,
   projectId: string,
   now: number,
+  host?: string,
 ): ProjectDeletePreview | undefined {
-  const known = projectsFor(scenario, now).projects.some(
-    (project) => project.id === projectId && !project.host,
-  );
-  if (!known) return undefined;
-  const rows = board.rows.filter((row) => row.project_id === projectId && !row.host);
+  if (!onHost(scenario, projectId, host, now)) return undefined;
+  const rows = projectRows(board, projectId, host);
   const started = rows.filter((row) => row.column !== "queued");
   const working = rows.filter((row) => row.column === "working");
-  const agents = liveAgentsFor(scenario, board, projectId, now);
+  const agents = host ? [] : liveAgentsFor(scenario, board, projectId, now);
   return {
     project: projectId,
     removed: {
@@ -1742,26 +1755,25 @@ function retirePreviewFor(
   board: BoardResponse,
   projectId: string,
   now: number,
+  host?: string,
 ): ProjectRetirePreview | undefined {
-  const known = projectsFor(scenario, now).projects.some(
-    (project) => project.id === projectId && !project.host,
-  );
-  if (!known) return undefined;
-  const open = board.rows.find(
-    (row) => row.project_id === projectId && !row.host && row.column !== "done",
-  );
+  if (!onHost(scenario, projectId, host, now)) return undefined;
+  const open = projectRows(board, projectId, host).find((row) => row.column !== "done");
   return {
     project: projectId,
     refused: open ? `card ${open.display_id} is open` : null,
-    agents: liveAgentsFor(scenario, board, projectId, now),
+    agents: host ? [] : liveAgentsFor(scenario, board, projectId, now),
   };
 }
 
 // The stand-in host's `spawn.checkouts_root` and home, where the fixture's
-// own projects are checked out as `example/<id>`.
+// own projects are checked out as `example/<id>`. Each peer keeps its
+// checkouts under a root of its own, and has its gamma there.
 const CHECKOUTS_ROOT = "/home/user/src";
+const PEER_CHECKOUTS_ROOT = "/home/user/work";
 const FIXTURE_HOME = "/home/user";
 const FIXTURE_CHECKOUTS = new Set(["alpha", "beta", "gamma"]);
+const PEER_CHECKOUTS = new Set(["gamma"]);
 
 const problem = (text: string): CheckoutCheck => ({
   path: null,
@@ -1770,8 +1782,11 @@ const problem = (text: string): CheckoutCheck => ({
   problem: text,
 });
 
-// `GET /api/v1/projects/checkout`, by the daemon's rules for the folder.
-function checkoutFor(url: URL): CheckoutCheck {
+// `GET /api/v1/projects/checkout`, by the daemon's rules for the folder: a
+// peer checks it under its own root.
+function checkoutFor(url: URL, peer: boolean): CheckoutCheck {
+  const root = peer ? PEER_CHECKOUTS_ROOT : CHECKOUTS_ROOT;
+  const checkouts = peer ? PEER_CHECKOUTS : FIXTURE_CHECKOUTS;
   const project = url.searchParams.get("project") ?? "";
   const repo = url.searchParams.get("repo") ?? "";
   const given = url.searchParams.get("path") ?? "";
@@ -1780,7 +1795,7 @@ function checkoutFor(url: URL): CheckoutCheck {
     return problem("fill in the id first: the folder is named after it");
   }
   const path = !given
-    ? `${CHECKOUTS_ROOT}/${project}`
+    ? `${root}/${project}`
     : given.startsWith("~/")
       ? `${FIXTURE_HOME}/${given.slice(2)}`
       : given.replace(/\/+$/, "");
@@ -1788,13 +1803,13 @@ function checkoutFor(url: URL): CheckoutCheck {
   if (path.split("/").includes("..")) {
     return problem(`${given} has a \`..\` in it; give the folder without one`);
   }
-  if (!path.startsWith(`${CHECKOUTS_ROOT}/`)) {
+  if (!path.startsWith(`${root}/`)) {
     return problem(
-      `${path} is not under spawn.checkouts_root (${CHECKOUTS_ROOT}), where the orchestrator looks for checkouts`,
+      `${path} is not under spawn.checkouts_root (${root}), where the orchestrator looks for checkouts`,
     );
   }
-  const name = path.slice(CHECKOUTS_ROOT.length + 1);
-  const existing = FIXTURE_CHECKOUTS.has(name) ? `example/${name}` : null;
+  const name = path.slice(root.length + 1);
+  const existing = checkouts.has(name) ? `example/${name}` : null;
   if (!clone) {
     if (!existing) return problem(`nothing is at ${path}; choose Clone to make it`);
     if (repo && repo.toLowerCase() !== existing) {
@@ -1877,6 +1892,59 @@ function doctorRead(
   return peerDoctorFor(machine.label, now);
 }
 
+// The host a project read with `?host=` names (protocol.md section 7.4):
+// `{}` for this host, `{ host }` for a live act peer, the daemon's refusal
+// for a peer whose link is not live or that only reads, and null for a
+// label that names no daemon (a 404).
+export function projectReadHost(
+  scenario: Scenario,
+  url: URL,
+  now: number,
+): { host?: string } | FixtureRefusal | null {
+  const host = url.searchParams.get("host");
+  if (!host) return {};
+  const machine = machinesFor(serverScenario(scenario), now).machines.find(
+    (one) => one.label === host || one.id === host,
+  );
+  if (machine?.kind === "local") return {};
+  if (!machine?.peer_scope) return null;
+  if (machine.link !== "live") {
+    return new FixtureRefusal(503, {
+      ok: false,
+      error: {
+        code: "peer_unreachable",
+        message: `${machine.label} is unreachable; nothing was sent or queued`,
+        hint: "retry from the control once the link is live",
+        host: machine.label,
+      },
+    });
+  }
+  if (machine.peer_scope !== "act") {
+    return new FixtureRefusal(502, {
+      ok: false,
+      error: {
+        code: "read_scope",
+        message: `${machine.label} is paired with a read scope: view only pairing`,
+        host: machine.label,
+      },
+    });
+  }
+  return { host: machine.label };
+}
+
+// A project read on the host `?host=` names, or why that host refuses it.
+function projectRead(
+  scenario: Scenario,
+  url: URL,
+  now: number,
+  read: (host: string | undefined) => unknown,
+): unknown {
+  const on = projectReadHost(scenario, url, now);
+  if (on === null) return undefined;
+  if (on instanceof FixtureRefusal) return on;
+  return read(on.host);
+}
+
 export function fixtureResource(
   path: string,
   scenario: Scenario = "default",
@@ -1900,9 +1968,15 @@ export function fixtureResource(
     return contributionsFor(board, url.searchParams.get("project"), now);
   }
   const deletion = /^\/api\/v1\/projects\/([^/]+)\/delete$/.exec(url.pathname);
-  if (deletion?.[1]) return deletePreviewFor(served, board, deletion[1], now);
+  if (deletion?.[1]) {
+    const id = deletion[1];
+    return projectRead(served, url, now, (host) => deletePreviewFor(served, board, id, now, host));
+  }
   const retire = /^\/api\/v1\/projects\/([^/]+)\/retire$/.exec(url.pathname);
-  if (retire?.[1]) return retirePreviewFor(served, board, retire[1], now);
+  if (retire?.[1]) {
+    const id = retire[1];
+    return projectRead(served, url, now, (host) => retirePreviewFor(served, board, id, now, host));
+  }
   const run = /^\/api\/v1\/runs\/([^/]+)$/.exec(url.pathname);
   if (run?.[1]) return runDetailFor(run[1], now);
   if (url.pathname === recapPath) return recapFor(served, now, null);
@@ -1916,14 +1990,18 @@ export function fixtureResource(
   }
   if (url.pathname === "/api/v1/health") return healthFor(served, now);
   if (url.pathname === "/api/v1/doctor") return doctorRead(served, url, now);
-  if (url.pathname === "/api/v1/projects/checkout") return checkoutFor(url);
+  if (url.pathname === "/api/v1/projects/checkout") {
+    return projectRead(served, url, now, (host) => checkoutFor(url, host !== undefined));
+  }
   if (url.pathname.startsWith("/api/v1/memory")) {
     settleRetros(now);
     return memoryResource(url, quotaFor(served, now).windows, served);
   }
   if (url.pathname === "/api/v1/retros") return retrosResource(url, now);
   // No project starts archived; the stand-in server adds the ones archived since.
-  if (url.pathname === projectsPath && url.searchParams.has("retired")) return { projects: [] };
+  if (url.pathname === projectsPath && url.searchParams.has("retired")) {
+    return projectRead(served, url, now, () => ({ projects: [] }));
+  }
   return undefined;
 }
 

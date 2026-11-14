@@ -4,13 +4,14 @@ import type { RefObject } from "react";
 
 import type { MutationResponse, Project, ProjectChecks, ProjectFields } from "../../lib/api-types";
 import { formatLisbonDay } from "../../lib/clock";
+import { hostField, ownerOf, projectKey } from "../../lib/peers";
 import { projectFieldsQuery, projectsPath, queryKeyFor } from "../../lib/queries";
 import { sendMutation } from "../attention/api";
 import { useAction } from "../attention/use-action";
 import { Segmented } from "../ui/segmented";
 import { Select } from "../ui/select";
 import { MinusIcon, PlusIcon } from "./icons";
-import { readFailure } from "./project-dialog";
+import { ProjectFailure, readFailure } from "./project-dialog";
 
 // `tiller project add`'s delivery modes, in Add project's order.
 const DELIVERIES = [
@@ -181,7 +182,7 @@ export function EditProject({
   onClose: () => void;
   onSaved: (receiptKey: string) => void;
 }) {
-  const read = useQuery(projectFieldsQuery(project.id));
+  const read = useQuery(projectFieldsQuery(project.id, ownerOf(project)));
   // A copy read before the dialog opened may be old: the form waits for this
   // open's own read.
   if (!read.isFetchedAfterMount || !read.data) {
@@ -201,6 +202,7 @@ export function EditProject({
   }
   return (
     <EditForm
+      project={project}
       opened={read.data}
       first={first}
       onPending={onPending}
@@ -211,12 +213,15 @@ export function EditProject({
 }
 
 function EditForm({
+  project,
   opened,
   first,
   onPending,
   onClose,
   onSaved,
 }: {
+  // The row the dialog opened from: a peer's sends the edit to that peer.
+  project: Project;
   opened: ProjectFields;
   first: RefObject<HTMLInputElement | null>;
   onPending: (pending: boolean) => void;
@@ -225,6 +230,7 @@ function EditForm({
 }) {
   const queryClient = useQueryClient();
   const ids = useId();
+  const host = ownerOf(project);
   // What the dialog opened on, or loaded after a conflict: the save goes
   // against its `rev`, and a field is changed when it differs from it.
   const [base, setBase] = useState(opened);
@@ -246,25 +252,26 @@ function EditForm({
       sendMutation<Project>("PATCH", `/api/v1/projects/${base.id}`, {
         ...(JSON.parse(editKey) as Record<string, unknown>),
         rev: base.rev,
+        ...hostField(project),
         idempotency_key,
       }),
-    [base.id, base.rev, editKey],
+    [base.id, base.rev, editKey, project],
   );
   const recorded = useCallback(
     (_: MutationResponse<Project>, receiptKey: string) => {
       void queryClient.invalidateQueries({ queryKey: queryKeyFor(projectsPath) });
       void queryClient.invalidateQueries({
-        queryKey: projectFieldsQuery(base.id).queryKey,
+        queryKey: projectFieldsQuery(base.id, host).queryKey,
       });
       onSaved(receiptKey);
       onClose();
     },
-    [base.id, onClose, onSaved, queryClient],
+    [base.id, host, onClose, onSaved, queryClient],
   );
   // The values and the `rev` are the click: a retry of the same save reuses
   // its key, and any other save is a new one.
   const action = useAction({
-    binding: `project-edit:${base.id}:${base.rev}:${editKey}`,
+    binding: `project-edit:${projectKey(project)}:${base.rev}:${editKey}`,
     send,
     onRecorded: recorded,
   });
@@ -278,7 +285,7 @@ function EditForm({
     if (!stale) return;
     let live = true;
     void queryClient
-      .fetchQuery({ ...projectFieldsQuery(base.id), staleTime: 0 })
+      .fetchQuery({ ...projectFieldsQuery(base.id, host), staleTime: 0 })
       .then((fresh) => {
         if (!live) return;
         const freshDraft = draftOf(fresh);
@@ -293,7 +300,7 @@ function EditForm({
     return () => {
       live = false;
     };
-  }, [stale, base, queryClient]);
+  }, [stale, base, host, queryClient]);
 
   // The new values: each field that moved takes the stored value, and the
   // owner's other changes stay.
@@ -556,9 +563,7 @@ function EditForm({
           {conflictText ?? `Not saved: ${changedAfter}.`}
         </p>
       ) : error && error !== handled ? (
-        <p className="refusal" role="alert">
-          {error.message}
-        </p>
+        <ProjectFailure error={error} inline />
       ) : null}
       <div className="dialog-actions">
         <button type="button" className="btn" disabled={busy} onClick={onClose}>

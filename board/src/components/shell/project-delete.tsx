@@ -9,6 +9,8 @@ import type {
   ProjectDeletePreview,
   ProjectUnlanded,
 } from "../../lib/api-types";
+import { hostField, ownerOf, projectKey } from "../../lib/peers";
+import type { Standing } from "../../lib/peers";
 import { projectDeleteQuery } from "../../lib/queries";
 import { onProjectGone } from "../../lib/sse";
 import { sendMutation } from "../attention/api";
@@ -21,6 +23,7 @@ import {
   AgentList,
   FLEET_PROJECT,
   ProjectDialog,
+  ProjectFailure,
   agentCount,
   agentName,
   readFailure,
@@ -158,9 +161,11 @@ function blockKind(
 
 // One blocker of the delete with the action that clears it on its right:
 // Cancel card and Stop agent open the card's and the Run menu's own confirm
-// dialogs. An agent on another host and a wait have no action here.
+// dialogs, sent to the project's host. An agent on another host and a wait
+// have no action here.
 function Blocker({
   project,
+  host,
   fact,
   unblock,
   agents,
@@ -169,6 +174,9 @@ function Blocker({
   onCleared,
 }: {
   project: Project;
+  // The peer that owns the project, which the actions go to; absent for this
+  // host's own.
+  host: string | undefined;
   fact: string;
   unblock: DeleteUnblock;
   agents: ProjectAgent[];
@@ -209,7 +217,11 @@ function Blocker({
           </button>
           {asking ? (
             <CancelDialog
-              card={{ id: target, display_id: target }}
+              card={{
+                id: target,
+                display_id: target,
+                ...(host ? { host, link: project.link ?? "live" } : {}),
+              }}
               reason={`deleting project ${project.id}`}
               onClose={close}
               onCancelled={cancelled}
@@ -226,6 +238,7 @@ function Blocker({
             target={{
               sessionId: target,
               name: agentName(agent),
+              host,
               orchestrator: agent.card === null,
               state: "running",
               runOpen: agent.run !== null,
@@ -257,16 +270,19 @@ function Blocker({
 }
 
 // The confirm step of a project delete: what goes, the agents it stops first,
-// what blocks it with the action that clears each, and the id typed again.
+// what blocks it with the action that clears each, and the id typed again. A
+// peer's project is read from and deleted on that peer (D22), which checks
+// the typed id again and records who deleted it.
 export function ConfirmDelete({ project, onClose }: { project: Project; onClose: () => void }) {
   const queryClient = useQueryClient();
+  const host = ownerOf(project);
   // While a blocker has a step past it, the counts are read again now and
   // then: a wait ends, or an agent on another host stops, without the board.
   // A refusal with no step (a stray reference) does not clear by itself, and
   // no read runs while a blocker's confirm is open.
   const [asking, setAsking] = useState(false);
   const preview = useQuery({
-    ...projectDeleteQuery(project.id),
+    ...projectDeleteQuery(project.id, host),
     refetchInterval: (query) => (query.state.data?.unblock && !asking ? BLOCKED_POLL_MS : false),
   });
   const [typed, setTyped] = useState("");
@@ -276,21 +292,28 @@ export function ConfirmDelete({ project, onClose }: { project: Project; onClose:
     (idempotency_key: string) =>
       sendMutation("POST", `/api/v1/projects/${project.id}/delete`, {
         confirm: project.id,
+        ...hostField(project),
         idempotency_key,
       }),
-    [project.id],
+    [project],
   );
   const recorded = useCallback(() => {
     onClose();
-    onProjectGone(queryClient, project.id);
-  }, [onClose, project.id, queryClient]);
-  const action = useAction({ binding: `${project.id}:delete`, send, onRecorded: recorded });
+    onProjectGone(queryClient, project.id, host);
+  }, [onClose, project.id, host, queryClient]);
+  const action = useAction({
+    binding: `${projectKey(project)}:delete`,
+    send,
+    onRecorded: recorded,
+  });
   // A refused delete may have stopped some agents first: read what is left.
   useEffect(() => {
     if (action.error) {
-      void queryClient.invalidateQueries({ queryKey: projectDeleteQuery(project.id).queryKey });
+      void queryClient.invalidateQueries({
+        queryKey: projectDeleteQuery(project.id, host).queryKey,
+      });
     }
-  }, [action.error, project.id, queryClient]);
+  }, [action.error, project.id, host, queryClient]);
 
   const refused = preview.data?.refused ?? null;
   const unblock = preview.data?.unblock ?? null;
@@ -304,9 +327,11 @@ export function ConfirmDelete({ project, onClose }: { project: Project; onClose:
   const onCleared = useCallback(
     (row: Omit<Cleared, "seen">) => {
       setCleared((list) => withCleared(list, { ...row, seen: readAt }, true));
-      void queryClient.invalidateQueries({ queryKey: projectDeleteQuery(project.id).queryKey });
+      void queryClient.invalidateQueries({
+        queryKey: projectDeleteQuery(project.id, host).queryKey,
+      });
     },
-    [project.id, queryClient, readAt],
+    [project.id, host, queryClient, readAt],
   );
   const blocking = refused && unblock ? { fact: refused, unblock } : null;
   const shown = useRef<{ key: string; gone: string } | null>(null);
@@ -350,14 +375,17 @@ export function ConfirmDelete({ project, onClose }: { project: Project; onClose:
 
   return (
     <ProjectDialog name="delete" pending={action.pending} onClose={onClose} initial={cancel}>
-      <h2 id="delete-dialog-title">Delete {project.name}?</h2>
+      <h2 id="delete-dialog-title">
+        Delete {project.name}
+        {host ? ` on ${host}` : ""}?
+      </h2>
       <p id="delete-dialog-body">
         {agents.length > 0
           ? "This stops the project's running agents, then removes"
           : "This removes"}{" "}
-        the project and everything recorded for it on this host, its event history included. It
-        cannot be undone. The checkout, its worktrees and the GitHub repository are left as they
-        are.
+        the project and everything recorded for it on {host ?? "this host"}, its event history
+        included. It cannot be undone. The checkout, its worktrees and the GitHub repository are
+        left as they are.
       </p>
       {preview.data ? (
         <Facts preview={preview.data}>
@@ -379,6 +407,7 @@ export function ConfirmDelete({ project, onClose }: { project: Project; onClose:
                   <Blocker
                     key={current.fact}
                     project={project}
+                    host={host}
                     fact={current.fact}
                     unblock={current.unblock}
                     agents={agents}
@@ -430,11 +459,7 @@ export function ConfirmDelete({ project, onClose }: { project: Project; onClose:
           />
         </div>
       ) : null}
-      {action.error ? (
-        <p className="refusal" role="alert">
-          {action.error.message}
-        </p>
-      ) : null}
+      <ProjectFailure error={action.error} />
       <div className="dialog-actions">
         <button
           ref={cancel}
@@ -460,11 +485,12 @@ export function ConfirmDelete({ project, onClose }: { project: Project; onClose:
 }
 
 // The delete control in a project's actions row. A peer's project is deleted
-// on its own host: the board host does not forward it (protocol.md section
-// 7.4). `fleet` is never deleted, so it has no control.
-export function DeleteProject({ project, owner }: { project: Project; owner: string | undefined }) {
+// on that peer, forwarded while its link is live with the `act` scope
+// (protocol.md section 7.4); otherwise the control is off with the reason.
+// `fleet` is never deleted, so it has no control.
+export function DeleteProject({ project, standing }: { project: Project; standing: Standing }) {
   const [confirming, setConfirming] = useState(false);
-  const off = owner ? `${owner} owns this project: delete it there` : undefined;
+  const off = standing.canAct ? undefined : (standing.reason ?? undefined);
   // The dialog gives focus back to the button that opened it.
   const close = useCallback(() => {
     setConfirming(false);
