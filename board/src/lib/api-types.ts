@@ -594,6 +594,10 @@ export interface ProjectFields {
   deploy_workflow: string | null;
   deploy_environment: string | null;
   deploy_timeout_minutes: number;
+  // Whether this project's builders and verifiers may bind and reach
+  // localhost in their sandbox (authority.md G24). Off by default. `null`
+  // for a peer on an older build, which has no such setting.
+  local_binding: boolean | null;
   rev: number;
 }
 

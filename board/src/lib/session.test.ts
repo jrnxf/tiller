@@ -75,17 +75,13 @@ test("signing out shows the signed-out screen only once the daemon has ended the
   expect((await signOut()).ok).toBe(false);
   expect(signedOutStore.get()).toBe(false);
 
-  const fetch = signOutAnswers([200, { owner: false }], [403, refusal("signed_out")]);
+  // Every read needs the cookie, on loopback too (G24), so no read is needed
+  // to know the board is now signed out.
+  const fetch = signOutAnswers([200, { owner: false }], [200, { owner: false }]);
   expect(await signOut()).toEqual({ ok: true });
   expect(fetch).toHaveBeenCalledWith("/api/v1/logout", expect.objectContaining({ method: "POST" }));
-  expect(fetch).toHaveBeenCalledWith("/api/v1/session", expect.anything());
+  expect(fetch).toHaveBeenCalledTimes(1);
   expect(signedOutStore.get()).toBe(true);
-});
-
-test("on loopback, where reads need no cookie, signing out keeps the board", async () => {
-  signOutAnswers([200, { owner: false }], [200, { owner: false }]);
-  expect(await signOut()).toEqual({ ok: true });
-  expect(signedOutStore.get()).toBe(false);
 });
 
 test("a cookie already gone signs out at once", async () => {

@@ -505,8 +505,7 @@ function BrowserSession({ owner }: { owner: boolean }) {
           setPending(true);
           setError(null);
           void signOut().then((result) => {
-            // At an allowed host the app swaps to the signed-out screen; on
-            // loopback this panel turns to "Not signed in".
+            // The app swaps to the signed-out screen.
             if (result.ok) {
               void queryClient.invalidateQueries({ queryKey: sessionQuery().queryKey });
             } else {

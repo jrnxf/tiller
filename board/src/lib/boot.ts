@@ -67,8 +67,8 @@ const HEALTH_PATH = "/api/v1/health";
 // What the page opens with: the board, with the snapshot when there is one;
 // the setup screen when the daemon runs on a machine nobody has set up yet
 // (no state.db: every read answers 503, with the command to run, until
-// `tiller init`); or the signed-out screen when, at an `--allow-host` name,
-// this browser has no owner cookie (every read answers 403 `signed_out`).
+// `tiller init`); or the signed-out screen when this browser has no owner
+// cookie (every read answers 403 `signed_out`).
 export type Boot =
   | { kind: "board"; snapshot: Snapshot | null }
   | { kind: "setup"; command: string }

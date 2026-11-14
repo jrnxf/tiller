@@ -14,8 +14,8 @@ function withCode(text: string): ReactNode[] {
     );
 }
 
-// At an `--allow-host` name, a browser without the owner cookie sees only
-// this: one field for the 8-digit code `tiller board --login` prints. It sends
+// A browser without the owner cookie sees only this, on loopback as at an
+// `--allow-host` name: one field for the 8-digit code `tiller board --login` prints. It sends
 // the code as the eighth digit lands, typed or pasted, and opens the board once
 // the daemon has set the cookie. The link and QR code that command prints sign
 // in the same way.

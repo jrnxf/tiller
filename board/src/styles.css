@@ -1491,7 +1491,7 @@ kbd {
   }
 }
 
-/* The signed-out screen at an `--allow-host` name (states/signed-out-screen.tsx) */
+/* The signed-out screen (states/signed-out-screen.tsx) */
 
 .signin-form {
   margin: 16px 0 0;

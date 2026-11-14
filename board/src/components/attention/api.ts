@@ -67,7 +67,7 @@ export async function sendMutation<T>(
   }
   if (isErrorBody(parsed)) {
     const { code, message, current, hint, host } = parsed.error;
-    // At an `--allow-host` name the cookie was revoked or ran out.
+    // The cookie was revoked or ran out.
     if (response.status === 403 && code === "signed_out") signedOutStore.set(true);
     throw new ActionError(response.status, code, message, current, hint, host);
   }

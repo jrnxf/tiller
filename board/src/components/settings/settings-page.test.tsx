@@ -10,7 +10,9 @@ import { signedOutStore } from "../../lib/session";
 import { SettingsPage } from "./settings-page";
 import { createTestQueryClient } from "../../test-app";
 
-// `gated`: an `--allow-host` name, where reads need the cookie.
+// `gated` false answers a signed-out session `{"owner": false}` instead of 403,
+// as a daemon did at loopback before every read needed the cookie (G24). The
+// board still renders that answer, so the tests below keep covering it.
 function serve(owner: boolean, logout: [number, unknown] = [200, { owner: false }], gated = true) {
   let signedIn = owner;
   const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -70,15 +72,6 @@ test("a signed-in browser has Sign out at the right of its row, and it ends the 
   fireEvent.click(button);
   await waitFor(() => expect(signedOutStore.get()).toBe(true));
   expect(fetch).toHaveBeenCalledWith("/api/v1/logout", expect.objectContaining({ method: "POST" }));
-});
-
-test("on loopback, signing out keeps the board and shows this browser signed out", async () => {
-  serve(true, undefined, false);
-  renderSettings();
-  fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
-  const panel = screen.getByRole("region", { name: "This browser" });
-  expect(await within(panel).findByText("Not signed in")).toBeTruthy();
-  expect(signedOutStore.get()).toBe(false);
 });
 
 test("a refused sign-out stays on the page and says why", async () => {

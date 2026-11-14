@@ -1,4 +1,4 @@
-import { ReadError, fetchJson, sessionPath } from "./queries";
+import { ReadError } from "./queries";
 import { createStore } from "./store";
 
 // Signing in with the code `tiller board --login` prints, and signing out
@@ -13,8 +13,8 @@ const LOGOUT_PATH = "/api/v1/logout";
 // app shows the signed-out screen in place of the board.
 export const signedOutStore = createStore(false);
 
-// A read refused because, at an `--allow-host` name, this browser is not
-// signed in.
+// A read refused because this browser is not signed in: every read needs
+// the owner cookie, on loopback as at an `--allow-host` name.
 export function isSignedOut(error: unknown): boolean {
   return error instanceof ReadError && error.status === 403 && error.code === "signed_out";
 }
@@ -72,21 +72,14 @@ export async function signIn(code: string): Promise<SignIn> {
   return (await post(LOGIN_PATH, { code })).result;
 }
 
-// Ends this browser's owner cookie on the daemon and drops it here. Where the
-// board now refuses reads (an `--allow-host` name) the app shows the
-// signed-out screen; on loopback the board stays, read-only, and the caller
-// refreshes what it shows. A cookie already gone counts as signed out.
+// Ends this browser's owner cookie on the daemon and drops it here. Every
+// read now needs a cookie this browser no longer has, so the app shows the
+// signed-out screen. A cookie already gone counts as signed out.
 export async function signOut(): Promise<SignIn> {
   const { result, code } = await post(LOGOUT_PATH, {});
-  if (code === "signed_out") {
+  if (code === "signed_out" || result.ok) {
     signedOutStore.set(true);
     return { ok: true };
-  }
-  if (!result.ok) return result;
-  try {
-    await fetchJson(sessionPath);
-  } catch (error) {
-    if (isSignedOut(error)) signedOutStore.set(true);
   }
   return result;
 }

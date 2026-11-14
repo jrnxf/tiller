@@ -218,6 +218,7 @@ function fieldsOf(project: Project): ProjectFields {
     deploy_workflow: alpha ? "deploy.yml" : null,
     deploy_environment: alpha ? "production" : null,
     deploy_timeout_minutes: alpha ? 20 : 60,
+    local_binding: false,
     rev: project.rev,
   };
 }
@@ -239,6 +240,7 @@ const EDIT_FIELDS = [
   "deploy_environment",
   "deploy_timeout_minutes",
   "deploy_workflow",
+  "local_binding",
   "name",
   "remote",
   "repo",
@@ -315,6 +317,9 @@ function editedFields(
   if ("deploy_timeout_minutes" in body && !positive(body.deploy_timeout_minutes)) {
     return refusal(400, "usage", "deploy timeout must be at least 1 minute");
   }
+  if ("local_binding" in body && typeof body.local_binding !== "boolean") {
+    return refusal(400, "usage", "local_binding must be true or false");
+  }
   const problem = "checks" in body ? checksProblem(body.checks) : null;
   if (problem) return refusal(400, "usage", problem);
   const optional = (field: "repo" | "remote" | "deploy_workflow" | "deploy_environment") =>
@@ -334,6 +339,7 @@ function editedFields(
       "deploy_timeout_minutes" in body
         ? Number(body.deploy_timeout_minutes)
         : fields.deploy_timeout_minutes,
+    local_binding: "local_binding" in body ? body.local_binding === true : fields.local_binding,
     rev: fields.rev + 1,
   };
   const direct = next.delivery === "no-mistakes" || next.delivery === "no-mistakes-prod-only";
