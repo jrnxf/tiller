@@ -806,6 +806,29 @@ pub struct Health {
     pub warnings: Vec<String>,
 }
 
+/// `GET /api/v1/health` signed out, at a local `Host` only: whether the
+/// daemon is well, its version, and whether `tiller init` has run. Nothing
+/// else is readable without the owner cookie (G24); a worker can already
+/// learn the version from `tiller --version` and see whether state.db
+/// exists.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct HealthSignedOut {
+    pub ok: bool,
+    pub version: String,
+    /// False until `tiller init` has made state.db, so a signed-out
+    /// browser on a fresh machine shows the setup screen.
+    pub initialized: bool,
+}
+
+/// What `GET /api/v1/health` answers: [`Health`] with the owner cookie,
+/// [`HealthSignedOut`] without it at a local `Host`.
+#[derive(Clone, Debug, PartialEq, Serialize, ToSchema)]
+#[serde(untagged)]
+pub enum HealthAnswer {
+    Full(Box<Health>),
+    SignedOut(HealthSignedOut),
+}
+
 /// The merge App key under `~/.tiller/forge-app/`: names files and the
 /// reason, never the key.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -1344,6 +1367,11 @@ pub struct EditProject {
     /// At least 1.
     #[serde(default)]
     pub deploy_timeout_minutes: Option<i64>,
+    /// Whether the project's builders and verifiers may bind and connect to
+    /// local ports in their sandbox. Running workers keep the setting they
+    /// launched with.
+    #[serde(default)]
+    pub local_binding: Option<bool>,
 }
 
 /// `GET /api/v1/projects/{id}/grants`: every standing grant of the project,
@@ -1623,6 +1651,11 @@ pub struct ProjectFields {
     pub deploy_workflow: Option<String>,
     pub deploy_environment: Option<String>,
     pub deploy_timeout_minutes: i64,
+    /// Builders and verifiers may bind and connect to local ports (G24).
+    /// Absent, and so `null`, from a peer on a build that has no such
+    /// setting: the Edit tab then hides it and never sends it.
+    #[serde(default)]
+    pub local_binding: Option<bool>,
     pub rev: i64,
 }
 

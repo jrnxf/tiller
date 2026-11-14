@@ -3503,14 +3503,15 @@
         "tags": [
           "reads"
         ],
-        "summary": "The daemon's own health: versions, pollers and tools, no work data. It\nanswers before `tiller init` too.",
+        "summary": "The daemon's own health: versions, pollers and tools, no work data. It\nanswers before `tiller init` too. Signed out, which the owner gate lets\nthrough only at a local `Host`, it is [`HealthSignedOut`]: `ok`,\n`version` and `initialized`, nothing else (G24).",
         "operationId": "health",
         "responses": {
           "200": {
+            "description": "Health in full with the owner cookie; signed out at a local Host, only ok, version and initialized",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Health"
+                  "$ref": "#/components/schemas/HealthAnswer"
                 }
               }
             }
@@ -6007,7 +6008,7 @@
             }
           },
           "403": {
-            "description": "`signed_out`: at an --allow-host name, without the owner cookie",
+            "description": "`signed_out`: without the owner cookie",
             "content": {
               "application/json": {
                 "schema": {
@@ -8267,6 +8268,13 @@
           "idempotency_key": {
             "type": "string"
           },
+          "local_binding": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the project's builders and verifiers may bind and connect to\nlocal ports in their sandbox. Running workers keep the setting they\nlaunched with."
+          },
           "name": {
             "type": [
               "string",
@@ -8563,6 +8571,38 @@
               "type": "string"
             },
             "description": "Problems that stop nothing, one line each: \"holder upgrade refused:\n<reason>\" until it clears (`recovery.md` R22)."
+          }
+        }
+      },
+      "HealthAnswer": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/Health"
+          },
+          {
+            "$ref": "#/components/schemas/HealthSignedOut"
+          }
+        ],
+        "description": "What `GET /api/v1/health` answers: [`Health`] with the owner cookie,\n[`HealthSignedOut`] without it at a local `Host`."
+      },
+      "HealthSignedOut": {
+        "type": "object",
+        "description": "`GET /api/v1/health` signed out, at a local `Host` only: whether the\ndaemon is well, its version, and whether `tiller init` has run. Nothing\nelse is readable without the owner cookie (G24); a worker can already\nlearn the version from `tiller --version` and see whether state.db\nexists.",
+        "required": [
+          "ok",
+          "version",
+          "initialized"
+        ],
+        "properties": {
+          "initialized": {
+            "type": "boolean",
+            "description": "False until `tiller init` has made state.db, so a signed-out\nbrowser on a fresh machine shows the setup screen."
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": "string"
           }
         }
       },
@@ -10769,6 +10809,13 @@
           "id": {
             "type": "string"
           },
+          "local_binding": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Builders and verifiers may bind and connect to local ports (G24).\nAbsent, and so `null`, from a peer on a build that has no such\nsetting: the Edit tab then hides it and never sends it."
+          },
           "name": {
             "type": "string"
           },
@@ -12919,7 +12966,7 @@
   "tags": [
     {
       "name": "reads",
-      "description": "Reads: any request that passes the Host check on loopback; at an --allow-host name, only with the owner cookie"
+      "description": "Reads: the owner cookie, at loopback and at an --allow-host name alike. Without it, health at a local Host answers only ok, version and initialized, and before tiller init every other read at a local Host answers 503 with the setup commands"
     },
     {
       "name": "mutations",
@@ -12927,7 +12974,7 @@
     },
     {
       "name": "stream",
-      "description": "The one SSE stream"
+      "description": "The one SSE stream: the owner cookie, as every read"
     },
     {
       "name": "session",

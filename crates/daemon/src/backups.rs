@@ -259,11 +259,8 @@ fn at(row: &BackupRow) -> Option<Timestamp> {
 #[utoipa::path(get, path = "/api/v1/backups", tag = "reads",
     responses((status = 200, body = BackupList), (status = 403, body = ErrorBody),
               (status = 500, body = ErrorBody, description = "`internal`: the manifest does not parse")))]
-pub(crate) async fn list(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> ApiResult<BackupList> {
-    owner_only(&state, &headers).await?;
+pub(crate) async fn list(State(state): State<AppState>) -> ApiResult<BackupList> {
+    owner_only()?;
     let paths = Paths::in_home(&state.0.home);
     let jobs = state.0.backups.clone();
     let listed = tokio::task::spawn_blocking(move || {

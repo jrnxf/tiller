@@ -548,7 +548,7 @@ fn a_lost_holder_resumes_its_worker_and_notifies_the_owner_once() {
     .unwrap();
     std::os::unix::fs::symlink(root.join("claude-stub"), bin.join("claude")).unwrap();
     let (daemon, port) = git_only_daemon(&agents.world);
-    let cookie = cookie(&agents.world);
+    let cookie = cookie(&agents.world, port);
     // The holder source records the pane and its pid first.
     let deadline = Instant::now() + WAIT;
     while count("SELECT count(*) FROM panes WHERE holder_instance IS NOT NULL AND pid IS NOT NULL")
@@ -746,7 +746,6 @@ fn killed_daemon_delivers_once(kill: Kill) {
     let run = agents.run();
     let (session, pane) = agents.launch(&run);
     shows(&client, &pane, "? for shortcuts");
-    let cookie = cookie(&agents.world);
     // An outside client, such as an attach, holds a lease under the Fit.
     let base = matches!(kill, Kill::Fit).then(|| {
         let base = client
@@ -758,6 +757,7 @@ fn killed_daemon_delivers_once(kill: Kill) {
     });
 
     let (mut daemon, port) = git_only_daemon(&agents.world);
+    let cookie = cookie(&agents.world, port);
     let mut view = match kill {
         Kill::Stream => Some(View::open(port, &cookie, &session)),
         Kill::Fit => Some(View::open_with(
@@ -950,9 +950,9 @@ fn twenty_daemon_restarts_leave_no_gap_in_a_counter() {
     let (_holder, client) = start_holder(&agents.world);
     let (session, pane) = agents.orchestrator();
     agents.until(&session, "a tick", |events| has(events, "tick"));
-    let cookie = cookie(&agents.world);
     for round in 0..20 {
         let (daemon, port) = git_only_daemon(&agents.world);
+        let cookie = cookie(&agents.world, port);
         let mut view = View::open(port, &cookie, &session);
         let last = agents.of(&session, "tick").len();
         view.until("a later count", |view| {
@@ -1033,7 +1033,7 @@ fn a_message_waits_out_a_reply_that_streams_with_an_empty_composer() {
     let (_daemon, port) = git_only_daemon(&agents.world);
     let mut view = View::open_with(
         port,
-        &cookie(&agents.world),
+        &cookie(&agents.world, port),
         &session,
         r#"{"fit": {"cols": 120, "rows": 40}}"#,
     );

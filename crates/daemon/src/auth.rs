@@ -19,7 +19,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::net::{IpAddr, Ipv6Addr};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -257,13 +257,34 @@ pub fn mint_login(home: &Path, now: Timestamp) -> Result<Login, AuthError> {
     })
 }
 
+/// The live owner cookies of each home, as this process last read or wrote
+/// `board-owner`. The daemon is its only writer (`tiller board --login`
+/// writes only `board-login`), and every write goes through
+/// [`write_owners`], so once loaded the cookie check never reads the disk.
+/// Expiry needs no write: each check compares against its own `now`.
+static OWNERS: LazyLock<Mutex<HashMap<PathBuf, Owners>>> = LazyLock::new(Mutex::default);
+
+/// The `(hash, expiry)` lines of one `board-owner`.
+type Owners = Vec<(String, Timestamp)>;
+
+/// Rewrites `board-owner` and the cache with it. The caller holds the lock,
+/// so a load ([`is_owner`]) never interleaves with it.
+fn write_owners(home: &Path, owners: Owners) -> Result<(), AuthError> {
+    write_lines(&owner_file(home), &owners)?;
+    OWNERS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(home.to_owned(), owners);
+    Ok(())
+}
+
 /// Records a new owner cookie and returns its value. The caller holds the
 /// lock.
 fn mint_owner(home: &Path, now: Timestamp) -> Result<String, AuthError> {
     let cookie = secret()?;
     let mut owners = read_lines(&owner_file(home), now);
     owners.push((hash(&cookie), later(now, COOKIE_SECONDS)));
-    write_lines(&owner_file(home), &owners)?;
+    write_owners(home, owners)?;
     Ok(cookie)
 }
 
@@ -356,17 +377,51 @@ pub fn sign_out(home: &Path, cookie: &str, now: Timestamp) -> Result<bool, AuthE
         if owners.len() == before {
             return Ok(false);
         }
-        write_lines(&owner_file(home), &owners)?;
+        write_owners(home, owners)?;
         Ok(true)
     })
 }
 
-/// Whether `cookie` is a minted, unexpired owner cookie.
-pub fn is_owner(home: &Path, cookie: &str, now: Timestamp) -> bool {
+/// Whether `cookie` is a minted, unexpired owner cookie, answered from
+/// memory: `None` until this process has read or written the owner file of
+/// `home`. It never touches the disk, so the runtime thread may call it.
+pub fn cached_owner(home: &Path, cookie: &str, now: Timestamp) -> Option<bool> {
     let wanted = hash(cookie);
-    read_lines(&owner_file(home), now)
-        .iter()
-        .any(|(hash, _)| constant_eq(hash, &wanted))
+    let owners = OWNERS.lock().unwrap_or_else(PoisonError::into_inner);
+    let lines = owners.get(home)?;
+    Some(
+        lines
+            .iter()
+            .any(|(hash, expiry)| *expiry > now && constant_eq(hash, &wanted)),
+    )
+}
+
+/// Whether `cookie` is a minted, unexpired owner cookie. The first call for
+/// `home` reads the owner file, under the lock so no write interleaves, and
+/// keeps it; later calls answer from memory ([`cached_owner`]).
+pub fn is_owner(home: &Path, cookie: &str, now: Timestamp) -> bool {
+    if let Some(owner) = cached_owner(home, cookie, now) {
+        return owner;
+    }
+    let loaded = locked(home, || {
+        let lines = read_lines(&owner_file(home), now);
+        OWNERS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(home.to_owned())
+            .or_insert(lines);
+        Ok(())
+    });
+    match loaded {
+        Ok(()) => cached_owner(home, cookie, now).unwrap_or(false),
+        // No lock, so nothing is kept: the file read alone answers.
+        Err(_) => {
+            let wanted = hash(cookie);
+            read_lines(&owner_file(home), now)
+                .iter()
+                .any(|(hash, _)| constant_eq(hash, &wanted))
+        }
+    }
 }
 
 /// The `Set-Cookie` value for a fresh cookie. `secure` marks it `Secure`,
@@ -583,6 +638,27 @@ fn constant_eq(a: &str, b: &str) -> bool {
             .zip(b.bytes())
             .fold(0u8, |acc, (x, y)| acc | (x ^ y))
             == 0
+}
+
+/// Records `cookie` as a live owner cookie, so the API tests can sign
+/// their reads in with a value they know.
+#[cfg(test)]
+pub(crate) fn register_owner(home: &Path, cookie: &str, now: Timestamp) -> Result<(), AuthError> {
+    locked(home, || {
+        let mut owners = read_lines(&owner_file(home), now);
+        owners.push((hash(cookie), later(now, COOKIE_SECONDS)));
+        write_owners(home, owners)
+    })
+}
+
+/// Drops what this process keeps of `home`'s owner file, so the next
+/// check reads it again.
+#[cfg(test)]
+pub(crate) fn forget_owners(home: &Path) {
+    OWNERS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(home);
 }
 
 #[cfg(test)]
@@ -803,6 +879,33 @@ mod tests {
         )
         .unwrap();
         assert!(redeem_login(home.path(), &token, now()).unwrap().is_some());
+    }
+
+    #[test]
+    fn the_owner_file_is_read_once_and_kept_with_every_write() {
+        let home = tempfile::tempdir().unwrap();
+        let token = mint_login(home.path(), now()).unwrap().token;
+        let laptop = redeem_login(home.path(), &token, now()).unwrap().unwrap();
+        assert_eq!(cached_owner(home.path(), &laptop, now()), Some(true));
+        // Once kept, the check reads no file: a removed one changes nothing.
+        let file = owner_file(home.path());
+        let lines = std::fs::read_to_string(&file).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        assert!(is_owner(home.path(), &laptop, now()));
+        std::fs::write(&file, lines).unwrap();
+        // A sign-out writes the file and the cache together.
+        assert!(sign_out(home.path(), &laptop, now()).unwrap());
+        assert_eq!(cached_owner(home.path(), &laptop, now()), Some(false));
+        let token = mint_login(home.path(), now()).unwrap().token;
+        let phone = redeem_login(home.path(), &token, now()).unwrap().unwrap();
+        // A fresh process reads the file and finds the same answers.
+        forget_owners(home.path());
+        assert_eq!(cached_owner(home.path(), &phone, now()), None);
+        assert!(is_owner(home.path(), &phone, now()));
+        assert!(!is_owner(home.path(), &laptop, now()));
+        // Expiry needs no write.
+        let later = now().plus_minutes(31 * 24 * 60);
+        assert_eq!(cached_owner(home.path(), &phone, later), Some(false));
     }
 
     #[test]

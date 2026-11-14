@@ -623,7 +623,7 @@ impl Soak {
             counters.push(counter);
         }
         let daemon = start_daemon(&world);
-        let cookie = cookie(&world);
+        let cookie = cookie(&world, daemon.1);
         let mut soak = Self {
             world,
             plan,

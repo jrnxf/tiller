@@ -90,13 +90,10 @@ fn exchange(port: u16, request: &str) -> (String, String) {
     (head.to_owned(), body.to_owned())
 }
 
-/// `GET /api/v1/health` over a plain socket.
-fn health(port: u16) -> Value {
-    let (head, body) = exchange(
-        port,
-        &format!("GET /api/v1/health HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
-    );
-    assert!(head.starts_with("HTTP/1.0 200"), "{head}");
+/// `GET /api/v1/health` over a plain socket, signed in as the owner.
+fn health(world: &World, port: u16) -> Value {
+    let (head, body) = get(world, port, "/api/v1/health");
+    assert_eq!(head, "HTTP/1.0 200 OK", "{body}");
     serde_json::from_str(&body).unwrap()
 }
 
@@ -155,7 +152,7 @@ fn every_poller_is_registered_when_the_daemon_says_it_is_listening() {
     let world = World::initialized();
     for _ in 0..5 {
         let mut daemon = start(&world);
-        let body = health(daemon.port);
+        let body = health(&world, daemon.port);
         let sources: Vec<&str> = body["pollers"]
             .as_array()
             .unwrap()
@@ -176,7 +173,7 @@ fn a_second_daemon_names_the_first_and_exits_zero() {
     let world = World::initialized();
     let mut first = start(&world);
     let pid = u64::from(first.child.id());
-    assert_eq!(health(first.port)["pid"], pid);
+    assert_eq!(health(&world, first.port)["pid"], pid);
     assert_eq!(info(&world).unwrap()["port"], u64::from(first.port));
 
     let mut second = spawn(&world, &[]);
@@ -213,7 +210,7 @@ fn a_killed_daemon_starts_again_on_the_same_home() {
     assert_eq!(info(&world).unwrap()["pid"], u64::from(killed));
 
     let mut again = start(&world);
-    let health = health(again.port);
+    let health = health(&world, again.port);
     assert_eq!(health["pid"], u64::from(again.child.id()));
     assert_eq!(health["initialized"], true);
     assert_eq!(info(&world).unwrap()["pid"], u64::from(again.child.id()));
@@ -277,24 +274,22 @@ fn a_migration_under_a_running_daemon_stops_it_with_three() {
     assert_eq!(stops, 0);
 }
 
-/// `GET <path>` over a plain socket: the status line and the body.
-fn get(port: u16, path: &str) -> (String, String) {
+/// `GET <path>` over a plain socket, signed in as the owner: the status line
+/// and the body. A local Host is no credential (G24).
+fn get(world: &World, port: u16, path: &str) -> (String, String) {
+    let cookie = common::holder::cookie(world, port);
     let (head, body) = exchange(
         port,
-        &format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+        &format!(
+            "GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nCookie: tiller_owner={cookie}\r\n\r\n"
+        ),
     );
     (head.lines().next().unwrap().to_owned(), body)
 }
 
 /// `POST <path>` with a JSON body, as the signed-in board sends it.
 fn post_as_board(world: &World, port: u16, path: &str, body: &str) -> (String, Value) {
-    let now = tiller_core::Timestamp::now();
-    let token = tiller_daemon::auth::mint_login(&world.home(), now)
-        .unwrap()
-        .token;
-    let cookie = tiller_daemon::auth::redeem_login(&world.home(), &token, now)
-        .unwrap()
-        .unwrap();
+    let cookie = common::holder::cookie(world, port);
     let (head, body) = exchange(
         port,
         &format!(
@@ -349,9 +344,9 @@ fn a_daemon_on_an_empty_home_makes_the_database_and_serves_agents() {
     assert!(!world.db().exists());
     let mut daemon = start(&world);
 
-    let (status, _) = get(daemon.port, "/api/v1/agents");
+    let (status, _) = get(&world, daemon.port, "/api/v1/agents");
     assert_eq!(status, "HTTP/1.0 200 OK");
-    assert_eq!(health(daemon.port)["initialized"], true);
+    assert_eq!(health(&world, daemon.port)["initialized"], true);
     let hosts: i64 = world
         .store()
         .conn()
@@ -387,7 +382,7 @@ fn a_daemon_on_an_empty_home_makes_the_database_and_serves_agents() {
 fn a_self_initialized_host_takes_a_new_label_and_boundary() {
     let world = World::new();
     let mut daemon = start(&world);
-    assert_eq!(health(daemon.port)["initialized"], true);
+    assert_eq!(health(&world, daemon.port)["initialized"], true);
     assert!(terminate(&mut daemon).success());
 
     let refused = world.run(&["init", "--host-label", "work-mac", "--lane-capacity", "2"]);
@@ -467,7 +462,7 @@ fn a_daemon_leaves_a_home_owned_by_another_system_uninitialized() {
     let mut daemon = start(&world);
 
     assert!(!world.db().exists());
-    let (status, _) = get(daemon.port, "/api/v1/agents");
+    let (status, _) = get(&world, daemon.port, "/api/v1/agents");
     assert_eq!(status, "HTTP/1.0 503 Service Unavailable");
     assert!(terminate(&mut daemon).success());
 }
@@ -569,8 +564,8 @@ fn the_login_link_signs_in_once_at_an_allowed_host() {
 
 /// At an `--allow-host` name a signed-out browser gets nothing but the
 /// sign-in screen; the code `tiller board --login` prints signs it in, and
-/// signing out ends that cookie. Loopback reads stay open, and the daemon
-/// never logs the code, even at its most verbose.
+/// signing out ends that cookie. The daemon never logs the code, even at
+/// its most verbose.
 #[test]
 fn the_login_code_signs_in_at_an_allowed_host_until_sign_out() {
     let world = World::initialized();
@@ -651,12 +646,18 @@ fn the_login_code_signs_in_at_an_allowed_host_until_sign_out() {
     assert!(out.contains("Max-Age=0"), "{out}");
     let (head, _) = read(&cookie);
     assert!(head.starts_with("HTTP/1.0 403"), "{head}");
-    // Loopback reads need no cookie, as before.
-    let (local, _) = exchange(
-        port,
-        &format!("GET /api/v1/board HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
-    );
-    assert!(local.starts_with("HTTP/1.0 200"), "{local}");
+    // A local Host is no credential (G24): loopback reads need the cookie
+    // too, and the signed-out one is refused there as well.
+    for sent in ["", &format!("Cookie: {cookie}\r\n")] {
+        let (local, body) = exchange(
+            port,
+            &format!("GET /api/v1/board HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n{sent}\r\n"),
+        );
+        assert!(local.starts_with("HTTP/1.0 403"), "{local}");
+        assert!(body.contains("signed_out"), "{body}");
+    }
+    let (local, _) = get(&world, port, "/api/v1/board");
+    assert_eq!(local, "HTTP/1.0 200 OK");
 
     assert!(terminate(&mut daemon).success());
     let mut logs = String::new();
@@ -818,7 +819,7 @@ fn reconciled_after(world: &World, port: u16, asked: tiller_core::Timestamp) {
     }
     let deadline = Instant::now() + WAIT;
     loop {
-        let (_, body) = get(port, "/api/v1/health");
+        let (_, body) = get(world, port, "/api/v1/health");
         let health: Value = serde_json::from_str(&body).unwrap();
         let passed = health["pollers"]
             .as_array()
@@ -833,8 +834,8 @@ fn reconciled_after(world: &World, port: u16, asked: tiller_core::Timestamp) {
 }
 
 /// The board's view of `retro` from `GET /api/v1/retros`.
-fn retro_view(port: u16, retro: &str) -> Value {
-    let (status, body) = get(port, "/api/v1/retros");
+fn retro_view(world: &World, port: u16, retro: &str) -> Value {
+    let (status, body) = get(world, port, "/api/v1/retros");
     assert_eq!(status, "HTTP/1.0 200 OK", "{body}");
     let list: Value = serde_json::from_str(&body).unwrap();
     list["retros"]
@@ -847,10 +848,10 @@ fn retro_view(port: u16, retro: &str) -> Value {
 }
 
 /// Waits for the board's run of `retro` to end, and returns its view.
-fn settled(port: u16, retro: &str) -> Value {
+fn settled(world: &World, port: u16, retro: &str) -> Value {
     let deadline = Instant::now() + WAIT;
     loop {
-        let view = retro_view(port, retro);
+        let view = retro_view(world, port, retro);
         if view["status"] != "running" {
             return view;
         }
@@ -879,7 +880,7 @@ fn the_board_runs_an_unfinished_retro_again() {
     let ran = world.must(&["retro", "run", &retro]);
     assert_eq!(ran.data()["retro"]["outcome"], "unfinished", "{}", ran.json);
     let mut daemon = start(&world);
-    let view = retro_view(daemon.port, &retro);
+    let view = retro_view(&world, daemon.port, &retro);
     assert_eq!(view["status"], "unfinished", "{view}");
     assert_eq!(
         view["learning"],
@@ -893,7 +894,7 @@ fn the_board_runs_an_unfinished_retro_again() {
     let (status, answer) = run_again(&world, daemon.port, &retro, "again-1");
     assert_eq!(status, "HTTP/1.0 200 OK", "{answer}");
     assert_eq!(answer["data"]["state"], "pending", "{answer}");
-    let view = settled(daemon.port, &retro);
+    let view = settled(&world, daemon.port, &retro);
     assert_eq!(view["status"], "unfinished", "{view}");
     assert_eq!(
         view["learning"],
@@ -908,7 +909,7 @@ fn the_board_runs_an_unfinished_retro_again() {
     // the proof, not a wait. A start there would claim the retro in the
     // store first, so the status and the start would show it.
     reconciled_after(&world, daemon.port, tiller_core::Timestamp::now());
-    let later = retro_view(daemon.port, &retro);
+    let later = retro_view(&world, daemon.port, &retro);
     assert_eq!(later["status"], "unfinished", "{later}");
     assert_eq!(later["curator_started_at"], view["curator_started_at"]);
     assert_eq!(runs.count(), 2, "a curator ran that no click started");
@@ -923,7 +924,7 @@ fn the_board_runs_an_unfinished_retro_again() {
     .unwrap();
     let (status, answer) = run_again(&world, daemon.port, &retro, "again-2");
     assert_eq!(status, "HTTP/1.0 200 OK", "{answer}");
-    let view = settled(daemon.port, &retro);
+    let view = settled(&world, daemon.port, &retro);
     assert_eq!(view["status"], "done", "{view}");
     assert_eq!(view["outcome"], "nothing", "{view}");
     // A done retro is not run again.
@@ -946,7 +947,7 @@ fn a_replayed_run_again_after_a_restart_starts_no_second_curator() {
     let (status, first) = run_again(&world, daemon.port, &retro, "click-1");
     assert_eq!(status, "HTTP/1.0 200 OK", "{first}");
     assert_eq!(first["replayed"], false, "{first}");
-    let view = settled(daemon.port, &retro);
+    let view = settled(&world, daemon.port, &retro);
     assert_eq!(view["status"], "unfinished", "{view}");
     assert_eq!(runs.count(), 1);
     assert!(terminate(&mut daemon).success());
@@ -970,7 +971,7 @@ fn a_replayed_run_again_after_a_restart_starts_no_second_curator() {
     assert_eq!(again["data"]["id"], retro.as_str(), "{again}");
     assert_eq!(again["events"], serde_json::json!([]), "{again}");
     assert!(marker.exists(), "the replay prepared the curator again");
-    let later = settled(daemon.port, &retro);
+    let later = settled(&world, daemon.port, &retro);
     assert_eq!(runs.count(), 1, "a second curator ran for one click");
     assert_eq!(later["status"], "unfinished", "{later}");
     assert_eq!(later["curator_started_at"], view["curator_started_at"]);
@@ -978,7 +979,7 @@ fn a_replayed_run_again_after_a_restart_starts_no_second_curator() {
     let (status, fresh) = run_again(&world, daemon.port, &retro, "click-2");
     assert_eq!(status, "HTTP/1.0 200 OK", "{fresh}");
     assert_eq!(fresh["replayed"], false, "{fresh}");
-    settled(daemon.port, &retro);
+    settled(&world, daemon.port, &retro);
     assert_eq!(runs.count(), 2);
     assert!(terminate(&mut daemon).success());
 }
@@ -996,7 +997,7 @@ fn a_run_again_that_cannot_prepare_its_curator_ends_unfinished() {
     let mut daemon = start(&world);
     let (status, answer) = run_again(&world, daemon.port, &retro, "click-1");
     assert_ne!(status, "HTTP/1.0 200 OK", "{answer}");
-    let view = retro_view(daemon.port, &retro);
+    let view = retro_view(&world, daemon.port, &retro);
     assert_eq!(view["status"], "unfinished", "{view}");
     let learning = view["learning"].as_str().unwrap();
     assert!(
@@ -1018,7 +1019,7 @@ fn a_run_again_that_cannot_start_its_curator_says_why() {
     let mut daemon = start(&world);
     let (status, answer) = run_again(&world, daemon.port, &retro, "click-1");
     assert_eq!(status, "HTTP/1.0 200 OK", "{answer}");
-    let view = settled(daemon.port, &retro);
+    let view = settled(&world, daemon.port, &retro);
     assert_eq!(view["status"], "unfinished", "{view}");
     let learning = view["learning"].as_str().unwrap();
     assert!(
@@ -1058,7 +1059,7 @@ fn a_stopping_daemon_stops_the_curator_the_board_started() {
     assert_eq!(status, "HTTP/1.0 200 OK", "{answer}");
     let curator = written_pid(&pid_file("curator.pid"));
     let grandchild = written_pid(&pid_file("grandchild.pid"));
-    let view = retro_view(daemon.port, &retro);
+    let view = retro_view(&world, daemon.port, &retro);
     assert_eq!(view["status"], "running", "{view}");
     // Run again is off while it runs.
     assert!(view["run_refusal"].is_string(), "{view}");

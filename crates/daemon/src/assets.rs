@@ -37,27 +37,47 @@ impl Assets {
         (self.get)("index.html").map(|file| String::from_utf8_lossy(&file.data).into_owned())
     }
 
+    /// Whether `path` is a built file [`Assets::file`] answers, found or
+    /// not, rather than the app shell.
+    pub fn is_file(&self, path: &str) -> bool {
+        !matches!(self.resolve(path), Resolved::Shell)
+    }
+
     /// A built file other than the app shell, with its cache policy.
     /// `None` for a path the app shell handles; `Err` for a missing hashed
     /// asset, which must never turn into HTML.
     pub fn file(&self, path: &str) -> Result<Option<Response>, StatusCode> {
+        match self.resolve(path) {
+            Resolved::Shell => Ok(None),
+            Resolved::File(file, cache) => Ok(Some(file_response(file, cache))),
+            Resolved::Missing => Err(StatusCode::NOT_FOUND),
+        }
+    }
+
+    /// What `path` names: the one rule [`Assets::is_file`] and
+    /// [`Assets::file`] share.
+    fn resolve(&self, path: &str) -> Resolved {
         let path = path.trim_start_matches('/');
         if path.is_empty() || path == "index.html" {
-            return Ok(None);
+            return Resolved::Shell;
         }
-        if let Some(file) = (self.get)(path) {
-            let cache = if path.starts_with("assets/") {
-                IMMUTABLE
-            } else {
-                "no-cache"
-            };
-            return Ok(Some(file_response(file, cache)));
+        let hashed = path.starts_with("assets/");
+        match (self.get)(path) {
+            Some(file) => Resolved::File(file, if hashed { IMMUTABLE } else { "no-cache" }),
+            None if hashed => Resolved::Missing,
+            None => Resolved::Shell,
         }
-        if path.starts_with("assets/") {
-            return Err(StatusCode::NOT_FOUND);
-        }
-        Ok(None)
     }
+}
+
+/// A request path as the board build sees it.
+enum Resolved {
+    /// The app shell answers it.
+    Shell,
+    /// A built file, with its `Cache-Control`.
+    File(EmbeddedFile, &'static str),
+    /// A hashed asset that is not in the build: 404, never HTML.
+    Missing,
 }
 
 fn file_response(file: EmbeddedFile, cache: &'static str) -> Response {
@@ -117,6 +137,29 @@ pub fn with_boot(index: &str, snapshot_json: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(RustEmbed)]
+    #[folder = "tests/fixtures/dist"]
+    struct Fixture;
+
+    #[test]
+    fn is_file_and_file_agree_on_every_kind_of_path() {
+        let assets = Assets::of::<Fixture>();
+        for (path, file) in [
+            ("/", false),
+            ("/index.html", false),
+            ("/projects/alpha", false),
+            ("/assets/app-abc123.js", true),
+            ("/assets/gone-2.js", true),
+        ] {
+            assert_eq!(assets.is_file(path), file, "{path}");
+            assert_eq!(!matches!(assets.file(path), Ok(None)), file, "{path}");
+        }
+        assert_eq!(
+            assets.file("/assets/gone-2.js").err(),
+            Some(StatusCode::NOT_FOUND)
+        );
+    }
 
     #[test]
     fn inlined_json_cannot_close_the_script() {

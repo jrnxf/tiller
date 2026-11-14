@@ -421,6 +421,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         mirrors: crate::mirror::Mirrors::new(),
         holder: Some(config.holder),
         sessions: crate::auth::Sessions::default(),
+        initialized: crate::api::Initialized::default(),
         streams: crate::sse::Streams::default(),
         ssh: config.ssh.clone(),
         evals: crate::memory::eval::Evals::default(),

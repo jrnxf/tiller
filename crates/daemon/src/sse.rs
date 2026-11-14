@@ -468,6 +468,7 @@ mod tests {
             let (db, stop) = (home.join("state.db"), stop.clone());
             std::thread::spawn(move || watch_changes(db, newest_tx, stop, |_| {}));
         }
+        crate::auth::register_owner(home, crate::api::tests::SIGNED_IN, Timestamp::now()).unwrap();
         let app = router(AppState::new(Inner {
             home: home.to_owned(),
             port,
@@ -485,6 +486,7 @@ mod tests {
             mirrors: crate::mirror::Mirrors::new(),
             holder: None,
             sessions: crate::auth::Sessions::default(),
+            initialized: crate::api::Initialized::default(),
             streams: crate::sse::Streams::default(),
             ssh: vec!["ssh".into()],
             evals: crate::memory::eval::Evals::default(),
@@ -506,8 +508,9 @@ mod tests {
     async fn connect(addr: SocketAddr, headers: &str, query: &str) -> TcpStream {
         let mut stream = TcpStream::connect(addr).await.unwrap();
         let request = format!(
-            "GET /api/v1/events{query} HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAccept: text/event-stream\r\n{headers}\r\n",
-            addr.port()
+            "GET /api/v1/events{query} HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAccept: text/event-stream\r\nCookie: tiller_owner={}\r\n{headers}\r\n",
+            addr.port(),
+            crate::api::tests::SIGNED_IN,
         );
         stream.write_all(request.as_bytes()).await.unwrap();
         stream

@@ -9,6 +9,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod common;
+
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
@@ -89,6 +91,8 @@ fn git_dir(into: &Path) -> PathBuf {
 struct Daemon {
     port: u16,
     pid: u32,
+    /// The owner cookie its reads send: a local Host is no credential (G24).
+    cookie: String,
 }
 
 impl Daemon {
@@ -127,7 +131,8 @@ impl Daemon {
             .trim()
             .parse()
             .unwrap();
-        Self { port, pid }
+        let cookie = common::sign_in(home, port);
+        Self { port, pid, cookie }
     }
 
     fn health(&self) -> Value {
@@ -137,8 +142,8 @@ impl Daemon {
             .unwrap();
         write!(
             stream,
-            "GET /api/v1/health HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
-            self.port
+            "GET /api/v1/health HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nCookie: tiller_owner={}\r\nConnection: close\r\n\r\n",
+            self.port, self.cookie
         )
         .unwrap();
         let mut raw = String::new();

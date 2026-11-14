@@ -13,6 +13,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod common;
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -29,7 +31,6 @@ use tiller_core::state::peers::{
     KeyFile, NewPairing, NewPeerKey, generate_key, key_path, public_key_text, write_key_file,
 };
 use tiller_core::store::Actor;
-use tiller_daemon::auth;
 use tiller_panes::testing::{Fleet, owner};
 
 const WAIT: Duration = Duration::from_secs(30);
@@ -168,6 +169,9 @@ struct World {
     board_daemon: Daemon,
     peer_daemon: Daemon,
     cookie: String,
+    /// The owner's cookie on the peer's own board, which reads need at
+    /// loopback too (G24).
+    peer_cookie: String,
     /// The shim records the `peer serve` pid here, then execs it.
     serve_pid: PathBuf,
 }
@@ -261,24 +265,27 @@ impl World {
         let shim = write_shim(board.dir.path(), peer.dir.path(), &serve_pid, exports);
         let peer_daemon = Daemon::start(peer.dir.path(), None);
         let board_daemon = Daemon::start(board.dir.path(), Some(&shim));
-        let token = auth::mint_login(board.dir.path(), Timestamp::now())
-            .unwrap()
-            .token;
-        let cookie = auth::redeem_login(board.dir.path(), &token, Timestamp::now())
-            .unwrap()
-            .unwrap();
+        let cookie = owner_cookie(board.dir.path(), board_daemon.port);
+        let peer_cookie = owner_cookie(peer.dir.path(), peer_daemon.port);
         Self {
             board,
             peer,
             board_daemon,
             peer_daemon,
-            cookie: format!("tiller_owner={cookie}"),
+            cookie,
+            peer_cookie,
             serve_pid,
         }
     }
 
     fn get(&self, path: &str) -> (u16, Value) {
-        let (status, body) = http(self.board_daemon.port, "GET", path, None, None);
+        let (status, body) = http(
+            self.board_daemon.port,
+            "GET",
+            path,
+            None,
+            Some(&self.cookie),
+        );
         (status, parse(&body))
     }
 
@@ -382,12 +389,17 @@ exec "{tiller}" "$@"
 
 // -- http -------------------------------------------------------------------
 
+/// A signed-in owner's `Cookie` value for the daemon of `home` on `port`.
+fn owner_cookie(home: &Path, port: u16) -> String {
+    format!("tiller_owner={}", common::sign_in(home, port))
+}
+
 fn parse(body: &str) -> Value {
     serde_json::from_str(body).unwrap_or_else(|error| panic!("not JSON ({error}): {body:?}"))
 }
 
-/// One request as the board sends it; a mutation carries the cookie and the
-/// board's own origin.
+/// One request as the board sends it, with the owner's cookie when given; a
+/// mutation carries the board's own origin.
 fn http(
     port: u16,
     method: &str,
@@ -447,11 +459,11 @@ fn dechunk(body: &str) -> String {
 
 /// `GET /api/v1/events`, read on a thread; each `data:` line arrives on the
 /// channel.
-fn sse(port: u16) -> mpsc::Receiver<String> {
+fn sse(port: u16, cookie: &str) -> mpsc::Receiver<String> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     write!(
         stream,
-        "GET /api/v1/events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: text/event-stream\r\n\r\n"
+        "GET /api/v1/events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: text/event-stream\r\nCookie: {cookie}\r\n\r\n"
     )
     .unwrap();
     let (tx, rx) = mpsc::channel();
@@ -595,7 +607,7 @@ fn board_answer_reaches_the_peers_orchestrator_outbox() {
         "GET",
         "/api/v1/attention?state=open",
         None,
-        None,
+        Some(&world.peer_cookie),
     );
     assert_eq!(status, 200, "{peers_view}");
     assert!(!peers_view.contains("Which database"), "{peers_view}");
@@ -614,7 +626,7 @@ fn frozen_peer_leaves_the_board_host_unaffected() {
     let world = World::start();
     world.live();
     until("the peer's question on the board", || world.peer_question());
-    let events = sse(world.board_daemon.port);
+    let events = sse(world.board_daemon.port, &world.cookie);
     let item = world.peer_question().unwrap()["id"]
         .as_str()
         .unwrap()
@@ -704,7 +716,7 @@ fn frozen_peer_leaves_the_board_host_unaffected() {
         "GET",
         "/api/v1/board?filter=all",
         None,
-        None,
+        Some(&world.peer_cookie),
     );
     assert_eq!(status, 200);
 
@@ -1333,6 +1345,7 @@ fn board_resumes_a_peer_agent_with_its_first_launch_flags() {
         review_hosts: &[],
         no_mistakes_socket: None,
         gh_login_readable: false,
+        local_binding: false,
         claude: "claude",
         claude_config: &ClaudeConfig::at(lab.join("claude")),
         claude_version: None,
