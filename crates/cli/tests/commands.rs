@@ -935,6 +935,11 @@ fn every_command_has_a_snapshot_and_an_exit_code() {
         "project_stage_launched",
         &["project", "stage", "alpha", "launched", "--rev", &rev()],
     );
+    step(
+        &world,
+        "project_local_binding",
+        &["project", "local-binding", "alpha", "on"],
+    );
 
     // A hard delete: refused without --yes, and the id is free afterwards.
     let gamma = [

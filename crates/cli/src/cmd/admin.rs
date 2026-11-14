@@ -51,6 +51,10 @@ pub enum ProjectCmd {
     Edit(ProjectEditArgs),
     /// Move a project between pre-launch and launched against the rev you read
     Stage(ProjectStage),
+    /// Let a project's builders and verifiers bind and connect to local
+    /// ports in their sandbox, or stop them; running workers keep theirs
+    /// until their next launch
+    LocalBinding(ProjectLocalBinding),
     /// Retire a project
     Retire(ProjectRetire),
     /// Delete a project and every record of it on this host, its events
@@ -94,6 +98,21 @@ pub struct ProjectStage {
     /// default-branch head read now
     #[arg(long)]
     pub from: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct ProjectLocalBinding {
+    /// The project's id (its slug, like alpha)
+    pub id: String,
+    /// on or off
+    pub switch: Switch,
+}
+
+/// `on` or `off`, for a setting with two states.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Switch {
+    On,
+    Off,
 }
 
 #[derive(Args, Debug)]
@@ -274,10 +293,24 @@ pub fn project(app: &App, cmd: ProjectCmd) -> Done {
         let store = app.read()?;
         return Ok(Outcome::read(json!({"projects": store.projects()?})));
     }
+    // The project's own orchestrator may set local binding too, so the store
+    // checks the caller, not the owner check (`authority.md` section 4).
+    if let ProjectCmd::LocalBinding(args) = cmd {
+        let mut store = app.write()?;
+        return Ok(Outcome::applied(store.project_local_binding(
+            &app.ctx(),
+            &args.id,
+            args.switch == Switch::On,
+        )?));
+    }
     app.require_owner("tiller project")?;
     let mut store = app.write()?;
     match cmd {
-        ProjectCmd::List => Err(Failure::new("internal", 1, "project list is a read")),
+        ProjectCmd::List | ProjectCmd::LocalBinding(_) => Err(Failure::new(
+            "internal",
+            1,
+            "project list and local-binding run before the owner check",
+        )),
         ProjectCmd::Add(args) => {
             let checks = args
                 .checks
@@ -329,6 +362,7 @@ pub fn project(app: &App, cmd: ProjectCmd) -> Done {
                     deploy_workflow: clearable(args.deploy_workflow),
                     deploy_environment: clearable(args.deploy_environment),
                     deploy_timeout_minutes: args.deploy_timeout_minutes,
+                    local_binding: None,
                 },
             )?))
         }
