@@ -880,19 +880,14 @@ async fn mutate_or(
     let damage = state.0.damage.clone();
     let args = request_args();
     let joined = tokio::task::spawn_blocking(move || {
-        if !db.exists() {
-            return Err(uninitialized());
-        }
-        let done = Store::open_current(&db)
-            .map_err(Refusal::State)
-            .and_then(|mut store| {
-                let ctx = board_ctx(&key, args.as_ref());
-                mutation(&mut store, &ctx, &key)
-            });
+        let done = open_for_write(&db).and_then(|mut store| {
+            let ctx = board_ctx(&key, args.as_ref());
+            mutation(&mut store, &ctx, &key)
+        });
         if let Err(Refusal::State(error)) = &done {
             damage.suspect(&db, error);
         }
-        Ok(done?)
+        done.map_err(ApiError::from)
     })
     .await;
     let done = match joined {
@@ -2869,8 +2864,8 @@ async fn agent_read<T: for<'de> Deserialize<'de>>(
 /// The peer query path for project `id`, then `tail`. The peer splits the
 /// path on `/` and reads each part as it is, so an id that is not a project
 /// id is not found here, rather than sent as another path (D22).
-fn peer_project_path(host: Option<&str>, id: &str, tail: &str) -> Result<String, ApiError> {
-    if host.is_some() && ids::validate_project_id(id).is_err() {
+fn peer_project_path(id: &str, tail: &str) -> Result<String, ApiError> {
+    if ids::validate_project_id(id).is_err() {
         return Err(Error::NotFound {
             entity: "project",
             id: id.to_owned(),
@@ -2879,6 +2874,25 @@ fn peer_project_path(host: Option<&str>, id: &str, tail: &str) -> Result<String,
         .into());
     }
     Ok(format!("projects/{id}{tail}"))
+}
+
+/// [`host_read`] of project `id`, then `tail`, which needs `act`. The id
+/// rules apply only once `host` is a peer: this host reads its own
+/// projects by any id they have.
+async fn project_read<T: for<'de> Deserialize<'de>>(
+    state: &AppState,
+    host: Option<&str>,
+    id: &str,
+    tail: &str,
+) -> Result<Option<T>, ApiError> {
+    match addressed(state, host).await? {
+        Addressed::Here => Ok(None),
+        Addressed::Peer(view) => {
+            let path = peer_project_path(id, tail)?;
+            read_on_peer(state, &view, path, true).await.map(Some)
+        }
+        Addressed::Unlinked(label) => Err(ApiError::unreachable(&label)),
+    }
 }
 
 /// A one-shot read of a record on the paired peer `host` names, as a
@@ -2891,11 +2905,20 @@ async fn host_read<T: for<'de> Deserialize<'de>>(
     path: String,
     act: bool,
 ) -> Result<Option<T>, ApiError> {
-    let view = match addressed(state, host).await? {
-        Addressed::Here => return Ok(None),
-        Addressed::Peer(view) => view,
-        Addressed::Unlinked(label) => return Err(ApiError::unreachable(&label)),
-    };
+    match addressed(state, host).await? {
+        Addressed::Here => Ok(None),
+        Addressed::Peer(view) => read_on_peer(state, &view, path, act).await.map(Some),
+        Addressed::Unlinked(label) => Err(ApiError::unreachable(&label)),
+    }
+}
+
+/// The read of [`host_read`] on the peer `view`.
+async fn read_on_peer<T: for<'de> Deserialize<'de>>(
+    state: &AppState,
+    view: &PeerView,
+    path: String,
+    act: bool,
+) -> Result<T, ApiError> {
     let label = view.label.as_str();
     if view.link != LinkState::Live {
         return Err(ApiError::unreachable(label));
@@ -2903,9 +2926,8 @@ async fn host_read<T: for<'de> Deserialize<'de>>(
     if act && view.scope != PeerScope::Act {
         return Err(ApiError::read_scope(label));
     }
-    peer_query(state, &view, path, || None)
+    peer_query(state, view, path, || None)
         .await
-        .map(Some)
         .map_err(|error| error.host(label))
 }
 
@@ -3260,8 +3282,7 @@ async fn project_delete_preview(
     Path(id): Path<String>,
     Query(query): Query<HostQuery>,
 ) -> ApiResult<ProjectDeletePreview> {
-    let path = peer_project_path(query.host.as_deref(), &id, "/delete")?;
-    if let Some(preview) = host_read(&state, query.host.as_deref(), path, true).await? {
+    if let Some(preview) = project_read(&state, query.host.as_deref(), &id, "/delete").await? {
         return Ok(Json(preview));
     }
     read(&state, move |store| delete_preview(store, &id))
@@ -3455,18 +3476,23 @@ fn clone_locks(home: &std::path::Path) -> PathBuf {
     home.join("clone-locks")
 }
 
-/// `state.db` opened again for the write after a clone, checked as at the
-/// start of the mutation: a database restored, removed or found damaged
-/// while the clone ran is not written through the handle opened before it.
+/// `state.db` opened for a mutation, refused while it is not there.
+fn open_for_write(db: &std::path::Path) -> Result<Store, Refusal> {
+    if !db.exists() {
+        return Err(uninitialized().into());
+    }
+    Store::open_current(db).map_err(Refusal::State)
+}
+
+/// `state.db` opened again for the write after a clone: a database
+/// restored, removed or found damaged while the clone ran is not written
+/// through the handle opened before it. The read-only marker is the check
+/// the daemon and each `peer serve` share, as the add runs in either.
 fn reopened(home: &std::path::Path) -> Result<Store, Refusal> {
     if let Some(reason) = crate::readonly::marked(home) {
         return Err(read_only(&reason).into());
     }
-    let db = home.join("state.db");
-    if !db.exists() {
-        return Err(uninitialized().into());
-    }
-    Ok(Store::open_current(db)?)
+    open_for_write(&home.join("state.db"))
 }
 
 /// What a Local checkout folder would do for project `id`, refused as the
@@ -4029,8 +4055,7 @@ async fn project_retire_preview(
     Path(id): Path<String>,
     Query(query): Query<HostQuery>,
 ) -> ApiResult<ProjectRetirePreview> {
-    let path = peer_project_path(query.host.as_deref(), &id, "/retire")?;
-    if let Some(preview) = host_read(&state, query.host.as_deref(), path, true).await? {
+    if let Some(preview) = project_read(&state, query.host.as_deref(), &id, "/retire").await? {
         return Ok(Json(preview));
     }
     read(&state, move |store| retire_preview(store, &id))
@@ -4086,8 +4111,7 @@ async fn project_fields(
     Path(id): Path<String>,
     Query(query): Query<HostQuery>,
 ) -> ApiResult<ProjectFields> {
-    let path = peer_project_path(query.host.as_deref(), &id, "")?;
-    if let Some(fields) = host_read(&state, query.host.as_deref(), path, true).await? {
+    if let Some(fields) = project_read(&state, query.host.as_deref(), &id, "").await? {
         return Ok(Json(fields));
     }
     read(&state, move |store| fields_of(store, &id))
@@ -13723,18 +13747,13 @@ pub(crate) mod tests {
     #[test]
     fn a_peer_project_path_takes_only_a_project_id() {
         assert_eq!(
-            peer_project_path(Some("peer"), "alpha-web", "/retire").unwrap(),
+            peer_project_path("alpha-web", "/retire").unwrap(),
             "projects/alpha-web/retire"
         );
         for id in ["alpha/retire", "alpha?before=1", "../doctor", "Alpha"] {
-            let refused = peer_project_path(Some("peer"), id, "").unwrap_err();
+            let refused = peer_project_path(id, "").unwrap_err();
             assert_eq!(refused.status, StatusCode::NOT_FOUND, "{id}");
         }
-        // This host's own read keeps its own answer for an id like that.
-        assert_eq!(
-            peer_project_path(None, "Alpha", "").unwrap(),
-            "projects/Alpha"
-        );
     }
 
     #[test]

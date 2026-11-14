@@ -80,8 +80,10 @@ pub fn plan(request: &Request<'_>) -> Result<Plan, CheckoutError> {
     // A clone still running has made `.git` and its remote, so its folder
     // would pass for a finished clone below: an add sent again while it
     // runs, from this process or another, is refused instead.
-    if path.exists() {
-        drop(Claim::take(request.locks, &path)?);
+    if path.exists() && Claim::running(request.locks, &path)? {
+        return Err(unsuitable(format!(
+            "a clone into {shown} is running already"
+        )));
     }
     let repo = request.repo.map(str::trim).filter(|repo| !repo.is_empty());
     if let Some(repo) = repo {
@@ -427,12 +429,17 @@ fn read_all(mut file: std::fs::File) -> String {
 /// A lock on the folder a clone runs into, held while it runs: a second
 /// clone into the same folder, or a plan that would take a half-made clone
 /// for a finished one, is refused, in this process or another. The lock
-/// file is in `locks`, named by a hash of the folder, and the lock goes with
-/// the last handle on it, so a process that dies gives it back.
+/// file is in `locks`, named by a hash of the folder with its links
+/// resolved, and the lock goes with the last handle on it, so a process
+/// that dies gives it back. Only a clone makes a lock file: a plan reads
+/// the ones there are.
 #[derive(Debug)]
 struct Claim {
     lock: File,
 }
+
+/// How long a clone waits for a plan that is reading its lock.
+const CLAIM_GRACE: Duration = Duration::from_millis(500);
 
 impl Claim {
     fn take(locks: &Path, path: &Path) -> Result<Self, CheckoutError> {
@@ -441,24 +448,76 @@ impl Claim {
             unsuitable(format!("a clone into {shown} cannot be claimed: {error}"))
         };
         std::fs::create_dir_all(locks).map_err(cannot)?;
-        let name: String = Sha256::digest(path.as_os_str().as_encoded_bytes())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
         let lock = File::options()
             .create(true)
             .truncate(false)
             .write(true)
-            .open(locks.join(format!("{name}.lock")))
+            .open(lock_file(locks, path))
             .map_err(cannot)?;
-        match lock.try_lock() {
-            Ok(()) => Ok(Self { lock }),
-            Err(TryLockError::WouldBlock) => Err(unsuitable(format!(
-                "a clone into {shown} is running already"
-            ))),
+        // A plan holds the lock for a moment as it reads it, so a clone
+        // tries again for a while before it calls the folder taken.
+        let since = Instant::now();
+        loop {
+            match lock.try_lock() {
+                Ok(()) => return Ok(Self { lock }),
+                Err(TryLockError::WouldBlock) if since.elapsed() < CLAIM_GRACE => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(TryLockError::WouldBlock) => {
+                    return Err(unsuitable(format!(
+                        "a clone into {shown} is running already"
+                    )));
+                }
+                Err(TryLockError::Error(error)) => return Err(cannot(error)),
+            }
+        }
+    }
+
+    /// True while a clone holds the claim on `path`.
+    fn running(locks: &Path, path: &Path) -> Result<bool, CheckoutError> {
+        let cannot = |error: std::io::Error| {
+            unsuitable(format!(
+                "a clone into {} cannot be checked: {error}",
+                path.display()
+            ))
+        };
+        let lock = match File::open(lock_file(locks, path)) {
+            Ok(lock) => lock,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(cannot(error)),
+        };
+        match lock.try_lock_shared() {
+            Ok(()) => Ok(false),
+            Err(TryLockError::WouldBlock) => Ok(true),
             Err(TryLockError::Error(error)) => Err(cannot(error)),
         }
     }
+}
+
+/// The lock file of `path` in `locks`. The path is keyed with the links of
+/// its nearest existing folder resolved, so two spellings of one folder
+/// share a lock.
+fn lock_file(locks: &Path, path: &Path) -> PathBuf {
+    let mut base = path;
+    let mut rest = Vec::new();
+    let resolved = loop {
+        if let Ok(resolved) = base.canonicalize() {
+            break resolved;
+        }
+        match (base.parent(), base.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name);
+                base = parent;
+            }
+            _ => break base.to_path_buf(),
+        }
+    };
+    let key = rest.iter().rev().fold(resolved, |key, name| key.join(name));
+    let name: String = Sha256::digest(key.as_os_str().as_encoded_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    locks.join(format!("{name}.lock"))
 }
 
 /// git with no question it could wait on: no password prompt, no ssh
@@ -555,13 +614,9 @@ mod tests {
             clone,
             root,
             home: Some(Path::new("/home/user")),
-            locks: &LOCKS,
+            locks: Path::new("/home/user/.tiller/clone-locks"),
         }
     }
-
-    /// The clone locks of every test: each test's folders are its own.
-    static LOCKS: std::sync::LazyLock<PathBuf> =
-        std::sync::LazyLock::new(|| std::env::temp_dir().join("tiller-test-clone-locks"));
 
     fn refused(request: &Request<'_>) -> String {
         match plan(request) {
@@ -735,7 +790,7 @@ mod tests {
             path: path.clone(),
             remote: text(&origin),
         };
-        let undo = clone(&plan, CLONE_LIMIT, &LOCKS)
+        let undo = clone(&plan, CLONE_LIMIT, &dir.path().join("locks"))
             .unwrap()
             .map(|cloned| cloned.undo);
         assert_eq!(undo, Some(Undo::Remove(path.clone())));
@@ -758,7 +813,7 @@ mod tests {
             path: empty.clone(),
             remote: text(&origin),
         };
-        let undo = clone(&plan, CLONE_LIMIT, &LOCKS)
+        let undo = clone(&plan, CLONE_LIMIT, &dir.path().join("locks"))
             .unwrap()
             .map(|cloned| cloned.undo);
         assert_eq!(undo, Some(Undo::Empty(empty.clone())));
@@ -767,7 +822,11 @@ mod tests {
         assert_eq!(std::fs::read_dir(&empty).unwrap().count(), 0);
 
         assert!(matches!(
-            clone(&Plan::Use { path: empty }, CLONE_LIMIT, &LOCKS),
+            clone(
+                &Plan::Use { path: empty },
+                CLONE_LIMIT,
+                &dir.path().join("locks")
+            ),
             Ok(None)
         ));
     }
@@ -780,7 +839,8 @@ mod tests {
             path: path.clone(),
             remote: text(&dir.path().join("no-such-origin.git")),
         };
-        let Err(CheckoutError::Clone(why)) = clone(&plan, CLONE_LIMIT, &LOCKS) else {
+        let Err(CheckoutError::Clone(why)) = clone(&plan, CLONE_LIMIT, &dir.path().join("locks"))
+        else {
             panic!("expected the clone to fail");
         };
         assert!(why.contains("git clone of"), "{why}");
@@ -799,8 +859,12 @@ mod tests {
             path: dir.path().join("new").join(name),
             remote: text(&origin),
         };
-        let web = clone(&into("web"), CLONE_LIMIT, &LOCKS).unwrap().unwrap();
-        let api = clone(&into("api"), CLONE_LIMIT, &LOCKS).unwrap().unwrap();
+        let web = clone(&into("web"), CLONE_LIMIT, &dir.path().join("locks"))
+            .unwrap()
+            .unwrap();
+        let api = clone(&into("api"), CLONE_LIMIT, &dir.path().join("locks"))
+            .unwrap()
+            .unwrap();
         web.undo.run();
         assert!(!dir.path().join("new/web").exists());
         assert!(dir.path().join("new/api/.git").is_dir());
@@ -826,7 +890,7 @@ mod tests {
             remote: text(&origin),
         };
         assert_eq!(
-            clone(&plan, CLONE_LIMIT, &LOCKS).map(|_| ()),
+            clone(&plan, CLONE_LIMIT, &dir.path().join("locks")).map(|_| ()),
             Err(CheckoutError::Unsuitable(format!(
                 "{} is not empty; give a new or empty folder to clone into",
                 path.display()
@@ -890,14 +954,16 @@ mod tests {
 
     #[test]
     fn one_clone_into_a_folder_runs_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let locks = dir.path().join("locks");
         let path = Path::new("/home/user/code/web");
-        let first = Claim::take(&LOCKS, path).unwrap();
-        let Err(CheckoutError::Unsuitable(why)) = Claim::take(&LOCKS, path) else {
+        let first = Claim::take(&locks, path).unwrap();
+        let Err(CheckoutError::Unsuitable(why)) = Claim::take(&locks, path) else {
             panic!("expected the second claim to be refused");
         };
         assert_eq!(why, "a clone into /home/user/code/web is running already");
         drop(first);
-        assert!(Claim::take(&LOCKS, path).is_ok());
+        assert!(Claim::take(&locks, path).is_ok());
     }
 
     /// A clone still running has made `.git` and its remote, so its folder
@@ -906,11 +972,15 @@ mod tests {
     #[test]
     fn a_folder_a_clone_is_running_into_is_refused() {
         let dir = tempfile::tempdir().unwrap();
+        let locks = dir.path().join("locks");
         let path = dir.path().join("web");
         std::fs::create_dir(&path).unwrap();
         let typed = text(&path);
-        let request = request(&typed, true, None);
-        let running = Claim::take(&LOCKS, &path).unwrap();
+        let request = Request {
+            locks: &locks,
+            ..request(&typed, true, None)
+        };
+        let running = Claim::take(&locks, &path).unwrap();
         assert_eq!(
             refused(&request),
             format!("a clone into {} is running already", path.display())
@@ -919,23 +989,66 @@ mod tests {
         assert!(matches!(plan(&request), Ok(Plan::Clone { .. })));
     }
 
+    /// A plan reads the locks there are and makes none, and a clone waits
+    /// for a plan that is reading its lock.
+    #[test]
+    fn a_plan_neither_makes_a_lock_nor_keeps_a_clone_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let locks = dir.path().join("locks");
+        let path = dir.path().join("web");
+        std::fs::create_dir(&path).unwrap();
+        let typed = text(&path);
+        let request = Request {
+            locks: &locks,
+            ..request(&typed, true, None)
+        };
+        assert!(plan(&request).is_ok());
+        assert!(!locks.exists());
+        drop(Claim::take(&locks, &path).unwrap());
+        let reading = File::open(lock_file(&locks, &path)).unwrap();
+        reading.try_lock_shared().unwrap();
+        let unlock = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(reading);
+        });
+        assert!(Claim::take(&locks, &path).is_ok());
+        unlock.join().unwrap();
+    }
+
+    /// Two spellings of one folder, through a link, share one claim.
+    #[test]
+    fn a_folder_reached_through_a_link_shares_its_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let locks = dir.path().join("locks");
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let linked = dir.path().join("linked");
+        std::os::unix::fs::symlink(&real, &linked).unwrap();
+        let held = Claim::take(&locks, &real.join("web")).unwrap();
+        assert!(Claim::take(&locks, &linked.join("web")).is_err());
+        assert!(Claim::take(&locks, &linked.join("./web")).is_err());
+        drop(held);
+        assert!(Claim::take(&locks, &linked.join("web")).is_ok());
+    }
+
     /// git holds the claim as its stdin, so a git that outlives the process
     /// that started it keeps the folder claimed until it ends.
     #[test]
     fn a_claim_lasts_while_a_process_holds_it() {
         let dir = tempfile::tempdir().unwrap();
+        let locks = dir.path().join("locks");
         let path = dir.path().join("web");
-        let claim = Claim::take(&LOCKS, &path).unwrap();
+        let claim = Claim::take(&locks, &path).unwrap();
         let mut child = Command::new("sleep")
             .arg("30")
             .stdin(claim.lock.try_clone().unwrap())
             .spawn()
             .unwrap();
         drop(claim);
-        assert!(Claim::take(&LOCKS, &path).is_err());
+        assert!(Claim::take(&locks, &path).is_err());
         child.kill().unwrap();
         child.wait().unwrap();
-        assert!(Claim::take(&LOCKS, &path).is_ok());
+        assert!(Claim::take(&locks, &path).is_ok());
     }
 
     #[test]

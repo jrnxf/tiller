@@ -42,9 +42,10 @@ export function AgentList({ agents, title }: { agents: ProjectAgent[]; title: st
 const SAID_HERE = new Set(["peer_unreachable", "read_scope", "forward_uncertain"]);
 
 // Why a project add, edit, archive or delete failed. A peer's refusal says
-// which host refused it (D22), unless this host said it for the peer. A forward the peer did not confirm says it may
-// have been applied, after the 11 min a clone and its stops may take, or the
-// 10 s an `inline` edit waits.
+// which host refused it (D22), unless this host said it for the peer. An
+// `internal` error is no refusal: it names the host it came from, once. A
+// forward the peer did not confirm says it may have been applied, after the
+// 11 min a clone and its stops may take, or the 10 s an `inline` edit waits.
 export function ProjectFailure({
   error,
   inline = false,
@@ -55,9 +56,10 @@ export function ProjectFailure({
   if (!error) return null;
   const { host, message } = error;
   if (host && !SAID_HERE.has(error.code)) {
+    const named = message.startsWith(`${host} `) ? message : `${host}: ${message}`;
     return (
       <p className="refusal" role="alert">
-        {host} refused it: {message}
+        {error.code === "internal" ? named : `${host} refused it: ${message}`}
       </p>
     );
   }

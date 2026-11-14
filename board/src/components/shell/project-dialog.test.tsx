@@ -49,6 +49,22 @@ test("a refusal names its host even when the message holds the label", () => {
   expect(screen.getByRole("alert").textContent).toBe("dev refused it: project id dev-web is taken");
 });
 
+// An answer the board host could not read is no refusal by the peer.
+test.each([
+  [
+    "host-d answered a malformed response: no body",
+    "host-d answered a malformed response: no body",
+  ],
+  ["the database is busy", "host-d: the database is busy"],
+])("an internal error %j is not called a refusal", (message, shown) => {
+  render(
+    <ProjectFailure
+      error={new ActionError(502, "internal", message, undefined, undefined, "host-d")}
+    />,
+  );
+  expect(screen.getByRole("alert").textContent).toBe(shown);
+});
+
 test("an unreachable peer is said once, in this host's words", () => {
   render(
     <ProjectFailure
