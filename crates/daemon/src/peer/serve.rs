@@ -572,7 +572,7 @@ impl Link<'_> {
             }
             Query::Retired => {
                 self.acts()?;
-                serde_json::to_value(views::retired_projects(store, Timestamp::now())?)
+                serde_json::to_value(views::own_retired_projects(store, Timestamp::now())?)
             }
             // `run` hands the checks to `Checks`, off the link thread: they
             // never run here.

@@ -1465,7 +1465,8 @@ async fn projects(
         // Peers cache only live projects, so a peer's archive is read from
         // the peer itself, for the delete it offers (D22).
         let path = "projects?retired=true".to_owned();
-        if let Some(mut retired) = host_read(&state, query.host.as_deref(), path, true).await?
+        if let Some(mut retired) =
+            host_read(&state, query.host.as_deref(), || Ok(path), true).await?
             && let Some(host) = query.host.as_deref()
         {
             views::tag_peer_projects(&state.0.peers.federation(), host, &mut retired)?;
@@ -2858,7 +2859,7 @@ async fn agent_read<T: for<'de> Deserialize<'de>>(
     what: &str,
     act: bool,
 ) -> Result<Option<T>, ApiError> {
-    host_read(state, host, format!("agents/{session}/{what}"), act).await
+    host_read(state, host, || Ok(format!("agents/{session}/{what}")), act).await
 }
 
 /// The peer query path for project `id`, then `tail`. The peer splits the
@@ -2885,40 +2886,25 @@ async fn project_read<T: for<'de> Deserialize<'de>>(
     id: &str,
     tail: &str,
 ) -> Result<Option<T>, ApiError> {
-    match addressed(state, host).await? {
-        Addressed::Here => Ok(None),
-        Addressed::Peer(view) => {
-            let path = peer_project_path(id, tail)?;
-            read_on_peer(state, &view, path, true).await.map(Some)
-        }
-        Addressed::Unlinked(label) => Err(ApiError::unreachable(&label)),
-    }
+    host_read(state, host, || peer_project_path(id, tail), true).await
 }
 
 /// A one-shot read of a record on the paired peer `host` names, as a
 /// `query` on its link (`protocol.md` 10.2); `None` when `host` is this
-/// host. `act` says the read needs the `act` scope. The answer, or the
-/// refusal, carries the peer's label.
+/// host. `path` makes the query path once `host` is a peer. `act` says the
+/// read needs the `act` scope. The answer, or the refusal, carries the
+/// peer's label.
 async fn host_read<T: for<'de> Deserialize<'de>>(
     state: &AppState,
     host: Option<&str>,
-    path: String,
+    path: impl FnOnce() -> Result<String, ApiError>,
     act: bool,
 ) -> Result<Option<T>, ApiError> {
-    match addressed(state, host).await? {
-        Addressed::Here => Ok(None),
-        Addressed::Peer(view) => read_on_peer(state, &view, path, act).await.map(Some),
-        Addressed::Unlinked(label) => Err(ApiError::unreachable(&label)),
-    }
-}
-
-/// The read of [`host_read`] on the peer `view`.
-async fn read_on_peer<T: for<'de> Deserialize<'de>>(
-    state: &AppState,
-    view: &PeerView,
-    path: String,
-    act: bool,
-) -> Result<T, ApiError> {
+    let view = match addressed(state, host).await? {
+        Addressed::Here => return Ok(None),
+        Addressed::Peer(view) => view,
+        Addressed::Unlinked(label) => return Err(ApiError::unreachable(&label)),
+    };
     let label = view.label.as_str();
     if view.link != LinkState::Live {
         return Err(ApiError::unreachable(label));
@@ -2926,8 +2912,9 @@ async fn read_on_peer<T: for<'de> Deserialize<'de>>(
     if act && view.scope != PeerScope::Act {
         return Err(ApiError::read_scope(label));
     }
-    peer_query(state, view, path, || None)
+    peer_query(state, &view, path()?, || None)
         .await
+        .map(Some)
         .map_err(|error| error.host(label))
 }
 
@@ -3660,7 +3647,7 @@ async fn project_checkout(
         })
         .map_err(|error| ApiError::from(Error::Usage(format!("the checkout query: {error}"))))?;
         let path = format!("projects/checkout?{params}");
-        if let Some(check) = host_read(&state, query.host.as_deref(), path, true).await? {
+        if let Some(check) = host_read(&state, query.host.as_deref(), || Ok(path), true).await? {
             return Ok(Json(check));
         }
     }

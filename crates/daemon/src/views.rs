@@ -896,21 +896,34 @@ fn project_shape(
 
 /// `GET /api/v1/projects`: projects not retired.
 pub fn projects(store: &Store, now: Timestamp) -> Result<ProjectsResponse> {
-    projects_where(store, now, false)
+    projects_where(store, now, |project| project.retired_at.is_none())
 }
 
 /// `GET /api/v1/projects?retired=true`: this host's retired projects, the
 /// ones only a delete still touches.
 pub fn retired_projects(store: &Store, now: Timestamp) -> Result<ProjectsResponse> {
-    projects_where(store, now, true)
+    projects_where(store, now, |project| project.retired_at.is_some())
 }
 
-fn projects_where(store: &Store, now: Timestamp, retired: bool) -> Result<ProjectsResponse> {
+/// The retired projects this host owns, the archive it answers a peer
+/// with: a row another host owns is that host's to delete (D22).
+pub fn own_retired_projects(store: &Store, now: Timestamp) -> Result<ProjectsResponse> {
+    let here = store.this_host()?.id;
+    projects_where(store, now, |project| {
+        project.retired_at.is_some() && project.owner_host_id == here
+    })
+}
+
+fn projects_where(
+    store: &Store,
+    now: Timestamp,
+    keep: impl Fn(&tiller_core::domain::Project) -> bool,
+) -> Result<ProjectsResponse> {
     Ok(ProjectsResponse {
         projects: store
             .projects()?
             .into_iter()
-            .filter(|project| project.retired_at.is_some() == retired)
+            .filter(|project| keep(project))
             .map(|project| project_shape(store, project, now))
             .collect::<Result<_>>()?,
     })

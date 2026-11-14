@@ -349,7 +349,7 @@ fn target_project(store: &Store, op: Op, frame: &Mutate) -> tiller_core::Result<
             .body
             .get("id")
             .and_then(Value::as_str)
-            .map(|id| id.trim().to_owned()),
+            .map(str::to_owned),
         Op::Answer | Op::Withdraw => {
             match found(resolve_id(conn, "attention", "attention", target))? {
                 Some(id) => {

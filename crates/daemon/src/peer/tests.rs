@@ -4558,6 +4558,36 @@ async fn the_board_adds_edits_retires_and_deletes_a_peer_project() {
     // The peer's rows say whose they are, as its live rows do.
     assert_eq!(archived["projects"][0]["host"], "peer", "{archived}");
     assert_eq!(archived["projects"][0]["link"], "live", "{archived}");
+    // A retired row a third host owns is that host's to delete, not listed.
+    {
+        let store = pair.peer.open();
+        let other = "01JHOSTC0000000000000000000";
+        store
+            .conn()
+            .execute(
+                "INSERT INTO hosts (id, label, kind) VALUES (?1, 'host-c', 'remote')",
+                [other],
+            )
+            .unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE projects SET owner_host_id = ?1,
+                 retired_at = (SELECT retired_at FROM projects WHERE id = 'gamma')
+                 WHERE id = 'alpha'",
+                [other],
+            )
+            .unwrap();
+    }
+    let archived = get(&app, "/api/v1/projects?retired=true&host=peer").await;
+    let archived: Value = serde_json::from_str(&archived.body).unwrap();
+    let ids: Vec<&str> = archived["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|project| project["id"].as_str())
+        .collect();
+    assert_eq!(ids, ["gamma"], "{archived}");
     let local = get(&app, "/api/v1/projects?retired=true").await;
     assert!(!local.body.contains("gamma"), "{}", local.body);
 
