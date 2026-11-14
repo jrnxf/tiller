@@ -1943,11 +1943,22 @@ fn peer_projects(view: &PeerView) -> ProjectsResponse {
 
 /// A paired peer's retired projects, read from the peer itself, tagged with
 /// that peer as its live rows are, so a client never takes one for this
-/// host's own (D22).
-pub fn tag_peer_projects(peers: &Federation, host: &str, response: &mut ProjectsResponse) {
-    if let Scope::Peer(view) = scope(peers, Some(host)) {
-        Owner::peer(view).projects(response);
-    }
+/// host's own (D22). A peer unpaired since the read is not found, so its
+/// rows never pass untagged.
+pub fn tag_peer_projects(
+    peers: &Federation,
+    host: &str,
+    response: &mut ProjectsResponse,
+) -> Result<()> {
+    let Scope::Peer(view) = scope(peers, Some(host)) else {
+        return Err(tiller_core::Error::NotFound {
+            entity: "host",
+            id: host.to_owned(),
+            candidates: Vec::new(),
+        });
+    };
+    Owner::peer(view).projects(response);
+    Ok(())
 }
 
 /// `GET /api/v1/board` across hosts (`protocol.md` 7.3).

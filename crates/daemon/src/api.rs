@@ -1473,7 +1473,7 @@ async fn projects(
         if let Some(mut retired) = host_read(&state, query.host.as_deref(), path, true).await?
             && let Some(host) = query.host.as_deref()
         {
-            views::tag_peer_projects(&state.0.peers.federation(), host, &mut retired);
+            views::tag_peer_projects(&state.0.peers.federation(), host, &mut retired)?;
             return Ok(Json(retired));
         }
         return read(&state, |store| {
@@ -3424,8 +3424,9 @@ fn add_here(
     let undo = tiller_agents::checkout::clone(&plan, tiller_agents::checkout::CLONE_LIMIT)
         .map_err(checkout_refused)?;
     // A clone can take minutes: the project is added when it is done, not
-    // when it was asked for. A retry that comes while it runs is refused by
-    // the clone's claim on the folder, and one after it sees the key.
+    // when it was asked for. A retry that comes while it runs finds no
+    // folder, and its own clone cannot take the one this lands; one after
+    // it sees the key.
     let ctx = &Ctx {
         now: Timestamp::now(),
         ..ctx.clone()

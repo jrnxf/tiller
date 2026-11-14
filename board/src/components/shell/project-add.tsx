@@ -57,7 +57,9 @@ function peerOf(value: string): string | undefined {
   return value.startsWith(PEER) ? value.slice(PEER.length) : undefined;
 }
 
-function hostChoices(machines: Machine[]): HostChoice[] {
+// A peer unpaired while the dialog is open stays chosen, and off, so the add
+// is not sent to a host the owner did not pick.
+export function hostChoices(machines: Machine[], hostValue: string): HostChoice[] {
   const local = machines.find((machine) => machine.kind === "local")?.label ?? null;
   const peers = peerMachines(machines).map((machine): HostChoice => {
     const standing = standingOf({ host: machine.label, link: machine.link }, machines);
@@ -68,9 +70,15 @@ function hostChoices(machines: Machine[]): HostChoice[] {
       reason: standing.canAct ? null : standing.reason,
     };
   });
+  const host = peerOf(hostValue);
+  const gone =
+    host && !peers.some((choice) => choice.value === hostValue)
+      ? [{ value: hostValue, host, label: host, reason: "no longer paired" }]
+      : [];
   return [
     { value: HERE, label: local ? `${local} (this host)` : "This host", reason: null },
     ...peers,
+    ...gone,
   ];
 }
 
@@ -120,10 +128,10 @@ function useSettled(value: string, ms: number): string {
 // peer, under its own checkout rules (D22).
 function AddDialog({ onClose }: { onClose: () => void }) {
   const queryClient = useQueryClient();
-  const choices = hostChoices(useMachineRows());
   const [hostValue, setHostValue] = useState(HERE);
-  const chosen = choices.find((choice) => choice.value === hostValue);
   const host = peerOf(hostValue);
+  const choices = hostChoices(useMachineRows(), hostValue);
+  const chosen = choices.find((choice) => choice.value === hostValue);
   const hostOff = chosen?.reason ?? null;
   const [id, setId] = useState("");
   const [repo, setRepo] = useState("");

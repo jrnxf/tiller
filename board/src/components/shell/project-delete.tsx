@@ -220,7 +220,7 @@ function Blocker({
               card={{
                 id: target,
                 display_id: target,
-                ...(host ? { host, link: "live" as const } : {}),
+                ...(host ? { host, link: project.link ?? "live" } : {}),
               }}
               reason={`deleting project ${project.id}`}
               onClose={close}
