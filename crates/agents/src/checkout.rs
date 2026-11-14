@@ -248,19 +248,29 @@ fn nearest(path: &Path) -> Option<&Path> {
 }
 
 /// Runs the clone a [`Plan::Clone`] asks for; a [`Plan::Use`] does nothing.
-/// git clones into a hidden folder beside the one asked for, which is
-/// renamed into place once the clone is done: a clone still running, or one
-/// whose process died, is never at the folder for a plan to take as a
-/// finished one. A clone that fails or runs out of time leaves nothing
-/// behind; folders made above it stay, empty. Returns how to take the clone
-/// back, when it ran one.
+/// Into a missing folder, git clones into a hidden folder beside it, which
+/// is renamed into place once the clone is done: a clone still running, or
+/// one whose process died, is never at the folder for a plan to take as a
+/// finished one. An empty folder that is there, which may be a link or a
+/// mount point a rename would replace, takes the clone itself. A clone that
+/// fails or runs out of time leaves nothing behind; folders made above it
+/// stay, empty. Returns how to take the clone back, when it ran one.
 pub fn clone(plan: &Plan, limit: Duration) -> Result<Option<Undo>, CheckoutError> {
     let Plan::Clone { path, remote } = plan else {
         return Ok(None);
     };
     let _claim = Claim::take(path)?;
     let undo = claim_folder(path)?;
-    let stage = stage(path)?;
+    let stage = match undo {
+        Undo::Remove(_) => Some(stage(path, limit)?),
+        Undo::Empty(_) => None,
+    };
+    let fail = |error: CheckoutError| {
+        if stage.is_none() {
+            undo.run();
+        }
+        error
+    };
     let stderr = tempfile::tempfile()
         .map_err(|error| CheckoutError::Clone(format!("git clone: {error}")))?;
     let mut command = no_prompt(Command::new("git"));
@@ -269,7 +279,11 @@ pub fn clone(plan: &Plan, limit: Duration) -> Result<Option<Undo>, CheckoutError
     process::own_group(&mut command);
     let mut child = command
         .args(["clone", "--quiet", "--", remote])
-        .arg(stage.path())
+        .arg(
+            stage
+                .as_ref()
+                .map_or(path.as_path(), tempfile::TempDir::path),
+        )
         .stdout(Stdio::null())
         .stderr(
             stderr
@@ -278,36 +292,64 @@ pub fn clone(plan: &Plan, limit: Duration) -> Result<Option<Undo>, CheckoutError
         )
         .spawn()
         .map_err(|error| CheckoutError::Clone(format!("git clone did not start: {error}")))?;
-    let status = finish(&mut child, limit, remote).map_err(CheckoutError::Clone)?;
+    let status =
+        finish(&mut child, limit, remote).map_err(|why| fail(CheckoutError::Clone(why)))?;
     if !status.success() {
         let why = read_all(stderr);
-        return Err(CheckoutError::Clone(format!(
+        return Err(fail(CheckoutError::Clone(format!(
             "git clone of {remote} failed: {}",
             why.trim()
-        )));
+        ))));
     }
-    // An empty folder is replaced; one that filled while the clone ran is
-    // not, and its contents stay.
-    if std::fs::rename(stage.path(), path).is_err() {
-        claim_folder(path)?;
-        return Err(unsuitable(format!(
-            "{} cannot take the clone",
-            path.display()
-        )));
+    match stage {
+        Some(stage) => place(stage, path, remote).map(|placed| placed.then_some(undo)),
+        None => Ok(Some(undo)),
     }
-    let _ = stage.keep();
-    Ok(Some(undo))
+}
+
+/// Renames a finished clone from its stage into `path`, which was missing.
+/// False when another clone of `remote` landed there first, from an add
+/// sent again while this one ran: that clone is used, and this one goes.
+/// A folder that filled with anything else keeps what it has.
+fn place(stage: tempfile::TempDir, path: &Path, remote: &str) -> Result<bool, CheckoutError> {
+    let Err(error) = std::fs::rename(stage.path(), path) else {
+        let _ = stage.keep();
+        return Ok(true);
+    };
+    let landed = top_level(path).is_some_and(|top| same(&top, path))
+        && git(Some(path), &["remote", "get-url", "origin"]).is_ok_and(|url| url.trim() == remote);
+    if landed {
+        return Ok(false);
+    }
+    claim_folder(path)?;
+    Err(unsuitable(format!(
+        "{} cannot take the clone: {error}",
+        path.display()
+    )))
 }
 
 /// The hidden folder beside `path` that git clones into, removed on drop
-/// unless it was kept.
-fn stage(path: &Path) -> Result<tempfile::TempDir, CheckoutError> {
+/// unless it was kept. A stage older than twice `limit` is left by a clone
+/// whose process died, since a live one is stopped at `limit`: it is
+/// removed first, so such clones do not pile up.
+fn stage(path: &Path, limit: Duration) -> Result<tempfile::TempDir, CheckoutError> {
     let parent = path.parent().unwrap_or(path);
     let name = path
         .file_name()
         .map_or_else(|| "checkout".into(), |name| name.to_string_lossy());
+    let prefix = format!(".{name}.clone-");
+    for entry in std::fs::read_dir(parent).into_iter().flatten().flatten() {
+        let stale = entry.file_name().to_string_lossy().starts_with(&prefix)
+            && entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .is_ok_and(|at| at.elapsed().is_ok_and(|age| age > limit * 2));
+        if stale {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
     tempfile::Builder::new()
-        .prefix(&format!(".{name}.clone-"))
+        .prefix(&prefix)
         .tempdir_in(parent)
         .map_err(|error| unsuitable(format!("{} cannot hold a clone: {error}", parent.display())))
 }
@@ -901,6 +943,59 @@ mod tests {
             .collect();
         beside.sort();
         assert_eq!(beside, [".web.clone-died"]);
+
+        // Past twice the limit, what it left is removed by the next clone.
+        let old = std::time::SystemTime::now() - CLONE_LIMIT * 3;
+        std::fs::File::open(&left)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let api = Plan::Clone {
+            path: dir.path().join("web-2"),
+            remote: text(&origin),
+        };
+        let web = Plan::Clone {
+            path: dir.path().join("web"),
+            remote: text(&origin),
+        };
+        clone(&api, CLONE_LIMIT).unwrap();
+        assert!(left.exists(), "a stage of another folder stays");
+        std::fs::remove_dir_all(dir.path().join("web")).unwrap();
+        clone(&web, CLONE_LIMIT).unwrap();
+        assert!(!left.exists());
+    }
+
+    /// An add sent again while its clone ran clones too; the clone that
+    /// lands second finds the first and uses it, with nothing to take back.
+    #[test]
+    fn a_clone_that_lands_second_uses_the_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let origin = origin(dir.path());
+        let path = dir.path().join("web");
+        let plan = Plan::Clone {
+            path: path.clone(),
+            remote: text(&origin),
+        };
+        clone(&plan, CLONE_LIMIT).unwrap();
+        let second = tempfile::tempdir_in(dir.path()).unwrap();
+        let gone = second.path().to_path_buf();
+        assert_eq!(place(second, &path, &text(&origin)), Ok(false));
+        assert!(!gone.exists());
+        assert!(path.join(".git").is_dir());
+
+        // Anything else there is kept, and the clone is refused.
+        let other = dir.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        std::fs::write(other.join("README"), "theirs").unwrap();
+        let third = tempfile::tempdir_in(dir.path()).unwrap();
+        let Err(CheckoutError::Unsuitable(why)) = place(third, &other, &text(&origin)) else {
+            panic!("expected a refusal");
+        };
+        assert!(why.contains("is not empty"), "{why}");
+        assert_eq!(
+            std::fs::read_to_string(other.join("README")).unwrap(),
+            "theirs"
+        );
     }
 
     #[test]

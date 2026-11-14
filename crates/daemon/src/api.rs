@@ -37,6 +37,7 @@ use tiller_core::host_config;
 // The store checks every cap. The API checks them again before a mutation
 // is forwarded, so text over a cap is refused here, not after a trip over
 // the link to a peer.
+use tiller_core::error::READ_ONLY_MARKER;
 use tiller_core::limits::{self, ANSWER_MAX_CHARS, COMMENT_MAX_CHARS, STEER_MAX_CHARS, within};
 use tiller_core::state::approvals::{Decision, NewGrant};
 use tiller_core::state::asks::NewAsk;
@@ -3424,21 +3425,34 @@ fn add_here(
     let undo = tiller_agents::checkout::clone(&plan, tiller_agents::checkout::CLONE_LIMIT)
         .map_err(checkout_refused)?;
     // A clone can take minutes: the project is added when it is done, not
-    // when it was asked for. A retry that comes while it runs finds no
-    // folder, and its own clone cannot take the one this lands; one after
-    // it sees the key.
+    // when it was asked for. A retry that comes while it runs, from another
+    // `peer serve`, finds no folder and clones too, then uses this clone if
+    // it lands first; one after it sees the key.
     let ctx = &Ctx {
         now: Timestamp::now(),
         ..ctx.clone()
     };
-    let done = add_numbered(store, ctx, home, new, Some(plan.path().to_path_buf()));
+    let path = plan.path().to_path_buf();
+    let done = reopened(home)
+        .and_then(|mut store| Ok(add_numbered(&mut store, ctx, home, new, Some(path))?));
     if done.is_err()
         && let Some(undo) = undo
     {
         // Done before the refusal is answered.
         undo.run();
     }
-    Ok(done?)
+    done
+}
+
+/// `state.db` opened again for the write after a clone, checked as at the
+/// start of the mutation: a database restored or found damaged while the
+/// clone ran is not written through the handle opened before it.
+fn reopened(home: &std::path::Path) -> Result<Store, Refusal> {
+    if let Ok(reason) = std::fs::read_to_string(home.join(READ_ONLY_MARKER)) {
+        return Err(read_only(reason.trim()).into());
+    }
+    tiller_core::owner::check(home)?;
+    Ok(Store::open_current(home.join("state.db"))?)
 }
 
 /// What a Local checkout folder would do for project `id`, refused as the
