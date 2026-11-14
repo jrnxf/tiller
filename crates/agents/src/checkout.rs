@@ -7,20 +7,18 @@
 //! clone a plan asks for.
 
 use std::collections::BTreeSet;
+use std::fs::{File, TryLockError};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+use sha2::{Digest, Sha256};
 
 use tiller_core::domain::forge::{self, Forge};
 use tiller_panes::process::{self, Ended};
 
 /// How long a clone may take before it is stopped.
 pub const CLONE_LIMIT: Duration = Duration::from_secs(10 * 60);
-
-/// The folders a clone is running into right now: a second clone into the
-/// same folder is refused instead of racing the first.
-static CLONING: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CheckoutError {
@@ -76,6 +74,12 @@ impl Plan {
 pub fn plan(request: &Request<'_>) -> Result<Plan, CheckoutError> {
     let path = folder(request)?;
     let shown = path.display();
+    // A clone still running has made the folder, and may have made `.git`
+    // and its remote, so it would pass for a finished one below. An add sent
+    // again while it runs, from another `peer serve` too, is refused.
+    if path.exists() {
+        drop(Claim::take(&path)?);
+    }
     let repo = request.repo.map(str::trim).filter(|repo| !repo.is_empty());
     if let Some(repo) = repo {
         check_repo(repo)?;
@@ -398,31 +402,42 @@ fn read_all(mut file: std::fs::File) -> String {
     text
 }
 
-/// A folder's place in [`CLONING`], given back on drop.
-struct Claim(PathBuf);
+/// A lock on the folder a clone runs into, held while it runs: a second
+/// clone into the same folder is refused instead of racing the first, in
+/// this process or another. The lock file is in the temp folder, named by a
+/// hash of the path, and the lock goes with the file's handle, so a process
+/// that dies gives it back.
+struct Claim {
+    _lock: File,
+}
 
 impl Claim {
     fn take(path: &Path) -> Result<Self, CheckoutError> {
-        let mut running = CLONING
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !running.insert(path.to_path_buf()) {
-            return Err(unsuitable(format!(
-                "a clone into {} is running already",
-                path.display()
-            )));
+        let shown = path.display();
+        let name = hex(&Sha256::digest(path.as_os_str().as_encoded_bytes()));
+        let lock = std::env::temp_dir().join(format!("tiller-clone-{name}.lock"));
+        let file = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock)
+            .map_err(|error| {
+                unsuitable(format!("a clone into {shown} cannot be claimed: {error}"))
+            })?;
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _lock: file }),
+            Err(TryLockError::WouldBlock) => Err(unsuitable(format!(
+                "a clone into {shown} is running already"
+            ))),
+            Err(TryLockError::Error(error)) => Err(unsuitable(format!(
+                "a clone into {shown} cannot be claimed: {error}"
+            ))),
         }
-        Ok(Self(path.to_path_buf()))
     }
 }
 
-impl Drop for Claim {
-    fn drop(&mut self) {
-        let mut running = CLONING
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        running.remove(&self.0);
-    }
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// git with no question it could wait on: no password prompt, no ssh
@@ -850,6 +865,34 @@ mod tests {
         assert_eq!(why, "a clone into /home/user/code/web is running already");
         drop(first);
         assert!(Claim::take(path).is_ok());
+    }
+
+    /// A clone still running has made `.git` and its remote, so its folder
+    /// looks like a finished clone: an add sent again then is refused, not
+    /// set to a folder the clone may yet take back.
+    #[test]
+    fn a_folder_a_clone_is_running_into_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("web");
+        std::fs::create_dir(&path).unwrap();
+        let request = Request {
+            project: "web",
+            repo: Some("example/web"),
+            path: path.to_str().unwrap(),
+            clone: true,
+            root: Some(dir.path()),
+            home: None,
+        };
+        let running = Claim::take(&path).unwrap();
+        let shown = path.display();
+        assert_eq!(
+            plan(&request),
+            Err(CheckoutError::Unsuitable(format!(
+                "a clone into {shown} is running already"
+            )))
+        );
+        drop(running);
+        assert!(matches!(plan(&request), Ok(Plan::Clone { .. })));
     }
 
     #[test]

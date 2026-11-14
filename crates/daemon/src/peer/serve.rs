@@ -655,8 +655,8 @@ impl Checks {
 /// exits; a proof that had not started never does, and a retry with its key
 /// runs it.
 struct Worker {
-    pace: Pace,
-    answer: Option<mpsc::Sender<Answer>>,
+    /// `None` only once the worker is dropped.
+    pace: Option<Pace>,
     answers: mpsc::Receiver<Answer>,
     wait: Duration,
 }
@@ -669,10 +669,16 @@ type Apply = Arc<dyn Fn(Mutate, forward::Op) -> Answer + Send + Sync>;
 
 /// How a [`Worker`] runs what it is asked.
 enum Pace {
-    /// On one thread, in turn: the queue, and whether the link has closed.
-    InTurn(Option<mpsc::Sender<(Mutate, forward::Op)>>, Arc<AtomicBool>),
-    /// Each on a thread of its own, at once.
-    AtOnce(Apply),
+    /// On one thread, in turn: its queue, and whether the link has closed.
+    InTurn {
+        asks: mpsc::Sender<(Mutate, forward::Op)>,
+        closing: Arc<AtomicBool>,
+    },
+    /// Each on a thread of its own, at once, which answers on `answer`.
+    AtOnce {
+        apply: Apply,
+        answer: mpsc::Sender<Answer>,
+    },
 }
 
 /// [`forward::apply`] on this host's store, with every check the link
@@ -702,8 +708,7 @@ impl Worker {
             }
         });
         Self {
-            pace: Pace::InTurn(Some(asks), closing),
-            answer: None,
+            pace: Some(Pace::InTurn { asks, closing }),
             answers,
             wait,
         }
@@ -712,8 +717,7 @@ impl Worker {
     fn at_once(apply: Apply, wait: Duration) -> Self {
         let (answer, answers) = mpsc::channel();
         Self {
-            pace: Pace::AtOnce(apply),
-            answer: Some(answer),
+            pace: Some(Pace::AtOnce { apply, answer }),
             answers,
             wait,
         }
@@ -723,19 +727,16 @@ impl Worker {
         match &self.pace {
             // The thread lives as long as the link; a send fails only if it
             // panicked, and the board host then gets no answer and a 504.
-            Pace::InTurn(Some(asks), _) => {
+            Some(Pace::InTurn { asks, .. }) => {
                 let _ = asks.send((frame, op));
             }
-            Pace::InTurn(None, _) => {}
-            Pace::AtOnce(apply) => {
-                let Some(answer) = self.answer.clone() else {
-                    return;
-                };
-                let apply = Arc::clone(apply);
+            Some(Pace::AtOnce { apply, answer }) => {
+                let (apply, answer) = (Arc::clone(apply), answer.clone());
                 std::thread::spawn(move || {
                     let _ = answer.send(apply(frame, op));
                 });
             }
+            None => {}
         }
     }
 
@@ -747,12 +748,11 @@ impl Worker {
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        if let Pace::InTurn(asks, closing) = &mut self.pace {
+        if let Some(Pace::InTurn { closing, .. }) = &self.pace {
             closing.store(true, Ordering::SeqCst);
-            *asks = None;
         }
         // The answers end once every thread that holds a sender has.
-        self.answer = None;
+        self.pace = None;
         let deadline = Instant::now() + self.wait;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());

@@ -36,3 +36,35 @@ test("a peer's refusal names the host that refused it", () => {
   );
   expect(screen.getByRole("alert").textContent).toBe("host-d refused it: project id is taken");
 });
+
+// A label that is also a word in the message still names the host.
+test("a refusal names its host even when the message holds the label", () => {
+  render(
+    <ProjectFailure
+      error={
+        new ActionError(422, "refused", "project id dev-web is taken", undefined, undefined, "dev")
+      }
+    />,
+  );
+  expect(screen.getByRole("alert").textContent).toBe("dev refused it: project id dev-web is taken");
+});
+
+test("an unreachable peer is said once, in this host's words", () => {
+  render(
+    <ProjectFailure
+      error={
+        new ActionError(
+          503,
+          "peer_unreachable",
+          "host-e is unreachable; nothing was sent or queued",
+          undefined,
+          undefined,
+          "host-e",
+        )
+      }
+    />,
+  );
+  expect(screen.getByRole("alert").textContent).toBe(
+    "host-e is unreachable; nothing was sent or queued",
+  );
+});

@@ -36,9 +36,13 @@ export function AgentList({ agents, title }: { agents: ProjectAgent[]; title: st
   );
 }
 
+// The codes this host answers for a peer, in words that name the peer
+// already: its link is down, it was paired to read only, or it did not
+// answer in time.
+const SAID_HERE = new Set(["peer_unreachable", "read_scope", "forward_uncertain"]);
+
 // Why a project add, edit, archive or delete failed. A peer's refusal says
-// which host refused it (D22), unless its message names the host already, as
-// an unreachable peer's does. A forward the peer did not confirm says it may
+// which host refused it (D22), unless this host said it for the peer. A forward the peer did not confirm says it may
 // have been applied, after the 11 min a clone and its stops may take, or the
 // 10 s an `inline` edit waits.
 export function ProjectFailure({
@@ -50,7 +54,7 @@ export function ProjectFailure({
 }) {
   if (!error) return null;
   const { host, message } = error;
-  if (host && error.code !== "forward_uncertain" && !message.includes(host)) {
+  if (host && !SAID_HERE.has(error.code)) {
     return (
       <p className="refusal" role="alert">
         {host} refused it: {message}

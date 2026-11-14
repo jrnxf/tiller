@@ -4555,6 +4555,9 @@ async fn the_board_adds_edits_retires_and_deletes_a_peer_project() {
     assert_eq!(archived.status, StatusCode::OK, "{}", archived.body);
     let archived: Value = serde_json::from_str(&archived.body).unwrap();
     assert_eq!(archived["projects"][0]["id"], "gamma", "{archived}");
+    // The peer's rows say whose they are, as its live rows do.
+    assert_eq!(archived["projects"][0]["host"], "peer", "{archived}");
+    assert_eq!(archived["projects"][0]["link"], "live", "{archived}");
     let local = get(&app, "/api/v1/projects?retired=true").await;
     assert!(!local.body.contains("gamma"), "{}", local.body);
 

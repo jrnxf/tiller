@@ -47,8 +47,8 @@ function ArchivedRow({ project }: { project: Project }) {
 
 // The projects archived on this host, and on each peer the board can act on,
 // folded under the live ones. Archiving keeps a project's history; its delete
-// is the one thing left to do with it. A peer reads its own archive and sends
-// rows that name no host, so each is stamped with the peer it came from.
+// is the one thing left to do with it. A peer's archive is read from the peer,
+// and the daemon tags its rows with the peer as it tags the live ones.
 export function ArchivedProjects() {
   const machines = useMachineRows();
   const peers = peerMachines(machines)
@@ -57,14 +57,7 @@ export function ArchivedProjects() {
   const hosts = [undefined, ...peers];
   const archived = useQueries({
     queries: hosts.map((host) => retiredProjectsQuery(host)),
-    combine: (results) =>
-      results.flatMap((result, index) => {
-        const host = hosts[index];
-        const projects = result.data?.projects ?? [];
-        return host
-          ? projects.map((project) => ({ ...project, host, link: "live" as const }))
-          : projects;
-      }),
+    combine: (results) => results.flatMap((result) => result.data?.projects ?? []),
   });
   const [open, setOpen] = useState(false);
   const list = useId();

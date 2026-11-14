@@ -1941,6 +1941,15 @@ fn peer_projects(view: &PeerView) -> ProjectsResponse {
     response
 }
 
+/// A paired peer's retired projects, read from the peer itself, tagged with
+/// that peer as its live rows are, so a client never takes one for this
+/// host's own (D22).
+pub fn tag_peer_projects(peers: &Federation, host: &str, response: &mut ProjectsResponse) {
+    if let Scope::Peer(view) = scope(peers, Some(host)) {
+        Owner::peer(view).projects(response);
+    }
+}
+
 /// `GET /api/v1/board` across hosts (`protocol.md` 7.3).
 pub fn federated_board(
     store: &Store,

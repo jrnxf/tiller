@@ -1470,7 +1470,10 @@ async fn projects(
         // Peers cache only live projects, so a peer's archive is read from
         // the peer itself, for the delete it offers (D22).
         let path = "projects?retired=true".to_owned();
-        if let Some(retired) = host_read(&state, query.host.as_deref(), path, true).await? {
+        if let Some(mut retired) = host_read(&state, query.host.as_deref(), path, true).await?
+            && let Some(host) = query.host.as_deref()
+        {
+            views::tag_peer_projects(&state.0.peers.federation(), host, &mut retired);
             return Ok(Json(retired));
         }
         return read(&state, |store| {
@@ -3389,7 +3392,6 @@ async fn submit_project(
     if let Some(view) = peer_for(&state, mutation.host()).await? {
         return detached(async move { forward(&state, &view, mutation, &bytes).await }).await;
     }
-    writable(&state)?;
     detached(async move {
         let (home, holder) = (state.0.home.clone(), state.0.holder.clone());
         let key = mutation.key.clone();
@@ -3446,7 +3448,7 @@ fn checkout_plan(
     id: &str,
     repo: Option<&str>,
     checkout: &NewCheckout,
-) -> Result<tiller_agents::checkout::Plan, ApiError> {
+) -> Result<tiller_agents::checkout::Plan, Refusal> {
     let config = config_toml::load(&home.join("config.toml")).map_err(|error| {
         ApiError::from(Error::Unavailable(format!(
             "{error}; fix it before setting a checkout"
@@ -3467,15 +3469,18 @@ fn checkout_plan(
     if matches!(plan, tiller_agents::checkout::Plan::Clone { .. }) {
         match store.project(id) {
             Ok(_) => {
-                return Err(Error::Refused {
-                    entity: "project",
-                    id: id.to_owned(),
-                    fact: "project id is taken".into(),
-                }
-                .into());
+                return Err(Refusal::Board(
+                    Error::Refused {
+                        entity: "project",
+                        id: id.to_owned(),
+                        fact: "project id is taken".into(),
+                    }
+                    .into(),
+                ));
             }
             Err(Error::NotFound { .. }) => {}
-            Err(error) => return Err(error.into()),
+            // A store error stays one, so the store is checked for damage.
+            Err(error) => return Err(Refusal::State(error)),
         }
     }
     Ok(plan)
@@ -3635,7 +3640,7 @@ pub(crate) fn checkout_check(
             problem: Some("fill in the id first: the folder is named after it".into()),
         });
     }
-    match checkout_plan(store, home, id, repo, &checkout) {
+    match checkout_plan(store, home, id, repo, &checkout).map_err(ApiError::from) {
         Ok(plan) => {
             let path = Some(plan.path().to_string_lossy().into_owned());
             Ok(match plan {
