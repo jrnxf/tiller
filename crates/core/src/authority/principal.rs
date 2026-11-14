@@ -242,23 +242,11 @@ fn process_table() -> std::io::Result<std::collections::HashMap<u32, (u32, Proce
         }
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     };
-    // `pid ppid rest`, where the rest (a command name or the arguments) may
-    // hold spaces.
-    let rows = |text: &str| -> Vec<(u32, u32, String)> {
-        text.lines()
-            .filter_map(|line| {
-                let mut fields = line.trim_start().splitn(3, char::is_whitespace);
-                let pid = fields.next()?.parse().ok()?;
-                let parent = fields.next()?.parse().ok()?;
-                Some((pid, parent, fields.next()?.trim().to_owned()))
-            })
-            .collect()
-    };
-    let args: std::collections::HashMap<u32, String> = rows(&ps("args")?)
+    let args: std::collections::HashMap<u32, String> = ps_rows(&ps("args")?)
         .into_iter()
         .map(|(pid, _, args)| (pid, args))
         .collect();
-    Ok(rows(&ps("comm")?)
+    Ok(ps_rows(&ps("comm")?)
         .into_iter()
         .map(|(pid, parent, path)| {
             let args = args.get(&pid).cloned().unwrap_or_default();
@@ -270,6 +258,24 @@ fn process_table() -> std::io::Result<std::collections::HashMap<u32, (u32, Proce
             (pid, (parent, Process { pid, comm, args }))
         })
         .collect())
+}
+
+/// The rows of `ps -o pid=,ppid=,<field>=`: `pid ppid rest`, where the rest
+/// (a command name or the arguments) may hold spaces. `ps` pads each column
+/// to its widest value, so any run of spaces separates the fields.
+#[cfg(any(test, not(target_os = "linux")))]
+fn ps_rows(text: &str) -> Vec<(u32, u32, String)> {
+    text.lines()
+        .filter_map(|line| {
+            let (pid, rest) = line.trim_start().split_once(char::is_whitespace)?;
+            let (parent, rest) = rest.trim_start().split_once(char::is_whitespace)?;
+            Some((
+                pid.parse().ok()?,
+                parent.parse().ok()?,
+                rest.trim().to_owned(),
+            ))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -370,6 +376,28 @@ mod tests {
         assert_eq!(comms, ["zsh", "claude", "launchd"]);
         assert_eq!(claude_ancestor(&chain), Some(20));
         assert!(walk(30, |_| Err(std::io::Error::other("gone"))).is_err());
+    }
+
+    /// `ps` pads its columns, so a short ppid (a terminal app's 1) sits
+    /// after several spaces; that row must still parse.
+    #[test]
+    fn ps_rows_read_padded_columns() {
+        let text = "    1     0 /sbin/launchd\n\
+                    \x2018528     1 /Applications/Terminal.app/Contents/MacOS/Terminal\n\
+                    \x2095292 18528 login -pf user\n\
+                    not a row\n";
+        assert_eq!(
+            ps_rows(text),
+            [
+                (1, 0, "/sbin/launchd".to_owned()),
+                (
+                    18528,
+                    1,
+                    "/Applications/Terminal.app/Contents/MacOS/Terminal".to_owned()
+                ),
+                (95292, 18528, "login -pf user".to_owned()),
+            ]
+        );
     }
 
     fn process_at(pid: u32, comm: &str) -> Process {
