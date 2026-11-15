@@ -13,6 +13,7 @@ import type {
   ContributionsResponse,
   DaemonHealth,
   DoctorReport,
+  HealthAnswer,
   HostConfig,
   HostFields,
   MachinesResponse,
@@ -26,15 +27,14 @@ import type {
   ProjectSetup,
   ProjectsResponse,
   QuotaResponse,
-  RecapResponse,
   RepliesResponse,
   RetrosResponse,
   RunDetail,
-  SessionView,
   SignalsResponse,
   StartSettings,
   TimelineResponse,
 } from "./api-types.ts";
+import { ownerFetch } from "./owner.ts";
 
 // A query key is the request path with its query string, exactly as the boot
 // snapshot keys its entries (protocol.md section 7.6), so hydrating never
@@ -103,7 +103,7 @@ async function readError(path: string, response: Response): Promise<ReadError> {
 }
 
 export async function fetchJson<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const response = await fetch(path, { headers: { accept: "application/json" }, signal });
+  const response = await ownerFetch(path, { headers: { accept: "application/json" }, signal });
   if (!response.ok) {
     throw await readError(path, response);
   }
@@ -132,11 +132,9 @@ export const boardQuery = (params?: BoardParams) => readQuery<BoardResponse>(boa
 export const attentionPath: QueryPath = "/api/v1/attention?state=open";
 export const attentionQuery = () => readQuery<AttentionResponse>(attentionPath);
 
-// What happened since the owner last marked a recap seen. It is read after
-// the page opens, not in the boot snapshot, and a change that moves a count
-// refetches it (lib/sse.ts).
+// What happened since the owner last marked a recap seen. The board no longer
+// shows it, but the fixture server still answers it as the daemon does.
 export const recapPath: QueryPath = "/api/v1/recap";
-export const recapQuery = () => readQuery<RecapResponse>(recapPath);
 
 // One of this host's projects' unread replies from the orchestrator, newest
 // first. Never federated: a peer's replies stay on the peer. An `ask.replied`
@@ -155,13 +153,31 @@ export const machinesQuery = () => readQuery<MachinesResponse>(machinesPath);
 export const quotaPath: QueryPath = "/api/v1/quota";
 export const quotaQuery = () => readQuery<QuotaResponse>(quotaPath);
 
-// Whether this browser is signed in as the owner, for Settings' Sign out.
+// Whether this browser still holds the owner cookie: the event stream asks
+// it when the daemon refuses or cuts the stream.
 export const sessionPath: QueryPath = "/api/v1/session";
-export const sessionQuery = () => readQuery<SessionView>(sessionPath);
 
 // The daemon's own facts (version, start time, merge App), for Settings.
 const healthPath: QueryPath = "/api/v1/health";
-export const healthQuery = () => readQuery<DaemonHealth>(healthPath);
+
+// Whether a health answer is the full one, not the signed-out `ok`,
+// `version` and `initialized` only.
+function isFullHealth(health: HealthAnswer): health is DaemonHealth {
+  return "pollers" in health;
+}
+
+// Signed out at a local `Host` the daemon still answers, with only `ok`,
+// `version` and `initialized`. That answer means the cookie is gone, as a 403
+// `signed_out` does.
+export const healthQuery = () =>
+  queryOptions({
+    queryKey: queryKeyFor(healthPath),
+    queryFn: async ({ signal }): Promise<DaemonHealth> => {
+      const health = await fetchJson<HealthAnswer>(healthPath, signal);
+      if (isFullHealth(health)) return health;
+      throw new ReadError(healthPath, 403, "signed out", null, "signed_out");
+    },
+  });
 
 // The checks `tiller doctor` runs, run on the board's host each time the host
 // card opens or the owner asks again, so never cached. With a peer's label

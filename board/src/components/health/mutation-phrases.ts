@@ -89,6 +89,7 @@ const PHRASE_TEXT: Record<string, string> = {
   "project.add": "added a project",
   "project.delete": "deleted a project",
   "project.edit": "edited a project",
+  "project.local_binding": "changed localhost for builders and verifiers",
   "project.merge_gate": "changed a project merge gate",
   "project.retire": "retired a project",
   "project.stage": "changed a project stage",

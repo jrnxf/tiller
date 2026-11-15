@@ -15,6 +15,7 @@ exit: 0
       "deploy_workflow": null,
       "edited_at": "<time>",
       "id": "fleet",
+      "local_binding": false,
       "merge_gate": "detect",
       "name": "Fleet",
       "next_card_seq": 2,

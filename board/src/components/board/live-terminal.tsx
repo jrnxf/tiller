@@ -1308,9 +1308,14 @@ export function LiveTerminal({
       role="group"
       aria-label={`Live terminal for ${label}`}
       onMouseDown={typeFromScreen}
-      // Scrolling up on the stage reads back, as it would in the terminal.
-      onWheel={(event) => {
-        if (event.deltaY < 0 && canHistory && history === null && !typing) openHistory();
+      // Scrolling up on the stage reads back, as it would in the terminal,
+      // typing or not: the scrollback takes the focus. It listens before
+      // xterm, which stops every wheel over its cells. A pane whose app asks
+      // for the mouse gets the wheel itself.
+      onWheelCapture={(event) => {
+        if (event.deltaY >= 0 || !canHistory || history !== null) return;
+        if (termRef.current?.modes.mouseTrackingMode !== "none") return;
+        openHistory();
       }}
     >
       <div className="mir-slot" ref={setInlineBox} />

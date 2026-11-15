@@ -9,13 +9,7 @@ import type { AskPiece } from "../../lib/ask-plan";
 import { LIMITS, isTooLong } from "../../lib/limits";
 import { isFederated, ownerOf, projectKey, standingOf } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
-import {
-  agentsQuery,
-  machinesQuery,
-  projectsQuery,
-  sessionQuery,
-  startSettingsQuery,
-} from "../../lib/queries";
+import { agentsQuery, machinesQuery, projectsQuery, startSettingsQuery } from "../../lib/queries";
 import { ActionFailure } from "../attention/action-failure";
 import type { ActionError } from "../attention/api";
 import { SendIcon } from "../attention/icons";
@@ -93,11 +87,9 @@ function SettingsFailure({
   error: ActionError;
   problems: SettingProblem[];
 }) {
-  const owner = useQuery(sessionQuery()).data?.owner ?? false;
-  const roots = useQuery({ ...startSettingsQuery(), enabled: owner }).data;
+  const roots = useQuery(startSettingsQuery()).data;
   const host = error.host ?? ownerOf(project);
-  // Settings are set here by the owner, or named for the peer that owns them.
-  if (!owner && host === undefined) return <ActionFailure error={error} host={host} />;
+  // Settings are set here, or named for the peer that owns them.
   return (
     <StartSettingsFix
       problems={problems}

@@ -1,5 +1,6 @@
 import type { ApiErrorBody, MutationResponse } from "../../lib/api-types";
 import { signedOutStore } from "../../lib/session";
+import { ownerFetch } from "../../lib/owner";
 
 // A refused or failed mutation, with the server's readable message, the
 // `current` facts a refusal carries and its hint (protocol.md sections 6.1
@@ -48,7 +49,7 @@ export async function sendMutation<T>(
 ): Promise<MutationResponse<T>> {
   let response: Response;
   try {
-    response = await fetch(path, {
+    response = await ownerFetch(path, {
       method,
       headers: { "content-type": "application/json", accept: "application/json" },
       body: JSON.stringify(body),
@@ -67,7 +68,7 @@ export async function sendMutation<T>(
   }
   if (isErrorBody(parsed)) {
     const { code, message, current, hint, host } = parsed.error;
-    // At an `--allow-host` name the cookie was revoked or ran out.
+    // The cookie was revoked or ran out.
     if (response.status === 403 && code === "signed_out") signedOutStore.set(true);
     throw new ActionError(response.status, code, message, current, hint, host);
   }

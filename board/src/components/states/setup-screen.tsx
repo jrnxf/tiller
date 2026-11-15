@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 
 import { SNAPSHOT_PATH } from "../../lib/boot";
 import { fetchJson } from "../../lib/queries";
+import { isSignedOut } from "../../lib/session";
 import { Logo } from "../shell/logo";
 import { useAppearance } from "../shell/shell";
 
@@ -49,18 +50,19 @@ export function SetupScreen({ command, onReady }: { command: string; onReady: ()
 
   useEffect(() => {
     let done = false;
+    const ready = () => {
+      if (done) return;
+      done = true;
+      clearInterval(timer);
+      onReady();
+    };
     const timer = setInterval(() => {
       // The snapshot, not health: health says initialized as soon as the
-      // file exists, while `tiller init` may still be writing it.
-      fetchJson(SNAPSHOT_PATH).then(
-        () => {
-          if (done) return;
-          done = true;
-          clearInterval(timer);
-          onReady();
-        },
-        () => {},
-      );
+      // file exists, while `tiller init` may still be writing it. Signed
+      // out, the snapshot is refused once there is one to refuse.
+      fetchJson(SNAPSHOT_PATH).then(ready, (error: unknown) => {
+        if (isSignedOut(error)) ready();
+      });
     }, SETUP_POLL_MS);
     return () => {
       done = true;

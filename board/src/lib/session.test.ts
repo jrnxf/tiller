@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
-import { ReadError, agentsQuery, boardQuery } from "./queries";
+import { ReadError, agentsQuery, boardQuery, healthQuery } from "./queries";
 import { sendMutation } from "../components/attention/api";
+import { ownerToken } from "./owner";
 import { codeDigits, isSignedOut, signIn, signOut, signedOutStore } from "./session";
 import { createTestQueryClient } from "../test-app";
 
-beforeEach(() => signedOutStore.set(false));
+beforeEach(() => {
+  signedOutStore.set(false);
+  window.localStorage.clear();
+});
 afterEach(() => vi.unstubAllGlobals());
 
 function answer(status: number, body: unknown) {
@@ -31,14 +35,21 @@ test("only a 403 signed_out read means this browser is signed out", () => {
   expect(isSignedOut(new Error("signed_out"))).toBe(false);
 });
 
-test("the code goes to the login endpoint as JSON", async () => {
-  const fetch = answer(200, { owner: true });
+test("the code goes to the login endpoint as JSON, and the owner token is kept", async () => {
+  const fetch = answer(200, { owner: true, owner_token: "f1c7" });
   expect(await signIn("12345678")).toEqual({ ok: true });
   expect(fetch).toHaveBeenCalledWith("/api/v1/login", {
     method: "POST",
     headers: { "content-type": "application/json", accept: "application/json" },
     body: '{"code":"12345678"}',
   });
+  expect(ownerToken()).toBe("f1c7");
+});
+
+test("a sign-in answer without an owner token is no sign-in", async () => {
+  answer(200, { owner: true });
+  expect((await signIn("12345678")).ok).toBe(false);
+  expect(ownerToken()).toBeNull();
 });
 
 test("each refusal reads as plain text", async () => {
@@ -75,17 +86,15 @@ test("signing out shows the signed-out screen only once the daemon has ended the
   expect((await signOut()).ok).toBe(false);
   expect(signedOutStore.get()).toBe(false);
 
-  const fetch = signOutAnswers([200, { owner: false }], [403, refusal("signed_out")]);
+  // Every read needs the cookie, on loopback too (G24), so no read is needed
+  // to know the board is now signed out.
+  window.localStorage.setItem("tiller-owner-token", "f1c7");
+  const fetch = signOutAnswers([200, { owner: false }], [200, { owner: false }]);
   expect(await signOut()).toEqual({ ok: true });
+  expect(ownerToken()).toBeNull();
   expect(fetch).toHaveBeenCalledWith("/api/v1/logout", expect.objectContaining({ method: "POST" }));
-  expect(fetch).toHaveBeenCalledWith("/api/v1/session", expect.anything());
+  expect(fetch).toHaveBeenCalledTimes(1);
   expect(signedOutStore.get()).toBe(true);
-});
-
-test("on loopback, where reads need no cookie, signing out keeps the board", async () => {
-  signOutAnswers([200, { owner: false }], [200, { owner: false }]);
-  expect(await signOut()).toEqual({ ok: true });
-  expect(signedOutStore.get()).toBe(false);
 });
 
 test("a cookie already gone signs out at once", async () => {
@@ -115,4 +124,18 @@ test("any read refused as signed out flips the board to the signed-out screen", 
   answer(403, refusal("signed_out"));
   await queryClient.fetchQuery({ ...agentsQuery(), retry: false }).catch(() => {});
   expect(signedOutStore.get()).toBe(true);
+});
+
+test("health with only ok, version and initialized means the cookie is gone", async () => {
+  const queryClient = createTestQueryClient();
+  answer(200, { ok: true, version: "0.1.0", initialized: true });
+  await expect(queryClient.fetchQuery({ ...healthQuery(), retry: false })).rejects.toThrow(
+    ReadError,
+  );
+  expect(signedOutStore.get()).toBe(true);
+
+  signedOutStore.set(false);
+  answer(200, { ok: true, version: "0.1.0", initialized: true, pollers: [] });
+  await queryClient.fetchQuery({ ...healthQuery(), staleTime: 0, retry: false });
+  expect(signedOutStore.get()).toBe(false);
 });

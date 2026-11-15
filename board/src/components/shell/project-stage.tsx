@@ -10,7 +10,6 @@ import {
   projectSetupQuery,
   projectsPath,
   queryKeyFor,
-  sessionQuery,
   startSettingsQuery,
 } from "../../lib/queries";
 import { sendMutation } from "../attention/api";
@@ -133,9 +132,8 @@ function WrappingPath({ path }: { path: string }) {
 // `tiller doctor` and `tiller config get checkouts.<id>` show them.
 function SetupFacts({ project }: { project: Project }) {
   const setup = useQuery(projectSetupQuery(project.id)).data;
-  const owner = useQuery(sessionQuery()).data?.owner ?? false;
   const [editing, setEditing] = useState(false);
-  const roots = useQuery({ ...startSettingsQuery(), enabled: owner && editing }).data;
+  const roots = useQuery({ ...startSettingsQuery(), enabled: editing }).data;
   if (!setup) return null;
   const changed = formatStageTime(setup.merge_gate_changed_at);
   return (
@@ -162,17 +160,10 @@ function SetupFacts({ project }: { project: Project }) {
           </code>
         ) : setup.config_error ? (
           <span className="stage-when">{setup.config_error}</span>
-        ) : owner ? (
-          <span className="stage-flag">not set</span>
         ) : (
-          <>
-            not set
-            <code className="stage-sha stage-command">
-              tiller config set checkouts.{project.id} &lt;path&gt;
-            </code>
-          </>
+          <span className="stage-flag">not set</span>
         )}
-        {owner && !setup.config_error && !editing ? (
+        {!setup.config_error && !editing ? (
           <button type="button" className="btn sm" onClick={() => setEditing(true)}>
             {setup.checkout ? "Change" : "Set"}
           </button>

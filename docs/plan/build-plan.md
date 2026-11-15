@@ -548,7 +548,7 @@ The sidebar has:
 
 **Perfect loads.** The developer wants every load to be perfect: no spinners, no skeletons, no layout shift and no theme flash. Every board task follows these rules:
 
-- **Boot snapshot.** The daemon renders `index.html` with the current dehydrated query state inlined in `<script type="application/json" id="tiller-boot">`, built by the same handlers the API uses. The client hydrates the QueryClient from it before it creates the router, so the first render is complete.
+- **Boot snapshot.** The board fetches the current dehydrated query state from `GET /api/v1/snapshot`, built by the same handlers the API uses, with the owner session (`protocol.md` 7.1, 7.6); the shell never inlines it, since a navigation sends no owner token. The client hydrates the QueryClient from it before it creates the router, so the first render is complete.
 - **No theme flash.** An inline script sets the theme class and background before any CSS loads.
 - **Loaders.** Route loaders `await context.queryClient.ensureQueryData(...)`, and components read with `useSuspenseQuery`, as the conventions reference does. Use `defaultPreload: "intent"` and structural sharing. A pending state must never become visible for a local fetch.
 - **Live updates.** The SSE stream writes each event into the Query cache with `setQueryData` and ignores any event whose `rev` is older than the cached one. After a gap, the snapshot is refetched silently while the UI stays put, and only the degraded pill shows.

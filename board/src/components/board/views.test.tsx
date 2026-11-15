@@ -359,19 +359,17 @@ function columnHead(name: string) {
   return head;
 }
 
-test("columns with cards share the board's width and an empty column folds to its icon", async () => {
+test("every column keeps its full width and name, empty or not", async () => {
   stubApi("default");
   await renderApp("default", "/?filter=needs");
 
   const tracks = screen.getByTestId("board").style.getPropertyValue("--cols").split(" ");
-  // Asked, Queued and Done hold no card that needs you; Working and Landing do.
-  expect(tracks).toEqual(["52px", "52px", "minmax(168px,1fr)", "minmax(168px,1fr)", "52px"]);
-  for (const name of ["Asked", "Queued", "Done"]) {
-    const head = columnHead(name);
-    expect(head.dataset.empty).toBe("true");
-    expect(head.querySelector(".n")).toBeNull();
+  // Asked, Queued and Done hold no card that needs you, and still keep their width.
+  expect(tracks).toEqual(Array(5).fill("minmax(168px,1fr)"));
+  for (const name of ["Asked", "Queued", "Working", "Landing", "Done"]) {
+    expect(columnHead(name).querySelector(".n")?.textContent).toBe(name);
   }
-  expect(columnHead("Working").dataset.empty).toBeUndefined();
+  expect(screen.getByTestId("board").querySelector("[data-empty]")).toBeNull();
 });
 
 function sidebarCount() {
@@ -397,51 +395,6 @@ test("the sidebar's Board count is the header's Active count, with and without a
     await router.navigate({ to: "/", search: { host: "01JHOSTA00000000000000000A" } });
   });
   await waitFor(() => expect(sidebarCount()).toBe(activeTab()));
-});
-
-test("an empty column's icon names the column and its count on hover and on focus", async () => {
-  stubApi("default");
-  await renderApp("default", "/?filter=needs");
-
-  const icon = screen.getByLabelText("Queued 0");
-  expect(icon.tabIndex).toBe(0);
-  act(() => icon.focus());
-  await waitFor(() => expect(document.querySelector(".colh-tip")?.textContent).toBe("Queued 0"));
-  act(() => icon.blur());
-  await waitFor(() => expect(document.querySelector(".colh-tip")).toBeNull());
-
-  fireEvent.mouseEnter(screen.getByLabelText("Done 0"));
-  fireEvent.pointerEnter(screen.getByLabelText("Done 0"), { pointerType: "mouse" });
-  fireEvent.mouseMove(screen.getByLabelText("Done 0"));
-  await waitFor(() => expect(document.querySelector(".colh-tip")?.textContent).toBe("Done 0"));
-});
-
-test("a column that gains a card unfolds", async () => {
-  stubApi("default");
-  const { queryClient } = await renderApp("default", "/?filter=needs");
-  expect(columnHead("Queued").dataset.empty).toBe("true");
-
-  const board = queryClient.getQueryData<BoardResponse>(queryKeyFor(boardPath()));
-  const row = board?.rows.find((candidate) => candidate.display_id === "alpha-41") as BoardRow;
-  act(() => {
-    applyChange(queryClient, {
-      seq: 5001,
-      at: "2026-11-02T12:00:00.000Z",
-      kind: "card.changed",
-      txn: "x",
-      entity: "card",
-      entity_id: row.id,
-      rev_after: 2,
-      card_id: row.id,
-      entity_state: null,
-      card: { ...row, column: "queued" },
-    } satisfies ChangeEvent);
-  });
-
-  await waitFor(() => expect(columnHead("Queued").dataset.empty).toBeUndefined());
-  expect(screen.getByTestId("board").style.getPropertyValue("--cols").split(" ")[1]).toBe(
-    "minmax(168px,1fr)",
-  );
 });
 
 test("with no card on the board no column folds", async () => {

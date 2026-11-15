@@ -81,13 +81,25 @@ board_url=$(start_daemon "$board_home" "$work/board.log")
 echo "Pairing: confirm on the peer with y."
 on_board peer add peer --ssh peer-alias
 
+# Every board read needs the owner session, at loopback too (authority.md
+# G24): the cookie and its owner token together. Redeem one login link here
+# for the pair the checks below send (the token is in the redirect's
+# fragment), and mint another for your browser.
+mint_login() { on_board board --login | grep -o '/login/[0-9a-f]*' | head -n 1; }
+jar=$work/cookies
+# The first login is the script's own, so its code is not shown.
+signed_in=$(curl -fsS -o /dev/null -D - -c "$jar" "$board_url$(mint_login 2>/dev/null)")
+owner_token=$(tr -d '\r' <<<"$signed_in" | sed -n 's/^[Ll]ocation: .*#owner=\([0-9a-f]*\)$/\1/p')
+[ -n "$owner_token" ] || { echo "the login link named no owner token" >&2; exit 1; }
+snapshot() { curl -fsS -b "$jar" -H "X-Tiller-Owner: $owner_token" "$board_url/api/v1/snapshot"; }
+
 for _ in $(seq 1 100); do
-  curl -fsS "$board_url/api/v1/snapshot" | grep -q '"link":"live"' && break
+  snapshot | grep -q '"link":"live"' && break
   sleep 0.2
 done
-curl -fsS "$board_url/api/v1/snapshot" | grep -q '"link":"live"' || { echo "the link never went live" >&2; exit 1; }
+snapshot | grep -q '"link":"live"' || { echo "the link never went live" >&2; exit 1; }
 
-login=$(on_board board --login | grep -o '/login/[0-9a-f]*' | head -n 1)
+login=$(mint_login)
 cat <<EOF
 
 Board host:  $board_url${login}   (opens the board signed in as the owner)

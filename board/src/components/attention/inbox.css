@@ -129,105 +129,6 @@
   min-height: 0;
 }
 
-/* Since you left */
-
-.recap {
-  margin: 12px 12px 4px;
-  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line-2));
-  border-radius: var(--r8);
-  background: var(--bg-card);
-  overflow: hidden;
-}
-
-.recap.quiet {
-  border-color: var(--line-1);
-}
-
-.recap-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 40px;
-  padding: 6px 8px 6px 14px;
-  color: var(--fg-1);
-}
-
-.recap.quiet .recap-head {
-  color: var(--fg-3);
-  padding-right: 14px;
-}
-
-.recap-head .icon {
-  width: 14px;
-  height: 14px;
-  color: var(--green);
-  flex: none;
-}
-
-.recap-gap {
-  flex: 1;
-}
-
-.recap-mark {
-  border-color: transparent;
-  background: var(--accent);
-  color: var(--bg-1);
-  box-shadow: none;
-}
-
-.recap-mark:hover:not(:disabled) {
-  background: var(--accent);
-  color: var(--bg-1);
-  filter: brightness(1.08);
-}
-
-.recap-mark:disabled {
-  opacity: 0.6;
-}
-
-.recap-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 34px;
-  padding: 0 14px;
-  border-top: 1px solid var(--line-1);
-  color: var(--fg-2);
-}
-
-.recap-row:hover {
-  background: var(--bg-hover);
-  color: var(--fg-1);
-}
-
-.recap-row .icon {
-  width: 14px;
-  height: 14px;
-  color: var(--fg-3);
-  flex: none;
-}
-
-.recap-row .n {
-  margin-left: auto;
-  font-variant-numeric: tabular-nums;
-  font-weight: var(--w-medium);
-  color: var(--fg-1);
-}
-
-.recap-row.bad .icon,
-.recap-row.bad .n {
-  color: var(--red-text);
-}
-
-:root[data-theme="dark"] .recap-row.bad .icon,
-:root[data-theme="dark"] .recap-row.bad .n {
-  color: var(--red);
-}
-
-.recap .refusal {
-  margin: 0 8px 8px;
-}
-
 .in-detail {
   overflow: auto;
   scroll-padding: 16px;
@@ -239,15 +140,15 @@
   max-width: 780px;
 }
 
-.ghead {
+/* The list's head: what waits on the owner, and the filter. */
+.lhead {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 36px;
-  padding: 0 16px;
-  background: var(--bg-2);
+  height: 40px;
+  padding: 0 12px 0 16px;
+  background: var(--bg-1);
   border-bottom: 1px solid var(--line-1);
-  border-top: 1px solid var(--line-1);
   color: var(--fg-1);
   font-weight: var(--w-medium);
   position: sticky;
@@ -255,37 +156,52 @@
   z-index: 1;
 }
 
-.in-list > section:first-child .ghead {
-  border-top: 0;
-}
-
-.ghead .icon {
-  width: 14px;
-  height: 14px;
-  color: var(--fg-3);
-}
-
-.ghead .c {
+.lhead .c,
+.lsub .c,
+.lchip .c {
   color: var(--fg-3);
   font-weight: var(--w-normal);
+  margin-left: 2px;
 }
 
-.ghead .why {
-  font-size: 11.5px;
+.lchips {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.lchip {
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: var(--r6);
+  background: transparent;
   color: var(--fg-3);
-  font-weight: var(--w-normal);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  min-width: 0;
+  font-size: 12px;
+  font-weight: var(--w-medium);
 }
 
-.ghead.perm {
-  background: color-mix(in srgb, var(--orange) 7%, var(--bg-2));
+.lchip:hover {
+  color: var(--fg-1);
 }
 
-.ghead.perm .icon {
-  color: var(--orange);
+.lchip[aria-pressed="true"] {
+  border-color: var(--line-2);
+  background: var(--bg-3);
+  color: var(--fg-1);
+}
+
+.lsub {
+  padding: 14px 16px 6px;
+  color: var(--fg-3);
+  font-size: var(--fs-mini);
+  font-weight: var(--w-medium);
+}
+
+/* What is no longer current stays at the bottom, faded. */
+.in-stale .irow .ii,
+.in-stale .irow .bd {
+  opacity: 0.6;
 }
 
 .irow {
@@ -327,19 +243,43 @@ a.irow:hover {
   margin-top: 2px;
 }
 
-.irow .ii.permic {
-  width: 14px;
-  height: 14px;
-  border: 1.5px solid var(--orange);
-  border-radius: 4px;
+/* Each row's kind: a decision, a prompt (a keypress in a pane) or a reply. */
+.irow .ii.kind {
+  width: 22px;
+  height: 22px;
+  margin-top: 0;
+  border-radius: var(--r6);
   display: grid;
   place-items: center;
-  color: var(--orange);
+  background: var(--bg-3);
 }
 
-.irow .ii.permic .icon {
-  width: 9px;
-  height: 9px;
+.irow .ii.kind .icon {
+  display: block;
+  width: 13px;
+  height: 13px;
+}
+
+.irow .ii.decision {
+  color: var(--m-opus-text);
+}
+
+.irow .ii.prompt {
+  color: var(--m-sonnet-text);
+}
+
+.irow .ii.reply {
+  color: var(--green-text);
+}
+
+/* A reply not yet marked read. */
+.irow .udot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-top: 7px;
+  border-radius: 50%;
+  background: var(--accent-solid);
 }
 
 .irow .bd {
@@ -1367,15 +1307,6 @@ button.chip:active {
 }
 
 /* Replies from the orchestrator */
-
-.ghead.reply .icon,
-.irow .ii.reply-ii {
-  color: var(--accent-text);
-}
-
-.irow .ii.reply-ii .icon {
-  display: block;
-}
 
 .reply-blk .blk-h .hint {
   margin-left: auto;

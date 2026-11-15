@@ -100,6 +100,11 @@ record!(Project in "projects" {
     stage_changed_at: Option<Timestamp>,
     /// When `rev` last moved; set in the statement that bumps it.
     edited_at: Timestamp,
+    /// Builders and verifiers may bind and connect to local ports in their
+    /// sandbox (`sandbox.network.allowLocalBinding`; authority.md G24).
+    /// Absent from a record an older peer sends, so off there.
+    #[serde(default)]
+    local_binding: bool,
 });
 
 impl Project {

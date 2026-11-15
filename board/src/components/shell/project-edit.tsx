@@ -46,6 +46,9 @@ interface Draft {
   deployWorkflow: string;
   timeout: string;
   deployEnvironment: string;
+  // Null for a peer on an older build, which has no such setting: the form
+  // hides it and never sends it.
+  localBinding: boolean | null;
 }
 
 type Field = keyof Draft;
@@ -64,6 +67,7 @@ const LABELS: Record<Field, string> = {
   deployWorkflow: "Deploy workflow",
   timeout: "Timeout",
   deployEnvironment: "Deploy environment",
+  localBinding: "Localhost for builders and verifiers",
 };
 
 // One command per line: the lines with text, trimmed.
@@ -91,6 +95,7 @@ function draftOf(fields: ProjectFields): Draft {
     deployWorkflow: fields.deploy_workflow ?? "",
     timeout: String(fields.deploy_timeout_minutes),
     deployEnvironment: fields.deploy_environment ?? "",
+    localBinding: fields.local_binding ?? null,
   };
 }
 
@@ -114,6 +119,8 @@ function stored(draft: Draft, field: Field): string {
       return String(Number(draft.timeout.trim()));
     case "capacity":
       return String(draft.capacity);
+    case "localBinding":
+      return draft.localBinding === null ? "" : draft.localBinding ? "on" : "off";
     default:
       return draft[field].trim();
   }
@@ -141,6 +148,9 @@ function editOf(base: Draft, draft: Draft): Record<string, unknown> {
   if (changed.has("deployWorkflow")) body.deploy_workflow = draft.deployWorkflow.trim();
   if (changed.has("timeout")) body.deploy_timeout_minutes = Number(draft.timeout.trim());
   if (changed.has("deployEnvironment")) body.deploy_environment = draft.deployEnvironment.trim();
+  if (changed.has("localBinding") && draft.localBinding !== null) {
+    body.local_binding = draft.localBinding;
+  }
   return body;
 }
 
@@ -557,6 +567,24 @@ function EditForm({
             onChange={(event) => set("deployEnvironment", event.target.value)}
           />
         </div>
+        {draft.localBinding === null ? null : (
+          <div className="pa-f">
+            <label className="pa-check">
+              <input
+                type="checkbox"
+                checked={draft.localBinding}
+                aria-describedby={`${ids}-local-help`}
+                disabled={busy}
+                onChange={(event) => set("localBinding", event.target.checked)}
+              />
+              Builders and verifiers may use localhost
+            </label>
+            <p className="pa-help" id={`${ids}-local-help`}>
+              Lets their sandbox start a dev server and reach other localhost services on this host.
+              The board still needs your sign-in. Takes effect at the next launch.
+            </p>
+          </div>
+        )}
       </div>
       {stale ? (
         <p className="refusal" role="alert">

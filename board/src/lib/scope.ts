@@ -54,8 +54,9 @@ export function scopeTest(
   return { card, agent };
 }
 
-// The Inbox badge: open decisions, permission prompts and agents that wait on
-// a dialog, when they are in scope.
+// The Inbox badge: open decisions that are still current, permission prompts
+// and agents that wait on a dialog, when they are in scope. It counts what
+// the Inbox lists under Needs you, so a decision no longer current is left out.
 export function attentionCount(
   attention: AttentionResponse,
   rows: BoardRow[],
@@ -65,7 +66,7 @@ export function attentionCount(
 ): number {
   const inScope = scopeTest(rows, scope, host);
   return (
-    attention.items.filter((item) => inScope.card(item.card_id)).length +
+    attention.items.filter((item) => item.still_current && inScope.card(item.card_id)).length +
     attention.permission_prompts.filter((prompt) => inScope.card(prompt.card_id)).length +
     waits.filter(inScope.agent).length
   );

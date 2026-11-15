@@ -2018,15 +2018,3 @@ export function fixtureSnapshot(
     ...(hasPeers(scenario) ? { peers: peerSnapshot(now) } : {}),
   };
 }
-
-// The text the daemon puts in index.html: escaped so it cannot end the script
-// element or break a line terminator (protocol.md section 7.6).
-export function bootScript(snapshot: Snapshot): string {
-  const json = JSON.stringify(snapshot)
-    .replaceAll("<", "\\u003c")
-    .replaceAll(">", "\\u003e")
-    .replaceAll("&", "\\u0026")
-    .replaceAll(" ", "\\u2028")
-    .replaceAll(" ", "\\u2029");
-  return `<script type="application/json" id="tiller-boot">${json}</script>`;
-}

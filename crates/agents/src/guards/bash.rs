@@ -3543,7 +3543,12 @@ impl Walker<'_, '_> {
             "holder" | "attach" => true,
             "migrate" => unseen || second == "down",
             "config" => unseen || second == "set",
-            "project" => second != "list",
+            "project" => {
+                if ctx.role == Role::Orchestrator && !appended && orchestrator_local_binding(args) {
+                    return None;
+                }
+                second != "list"
+            }
             "mem" => unseen || second == "approve",
             // Every retro command is the owner's or the curator's: the CLI
             // refuses `list` and `show` to any session, core takes `sweep`
@@ -3596,6 +3601,28 @@ fn chat_approve(args: &[Arg]) -> bool {
         j += 1;
     }
     ids == 1 && asks == 1
+}
+
+/// `tiller project local-binding <id> on|off`, and nothing else but
+/// `--json`: the one project form the orchestrator may run (`authority.md`
+/// section 4, "Turn local binding on or off"). Core refuses it for any
+/// project but the orchestrator's own.
+fn orchestrator_local_binding(args: &[Arg]) -> bool {
+    let mut words = Vec::new();
+    for arg in args {
+        if !arg.fixed {
+            return false;
+        }
+        match arg.text.as_str() {
+            "--json" => {}
+            text if text.starts_with('-') => return false,
+            text => words.push(text),
+        }
+    }
+    matches!(
+        words.as_slice(),
+        ["project", "local-binding", id, "on" | "off"] if !id.is_empty()
+    )
 }
 
 /// `ssh`, `mosh` or `et` arguments, read the way the client reads them.

@@ -4,6 +4,8 @@ export interface Command {
   label: string;
   // Extra words that find the command but are not shown.
   keywords?: string;
+  // The keys that run it from anywhere, one by one, such as G then I.
+  keys?: string[];
   run: () => void;
 }
 

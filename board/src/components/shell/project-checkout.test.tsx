@@ -15,14 +15,13 @@ afterEach(() => {
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 
-function serve(owner: boolean) {
+function serve() {
   let checkout: string | null = null;
   const posts: Record<string, unknown>[] = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
-      if (path === "/api/v1/session") return json({ owner });
       if (path === "/api/v1/start-settings") {
         return json({
           pool_root: "/home/user/pool",
@@ -73,7 +72,7 @@ function renderDetail() {
 }
 
 test("the owner sets a project's checkout where the project is edited, starting from the folder default", async () => {
-  const posts = serve(true);
+  const posts = serve();
   renderDetail();
   fireEvent.click(await screen.findByRole("button", { name: "Set" }));
   const field = within(await screen.findByTestId("setting-checkouts.alpha"));
@@ -85,11 +84,4 @@ test("the owner sets a project's checkout where the project is edited, starting 
     expect.objectContaining({ key: "checkouts.alpha", value: "/home/user/src/alpha" }),
   ]);
   expect(await screen.findByRole("button", { name: "Change" })).toBeTruthy();
-});
-
-test("a browser that is not the owner is shown the command instead", async () => {
-  serve(false);
-  renderDetail();
-  expect(await screen.findByText(/tiller config set checkouts.alpha/)).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Set" })).toBeNull();
 });

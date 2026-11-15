@@ -90,8 +90,8 @@ fn accepted(key: &PeerKey) -> AcceptedKey {
 
 #[utoipa::path(get, path = "/api/v1/peers", tag = "reads",
     responses((status = 200, body = PeerList), (status = 403, body = ErrorBody)))]
-pub(crate) async fn list(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<PeerList> {
-    owner_only(&state, &headers).await?;
+pub(crate) async fn list(State(state): State<AppState>) -> ApiResult<PeerList> {
+    owner_only()?;
     let home = state.0.home.clone();
     let listed = read(&state, move |store| {
         let paired = peers::paired(store, &home)?

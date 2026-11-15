@@ -31,7 +31,6 @@ function hostA(over: Partial<HostFields> = {}): HostFields {
 
 interface Serve {
   scenario?: Scenario;
-  owner?: boolean;
   host?: HostFields;
   // What a PATCH answers instead of a save: a status and its error.
   refuse?: { status: number; code: string; message: string; host?: HostFields };
@@ -39,11 +38,10 @@ interface Serve {
 
 // The fixture host, with `GET /api/v1/host` read from `host` and each
 // `PATCH /api/v1/host` saved into it as the daemon saves it.
-function serve({ scenario = "default", owner = true, host = hostA(), refuse }: Serve = {}) {
+function serve({ scenario = "default", host = hostA(), refuse }: Serve = {}) {
   const state = { host };
   const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
-    if (path === "/api/v1/session") return new Response(JSON.stringify({ owner }));
     if (path === "/api/v1/host" && init?.method === "PATCH") {
       if (refuse) {
         if (refuse.host) state.host = refuse.host;
@@ -304,15 +302,4 @@ test("a refused save shows the daemon's reason under the fields", async () => {
   expect((await within(capacity).findByRole("alert")).textContent).toBe(
     "a backup already records the personal boundary",
   );
-});
-
-test("a viewer who is not the owner sees the values and no Save", async () => {
-  serve({ owner: false });
-  const card = await openHostA();
-  const capacity = section(card, "Capacity");
-  expect(within(capacity).getByText("Owner only")).toBeTruthy();
-  expect(within(capacity).queryByRole("button", { name: "Save" })).toBeNull();
-  expect(within(capacity).getByLabelText<HTMLInputElement>("RAM floor").disabled).toBe(true);
-  const identity = section(card, "Label and boundary");
-  expect(within(identity).getByLabelText<HTMLInputElement>("Label").disabled).toBe(true);
 });

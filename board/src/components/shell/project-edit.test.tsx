@@ -31,6 +31,7 @@ const FIELDS: ProjectFields = {
   deploy_workflow: "deploy.yml",
   deploy_environment: "production",
   deploy_timeout_minutes: 20,
+  local_binding: false,
   rev: alpha.rev,
 };
 
@@ -38,8 +39,8 @@ const FIELDS: ProjectFields = {
 // is an edit made elsewhere before the first save. A read of the peer
 // host-b's copy (`?host=host-b`) is answered from the same project, and
 // lands in `reads`.
-function serve(other?: Partial<ProjectFields>, reads: string[] = []) {
-  let stored = { ...FIELDS };
+function serve(other?: Partial<ProjectFields>, reads: string[] = [], base = FIELDS) {
+  let stored = { ...base };
   let otherPending = other;
   const patches: Record<string, unknown>[] = [];
   vi.stubGlobal(
@@ -47,7 +48,6 @@ function serve(other?: Partial<ProjectFields>, reads: string[] = []) {
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       reads.push(String(input));
       const path = String(input).replace("?host=host-b", "");
-      if (path === "/api/v1/session") return json({ owner: true });
       if (path.endsWith("/setup")) {
         return json({
           project: "alpha",
@@ -172,6 +172,44 @@ test("Edit opens on the stored fields and saves only what changed, against the r
   expect(await screen.findByText(/Project saved/)).toBeTruthy();
 });
 
+test("localhost for builders and verifiers is off until the owner ticks it, then saves alone", async () => {
+  const patches = serve();
+  renderDetail();
+  const dialog = await openEdit();
+  const box = dialog.getByLabelText("Builders and verifiers may use localhost") as HTMLInputElement;
+  expect(box.checked).toBe(false);
+  expect(box.getAttribute("aria-describedby")).toBeTruthy();
+  const save = dialog.getByRole("button", { name: "Save" }) as HTMLButtonElement;
+  fireEvent.click(box);
+  expect(save.disabled).toBe(false);
+  // Ticked and unticked again is no change.
+  fireEvent.click(box);
+  expect(save.disabled).toBe(true);
+  fireEvent.click(box);
+  fireEvent.click(save);
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(patches).toEqual([
+    { local_binding: true, rev: alpha.rev, idempotency_key: expect.any(String) },
+  ]);
+});
+
+test("a peer on an older build has no localhost setting, and a save never sends one", async () => {
+  // The daemon relays the older peer's record with `local_binding: null`.
+  const patches = serve(undefined, [], { ...FIELDS, local_binding: null });
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  renderDetail();
+  const dialog = await openEdit();
+  expect(dialog.queryByLabelText("Builders and verifiers may use localhost")).toBeNull();
+  fireEvent.change(dialog.getByLabelText("Name"), { target: { value: "alpha two" } });
+  fireEvent.click(dialog.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(patches).toEqual([
+    { name: "alpha two", rev: alpha.rev, idempotency_key: expect.any(String) },
+  ]);
+  expect(errors).not.toHaveBeenCalled();
+  errors.mockRestore();
+});
+
 test("a field left empty or a bad timeout keeps Save off", async () => {
   serve();
   renderDetail();
@@ -242,7 +280,6 @@ test("a peer's refusal of an edit names the peer", async () => {
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
-      if (path === "/api/v1/session") return json({ owner: true });
       if (path === "/api/v1/projects/alpha" && init?.method === "PATCH") {
         return json(
           {
@@ -295,7 +332,6 @@ test("the fleet project has an Edit button that opens the fields alone, with no 
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);
-      if (path === "/api/v1/session") return json({ owner: true });
       if (path === "/api/v1/projects/fleet") {
         return json({ ...FIELDS, id: "fleet", name: "fleet", repo: null, remote: null });
       }

@@ -52,6 +52,7 @@ rsa.workspace = true
 rustix = { workspace = true, features = ["pty"] }
 tempfile.workspace = true
 tiller-core = { workspace = true, features = ["test-owner"] }
+tiller-daemon = { workspace = true, features = ["testing"] }
 tiller-panes = { workspace = true, features = ["testing"] }
 
 [lints]

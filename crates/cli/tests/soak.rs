@@ -576,7 +576,7 @@ struct Soak {
     out: PathBuf,
     holder: Holder,
     daemon: Option<(Running, u16)>,
-    cookie: String,
+    cookie: tiller_daemon::testing::SignedIn,
     orchestrator: String,
     counters: Vec<Counter>,
     messages: Vec<Message>,
@@ -623,7 +623,7 @@ impl Soak {
             counters.push(counter);
         }
         let daemon = start_daemon(&world);
-        let cookie = cookie(&world);
+        let cookie = cookie(&world, daemon.1);
         let mut soak = Self {
             world,
             plan,

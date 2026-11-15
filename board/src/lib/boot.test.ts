@@ -1,9 +1,9 @@
 import { QueryClient } from "@tanstack/react-query";
 import { expect, test } from "vitest";
 
-import { BOOT_ELEMENT_ID, hydrateFromSnapshot, loadBoot, readBootSnapshot } from "./boot";
+import { hydrateFromSnapshot, loadBoot } from "./boot";
 import { clockStore } from "./clock";
-import { bootScript, fixtureSnapshot } from "./fixtures";
+import { fixtureSnapshot } from "./fixtures";
 import {
   agentsQuery,
   attentionQuery,
@@ -42,27 +42,6 @@ test("the filtered board paths are distinct keys, in the snapshot's own spelling
   expect(agentsQuery("h1").queryKey).toEqual(["api", "/api/v1/agents?host=h1"]);
 });
 
-test("the inlined script survives text that would end a script element", () => {
-  const snapshot = fixtureSnapshot("default", NOW);
-  snapshot.queries["/api/v1/note"] = { text: "</script><script>alert(1)</script> &    " };
-
-  document.body.innerHTML = bootScript(snapshot);
-  const element = document.getElementById(BOOT_ELEMENT_ID);
-  expect(element?.textContent).not.toContain("</script>");
-  expect(element?.textContent).not.toContain("<");
-
-  const read = readBootSnapshot(document);
-  expect(read?.queries["/api/v1/note"]).toEqual(snapshot.queries["/api/v1/note"]);
-});
-
-test("a missing or malformed boot script reads as no snapshot", () => {
-  document.body.innerHTML = "";
-  expect(readBootSnapshot(document)).toBeNull();
-
-  document.body.innerHTML = `<script type="application/json" id="${BOOT_ELEMENT_ID}">{"v":2}</script>`;
-  expect(readBootSnapshot(document)).toBeNull();
-});
-
 test("hydrating returns the stream position and sets the server clock offset", () => {
   const queryClient = new QueryClient();
   const snapshot = fixtureSnapshot("default", Date.now() + 60_000);
@@ -80,7 +59,29 @@ function unreachable(path: string) {
 }
 
 test("a snapshot refused as signed out boots the signed-out screen", async () => {
-  document.body.innerHTML = "";
-  expect(await loadBoot(document, refusedSignedOut)).toEqual({ kind: "signed-out" });
-  expect(await loadBoot(document, unreachable)).toEqual({ kind: "board", snapshot: null });
+  expect(await loadBoot(refusedSignedOut)).toEqual({ kind: "signed-out" });
+  expect(await loadBoot(unreachable)).toEqual({ kind: "board", snapshot: null });
+});
+
+// A machine before `tiller init`: every read answers 503 with the command,
+// and health answers `health`.
+function unset(health: unknown) {
+  return (path: string) =>
+    path === "/api/v1/health"
+      ? Promise.resolve(health)
+      : Promise.reject(new ReadError(path, 503, "no state.db", "tiller init"));
+}
+
+test("a 503 opens the setup screen when health says init has not run", async () => {
+  const full = { ok: false, version: "0.1.0", initialized: false, pollers: [] };
+  expect(await loadBoot(unset(full) as never)).toEqual({
+    kind: "setup",
+    command: "tiller init",
+  });
+  // Signed out at a local Host, health is small but still says it.
+  const small = unset({ ok: false, version: "0.1.0", initialized: false }) as never;
+  expect(await loadBoot(small)).toEqual({ kind: "setup", command: "tiller init" });
+  // A health answer that does not say it never claims an unset machine.
+  const unsaid = unset({ ok: false, version: "0.1.0" }) as never;
+  expect(await loadBoot(unsaid)).toEqual({ kind: "board", snapshot: null });
 });

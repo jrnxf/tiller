@@ -174,7 +174,7 @@ test("the Retry on a failed section is a bordered button like the other secondar
 
 test("a machine nobody has set up boots to the setup screen with the daemon's command", async () => {
   stubDaemon({ "/api/v1/health": { ok: false, version: "0.1.0", initialized: false } });
-  const boot = await loadBoot(document.implementation.createHTMLDocument());
+  const boot = await loadBoot();
   expect(boot).toEqual({
     kind: "setup",
     command: "tiller owner set tiller\ntiller init --host-label <label> --lane-capacity <n>",
@@ -183,7 +183,7 @@ test("a machine nobody has set up boots to the setup screen with the daemon's co
 
 test("a 503 from a set-up daemon boots the board, not the setup screen", async () => {
   stubDaemon({ "/api/v1/health": { ok: false, version: "0.1.0", initialized: true } });
-  const boot = await loadBoot(document.implementation.createHTMLDocument());
+  const boot = await loadBoot();
   expect(boot).toEqual({ kind: "board", snapshot: null });
 });
 
@@ -218,6 +218,33 @@ test("the setup screen opens the board once tiller init has run", async () => {
   // Health says initialized once state.db exists; the board opens only once
   // the daemon serves it.
   answers["/api/v1/snapshot"] = fixtureSnapshot("default");
+  await act(() => vi.advanceTimersByTimeAsync(SETUP_POLL_MS * 3));
+  expect(onReady).toHaveBeenCalledTimes(1);
+});
+
+test("signed out, the setup screen opens the sign-in once tiller init has run", async () => {
+  vi.useFakeTimers();
+  let initialized = false;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(() =>
+      Promise.resolve(
+        initialized
+          ? new Response(
+              JSON.stringify({ error: { code: "signed_out", message: "not signed in" } }),
+              { status: 403 },
+            )
+          : new Response(JSON.stringify(UNINITIALIZED), { status: 503 }),
+      ),
+    ),
+  );
+  const onReady = vi.fn();
+  render(<SetupScreen command={SETUP_COMMANDS} onReady={onReady} />);
+  await act(() => vi.advanceTimersByTimeAsync(SETUP_POLL_MS));
+  expect(onReady).not.toHaveBeenCalled();
+  // Once there is a snapshot it is refused as signed out: the reload boots
+  // the sign-in screen.
+  initialized = true;
   await act(() => vi.advanceTimersByTimeAsync(SETUP_POLL_MS * 3));
   expect(onReady).toHaveBeenCalledTimes(1);
 });

@@ -21,11 +21,13 @@ const WAIT: Duration = Duration::from_secs(30);
 
 /// `GET /api/v1/events` read on a thread: each `data:` line of a `change`
 /// message arrives on the channel.
-fn changes(port: u16) -> mpsc::Receiver<String> {
+fn changes(world: &World, port: u16) -> mpsc::Receiver<String> {
+    let cookie = common::holder::cookie(world, port);
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     write!(
         stream,
-        "GET /api/v1/events HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAccept: text/event-stream\r\n\r\n"
+        "GET /api/v1/events HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAccept: text/event-stream\r\n{}\r\n",
+        cookie.headers()
     )
     .unwrap();
     let (tx, rx) = mpsc::channel();
@@ -110,12 +112,14 @@ fn commit_outside(root: &Path, text: &str) {
     );
 }
 
-/// One `GET`, the whole answer with its head.
-fn fetch(port: u16, path: &str) -> String {
+/// One `GET` signed in as the owner, the whole answer with its head.
+fn fetch(world: &World, port: u16, path: &str) -> String {
+    let cookie = common::holder::cookie(world, port);
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     write!(
         stream,
-        "GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n"
+        "GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n{}\r\n",
+        cookie.headers()
     )
     .unwrap();
     let mut answer = String::new();
@@ -124,16 +128,16 @@ fn fetch(port: u16, path: &str) -> String {
 }
 
 /// The memory document as the board reads it.
-fn fleet_text(port: u16) -> String {
-    fetch(port, "/api/v1/memory?scope=fleet")
+fn fleet_text(world: &World, port: u16) -> String {
+    fetch(world, port, "/api/v1/memory?scope=fleet")
 }
 
 /// Waits until the `memory` poller has taken its first look, the baseline
 /// a later edit is told apart from.
-fn watching(port: u16) {
+fn watching(world: &World, port: u16) {
     let deadline = Instant::now() + WAIT;
     loop {
-        let answer = fetch(port, "/api/v1/health");
+        let answer = fetch(world, port, "/api/v1/health");
         let body = answer.split_once("\r\n\r\n").map_or("", |(_, body)| body);
         let health: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
         let looked = health["pollers"].as_array().is_some_and(|pollers| {
@@ -166,8 +170,8 @@ fn an_edit_made_outside_the_board_reaches_the_stream() {
         "# Fleet\n\n## How we work here\n\n- The first line.\n",
     );
     let (_daemon, port) = git_only_daemon(&world);
-    let rx = changes(port);
-    watching(port);
+    let rx = changes(&world, port);
+    watching(&world, port);
     // The first look is a baseline, not a change.
     let early = drain(&rx, Duration::from_secs(2));
     assert!(
@@ -185,7 +189,7 @@ fn an_edit_made_outside_the_board_reaches_the_stream() {
         change.contains("\"kind\":\"memory_repo.changed\""),
         "{change}"
     );
-    assert!(fleet_text(port).contains("Edited by hand."));
+    assert!(fleet_text(&world, port).contains("Edited by hand."));
     // One change for one edit: nothing more follows while the repo is still.
     let more = drain(&rx, Duration::from_secs(3));
     assert!(
@@ -199,8 +203,8 @@ fn an_edit_made_outside_the_board_reaches_the_stream() {
 }
 
 /// The memory poller as `/health` shows it.
-fn memory_poller(port: u16) -> serde_json::Value {
-    let answer = fetch(port, "/api/v1/health");
+fn memory_poller(world: &World, port: u16) -> serde_json::Value {
+    let answer = fetch(world, port, "/api/v1/health");
     let body = answer.split_once("\r\n\r\n").map_or("", |(_, body)| body);
     let health: serde_json::Value = serde_json::from_str(body).unwrap();
     health["pollers"]
@@ -224,8 +228,8 @@ fn the_watcher_holds_while_the_marker_names_another_system() {
         "# Fleet\n\n## How we work here\n\n- The first line.\n",
     );
     let (_daemon, port) = git_only_daemon(&world);
-    let rx = changes(port);
-    watching(port);
+    let rx = changes(&world, port);
+    watching(&world, port);
     drain(&rx, Duration::from_secs(2));
 
     let marker = world.home().join("owner");
@@ -240,7 +244,7 @@ fn the_watcher_holds_while_the_marker_names_another_system() {
         held.iter().all(|data| !data.contains("memory_repo")),
         "{held:?}"
     );
-    let poller = memory_poller(port);
+    let poller = memory_poller(&world, port);
     assert_eq!(poller["consecutive_failures"], 0, "{poller}");
     assert!(poller["last_error"].is_null(), "{poller}");
 

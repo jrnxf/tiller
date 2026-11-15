@@ -43,6 +43,8 @@ fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
 struct Daemon {
     port: u16,
     pid: u32,
+    /// The owner session its reads send: a local Host is no credential (G24).
+    cookie: tiller_daemon::testing::SignedIn,
 }
 
 impl Daemon {
@@ -83,7 +85,8 @@ impl Daemon {
             .trim()
             .parse()
             .unwrap();
-        Self { port, pid }
+        let cookie = tiller_daemon::testing::sign_in(home, port);
+        Self { port, pid, cookie }
     }
 
     fn health(&self) -> Value {
@@ -94,7 +97,8 @@ impl Daemon {
             .unwrap();
         write!(
             stream,
-            "GET /api/v1/health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+            "GET /api/v1/health HTTP/1.1\r\nHost: {host}\r\n{}Connection: close\r\n\r\n",
+            self.cookie.headers()
         )
         .unwrap();
         let mut raw = String::new();

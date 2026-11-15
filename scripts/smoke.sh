@@ -32,4 +32,11 @@ grep -qi '^cache-control: .*immutable' <<<"$headers" || { echo "$asset is not se
 health=$(curl -fsS "$url/api/v1/health")
 grep -q '"version"' <<<"$health" || { echo "no health answer from $url/api/v1/health" >&2; exit 1; }
 
-echo "ok: $url serves the board and its health"
+# A local Host is no credential (G24): without the owner session every other
+# read answers 403 signed_out at loopback too.
+answer=$(curl -sS -w '\n%{http_code}' "$url/api/v1/projects")
+status=$(tail -n 1 <<<"$answer")
+[ "$status" = 403 ] || { echo "$url/api/v1/projects answered $status without the owner session" >&2; exit 1; }
+grep -q '"code":"signed_out"' <<<"$answer" || { echo "no signed_out answer from $url/api/v1/projects: $answer" >&2; exit 1; }
+
+echo "ok: $url serves the board and its health, and keeps its reads behind the owner session"

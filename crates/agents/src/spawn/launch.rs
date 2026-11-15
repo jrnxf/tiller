@@ -88,6 +88,10 @@ pub struct LaunchSpec<'a> {
     /// The worker may read the owner's GitHub login: a builder on a
     /// `no-mistakes` project ([`Placeholders::gh_login_readable`]).
     pub gh_login_readable: bool,
+    /// The project lets its builders and verifiers bind and connect to
+    /// local ports ([`Placeholders::local_binding`]). Hashed into the
+    /// fragment, so a running worker keeps the value it launched with.
+    pub local_binding: bool,
     /// The Claude Code command.
     pub claude: &'a str,
     /// Where Claude Code keeps the user config the trust is recorded in.
@@ -508,6 +512,7 @@ fn render(spec: &LaunchSpec<'_>) -> Result<Rendered, SpawnError> {
             network_allow: spec.network_allow.to_vec(),
             no_mistakes_socket: spec.no_mistakes_socket.map(str::to_owned),
             gh_login_readable: spec.gh_login_readable,
+            local_binding: spec.local_binding,
         },
     )?;
     let (mode, mode_note) = effective_mode(spec.claude, &front.permission_mode);

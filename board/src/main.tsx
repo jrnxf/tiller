@@ -9,6 +9,7 @@ import { SetupScreen } from "./components/states/setup-screen";
 import { SignedOutScreen } from "./components/states/signed-out-screen";
 import { hydrateFromSnapshot, loadBoot } from "./lib/boot";
 import { createQueryClient } from "./lib/query-client";
+import { takeOwnerTokenFromFragment } from "./lib/owner";
 import { createAppRouter } from "./lib/router";
 import { signedOutStore } from "./lib/session";
 import { connectEvents } from "./lib/sse";
@@ -34,13 +35,14 @@ async function fontReady(): Promise<void> {
   }
 }
 
-// The daemon inlines the snapshot, so this is synchronous. Without it (a dev
-// server that is not the daemon, or a machine nobody has set up) it asks.
+// A login link lands here with the owner token in the fragment: keep it and
+// take it out of the address bar before anything reads the URL.
+takeOwnerTokenFromFragment();
+
 const [boot] = await Promise.all([loadBoot(), fontReady()]);
 const app = createRoot(root);
 
-// Signed in, the daemon inlines the snapshot and a reload is the ordinary first
-// load of the board.
+// Signed in, a reload is the ordinary first load of the board.
 function showSignedOut() {
   app.render(
     <StrictMode>
@@ -52,8 +54,7 @@ function showSignedOut() {
 if (boot.kind === "signed-out") {
   showSignedOut();
 } else if (boot.kind === "setup") {
-  // Once `tiller init` has run, the daemon inlines a snapshot: a reload is the
-  // ordinary first load.
+  // Once `tiller init` has run, a reload is the ordinary first load.
   app.render(
     <StrictMode>
       <SetupScreen command={boot.command} onReady={() => window.location.reload()} />

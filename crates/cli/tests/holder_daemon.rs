@@ -65,8 +65,8 @@ fn a_daemon_restart_serves_the_same_holder_pane_with_its_history_and_input() {
         .unwrap();
     assert!(tiller_core::ids::is_holder_pane(&pane), "{pane}");
 
-    let cookie = cookie(&world);
     let (daemon, port) = git_only_daemon(&world);
+    let cookie = cookie(&world, port);
     let mut view = View::open(port, &cookie, &session);
     view.until("size", |view| {
         view.lines.first().is_some_and(|l| l["type"] == "size")
@@ -140,8 +140,8 @@ fn a_fit_sizes_the_holder_pane_and_the_size_stays_when_the_last_lease_ends() {
     let own = pane_size(&client, &session);
     assert_ne!(own, (100, 30));
 
-    let cookie = cookie(&world);
     let (_daemon, port) = git_only_daemon(&world);
+    let cookie = cookie(&world, port);
     let mut view = View::open_with(
         port,
         &cookie,
@@ -230,8 +230,8 @@ fn a_size_another_holder_client_sets_during_a_fit_is_kept_or_given_back() {
     let (_holder, client) = start_holder(&world);
     let started = world.must(&["orchestrator", "start", "alpha"]);
     let session = started.data()["session"]["id"].as_str().unwrap().to_owned();
-    let cookie = cookie(&world);
     let (_daemon, port) = git_only_daemon(&world);
+    let cookie = cookie(&world, port);
 
     // Another client sizes the pane during the Fit, and the view ends: the
     // pane keeps the other client's size.

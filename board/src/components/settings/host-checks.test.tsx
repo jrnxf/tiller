@@ -15,12 +15,10 @@ import { createTestQueryClient } from "../../test-app";
 function serve(
   scenario: Scenario,
   {
-    owner = true,
     doctor = true,
     startedAt,
     peer,
   }: {
-    owner?: boolean;
     doctor?: boolean;
     startedAt?: string;
     // Answers a peer's checks in place of the fixture: the read's number,
@@ -32,7 +30,6 @@ function serve(
   let peerReads = 0;
   const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
-    if (path === "/api/v1/session") return new Response(JSON.stringify({ owner }));
     if (peer && path === "/api/v1/doctor?host=host-d") {
       peerReads += 1;
       return peer(peerReads, fixtureResource(path, scenario) as DoctorReport);
@@ -172,15 +169,6 @@ test("Check again runs the checks once more", async () => {
   const before = calls(fetch, "/api/v1/doctor");
   fireEvent.click(within(card).getByRole("button", { name: "Check again" }));
   await waitFor(() => expect(calls(fetch, "/api/v1/doctor")).toBe(before + 1));
-});
-
-test("a browser that is not the owner reads the checks and cannot run a poller", async () => {
-  serve("default", { owner: false });
-  renderSettings();
-  const { card } = await openHost("host-a");
-  const reconcile = await within(card).findByTestId("check-poller:reconcile");
-  expect(within(reconcile).queryByRole("button", { name: "Run now" })).toBeNull();
-  expect(within(reconcile).getByText("Owner only")).toBeTruthy();
 });
 
 test("checks that cannot be run from the board say so and point to the shell", async () => {

@@ -405,6 +405,28 @@ pub fn check_label(label: &str) -> Result<()> {
     }
 }
 
+/// The host label a machine name gives: its first DNS part, with every
+/// character a label refuses turned into `-`, and cut to 64. A name with no
+/// letter or digit to start it gives `None`. A label names this host to its
+/// peers, so a fresh `state.db` takes one that [`check_label`] accepts:
+/// `host-a.example.com` gives `host-a`.
+pub fn label_from_hostname(name: &str) -> Option<String> {
+    let first = name.trim().split('.').next().unwrap_or_default();
+    let plain: String = first
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .skip_while(|c| !c.is_ascii_alphanumeric())
+        .take(64)
+        .collect();
+    check_label(&plain).ok().map(|()| plain)
+}
+
 /// An ssh alias is one word on ssh's command line, after `--`: a host name,
 /// an address or `user@host`, never an option. At most 255 characters.
 pub fn check_alias(alias: &str) -> Result<()> {
@@ -1252,6 +1274,22 @@ mod tests {
             &"x".repeat(65),
         ] {
             assert!(check_label(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn hostnames_give_plain_labels() {
+        for (name, label) in [
+            ("host-a.example.com", Some("host-a")),
+            ("Host-A\n", Some("Host-A")),
+            ("host a", Some("host-a")),
+            ("-host_b.lan", Some("host_b")),
+            (&"x".repeat(70), Some(&*"x".repeat(64))),
+            ("", None),
+            (".example.com", None),
+            ("---", None),
+        ] {
+            assert_eq!(label_from_hostname(name).as_deref(), label, "{name:?}");
         }
     }
 

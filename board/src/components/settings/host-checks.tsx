@@ -56,21 +56,17 @@ function RunNow({
 
 function Line({
   line,
-  owner,
   onRan,
 }: {
   line: CheckLine;
-  owner: boolean;
   // How a poller's Run now reports back; a peer's lines have no Run now.
   onRan?: (after: PollerHealth | null) => void;
 }) {
   const end =
     line.end?.kind === "run" ? (
-      owner && onRan ? (
+      onRan ? (
         <RunNow poller={line.end.poller} onRan={onRan} />
-      ) : (
-        <span className="set-line-r">Owner only</span>
-      )
+      ) : null
     ) : line.end ? (
       <span className="set-line-r">{line.end.text}</span>
     ) : null;
@@ -88,7 +84,7 @@ function Line({
 
 // The checks of the host serving this board: the ones `tiller doctor` runs,
 // run again each time the card opens, and its pollers.
-function LocalChecks({ health, owner }: { health: DaemonHealth; owner: boolean }) {
+function LocalChecks({ health }: { health: DaemonHealth }) {
   const client = useQueryClient();
   const doctor = useQuery(doctorQuery());
   // Pollers Run now brought back, shown as fixed while the card is open.
@@ -128,7 +124,7 @@ function LocalChecks({ health, owner }: { health: DaemonHealth; owner: boolean }
           />
         ) : null}
         {lines.map((line) => (
-          <Line key={line.key} line={line} owner={owner} onRan={ran} />
+          <Line key={line.key} line={line} onRan={ran} />
         ))}
       </ul>
     </HostCardSection>
@@ -199,9 +195,7 @@ function PeerChecks({ machine }: { machine: Machine }) {
           />
         ) : null}
         {doctor.data
-          ? peerCheckLines(doctor.data).map((line) => (
-              <Line key={line.key} line={line} owner={false} />
-            ))
+          ? peerCheckLines(doctor.data).map((line) => <Line key={line.key} line={line} />)
           : null}
         {doctor.data ? (
           // The link's `tiller peer serve` runs them, with the SSH session's
@@ -220,17 +214,9 @@ function PeerChecks({ machine }: { machine: Machine }) {
   );
 }
 
-export function HostChecks({
-  machine,
-  health,
-  owner,
-}: {
-  machine: Machine;
-  health: DaemonHealth;
-  owner: boolean;
-}) {
+export function HostChecks({ machine, health }: { machine: Machine; health: DaemonHealth }) {
   return machine.kind === "local" ? (
-    <LocalChecks health={health} owner={owner} />
+    <LocalChecks health={health} />
   ) : (
     <PeerChecks machine={machine} />
   );

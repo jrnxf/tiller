@@ -10,20 +10,12 @@ import { signedOutStore } from "../../lib/session";
 import { SettingsPage } from "./settings-page";
 import { createTestQueryClient } from "../../test-app";
 
-// `gated`: an `--allow-host` name, where reads need the cookie.
-function serve(owner: boolean, logout: [number, unknown] = [200, { owner: false }], gated = true) {
-  let signedIn = owner;
+// The federated fixture, as the daemon answers a browser signed in as the
+// owner: no other browser reaches Settings (G24).
+function serve(logout: [number, unknown] = [200, { owner: false }]) {
   const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
-    if (path === "/api/v1/session") {
-      if (!signedIn && gated) {
-        const refused = { ok: false, error: { code: "signed_out", message: "signed out" } };
-        return new Response(JSON.stringify(refused), { status: 403 });
-      }
-      return new Response(JSON.stringify({ owner: signedIn }));
-    }
     if (path === "/api/v1/logout" && init?.method === "POST") {
-      if (logout[0] === 200) signedIn = false;
       return new Response(JSON.stringify(logout[1]), { status: logout[0] });
     }
     // A peer's checks, as the link answers them.
@@ -60,7 +52,7 @@ afterEach(() => {
 });
 
 test("a signed-in browser has Sign out at the right of its row, and it ends the sign-in", async () => {
-  const fetch = serve(true);
+  const fetch = serve();
   renderSettings();
   const panel = await screen.findByRole("region", { name: "This browser" });
   const row = (await within(panel).findByText("Signed in as the owner")).closest(".set-row");
@@ -72,17 +64,8 @@ test("a signed-in browser has Sign out at the right of its row, and it ends the 
   expect(fetch).toHaveBeenCalledWith("/api/v1/logout", expect.objectContaining({ method: "POST" }));
 });
 
-test("on loopback, signing out keeps the board and shows this browser signed out", async () => {
-  serve(true, undefined, false);
-  renderSettings();
-  fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
-  const panel = screen.getByRole("region", { name: "This browser" });
-  expect(await within(panel).findByText("Not signed in")).toBeTruthy();
-  expect(signedOutStore.get()).toBe(false);
-});
-
 test("a refused sign-out stays on the page and says why", async () => {
-  serve(true, [403, { ok: false, error: { code: "not_owner", message: "no" } }]);
+  serve([403, { ok: false, error: { code: "not_owner", message: "no" } }]);
   renderSettings();
   fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
   expect((await screen.findByRole("alert")).textContent).toBe(
@@ -92,16 +75,8 @@ test("a refused sign-out stays on the page and says why", async () => {
   expect(screen.getByRole<HTMLButtonElement>("button", { name: "Sign out" }).disabled).toBe(false);
 });
 
-test("on loopback, a browser that is not signed in has nothing to sign out", async () => {
-  serve(false, undefined, false);
-  renderSettings();
-  const panel = await screen.findByRole("region", { name: "This browser" });
-  expect(await within(panel).findByText("Not signed in")).toBeTruthy();
-  expect(within(panel).queryByRole("button", { name: "Sign out" })).toBeNull();
-});
-
 test("Settings lists every host in one table, this one a row like the others", async () => {
-  serve(true);
+  serve();
   renderSettings();
   const panel = await screen.findByRole("region", { name: "Hosts" });
   const row = (label: string) => within(panel).getByTestId(`host-${label}`);
@@ -149,7 +124,7 @@ test("Settings lists every host in one table, this one a row like the others", a
 });
 
 test("a paired host's card has its peer link, and the boards that reach this host follow Hosts", async () => {
-  serve(true);
+  serve();
   renderSettings();
   const panel = await screen.findByRole("region", { name: "Hosts" });
   const row = await within(panel).findByTestId("host-host-d");
@@ -170,21 +145,8 @@ test("a paired host's card has its peer link, and the boards that reach this hos
   expect(within(boards).getByTestId("board-key-host-d")).toBeTruthy();
 });
 
-test("a browser that is not the owner sees no peer link and no boards list", async () => {
-  serve(false, undefined, false);
-  renderSettings();
-  const panel = await screen.findByRole("region", { name: "Hosts" });
-  const row = await within(panel).findByTestId("host-host-d");
-  fireEvent.click(within(row).getByRole("button", { name: "host-d" }));
-  const card = await screen.findByTestId("host-card-host-d");
-  // A browser that is not the owner still reads the peer's checks.
-  expect(await within(card).findByTestId("check-merge-gates")).toBeTruthy();
-  expect(within(card).queryByRole("region", { name: "Peer link" })).toBeNull();
-  expect(screen.queryByRole("region", { name: "Boards that reach this host" })).toBeNull();
-});
-
 test("without the hosts list, the host serving this board still has its row", async () => {
-  serve(true);
+  serve();
   const served = globalThis.fetch;
   // The merge App is ready, so nothing on this host needs the owner.
   const health = fixtureResource("/api/v1/health", "merge-ready") as DaemonHealth;
@@ -208,7 +170,7 @@ test("without the hosts list, the host serving this board still has its row", as
 });
 
 test("a merge App that is not ready is a section above the hosts, named by its host", async () => {
-  serve(true);
+  serve();
   renderSettings();
   const section = await screen.findByTestId("merge-app");
   expect(section.getAttribute("aria-label")).toBe("Merge App");
@@ -227,8 +189,8 @@ interface MachineRow {
 
 // Settings with only this host paired. `pair` answers `POST /api/v1/peers`;
 // once it answers 200 the machines list holds the new host.
-function serveUnpaired(pair: () => Promise<[number, unknown]>, owner = true) {
-  const fetch = serve(owner, undefined, false);
+function serveUnpaired(pair: () => Promise<[number, unknown]>) {
+  const fetch = serve();
   const federated = fetch.getMockImplementation()!;
   const body = fixtureResource("/api/v1/machines", "federated") as { machines: MachineRow[] };
   const local = body.machines.filter((machine) => machine.kind === "local");
@@ -274,15 +236,6 @@ test("with no other host, Hosts lists this one, says none is paired and offers A
   const head = panel.querySelector(".set-sec-h") as HTMLElement;
   expect(head.lastElementChild).toBe(within(head).getByRole("button", { name: "Add a host" }));
   expect(within(panel).queryByText("host-d")).toBeNull();
-});
-
-test("a browser not signed in as the owner is told to sign in, with no Add a host", async () => {
-  serveUnpaired(async () => [200, PAIRED], false);
-  renderSettings();
-  const panel = await screen.findByRole("region", { name: "Hosts" });
-  await within(panel).findByText("Sign this browser in as the owner to add one");
-  expect(within(panel).getByText("No other host is paired")).toBeTruthy();
-  expect(within(panel).queryByRole("button", { name: "Add a host" })).toBeNull();
 });
 
 test("Add a host opens a form that Pair arms only with a label and an alias, and Cancel closes", async () => {
@@ -387,12 +340,11 @@ test.each([
 );
 
 // The start settings of this host, served beside the rest.
-function serveSettings(owner: boolean) {
+function serveSettings() {
   let pool: string | null = null;
   const posts: Record<string, unknown>[] = [];
   const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
-    if (path === "/api/v1/session") return new Response(JSON.stringify({ owner }));
     if (path === "/api/v1/start-settings") {
       return new Response(
         JSON.stringify({
@@ -435,7 +387,7 @@ function serveSettings(owner: boolean) {
 }
 
 test("the owner sets a start folder from Settings and a refusal says why", async () => {
-  const posts = serveSettings(true);
+  const posts = serveSettings();
   renderSettings();
   const section = within(await screen.findByRole("region", { name: "Starting agents" }));
   const pool = within(section.getByTestId("setting-spawn.pool_root"));
@@ -454,7 +406,7 @@ test("the owner sets a start folder from Settings and a refusal says why", async
 });
 
 test("the host picker heads Starting agents, and the start folders follow it", async () => {
-  serveSettings(true);
+  serveSettings();
   renderSettings();
   const region = await screen.findByRole("region", { name: "Starting agents" });
   // One picker, on the first section it moves.
@@ -478,13 +430,4 @@ test("the host picker heads Starting agents, and the start folders follow it", a
   // This host's problems and derived folders are not host-d's.
   expect(pool.textContent).not.toContain("is not set");
   expect(section.queryByText("/home/user/.tiller/scratch")).toBeNull();
-});
-
-test("a browser that is not the owner reads the start folders and cannot change them", async () => {
-  serveSettings(false);
-  renderSettings();
-  const section = within(await screen.findByRole("region", { name: "Starting agents" }));
-  expect(section.getByText("/home/user/src")).toBeTruthy();
-  expect(section.getByText("Not set")).toBeTruthy();
-  expect(section.queryAllByRole("textbox")).toHaveLength(0);
 });

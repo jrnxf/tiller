@@ -324,6 +324,56 @@ test("the top-bar Ask button and the A key open the ask dialog with the text foc
   expect(screen.getByRole("dialog", { name: "Ask orchestrators" })).toBeTruthy();
 });
 
+// A plain letter key on the page, outside any field.
+function press(key: string) {
+  fireEvent.keyDown(document.body, { key, code: `Key${key.toUpperCase()}` });
+}
+
+test("G then a screen's key opens that screen, and the second key does nothing else", async () => {
+  const router = await renderApp();
+  press("g");
+  press("i");
+  await vi.waitFor(() => expect(router.state.location.pathname).toBe("/inbox"));
+  expect(screen.getByRole("heading", { level: 1, name: "Inbox" })).toBeTruthy();
+
+  // A alone opens Ask. After G it opens the Agents screen only.
+  press("g");
+  press("a");
+  await vi.waitFor(() => expect(router.state.location.pathname).toBe("/agents"));
+  expect(screen.queryByRole("dialog", { name: "Ask orchestrators" })).toBeNull();
+
+  press("g");
+  press("b");
+  await vi.waitFor(() => expect(router.state.location.pathname).toBe("/"));
+});
+
+test("the screen chords leave a field and an open dialog alone", async () => {
+  const router = await renderApp();
+  fireEvent.click(screen.getByRole("button", { name: "Add project" }));
+  const dialog = screen.getByRole("dialog", { name: "Add project" });
+  const cancel = within(dialog).getByRole("button", { name: "Cancel" });
+  fireEvent.keyDown(cancel, { key: "g", code: "KeyG" });
+  fireEvent.keyDown(cancel, { key: "i", code: "KeyI" });
+  expect(router.state.location.pathname).toBe("/");
+
+  fireEvent.click(cancel);
+  const field = document.createElement("input");
+  document.body.append(field);
+  field.focus();
+  fireEvent.keyDown(field, { key: "g", code: "KeyG" });
+  fireEvent.keyDown(field, { key: "i", code: "KeyI" });
+  expect(router.state.location.pathname).toBe("/");
+  field.remove();
+});
+
+test("the palette shows each screen's chord", async () => {
+  await renderApp();
+  fireEvent.keyDown(document.body, { key: "k", metaKey: true });
+  const palette = screen.getByRole("dialog", { name: /command/i });
+  const inbox = within(palette).getByRole("option", { name: /Inbox/ });
+  expect([...inbox.querySelectorAll("kbd")].map((key) => key.textContent)).toEqual(["G", "I"]);
+});
+
 test("no global shortcut fires while a dialog is open", async () => {
   await renderApp();
   fireEvent.click(screen.getByRole("button", { name: "Add project" }));

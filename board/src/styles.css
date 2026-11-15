@@ -1188,6 +1188,12 @@ kbd {
   color: var(--fg-3);
 }
 
+.palette-keys {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
 .palette-group {
   font-size: var(--fs-mini);
   color: var(--fg-3);
@@ -1491,7 +1497,7 @@ kbd {
   }
 }
 
-/* The signed-out screen at an `--allow-host` name (states/signed-out-screen.tsx) */
+/* The signed-out screen (states/signed-out-screen.tsx) */
 
 .signin-form {
   margin: 16px 0 0;

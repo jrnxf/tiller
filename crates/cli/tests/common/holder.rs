@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use serde_json::Value;
+use tiller_daemon::testing::SignedIn;
 use tiller_panes::{HolderClient, socket_path};
 
 use super::{Running, World};
@@ -64,29 +65,24 @@ pub fn start_holder(world: &World) -> (Running, HolderClient) {
     }
 }
 
-/// The owner's board cookie for `world`'s daemon.
-pub fn cookie(world: &World) -> String {
-    let now = tiller_core::Timestamp::now();
-    let token = tiller_daemon::auth::mint_login(&world.home(), now)
-        .unwrap()
-        .token;
-    tiller_daemon::auth::redeem_login(&world.home(), &token, now)
-        .unwrap()
-        .unwrap()
+/// The owner session for `world`'s daemon on `port`, signed in as the
+/// owner does it ([`tiller_daemon::testing::sign_in`]).
+pub fn cookie(world: &World, port: u16) -> SignedIn {
+    tiller_daemon::testing::sign_in(&world.home(), port)
 }
 
 /// A board POST to `path`, sent on a new connection; the connection is
 /// returned with the request written.
-pub fn post(port: u16, cookie: &str, path: &str, body: &str) -> TcpStream {
+pub fn post(port: u16, cookie: &SignedIn, path: &str, body: &str) -> TcpStream {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     stream.set_read_timeout(Some(WAIT)).unwrap();
     stream
         .write_all(
             format!(
                 "POST {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\n\
-                 Sec-Fetch-Site: same-origin\r\nCookie: {}={cookie}\r\n\
+                 Sec-Fetch-Site: same-origin\r\n{}\
                  Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-                tiller_daemon::auth::COOKIE,
+                cookie.headers(),
                 body.len()
             )
             .as_bytes(),
@@ -96,7 +92,7 @@ pub fn post(port: u16, cookie: &str, path: &str, body: &str) -> TcpStream {
 }
 
 /// Types `input` into the session's pane through the board's input path.
-pub fn send(port: u16, cookie: &str, session: &str, input: &Value) {
+pub fn send(port: u16, cookie: &SignedIn, session: &str, input: &Value) {
     let mut stream = post(
         port,
         cookie,
@@ -122,12 +118,12 @@ pub struct View {
 }
 
 impl View {
-    pub fn open(port: u16, cookie: &str, session: &str) -> Self {
+    pub fn open(port: u16, cookie: &SignedIn, session: &str) -> Self {
         Self::open_with(port, cookie, session, "{}")
     }
 
     /// Opens the view with `body`, such as a Fit.
-    pub fn open_with(port: u16, cookie: &str, session: &str, body: &str) -> Self {
+    pub fn open_with(port: u16, cookie: &SignedIn, session: &str, body: &str) -> Self {
         let stream = post(
             port,
             cookie,
@@ -217,14 +213,14 @@ impl View {
 }
 
 /// A board GET of `path` on the daemon at `port`: the response body.
-pub fn get(port: u16, cookie: &str, path: &str) -> Value {
+pub fn get(port: u16, cookie: &SignedIn, path: &str) -> Value {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     stream.set_read_timeout(Some(WAIT)).unwrap();
     stream
         .write_all(
             format!(
-                "GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nCookie: {}={cookie}\r\n\r\n",
-                tiller_daemon::auth::COOKIE
+                "GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n{}\r\n",
+                cookie.headers()
             )
             .as_bytes(),
         )

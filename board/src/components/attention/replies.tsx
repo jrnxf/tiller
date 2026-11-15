@@ -52,7 +52,9 @@ function ProjectOf({
   );
 }
 
-function ReplyRow({
+// A reply in the Inbox list. Every listed reply is unread: Mark read takes it
+// off the list.
+export function ReplyRow({
   reply,
   selected,
   projects,
@@ -65,11 +67,11 @@ function ReplyRow({
     <Link
       to="/inbox"
       search={({ host }) => ({ host, item: reply.id })}
-      className="irow"
+      className="irow unread"
       data-selected={selected}
       data-testid={`inbox-row-${reply.id}`}
     >
-      <span className="ii reply-ii">
+      <span className="ii kind reply" title="Reply">
         <ReplyIcon />
       </span>
       <span className="bd">
@@ -82,40 +84,12 @@ function ReplyRow({
               <span className="sl">/</span>
             </>
           ) : null}
-          replied {formatAgo(reply.replied_at)}
+          reply<span className="sl">/</span>
+          {formatAgo(reply.replied_at)}
         </span>
       </span>
+      <span className="udot" role="img" aria-label="Unread" />
     </Link>
-  );
-}
-
-export function RepliesGroup({
-  replies,
-  selected,
-  projects,
-}: {
-  replies: ReplyItem[];
-  selected: string | undefined;
-  projects: Project[];
-}) {
-  if (replies.length === 0) return null;
-  return (
-    <section aria-label="Replies">
-      <div className="ghead reply">
-        <ReplyIcon />
-        Replies<span className="c">{replies.length}</span>
-        <span className="sp" />
-        <span className="why">the orchestrator answered</span>
-      </div>
-      {replies.map((reply) => (
-        <ReplyRow
-          key={reply.id}
-          reply={reply}
-          selected={reply.id === selected}
-          projects={projects}
-        />
-      ))}
-    </section>
   );
 }
 

@@ -105,14 +105,29 @@ impl Timed {
     /// reader's do.
     fn unlimit_reads(&mut self) -> io::Result<()> {
         self.deadline = None;
-        self.stream.set_read_timeout(None)
+        gone_is_fine(self.stream.set_read_timeout(None))
+    }
+}
+
+/// macOS refuses a socket option (EINVAL) once the peer has closed. The
+/// read or write that follows then finds the close itself, as on Linux,
+/// so the close is reported as the holder's and not as a bad argument.
+fn gone_is_fine(set: io::Result<()>) -> io::Result<()> {
+    match set {
+        Err(err)
+            if cfg!(target_vendor = "apple")
+                && err.raw_os_error() == Some(rustix::io::Errno::INVAL.raw_os_error()) =>
+        {
+            Ok(())
+        }
+        set => set,
     }
 }
 
 impl io::Read for Timed {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if let Some(left) = self.left()? {
-            self.stream.set_read_timeout(Some(left))?;
+            gone_is_fine(self.stream.set_read_timeout(Some(left)))?;
         }
         self.stream.read(buf)
     }
@@ -121,7 +136,7 @@ impl io::Read for Timed {
 impl Write for Timed {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if let Some(left) = self.left()? {
-            self.stream.set_write_timeout(Some(left))?;
+            gone_is_fine(self.stream.set_write_timeout(Some(left)))?;
         }
         self.stream.write(buf)
     }
@@ -1414,7 +1429,9 @@ mod tests {
         assert_eq!(subscription.recv().unwrap(), None);
         let err = handle.resize(100, 30).unwrap_err();
         assert!(err.to_string().contains("has ended"), "{err}");
-        drop(subscription);
+        // Every copy of our socket must close before the holder's write
+        // fails: macOS does not fail it on a shutdown of our reads alone.
+        drop((subscription, handle, side));
         holder.join().unwrap();
     }
 
@@ -1459,7 +1476,8 @@ mod tests {
         };
         assert_eq!(why, "a resize failed: test");
         assert_eq!(subscription.recv().unwrap(), None);
-        drop(subscription);
+        // As above: close every copy of our socket so the holder's write fails.
+        drop((subscription, side));
         holder.join().unwrap();
     }
 

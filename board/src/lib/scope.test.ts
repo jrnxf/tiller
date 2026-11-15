@@ -45,7 +45,10 @@ test("the view knob and the machine filter narrow together", () => {
 
 test("the Inbox badge counts only what is in scope", () => {
   const all = new Set(projects.map((project) => project.id));
-  const total = attention.items.length + attention.permission_prompts.length;
+  const current = attention.items.filter((item) => item.still_current).length;
+  // The fixture holds a decision that is no longer current, which is left out.
+  expect(current).toBeLessThan(attention.items.length);
+  const total = current + attention.permission_prompts.length;
   expect(attentionCount(attention, board.rows, all, undefined)).toBe(total);
   expect(attentionCount(attention, board.rows, new Set(), undefined)).toBeLessThan(total);
   expect(attentionCount(attention, board.rows, all, "no-such-host")).toBeLessThan(total);
