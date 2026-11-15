@@ -1,13 +1,19 @@
 import { useSuspenseQuery } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
+import type { HotkeyChord } from "@tanstack/react-hotkeys";
+import { useHotkeys } from "@tanstack/react-hotkeys";
+import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
+import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
 
 import { agentsQuery, attentionQuery, boardQuery, projectsQuery } from "../../lib/queries";
 import { projectKey } from "../../lib/peers";
 import { prefsStore } from "../../lib/prefs";
+import { shortcutsBlocked } from "../../lib/shortcuts";
 import { attentionCount, dialogWaits, scopedProjects } from "../../lib/scope";
 import { useStore } from "../../lib/store";
+import { useReplies } from "../attention/replies";
 import { PrIcon } from "../board/icons";
+import { showToast } from "../board/toast";
 import { countsByFilter, tilesInScope } from "../board/model";
 import { Section } from "../states/section";
 import {
@@ -25,30 +31,51 @@ import { ProjectsSection } from "./projects-section";
 import { QuotaFooter, QuotaUnavailable } from "./quota-footer";
 import { useNamedProjects } from "../board/peer-state";
 
-const NAV: {
+// Inbox comes first: what waits on the owner is the first thing to see.
+// `key` is the second key of the screen's chord: G, then that key.
+export const NAV: {
   to: "/" | "/agents" | "/contributions" | "/inbox" | "/memory" | "/health" | "/settings";
   label: string;
+  key: HotkeyChord;
   icon: ReactNode;
 }[] = [
-  { to: "/", label: "Board", icon: <BoardIcon /> },
-  { to: "/agents", label: "Agents", icon: <AgentsIcon /> },
-  { to: "/contributions", label: "Contributions", icon: <PrIcon /> },
-  { to: "/inbox", label: "Inbox", icon: <InboxIcon /> },
-  { to: "/memory", label: "Memory", icon: <MemoryIcon /> },
-  { to: "/health", label: "Health", icon: <PulseIcon /> },
-  { to: "/settings", label: "Settings", icon: <SettingsIcon /> },
+  { to: "/inbox", label: "Inbox", key: "I", icon: <InboxIcon /> },
+  { to: "/", label: "Board", key: "B", icon: <BoardIcon /> },
+  { to: "/agents", label: "Agents", key: "A", icon: <AgentsIcon /> },
+  { to: "/contributions", label: "Contributions", key: "C", icon: <PrIcon /> },
+  { to: "/memory", label: "Memory", key: "M", icon: <MemoryIcon /> },
+  { to: "/health", label: "Health", key: "H", icon: <PulseIcon /> },
+  { to: "/settings", label: "Settings", key: "S", icon: <SettingsIcon /> },
 ];
 
-// The ids of the projects the current view and machine filter show.
-function useShownIds(activeHost: string | undefined): Set<string> {
+// G, then a screen's key, opens that screen. The hotkey listens on the
+// document, so its last key stops there and never reaches the window
+// listeners of single-key shortcuts, such as I in the Agents view or A for
+// Ask. A modal or a field the key is typed into keeps the key as its own.
+function useNavHotkeys() {
+  const navigate = useNavigate();
+  useHotkeys(
+    NAV.map((item) => ({
+      hotkey: ["G", item.key],
+      callback: (event: KeyboardEvent) => {
+        if (shortcutsBlocked(event)) return;
+        void navigate({ to: item.to, search: (prev) => ({ ...prev, owner: undefined }) });
+      },
+    })),
+  );
+}
+
+// The projects the current view and machine filter show.
+function useScoped(activeHost: string | undefined) {
   const { data: board } = useSuspenseQuery(boardQuery());
   const projects = useNamedProjects(useSuspenseQuery(projectsQuery()).data);
   const prefs = useStore(prefsStore);
-  return new Set(
-    scopedProjects(prefs, projects.projects, board.rows, activeHost).map((project) =>
-      projectKey(project),
-    ),
-  );
+  return { scoped: scopedProjects(prefs, projects.projects, board.rows, activeHost), projects };
+}
+
+// The ids of the projects the current view and machine filter show.
+function useShownIds(activeHost: string | undefined): Set<string> {
+  return new Set(useScoped(activeHost).scoped.map((project) => projectKey(project)));
 }
 
 // The counts beside the screen names read their own queries: one that cannot
@@ -69,13 +96,57 @@ function RunningCount({ activeHost }: { activeHost: string | undefined }) {
   return <span className="count">{running}</span>;
 }
 
+// What waits on the owner, and the unread replies: the rows the Inbox counts.
 function WaitingBadge({ activeHost }: { activeHost: string | undefined }) {
   const { data: attention } = useSuspenseQuery(attentionQuery());
   const { data: board } = useSuspenseQuery(boardQuery());
   const { data: agents } = useSuspenseQuery(agentsQuery());
   const shownIds = useShownIds(activeHost);
-  const waiting = attentionCount(attention, board.rows, shownIds, activeHost, dialogWaits(agents));
-  return waiting > 0 ? <span className="badge warn">{waiting}</span> : null;
+  const { replies } = useReplies(useScoped(activeHost).scoped);
+  const waiting =
+    attentionCount(attention, board.rows, shownIds, activeHost, dialogWaits(agents)) +
+    replies.length;
+  return waiting > 0 ? <span className="badge">{waiting}</span> : null;
+}
+
+// A reply that arrives while the owner is on another screen shows a toast
+// with a link to it, so it is not missed. The replies already there when a
+// project first comes into scope are not news.
+function ReplyToasts({ activeHost }: { activeHost: string | undefined }) {
+  const { scoped, projects } = useScoped(activeHost);
+  const { replies, loading } = useReplies(scoped);
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const seen = useRef(new Map<string, Set<string>>());
+  useEffect(() => {
+    if (loading) return;
+    const fresh = [];
+    const now = new Map<string, Set<string>>();
+    for (const reply of replies) {
+      const ids = now.get(reply.project) ?? new Set();
+      ids.add(reply.id);
+      now.set(reply.project, ids);
+    }
+    for (const project of scoped) {
+      const before = seen.current.get(project.id);
+      const ids = now.get(project.id) ?? new Set<string>();
+      if (before)
+        fresh.push(...replies.filter((r) => r.project === project.id && !before.has(r.id)));
+      seen.current.set(project.id, new Set([...(before ?? []), ...ids]));
+    }
+    const newest = fresh[0];
+    if (!newest || pathname === "/inbox") return;
+    const name = projects.projects.find((project) => project.id === newest.project)?.name;
+    showToast(
+      "reply",
+      fresh.length > 1
+        ? `${fresh.length} new replies`
+        : `${name ? `${name}: ` : ""}a reply to your ${newest.to === "ask" ? "ask" : "comment"}`,
+      newest.question,
+      null,
+      { label: "Open in Inbox", item: newest.id },
+    );
+  });
+  return null;
 }
 
 const COUNTS: Partial<Record<string, (props: { activeHost: string | undefined }) => ReactNode>> = {
@@ -113,6 +184,7 @@ export function Sidebar({
   onNavigate: () => void;
   onOpenPalette: () => void;
 }) {
+  useNavHotkeys();
   return (
     <aside className="side" aria-label="Sidebar">
       <div className="ws">
@@ -141,8 +213,9 @@ export function Sidebar({
             className="nav"
             activeProps={{ className: "nav", "aria-current": "page" }}
             activeOptions={{ exact: true }}
-            // The Agents view folds the sidebar to icons; the name stays on hover.
-            title={item.label}
+            // The Agents view folds the sidebar to icons; the name stays on
+            // hover, with the screen's chord.
+            title={`${item.label} (G then ${item.key})`}
           >
             {item.icon}
             <span className="lbl">{item.label}</span>
@@ -150,6 +223,9 @@ export function Sidebar({
           </Link>
         ))}
       </nav>
+      <Section label="Replies" fallback={noCount}>
+        <ReplyToasts activeHost={activeHost} />
+      </Section>
       <Section label="Projects">
         <ProjectsSection activeHost={activeHost} />
       </Section>

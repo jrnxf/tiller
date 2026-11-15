@@ -1,16 +1,26 @@
+import { Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 
 import { createStore, useStore } from "../../lib/store";
 import { CheckIcon } from "../shell/icons";
+import { ReplyIcon } from "../attention/icons";
 import { WarnIcon } from "./icons";
 
 interface ToastState {
   id: number;
-  tone: "ok" | "bad";
+  // "reply" is news from an orchestrator, with a link to it.
+  tone: "ok" | "bad" | "reply";
   title: string;
   detail: string | null;
   // A command for the owner to run, shown with a Copy button.
   command: string | null;
+  // A link to where the news is, such as a reply in the Inbox.
+  link: ToastLink | null;
+}
+
+interface ToastLink {
+  label: string;
+  item: string;
 }
 
 const toastStore = createStore<ToastState | null>(null);
@@ -21,13 +31,14 @@ export function showToast(
   title: string,
   detail: string | null = null,
   command: string | null = null,
+  link: ToastLink | null = null,
 ) {
   counter += 1;
-  toastStore.set({ id: counter, tone, title, detail, command });
+  toastStore.set({ id: counter, tone, title, detail, command, link });
 }
 
-// How long a toast stays: a failure longer, and one with a command to copy
-// long enough to copy it. A pointer on the toast holds it.
+// How long a toast stays: a failure or a link longer, and one with a command
+// to copy long enough to copy it. A pointer on the toast holds it.
 const OK_MS = 4000;
 const BAD_MS = 8000;
 const COMMAND_MS = 20_000;
@@ -66,15 +77,16 @@ export function ToastHost() {
   const id = toast?.id;
   const tone = toast?.tone;
   const command = toast?.command ?? null;
+  const linked = toast?.link !== null && toast?.link !== undefined;
   const [held, setHeld] = useState(false);
   useEffect(() => {
     if (id === undefined || held) return;
     const timer = setTimeout(
       clearToast,
-      command !== null ? COMMAND_MS : tone === "bad" ? BAD_MS : OK_MS,
+      command !== null ? COMMAND_MS : tone === "bad" || linked ? BAD_MS : OK_MS,
     );
     return () => clearTimeout(timer);
-  }, [id, tone, command, held]);
+  }, [id, tone, command, linked, held]);
 
   return (
     <div
@@ -86,18 +98,37 @@ export function ToastHost() {
       data-open={toast !== null}
       data-tone={toast?.tone}
       data-command={command !== null}
+      data-link={linked}
       onPointerEnter={() => setHeld(true)}
       onPointerLeave={() => setHeld(false)}
     >
       {toast ? (
         <>
-          {toast.tone === "ok" ? <CheckIcon /> : <WarnIcon />}
+          {toast.tone === "ok" ? (
+            <CheckIcon />
+          ) : toast.tone === "reply" ? (
+            <ReplyIcon />
+          ) : (
+            <WarnIcon />
+          )}
           <div>
             <div className="t1">{toast.title}</div>
             {toast.detail ? <div className="t2">{toast.detail}</div> : null}
             {toast.command ? (
               <div className="t3">
                 <CopyCommand command={toast.command} />
+              </div>
+            ) : null}
+            {toast.link ? (
+              <div className="t3">
+                <Link
+                  to="/inbox"
+                  search={({ host }) => ({ host, item: toast.link?.item })}
+                  className="toast-link"
+                  onClick={clearToast}
+                >
+                  {toast.link.label}
+                </Link>
               </div>
             ) : null}
           </div>

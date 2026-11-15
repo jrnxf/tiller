@@ -24,6 +24,7 @@ import {
   SettingsIcon,
 } from "./icons";
 import { useNamedProjects } from "../board/peer-state";
+import { NAV } from "./sidebar";
 
 interface PaletteProps {
   open: boolean;
@@ -62,6 +63,12 @@ function iconFor(command: Command) {
   return null;
 }
 
+// A screen's chord, as the sidebar binds it.
+function chord(to: string): string[] | undefined {
+  const item = NAV.find((entry) => entry.to === to);
+  return item ? ["G", item.key] : undefined;
+}
+
 function useCommands(activeHost: string | undefined, close: () => void): Command[] {
   const navigate = useNavigate();
   // A read that failed only drops its own commands; going to a screen and
@@ -76,29 +83,51 @@ function useCommands(activeHost: string | undefined, close: () => void): Command
       () =>
         void navigate({ to, search: (prev) => prev });
     const commands: Command[] = [
-      { id: "go-board", group: "Go to", label: "Board", run: go("/") },
-      { id: "go-agents", group: "Go to", label: "Agents", run: go("/agents") },
-      {
-        id: "go-contributions",
-        group: "Go to",
-        label: "Contributions",
-        keywords: "pull requests prs published",
-        run: go("/contributions"),
-      },
       {
         id: "go-inbox",
         group: "Go to",
         label: "Inbox",
         keywords: "attention needs you",
+        keys: chord("/inbox"),
         run: go("/inbox"),
       },
-      { id: "go-memory", group: "Go to", label: "Memory", run: go("/memory") },
-      { id: "go-health", group: "Go to", label: "Health", keywords: "quota", run: go("/health") },
+      { id: "go-board", group: "Go to", label: "Board", keys: chord("/"), run: go("/") },
+      {
+        id: "go-agents",
+        group: "Go to",
+        label: "Agents",
+        keys: chord("/agents"),
+        run: go("/agents"),
+      },
+      {
+        id: "go-contributions",
+        group: "Go to",
+        label: "Contributions",
+        keywords: "pull requests prs published",
+        keys: chord("/contributions"),
+        run: go("/contributions"),
+      },
+      {
+        id: "go-memory",
+        group: "Go to",
+        label: "Memory",
+        keys: chord("/memory"),
+        run: go("/memory"),
+      },
+      {
+        id: "go-health",
+        group: "Go to",
+        label: "Health",
+        keywords: "quota",
+        keys: chord("/health"),
+        run: go("/health"),
+      },
       {
         id: "go-settings",
         group: "Go to",
         label: "Settings",
         keywords: "theme density appearance",
+        keys: chord("/settings"),
         run: go("/settings"),
       },
       {
@@ -257,6 +286,13 @@ function PaletteBody({ onClose, activeHost }: Omit<PaletteProps, "open">) {
             >
               <span className="palette-icon">{iconFor(command)}</span>
               <span>{command.label}</span>
+              {command.keys ? (
+                <span className="palette-keys" aria-hidden="true">
+                  {command.keys.map((key) => (
+                    <kbd key={key}>{key}</kbd>
+                  ))}
+                </span>
+              ) : null}
             </li>
           </Fragment>
         ))}

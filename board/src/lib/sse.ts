@@ -39,7 +39,6 @@ import {
   projectsPath,
   quotaPath,
   queryKeyFor,
-  recapPath,
   sessionPath,
   signalsPath,
   hostConfigPath,
@@ -269,15 +268,6 @@ const SIGNAL_ENTITIES = new Set([
 // something moved, and the quiet refetch fetches the joined answer.
 const REFETCH_ENTITIES = new Set(["session", "run", "pane", "observation", "worktree"]);
 
-// The events a recap counts, and the mark that resets it.
-const RECAP_KINDS = new Set([
-  "card.closed",
-  "attention.opened",
-  "run.ended",
-  "proposal.created",
-  "recap.seen",
-]);
-
 // `peer` is set for a peer's change: the rules for this host's own reads (its
 // settings, its project setup, its Health signals and its contributions) do
 // not run, since the peer's config, cards and runs do not move them.
@@ -287,10 +277,6 @@ export function applyChange(
   { peer = false }: { peer?: boolean } = {},
 ): void {
   const state = event.entity_state;
-
-  if (RECAP_KINDS.has(event.kind)) {
-    void queryClient.invalidateQueries({ queryKey: queryKeyFor(recapPath), refetchType: "active" });
-  }
 
   const gone = event.kind === "project.deleted" || event.kind === "project.retired";
   const list = ENTITY_LISTS[event.entity];

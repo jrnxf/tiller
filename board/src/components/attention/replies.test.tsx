@@ -3,6 +3,7 @@ import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
+import type { RepliesResponse, ReplyItem } from "../../lib/api-types";
 import { hydrateFromSnapshot } from "../../lib/boot";
 import { fixtureResource, fixtureSnapshot, serverResponses } from "../../lib/fixtures";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
@@ -104,20 +105,83 @@ afterEach(() => {
 
 const flush = () => act(async () => {});
 
-test("the Replies group lists each project's unread replies, newest first", async () => {
+test("the Replies filter lists each project's unread replies, newest first, each marked unread", async () => {
   await renderAt("/inbox");
-  const group = await screen.findByRole("region", { name: "Replies" });
-  const rows = within(group)
-    .getAllByRole("link")
-    .map((row) => row.getAttribute("data-testid"));
-  expect(rows).toEqual([
+  const list = screen.getByRole("region", { name: "Needs you" });
+  await within(list).findByTestId(`inbox-row-${ALPHA_REPLY}`);
+  // All mixes the replies in with the rest.
+  expect(within(list).getAllByRole("link").length).toBeGreaterThan(3);
+  const replies = screen.getByRole("button", { name: /^Replies/ });
+  expect(replies.textContent).toBe("Replies 3");
+  fireEvent.click(replies);
+  expect(replies.getAttribute("aria-pressed")).toBe("true");
+  const rows = within(list).getAllByRole("link");
+  expect(rows.map((row) => row.getAttribute("data-testid"))).toEqual([
     `inbox-row-${ALPHA_REPLY}`,
     `inbox-row-${BETA_REPLY}`,
     `inbox-row-${GAMMA_REPLY}`,
   ]);
-  expect(within(group).getByTestId(`inbox-row-${ALPHA_REPLY}`).textContent).toContain(
-    "Can the export job retry on its own",
+  for (const row of rows) {
+    expect(row.querySelector(".ii.kind")?.getAttribute("title")).toBe("Reply");
+    expect(within(row).getByRole("img", { name: "Unread" })).toBeTruthy();
+  }
+  expect(rows[0]?.textContent).toContain("Can the export job retry on its own");
+  // Nothing that is no longer current shows under Replies.
+  expect(screen.queryByRole("region", { name: "No longer current" })).toBeNull();
+
+  fireEvent.click(screen.getByRole("button", { name: "All" }));
+  expect(within(list).getAllByRole("link").length).toBeGreaterThan(3);
+});
+
+test("the Inbox badge counts the unread replies too", async () => {
+  const { queryClient } = await renderAt("/");
+  const nav = screen.getByRole("navigation", { name: "Screens" });
+  const inbox = within(nav).getByRole("link", { name: /^Inbox/ });
+  await waitFor(() =>
+    expect(queryClient.getQueryData(["api", "/api/v1/projects/alpha/replies"])).toBeTruthy(),
   );
+  const before = Number(inbox.querySelector(".badge")?.textContent);
+  act(() => {
+    queryClient.setQueryData(["api", "/api/v1/projects/alpha/replies"], { replies: [] });
+  });
+  await waitFor(() => expect(Number(inbox.querySelector(".badge")?.textContent)).toBe(before - 1));
+  expect(inbox.querySelector(".badge.warn")).toBeNull();
+});
+
+test("a reply that arrives off the Inbox shows a toast that links to it", async () => {
+  const { queryClient, router } = await renderAt("/");
+  const key = ["api", "/api/v1/projects/alpha/replies"];
+  await waitFor(() => expect(queryClient.getQueryData(key)).toBeTruthy());
+  // The replies already there are not news.
+  expect(screen.getByTestId("toast").getAttribute("data-open")).toBe("false");
+  const old = queryClient.getQueryData<RepliesResponse>(key)?.replies ?? [];
+  const fresh = {
+    ...old[0],
+    id: "01JREPLY000000000000000009",
+    question: "What should we add next?",
+    replied_at: "2026-11-02T14:06:00.000Z",
+  } as ReplyItem;
+  act(() => queryClient.setQueryData(key, { replies: [fresh, ...old] }));
+  const toast = screen.getByTestId("toast");
+  await waitFor(() => expect(toast.getAttribute("data-open")).toBe("true"));
+  expect(toast.textContent).toContain("a reply to your ask");
+  expect(toast.textContent).toContain("What should we add next?");
+  const open = within(toast).getByRole("link", { name: "Open in Inbox" });
+  expect(open.getAttribute("href")).toBe("/inbox?item=01JREPLY000000000000000009");
+  fireEvent.click(open);
+  await waitFor(() => expect(router.state.location.pathname).toBe("/inbox"));
+  expect(toast.getAttribute("data-open")).toBe("false");
+
+  // On the Inbox the new reply is in the list, so no toast.
+  act(() =>
+    queryClient.setQueryData(key, {
+      replies: [{ ...fresh, id: "01JREPLY00000000000000000A" }, fresh, ...old],
+    }),
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("inbox-row-01JREPLY00000000000000000A")).toBeTruthy(),
+  );
+  expect(toast.getAttribute("data-open")).toBe("false");
 });
 
 test("a reply's detail shows the question, the answer and the card the ask filed", async () => {
@@ -205,7 +269,7 @@ test("asking again leaves off the footer of an ask sent to several projects", ()
 
 test("a reply event refetches every project's replies, and nothing else of the kind", async () => {
   const { queryClient } = await renderAt("/inbox");
-  await screen.findByRole("region", { name: "Replies" });
+  await screen.findByTestId(`inbox-row-${ALPHA_REPLY}`);
   const seen = vi.spyOn(queryClient, "invalidateQueries");
   act(() => {
     applyChange(queryClient, {

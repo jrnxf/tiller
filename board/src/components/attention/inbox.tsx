@@ -1,6 +1,6 @@
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 
 import type {
@@ -49,8 +49,7 @@ import { ApproveBlock } from "./approve";
 import { CardActions, TerminalMenu } from "./card-actions";
 import { CardOverflow } from "./card-lifecycle";
 import { tidy } from "./ansi";
-import { RecapCard } from "./recap";
-import { RepliesGroup, ReplyDetail, useReplies } from "./replies";
+import { ReplyDetail, ReplyRow, useReplies } from "./replies";
 import {
   KIND_LABELS,
   PRIORITIES,
@@ -62,16 +61,7 @@ import {
   staleText,
 } from "./format";
 import type { ParsedEvidence } from "./format";
-import {
-  BackIcon,
-  ChevronIcon,
-  FileIcon,
-  InfoIcon,
-  LockIcon,
-  NeedsIcon,
-  OkIcon,
-  RetiredIcon,
-} from "./icons";
+import { BackIcon, ChevronIcon, DecisionIcon, FileIcon, InfoIcon, LockIcon, OkIcon } from "./icons";
 import { Terminal } from "./terminal";
 import { ViewLive } from "./view-live";
 import { agentName, useSessionAgent } from "./agent-name";
@@ -79,8 +69,8 @@ import { WithdrawButton } from "./withdraw";
 import "./inbox.css";
 
 // One row of the inbox: a decision (an attention item), a permission prompt,
-// or an agent that waits on a dialog no hook asked for. Decisions and prompts
-// are different kinds of thing and never share a list (state.md).
+// or an agent that waits on a dialog no hook asked for. They share one list,
+// and each row's icon and meta line say which kind it is.
 interface DecisionEntry {
   type: "decision";
   id: string;
@@ -339,7 +329,7 @@ function DecisionDetail({
   const evidence = useMemo(() => parseEvidence(item.evidence), [item.evidence]);
   const chip = (
     <span className="lab sm">
-      <NeedsIcon />
+      <DecisionIcon />
       {KIND_LABELS[item.kind] ?? item.kind}
     </span>
   );
@@ -696,15 +686,17 @@ function Row({ entry, selected, ctx }: { entry: Entry; selected: boolean; ctx: C
       data-testid={`inbox-row-${entry.id}`}
     >
       {entry.type === "permission" ? (
-        <span className="ii permic">
+        <span className="ii kind prompt" title="Permission prompt">
           <LockIcon />
         </span>
       ) : entry.type === "dialog" ? (
-        <span className="ii permic">
+        <span className="ii kind prompt" title="Dialog">
           <ShieldIcon />
         </span>
       ) : (
-        <span className="ii">{answered ? <OkIcon /> : gone ? <RetiredIcon /> : <NeedsIcon />}</span>
+        <span className="ii kind decision" title="Decision">
+          {answered ? <OkIcon /> : <DecisionIcon />}
+        </span>
       )}
       <span className="bd">
         <span className={`t${entry.type === "permission" ? " mono" : ""}`}>{title}</span>
@@ -723,6 +715,8 @@ function Row({ entry, selected, ctx }: { entry: Entry; selected: boolean; ctx: C
               <span className="sl">/</span>
             </>
           )}
+          {entry.type === "decision" ? "decision" : "keypress in a pane"}
+          <span className="sl">/</span>
           {formatAge(since)}
           {answered ? <span className="lab sm ok">answered</span> : null}
           {withdrawn ? <span className="lab sm">withdrawn</span> : null}
@@ -744,44 +738,12 @@ function Row({ entry, selected, ctx }: { entry: Entry; selected: boolean; ctx: C
   );
 }
 
-function Group({
-  title,
-  why,
-  entries,
-  empty,
-  selected,
-  ctx,
-  perm,
-}: {
-  title: string;
-  why: string;
-  entries: Entry[];
-  empty: string;
-  selected: string | undefined;
-  ctx: Context;
-  perm?: boolean;
-}) {
-  return (
-    <section aria-label={title}>
-      <div className={`ghead${perm ? " perm" : ""}`}>
-        {perm ? <LockIcon /> : <NeedsIcon />}
-        {title}
-        {/* Open items only: what is answered stays listed but no longer counts. */}
-        <span className="c">
-          {entries.filter((entry) => entry.type !== "decision" || entry.answered === null).length}
-        </span>
-        <span className="sp" />
-        <span className="why">{why}</span>
-      </div>
-      {entries.length ? (
-        entries.map((entry) => (
-          <Row key={entry.id} entry={entry} selected={entry.id === selected} ctx={ctx} />
-        ))
-      ) : (
-        <div className="irow empty">{empty}</div>
-      )}
-    </section>
-  );
+// What the list shows: every row, or the orchestrators' replies only.
+type Show = "all" | "replies";
+
+// The newest first. `at` is when the row began to wait, or when it arrived.
+function newestFirst(a: { at: string }, b: { at: string }): number {
+  return b.at.localeCompare(a.at);
 }
 
 export function Inbox({
@@ -843,8 +805,6 @@ export function Inbox({
         withdrawn: entry,
       })),
   ].filter((entry) => inScope(entry.item.card_id));
-  // Oldest first: the item that has waited longest leads.
-  decisions.sort((a, b) => a.item.opened_at.localeCompare(b.item.opened_at));
   const current = decisions.filter((entry) => entry.item.still_current || entry.answered !== null);
   const stale = decisions.filter((entry) => !entry.item.still_current && entry.answered === null);
   // The prompts group: permission prompts, then agents that wait on a dialog.
@@ -858,12 +818,39 @@ export function Inbox({
       .map((agent) => ({ type: "dialog" as const, id: dialogId(agent), agent })),
   ];
 
-  // Every row in list order, so nothing chosen shows the first.
+  // One list, the newest first: decisions, prompts and replies. What is no
+  // longer current follows, faded. The Replies filter shows replies only.
+  const [show, setShow] = useState<Show>("all");
+  const live: (Shown & { at: string })[] = [
+    ...[...current, ...prompts].map((entry) => ({
+      type: "entry" as const,
+      id: entry.id,
+      entry,
+      at: sinceOfEntry(entry) ?? "",
+    })),
+    ...replies.map((reply) => ({
+      type: "reply" as const,
+      id: reply.id,
+      reply,
+      at: reply.replied_at,
+    })),
+  ];
+  live.sort(newestFirst);
+  const shownLive = show === "all" ? live : live.filter((row) => row.type === "reply");
+  const shownStale = show === "all" ? stale : [];
+  // Open rows only: an answered decision stays listed but no longer counts.
+  const open = live.filter(
+    (row) => row.type === "reply" || row.entry.type !== "decision" || row.entry.answered === null,
+  ).length;
+  // Every row, so a chosen row shows even when the filter hides it. With
+  // nothing chosen, the first row the list shows is the one shown.
   const all: Shown[] = [
-    ...[...current, ...prompts].map((entry) => ({ type: "entry" as const, id: entry.id, entry })),
-    ...replies.map((reply) => ({ type: "reply" as const, id: reply.id, reply })),
+    ...live,
     ...stale.map((entry) => ({ type: "entry" as const, id: entry.id, entry })),
   ];
+  const first: Shown | undefined =
+    shownLive[0] ??
+    (shownStale[0] && { type: "entry", id: shownStale[0].id, entry: shownStale[0] });
   // The brief leads the list, so it is what shows when nothing is chosen.
   const sent = useStore(sentStore);
   const sentHere = selected ? sent[selected]?.receipt : undefined;
@@ -884,7 +871,7 @@ export function Inbox({
   const briefChosen = brief !== null && (selected === AWAY_BRIEF_ID || !selected);
   const picked = briefChosen
     ? undefined
-    : (all.find((row) => row.id === selected) ?? (selected ? undefined : all[0]));
+    : (all.find((row) => row.id === selected) ?? (selected ? undefined : first));
   const chosen = picked?.type === "entry" ? picked.entry : undefined;
   const chosenReply = picked?.type === "reply" ? picked.reply : undefined;
 
@@ -892,32 +879,52 @@ export function Inbox({
     <div className="inbox" data-pane={selected ? "detail" : "list"} data-testid="inbox">
       <div className="in-list">
         {brief ? <AwayBriefRow brief={brief} selected={briefChosen} /> : null}
-        <RecapCard />
-        <Group
-          title="Decisions"
-          why="your call"
-          entries={current}
-          empty="No decisions waiting."
-          selected={chosen?.id}
-          ctx={ctx}
-        />
-        <Group
-          title="Permission prompts"
-          why="a keypress in a pane"
-          entries={prompts}
-          empty="No prompts waiting."
-          selected={chosen?.id}
-          ctx={ctx}
-          perm
-        />
-        <RepliesGroup replies={replies} selected={picked?.id} projects={ctx.projects} />
-        {stale.length ? (
-          <section aria-label="No longer current">
-            <div className="ghead gone">
-              <RetiredIcon />
-              No longer current<span className="c">{stale.length}</span>
+        <div className="lhead">
+          Needs you <span className="c">{open}</span>
+          <span className="lchips" role="group" aria-label="Show">
+            <button
+              type="button"
+              className="lchip"
+              aria-pressed={show === "all"}
+              onClick={() => setShow("all")}
+            >
+              All
+            </button>
+            <button
+              type="button"
+              className="lchip"
+              aria-pressed={show === "replies"}
+              onClick={() => setShow("replies")}
+            >
+              Replies <span className="c">{replies.length}</span>
+            </button>
+          </span>
+        </div>
+        <section aria-label="Needs you">
+          {shownLive.map((row) =>
+            row.type === "reply" ? (
+              <ReplyRow
+                key={row.id}
+                reply={row.reply}
+                selected={row.id === picked?.id}
+                projects={ctx.projects}
+              />
+            ) : (
+              <Row key={row.id} entry={row.entry} selected={row.id === chosen?.id} ctx={ctx} />
+            ),
+          )}
+          {shownLive.length === 0 ? (
+            <div className="irow empty">
+              {show === "replies" ? "No unread replies." : "Nothing waits on you."}
             </div>
-            {stale.map((entry) => (
+          ) : null}
+        </section>
+        {shownStale.length ? (
+          <section aria-label="No longer current" className="in-stale">
+            <div className="lsub">
+              No longer current <span className="c">{shownStale.length}</span>
+            </div>
+            {shownStale.map((entry) => (
               <Row key={entry.id} entry={entry} selected={entry.id === chosen?.id} ctx={ctx} />
             ))}
           </section>

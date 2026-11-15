@@ -1188,6 +1188,12 @@ kbd {
   color: var(--fg-3);
 }
 
+.palette-keys {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
 .palette-group {
   font-size: var(--fs-mini);
   color: var(--fg-3);

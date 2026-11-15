@@ -569,9 +569,17 @@
     url = "https://registry.npmjs.org/@tanstack/history/-/history-1.162.5.tgz";
     hash = "sha512-w1+YvwmTkwt5n8yUqEH3IWZ9DsmorCZW/EQ3KYHnqEgIkOZpH54NvW6/Epq3Dzb8H0ifIeYX8PExvrNLIH5FIA==";
   };
+  "@tanstack/hotkeys@0.20.0" = fetchurl {
+    url = "https://registry.npmjs.org/@tanstack/hotkeys/-/hotkeys-0.20.0.tgz";
+    hash = "sha512-dH9r8ZCCAcjQTcTSHlHooJgnTfS5AGnTbo7mZ9VfM6ZGGWWVA0lea7tUs3oAO2lWS5keYWrH+hg8hmGjmdNrbQ==";
+  };
   "@tanstack/query-core@5.105.1" = fetchurl {
     url = "https://registry.npmjs.org/@tanstack/query-core/-/query-core-5.105.1.tgz";
     hash = "sha512-B/rNlZoZ54w1dlddiUt9oEe1SLM+37c00SKLJEg9YH+7as3Y54P81o9Fh+2ujZ36tXPnQJ5oVe7AcyEWkyFhPg==";
+  };
+  "@tanstack/react-hotkeys@0.19.0" = fetchurl {
+    url = "https://registry.npmjs.org/@tanstack/react-hotkeys/-/react-hotkeys-0.19.0.tgz";
+    hash = "sha512-k5aJOd3tbn2SOwquAH2+eW5lfLxXV1wGvG/8qmux/AzuortslVPfve1KBbPivgew0nb6/3hPMegHML1Qi3aqYQ==";
   };
   "@tanstack/react-query@5.105.1" = fetchurl {
     url = "https://registry.npmjs.org/@tanstack/react-query/-/react-query-5.105.1.tgz";

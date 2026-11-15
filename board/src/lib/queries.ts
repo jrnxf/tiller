@@ -27,7 +27,6 @@ import type {
   ProjectSetup,
   ProjectsResponse,
   QuotaResponse,
-  RecapResponse,
   RepliesResponse,
   RetrosResponse,
   RunDetail,
@@ -133,11 +132,9 @@ export const boardQuery = (params?: BoardParams) => readQuery<BoardResponse>(boa
 export const attentionPath: QueryPath = "/api/v1/attention?state=open";
 export const attentionQuery = () => readQuery<AttentionResponse>(attentionPath);
 
-// What happened since the owner last marked a recap seen. It is read after
-// the page opens, not in the boot snapshot, and a change that moves a count
-// refetches it (lib/sse.ts).
+// What happened since the owner last marked a recap seen. The board no longer
+// shows it, but the fixture server still answers it as the daemon does.
 export const recapPath: QueryPath = "/api/v1/recap";
-export const recapQuery = () => readQuery<RecapResponse>(recapPath);
 
 // One of this host's projects' unread replies from the orchestrator, newest
 // first. Never federated: a peer's replies stay on the peer. An `ask.replied`

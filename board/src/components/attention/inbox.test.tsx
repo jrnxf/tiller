@@ -222,19 +222,29 @@ afterEach(() => {
 
 const flush = () => act(async () => {});
 
-test("decisions and permission prompts are separate lists, and a stale item is set apart", async () => {
+// The kind a row's icon names: Decision, Permission prompt, Dialog or Reply.
+function kind(row: HTMLElement) {
+  return row.querySelector(".ii.kind")?.getAttribute("title");
+}
+
+test("decisions and permission prompts share one list, each with its kind's icon, and a stale item is set apart", async () => {
   stubDaemon("default");
   await renderInbox();
 
-  const decisions = screen.getByRole("region", { name: "Decisions" });
-  const prompts = screen.getByRole("region", { name: "Permission prompts" });
+  const needs = screen.getByRole("region", { name: "Needs you" });
   const gone = screen.getByRole("region", { name: "No longer current" });
-  expect(within(decisions).getByTestId(`inbox-row-${RETRY}`)).toBeTruthy();
-  expect(within(decisions).getByTestId(`inbox-row-${MERGE}`)).toBeTruthy();
-  expect(within(prompts).getByText(/rm -rf target\/debug\/incremental/)).toBeTruthy();
-  expect(within(prompts).queryByTestId(`inbox-row-${RETRY}`)).toBeNull();
+  expect(kind(within(needs).getByTestId(`inbox-row-${RETRY}`))).toBe("Decision");
+  expect(kind(within(needs).getByTestId(`inbox-row-${MERGE}`))).toBe("Decision");
+  const prompt = within(needs)
+    .getByText(/rm -rf target\/debug\/incremental/)
+    .closest("a");
+  if (!prompt) throw new Error("no row for the prompt");
+  expect(kind(prompt)).toBe("Permission prompt");
+  expect(prompt.textContent).toContain("keypress in a pane");
   expect(within(gone).getByTestId(`inbox-row-${QUIET}`)).toBeTruthy();
-  expect(within(decisions).queryByTestId(`inbox-row-${QUIET}`)).toBeNull();
+  expect(within(needs).queryByTestId(`inbox-row-${QUIET}`)).toBeNull();
+  // No group headings, and nothing orange.
+  expect(document.querySelector(".ghead, .permic")).toBeNull();
 });
 
 test("an item shows its question, evidence, recommendation, consequence and that it is current", async () => {
@@ -733,10 +743,10 @@ test("with no dialog on the screen, the detail shows what the hook recorded", as
 const SESSION_TRUST = "01JSESSWALPHA4200000000000";
 const SESSION_MENU = "01JSESSWBETA70000000000000";
 
-test("an agent waiting on a dialog no hook asked for is a row in Permission prompts", async () => {
+test("an agent waiting on a dialog no hook asked for is a prompt row in the list", async () => {
   stubDaemon("dialog");
   await renderInbox("dialog");
-  const prompts = screen.getByRole("region", { name: "Permission prompts" });
+  const prompts = screen.getByRole("region", { name: "Needs you" });
   expect(within(prompts).getByText("alpha-42-build waits on a dialog")).toBeTruthy();
   expect(within(prompts).getByText("beta-7-build waits on a dialog")).toBeTruthy();
   // beta-7's worker waits on a menu, so the scenario has no stale "went
@@ -760,7 +770,7 @@ test("an agent's name shows on screen under the field the daemon's contract name
 
   stubDaemon("dialog");
   await renderInbox("dialog");
-  const prompts = screen.getByRole("region", { name: "Permission prompts" });
+  const prompts = screen.getByRole("region", { name: "Needs you" });
   expect(within(prompts).getByText("alpha-42-build waits on a dialog")).toBeTruthy();
 });
 
@@ -1185,106 +1195,12 @@ test("a decision that is no longer current has no View live", async () => {
   expect(document.querySelector(".in-detail .ev-acts")).toBeNull();
 });
 
-const COUNTS = ["Landed", "New decisions", "Failed runs", "Memory suggestions"];
-
-test("the recap card counts what happened since the owner left", async () => {
+test("the Inbox has no recap card", async () => {
   stubDaemon("default");
   await renderInbox();
-  const card = await screen.findByTestId("recap");
-  expect(card.textContent).toMatch(/Since \w{3} \d\d:\d\d/);
-  for (const [label, count] of [
-    ["Landed", "3"],
-    ["New decisions", "2"],
-    ["Failed runs", "1"],
-    ["Memory suggestions", "4"],
-  ] as const) {
-    const row = within(card).getByText(label).closest("a");
-    expect(row?.textContent).toBe(`${label}${count}`);
-  }
-  expect(
-    COUNTS.map((label) => within(card).getByText(label).closest("a")?.getAttribute("href")),
-  ).toEqual(["/", "/inbox", "/?filter=needs", "/memory"]);
-  // The first decision still opens in the detail.
-  expect(screen.getByTestId("inbox").getAttribute("data-pane")).toBe("list");
-});
-
-test("a quiet recap says nothing is new and has no Mark seen", async () => {
-  stubDaemon("empty");
-  await renderInbox("empty");
-  const card = await screen.findByTestId("recap-quiet");
-  expect(card.textContent).toMatch(/Nothing new since \w{3} \d\d:\d\d/);
-  expect(screen.queryByRole("button", { name: "Mark seen" })).toBeNull();
-});
-
-test("Mark seen posts once and the card turns quiet", async () => {
-  stubDaemon("default", true);
-  replies = [
-    {
-      status: 200,
-      body: {
-        ...ok().body,
-        data: {
-          seen_at: "2026-11-02T14:05:09.000Z",
-          since: "2026-11-02T14:05:09.000Z",
-          landed: 0,
-          decisions: 0,
-          failed_runs: 0,
-          suggestions: 0,
-        },
-      },
-    },
-  ];
-  await renderInbox();
-  const mark = await screen.findByRole("button", { name: "Mark seen" });
-  fireEvent.click(mark);
-  fireEvent.click(mark);
-  release?.();
   await flush();
-  expect(calls).toHaveLength(1);
-  expect(calls[0]).toMatchObject({ method: "POST", path: "/api/v1/recap/seen" });
-  expect(Object.keys(calls[0]?.body ?? {})).toEqual(["idempotency_key"]);
-  expect(screen.getByTestId("recap-quiet").textContent).toContain("Nothing new since");
-});
-
-test("a refused Mark seen shows why and keeps the card", async () => {
-  stubDaemon("default");
-  replies = [
-    {
-      status: 403,
-      body: {
-        ok: false,
-        error: { code: "forbidden", message: "Only the owner can mark this seen." },
-      },
-    },
-  ];
-  await renderInbox();
-  fireEvent.click(await screen.findByRole("button", { name: "Mark seen" }));
-  await flush();
-  expect((await screen.findByRole("alert")).textContent).toContain("Only the owner");
-  expect(screen.getByTestId("recap")).toBeTruthy();
-});
-
-test("a recap event refetches the recap", async () => {
-  stubDaemon("default");
-  const { queryClient } = await renderInbox();
-  await screen.findByTestId("recap");
-  const seen = vi.spyOn(queryClient, "invalidateQueries");
-  act(() => {
-    applyChange(queryClient, {
-      seq: 9001,
-      at: "2026-11-02T14:06:00.000Z",
-      kind: "proposal.created",
-      txn: "proposal.create",
-      entity: "proposal",
-      entity_id: "01JPROP0000000000000000001",
-      rev_after: null,
-      card_id: null,
-      entity_state: null,
-    });
-  });
-  expect(seen).toHaveBeenCalledWith(
-    expect.objectContaining({ queryKey: ["api", "/api/v1/recap"] }),
-  );
+  expect(screen.queryByTestId("recap")).toBeNull();
+  expect(screen.queryByTestId("recap-quiet")).toBeNull();
 });
 
 test("an item's back link is a bordered button, not a ghost", async () => {
@@ -1325,8 +1241,8 @@ test("an undated hold a month old shows under Needs you and never alarms", async
     );
   });
 
-  const decisions = screen.getByRole("region", { name: "Decisions" });
-  const row = within(decisions).getByTestId(`inbox-row-${RETRY}`);
+  const needs = screen.getByRole("region", { name: "Needs you" });
+  const row = within(needs).getByTestId(`inbox-row-${RETRY}`);
   expect(row.querySelector(".old, .warn")).toBeNull();
   const gone = screen.queryByRole("region", { name: "No longer current" });
   expect(gone ? within(gone).queryByTestId(`inbox-row-${RETRY}`) : null).toBeNull();
