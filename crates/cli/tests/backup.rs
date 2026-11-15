@@ -172,7 +172,15 @@ fn an_open_of_a_db_path_that_is_not_utf8_refuses_and_does_not_panic() {
     let old = tiller_core::migrate::LATEST - 1;
     world.must(&["migrate", "down", "--to", &old.to_string()]);
     let path = world.home().join(OsStr::from_bytes(b"state-\xff.db"));
-    std::fs::rename(world.db(), &path).unwrap();
+    if let Err(error) = std::fs::rename(world.db(), &path) {
+        // APFS refuses a file name that is not UTF-8 (EILSEQ, 92 on macOS),
+        // so no such database can exist there and there is nothing to test.
+        if cfg!(target_os = "macos") && error.raw_os_error() == Some(92) {
+            eprintln!("skipped: this file system refuses names that are not UTF-8");
+            return;
+        }
+        panic!("rename to a name that is not UTF-8: {error}");
+    }
     let before: Vec<_> = std::fs::read_dir(world.home())
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
