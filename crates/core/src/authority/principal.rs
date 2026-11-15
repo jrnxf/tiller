@@ -234,7 +234,7 @@ fn read_process(pid: u32) -> std::io::Result<(u32, Process)> {
 #[cfg(not(target_os = "linux"))]
 fn process_table() -> std::io::Result<std::collections::HashMap<u32, (u32, Process)>> {
     let ps = |field: &str| -> std::io::Result<String> {
-        let output = std::process::Command::new("ps")
+        let output = std::process::Command::new("/bin/ps")
             .args(["-ax", "-o", &format!("pid=,ppid=,{field}=")])
             .output()?;
         if !output.status.success() {
