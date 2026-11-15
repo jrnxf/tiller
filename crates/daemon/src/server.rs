@@ -265,7 +265,8 @@ pub fn allowed_host(raw: &str) -> Result<String, DaemonError> {
 /// Lanes a self-initialized host gets; `tiller host edit` changes it.
 const DEFAULT_LANES: i64 = 2;
 
-/// This machine's name, for the host label of a self-initialized database.
+/// This machine's name as a host label, for a self-initialized database: a
+/// peer knows this host by it, so it is a plain label (`check_label`).
 fn host_label() -> String {
     ["/proc/sys/kernel/hostname", "/etc/hostname"]
         .iter()
@@ -276,8 +277,7 @@ fn host_label() -> String {
                 .ok()
                 .and_then(|out| String::from_utf8(out.stdout).ok()),
         )
-        .map(|name| name.trim().to_owned())
-        .find(|name| !name.is_empty())
+        .find_map(|name| tiller_core::state::peers::label_from_hostname(&name))
         .unwrap_or_else(|| "local".to_owned())
 }
 

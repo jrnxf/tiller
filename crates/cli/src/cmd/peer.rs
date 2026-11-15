@@ -264,7 +264,15 @@ fn add(app: &App, label: &str, alias: &str, scope: PeerScope) -> Done {
         )));
     }
     // This host's label is a word on the peer's command line.
-    check_label(&this.label)?;
+    if check_label(&this.label).is_err() {
+        let hint = peers::label_from_hostname(&this.label)
+            .map(|label| format!(" --label {label}"))
+            .unwrap_or_else(|| " --label <label>".to_owned());
+        return Err(Failure::refused(format!(
+            "this host's label {:?} cannot name it to a peer: a label is a letter or digit, then letters, digits, '_' or '-'. Rename this host first: tiller host edit --rev {}{hint}, or open this host under Settings > Hosts",
+            this.label, this.rev
+        )));
+    }
     let host_id = meta(store.conn(), "host_id")?.ok_or_else(|| {
         Failure::refused(format!(
             "state.db has no host id; {}",

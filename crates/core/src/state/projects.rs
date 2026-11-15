@@ -452,6 +452,9 @@ impl Store {
                         .ok_or_else(|| Error::not_found("card", HOST_HEALTH_CARD))?,
                 });
             }
+            // A new host's label names it to its peers, as `tiller peer add`
+            // checks. A replay above keeps the label it already has.
+            super::peers::check_label(&init.host_label)?;
             let now = tx.now();
             let host_id = ids::new_ulid();
             tx.conn().execute(
