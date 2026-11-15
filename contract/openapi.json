@@ -3732,7 +3732,7 @@
         "tags": [
           "session"
         ],
-        "summary": "Signs in with the 8-digit code `tiller board --login` prints, as the\nlink does: sets the owner cookie and answers the owner token, which the\nboard keeps in `localStorage` and sends as `auth::TOKEN_HEADER`. It\npasses the mutation checks but the session. The limits count per client (`auth::Client`): a client's wrong\ncode counts against every pending code, each of which burns for that\nclient on its third, and each client has only so many tries a minute;\na pending code burns for everyone only at `auth::CODE_MISS_CEILING`.\nThe code is never logged.",
+        "summary": "Signs in with the 8-digit code `tiller board --login` prints, as the\nlink does: sets the owner cookie and answers the owner token, which the\nboard keeps in `localStorage` and sends as `auth::TOKEN_HEADER`. It\npasses the mutation checks but the session. The limits count per client\n(`auth::Client`): a client's wrong code counts against every pending\ncode, each of which burns for that client on its third, and each client\nhas only so many tries a minute; a pending code burns for everyone only\nat `auth::CODE_MISS_CEILING`.\nThe code is never logged.",
         "operationId": "login_code",
         "requestBody": {
           "content": {
