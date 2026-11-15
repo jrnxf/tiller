@@ -249,53 +249,6 @@
 .colh.mini .c {
   color: var(--fg-4);
 }
-/* An empty column's icon: hover or focus names the column. */
-.colh-tip-pos {
-  z-index: 50;
-}
-.colh-t {
-  display: grid;
-  place-items: center;
-  width: 24px;
-  height: 24px;
-  border-radius: var(--r6);
-  color: var(--fg-3);
-}
-.colh-t:hover {
-  background: var(--bg-hover);
-}
-.colh-tip {
-  padding: 5px 8px;
-  background: var(--bg-pop);
-  border: 1px solid var(--line-2);
-  border-radius: var(--r6);
-  box-shadow: var(--shadow-high);
-  font-size: var(--fs-mini);
-  color: var(--fg-3);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  transition:
-    opacity var(--fast) var(--ease),
-    transform var(--fast) var(--ease);
-}
-.colh-tip b {
-  color: var(--fg-1);
-  font-weight: var(--w-medium);
-}
-.colh-tip[data-starting-style],
-.colh-tip[data-ending-style] {
-  opacity: 0;
-  transform: translateY(-3px);
-}
-@media (prefers-reduced-motion: reduce) {
-  .colh-tip {
-    transition: opacity var(--fast) var(--ease);
-  }
-  .colh-tip[data-starting-style],
-  .colh-tip[data-ending-style] {
-    transform: none;
-  }
-}
 .lane {
   margin-top: 2px;
 }
@@ -1478,9 +1431,21 @@ a.card:hover {
 .toast[data-tone="bad"] .icon {
   color: var(--red);
 }
-/* A toast with a command to copy takes the pointer, for its Copy button. */
-.toast[data-open="true"][data-command="true"] {
+.toast[data-tone="reply"] .icon {
+  color: var(--green-text);
+}
+/* A toast with a command to copy or a link takes the pointer, for its
+   button or link. */
+.toast[data-open="true"][data-command="true"],
+.toast[data-open="true"][data-link="true"] {
   pointer-events: auto;
+}
+.toast-link {
+  color: var(--accent-text);
+  font-weight: var(--w-medium);
+}
+.toast-link:hover {
+  text-decoration: underline;
 }
 .toast .t3 {
   margin-top: 6px;
