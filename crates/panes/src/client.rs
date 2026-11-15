@@ -1414,7 +1414,9 @@ mod tests {
         assert_eq!(subscription.recv().unwrap(), None);
         let err = handle.resize(100, 30).unwrap_err();
         assert!(err.to_string().contains("has ended"), "{err}");
-        drop(subscription);
+        // Every copy of our socket must close before the holder's write
+        // fails: macOS does not fail it on a shutdown of our reads alone.
+        drop((subscription, handle, side));
         holder.join().unwrap();
     }
 
@@ -1459,7 +1461,8 @@ mod tests {
         };
         assert_eq!(why, "a resize failed: test");
         assert_eq!(subscription.recv().unwrap(), None);
-        drop(subscription);
+        // As above: close every copy of our socket so the holder's write fails.
+        drop((subscription, side));
         holder.join().unwrap();
     }
 
