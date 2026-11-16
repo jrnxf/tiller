@@ -27,8 +27,8 @@ use super::forward::{self, Lane, Mutate};
 use super::nonces;
 use super::{Frame, Hello, PeerQueries, PeerSnapshot, Timing, Welcome, federation_accept};
 use crate::api::{
-    ApiError, CheckoutQuery, checkout_check, delete_preview, fields_of, pane_tail_of, pane_target,
-    prompt_read_on, remote_pane, retire_preview, tail_on,
+    ApiError, CheckoutQuery, checkout_check, delete_preview, fields_of, grants_of, pane_tail_of,
+    pane_target, prompt_read_on, remote_pane, retire_preview, tail_on,
 };
 use crate::dto::{Doctor, ErrorBody, MachinesResponse};
 use crate::mirror::Mirrors;
@@ -566,6 +566,11 @@ impl Link<'_> {
                 self.acts()?;
                 serde_json::to_value(delete_preview(store, &id)?)
             }
+            // Grants and settings opens for an `act` pairing only (UA-43).
+            Query::Grants(id) => {
+                self.acts()?;
+                serde_json::to_value(grants_of(store, id)?)
+            }
             Query::Checkout(query) => {
                 self.acts()?;
                 serde_json::to_value(checkout_check(store, &self.config.home, *query)?)
@@ -814,6 +819,8 @@ enum Query {
     RetirePreview(String),
     /// What deleting a project would remove, and what blocks it.
     DeletePreview(String),
+    /// A project's standing grants, for Grants and settings (UA-43).
+    Grants(String),
     /// What Add project would do with a Local checkout folder on this host.
     Checkout(Box<CheckoutQuery>),
     /// This host's retired projects, which the board deletes from.
@@ -852,9 +859,10 @@ fn parse_query(path: &str) -> Result<Query, ApiError> {
         ["projects", id] if before.is_none() => Query::Project((*id).to_owned()),
         ["projects", id, "retire"] if before.is_none() => Query::RetirePreview((*id).to_owned()),
         ["projects", id, "delete"] if before.is_none() => Query::DeletePreview((*id).to_owned()),
+        ["projects", id, "grants"] if before.is_none() => Query::Grants((*id).to_owned()),
         _ => {
             return Err(usage(
-                "a query is cards/{id}, cards/{id}/timeline, runs/{id}, doctor, agents/{session}/terminal/tail, agents/{session}/prompt, projects/{id}, projects/{id}/retire, projects/{id}/delete, projects/checkout or projects?retired=true",
+                "a query is cards/{id}, cards/{id}/timeline, runs/{id}, doctor, agents/{session}/terminal/tail, agents/{session}/prompt, projects/{id}, projects/{id}/retire, projects/{id}/delete, projects/{id}/grants, projects/checkout or projects?retired=true",
             ));
         }
     };
@@ -867,6 +875,7 @@ fn parse_query(path: &str) -> Result<Query, ApiError> {
         | Query::Project(id)
         | Query::RetirePreview(id)
         | Query::DeletePreview(id)
+        | Query::Grants(id)
             if id.is_empty() =>
         {
             Err(usage("the query names no id"))
@@ -982,13 +991,18 @@ mod tests {
             parse_query("projects?retired=true").ok(),
             Some(Query::Retired)
         );
+        assert_eq!(
+            parse_query("projects/alpha/grants").ok(),
+            Some(Query::Grants("alpha".into()))
+        );
         for refused in [
             "projects?retired=false",
             "projects?retired=true&host=other",
             "projects/checkout?project=alpha&host=other",
             "projects/checkout?colour=red",
             "projects/alpha/stage",
-            "projects/alpha/grants",
+            "projects/alpha/grants?host=other",
+            "projects/alpha/grants/1",
             "projects/alpha?before=4",
             "projects//retire",
             "projects",

@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import type { Project } from "../../lib/api-types";
-import { VIEW_ONLY_REASON, ownerOf } from "../../lib/peers";
+import { VIEW_ONLY_REASON, hostField, ownerOf } from "../../lib/peers";
 import { useStanding } from "../board/peer-state";
 import {
   projectGrantsQuery,
@@ -76,7 +76,7 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function Facts({ project }: { project: Project }) {
+function Facts({ project, canAct }: { project: Project; canAct: boolean }) {
   const prelaunch = project.stage === "pre-launch";
   const reviewedAt = formatStageTime(project.reviewed_at ?? project.stage_changed_at);
   const next = formatStageTime(project.next_review_due);
@@ -107,7 +107,15 @@ function Facts({ project }: { project: Project }) {
       <Fact label="Builders follow">
         <code className="stage-sha">{project.effective_delivery}</code>
       </Fact>
-      {ownerOf(project) || project.id === FLEET_PROJECT ? null : <SetupFacts project={project} />}
+      {project.id === FLEET_PROJECT ? null : ownerOf(project) ? (
+        // The repo and checkout are the peer's config; its grants are read
+        // over the link, for a pairing that may act (UA-43).
+        canAct ? (
+          <GrantsFact project={project} />
+        ) : null
+      ) : (
+        <SetupFacts project={project} />
+      )}
     </dl>
   );
 }
@@ -197,7 +205,7 @@ function SetupFacts({ project }: { project: Project }) {
 // How many grants let this project's work merge without the owner. The
 // dialog behind Grants and settings lists them.
 function GrantsFact({ project }: { project: Project }) {
-  const grants = useQuery(projectGrantsQuery(project.id)).data;
+  const grants = useQuery(projectGrantsQuery(project.id, ownerOf(project))).data;
   if (!grants) return null;
   return (
     <Fact label="Grants">
@@ -225,9 +233,11 @@ function ConfirmStage({
       sendMutation("POST", `/api/v1/projects/${project.id}/stage`, {
         rev: project.rev,
         stage: target,
+        // A peer's project: the board host forwards the switch (UA-43).
+        ...hostField(project),
         idempotency_key,
       }),
-    [project.id, project.rev, target],
+    [project, target],
   );
   const recorded = useCallback(
     (_: unknown, key: string) => {
@@ -302,15 +312,12 @@ export function ProjectDetail({ project, id }: { project: Project; id: string })
   const [editing, setEditing] = useState(false);
   const [receipt, setReceipt] = useState<{ key: string; text: string } | null>(null);
   const target: Stage = project.stage === "pre-launch" ? "launched" : "pre-launch";
-  // The board host does not forward a stage switch (protocol.md section 7.4).
   const owner = ownerOf(project);
-  const off = owner ? `${owner} owns this project: switch its stage there` : undefined;
-  // An edit, an archive and a delete are forwarded to a peer whose link is
-  // live with the `act` scope (D22); grants stay on their own host, so a
-  // peer's project opens on its fields alone.
+  // An edit, an archive and a delete (D22), the grants and the stage switch
+  // (UA-43) are forwarded to a peer whose link is live with the `act` scope.
   const standing = useStanding(project);
   const editOff = standing.canAct ? undefined : (standing.reason ?? undefined);
-  const fieldsOnly = project.id === FLEET_PROJECT || owner !== undefined;
+  const fieldsOnly = project.id === FLEET_PROJECT;
 
   // The dialog gives focus back to the button that opened it.
   const close = useCallback(() => {
@@ -322,15 +329,7 @@ export function ProjectDetail({ project, id }: { project: Project; id: string })
 
   return (
     <div className="pdetail" id={id} role="group" aria-label={`${project.name} stage`}>
-      <Facts project={project} />
-      {/* What this board cannot do for a peer's project, and where it is done:
-          without it the grants are missing with no word, and the stage switch
-          is off with its reason in a tooltip alone. */}
-      {owner ? (
-        <p className="pdetail-off" data-testid="peer-only">
-          Grants and the stage switch of this project are on {owner}'s own board.
-        </p>
-      ) : null}
+      <Facts project={project} canAct={standing.canAct} />
       {/* A tooltip does not show on a touch screen, so the reason is in view. */}
       {editOff ? (
         <p className="pdetail-off">
@@ -350,8 +349,8 @@ export function ProjectDetail({ project, id }: { project: Project; id: string })
         <button
           type="button"
           className="btn stage-switch"
-          disabled={off !== undefined}
-          title={off}
+          disabled={editOff !== undefined}
+          title={editOff}
           onClick={() => setConfirming(true)}
         >
           Switch to {target}

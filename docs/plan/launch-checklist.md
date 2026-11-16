@@ -22,7 +22,7 @@ On Monday 2026-11-16 at about 15:30 Lisbon time, the owner said yes to every ite
 - [x] UA-09: a short answer for a person at a terminal, the full record with `--json` or `--full`
 - [ ] UA-03: the owner's CLI reaches a peer's work through the local daemon
 - [ ] UA-30: one "Away" for every paired host
-- [ ] UA-43: grants for a peer's project from one board
+- [x] UA-43: grants for a peer's project from one board
 - [x] UA-07: show the host chip on a card only when the host needs attention
 
 ## Work after the decisions
@@ -43,6 +43,7 @@ The owner skipped the full test passes on Monday 2026-11-16 to get a release out
 - [ ] UA-01: `refuses_runs` and the floors check in the spec: text only
 - [ ] UA-63 and UA-64 from iteration 33: no seventh pass confirmed that the sixth pass found every P1
 - [ ] UA-09: the short answer at a real terminal, on the bench; only a pseudo-terminal test ran. A read with no sentence still prints its record
+- [ ] UA-43: a grant made and revoked, and a stage switched, on a peer's project from main's board, through a real SSH link
 - [ ] Every owner decision above, as each one lands
 - [ ] UA-19: the daemon's `recovery` item for a worker that waits 5 minutes with no item (R23), and the age of the report on the tile
 - [ ] UA-38: a new request or a rejection withdraws the notes of the PR's earlier approvals, and Withdraw works on a note whose approval ended

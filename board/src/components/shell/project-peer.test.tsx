@@ -10,6 +10,7 @@ import {
 } from "../../lib/fixture-mutations";
 import { FixtureRefusal, fixtureResource, fixtureResponses } from "../../lib/fixtures";
 import { machinesPath, projectsPath, queryKeyFor } from "../../lib/queries";
+import { grantsFor, resetGrantsFixture } from "../../lib/fixtures-grants";
 import { receiptsStore } from "../../lib/receipts";
 import { onProjectGone } from "../../lib/sse";
 import { choose } from "../../test-select";
@@ -18,6 +19,7 @@ import { standingOf } from "../../lib/peers";
 import { ArchiveProject } from "./project-archive";
 import { AddProject } from "./project-add";
 import { ConfirmDelete } from "./project-delete";
+import { ProjectDetail } from "./project-stage";
 import { ArchivedProjects } from "./projects-archived";
 
 // Fri 13 Nov 2026, 12:00 in Lisbon (winter time is UTC).
@@ -59,6 +61,7 @@ function stubDaemon() {
 beforeEach(() => {
   receiptsStore.set({ byKey: {}, progress: {} });
   resetPeerProjectsFixture();
+  resetGrantsFixture(NOW);
   calls = [];
   reads = [];
   hold = null;
@@ -223,6 +226,79 @@ test("a peer's project is archived on the peer, and its archived list shows it w
   const row = await screen.findByText("orchard");
   expect(reads).toContain("/api/v1/projects?retired=true&host=host-d");
   expect(within(row.closest(".prow") as HTMLElement).getByText("host-d")).toBeTruthy();
+});
+
+test("a grant made and revoked on a peer's project is the peer's, sent with its host", async () => {
+  renderWith(<ProjectDetail project={peerGamma} id="detail" />);
+  fireEvent.click(await screen.findByRole("button", { name: "Grants and settings" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "gamma on host-d" }));
+  expect(await dialog.findByText(/No grant is active/)).toBeTruthy();
+
+  fireEvent.click(dialog.getByRole("button", { name: "New grant" }));
+  const form = within(await screen.findByRole("dialog", { name: "New grant for gamma" }));
+  // The base branch is the peer's own default branch.
+  await waitFor(() =>
+    expect((form.getByLabelText(/^Base branch/) as HTMLInputElement).value).toBe("main"),
+  );
+  fireEvent.click(form.getByRole("button", { name: "Create grant" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog", { name: "New grant for gamma" })).toBeNull(),
+  );
+  expect(calls).toEqual([
+    expect.objectContaining({
+      method: "POST",
+      path: "/api/v1/projects/gamma/grants",
+      body: expect.objectContaining({ kind: "merge", host: "host-d" }),
+    }),
+  ]);
+  const made = grantsFor("gamma", "host-d").grants[0];
+  expect(made).toBeTruthy();
+  // This host's gamma has a grant of its own, and it is left as it was.
+  expect(grantsFor("gamma").grants.some((grant) => grant.id === made?.id)).toBe(false);
+  expect(reads).toContain("/api/v1/projects/gamma/grants?host=host-d");
+
+  fireEvent.click(await dialog.findByRole("button", { name: "Revoke..." }));
+  const confirm = within(await screen.findByRole("dialog", { name: /^Revoke grant / }));
+  fireEvent.click(confirm.getByRole("button", { name: "Revoke grant" }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: /^Revoke grant / })).toBeNull());
+  expect(calls[1]).toEqual({
+    method: "DELETE",
+    path: `/api/v1/grants/${made?.id}`,
+    body: { host: "host-d", idempotency_key: expect.any(String) },
+  });
+  expect(grantsFor("gamma", "host-d").grants[0]?.revoked_at).toBeTruthy();
+});
+
+// This host's own gamma, beside host-d's.
+const localGamma = (row: Project) => row.id === "gamma" && !row.host;
+
+test("a peer's stage switch is sent with its host and moves that peer's project", async () => {
+  renderWith(<ProjectDetail project={peerGamma} id="detail" />);
+  fireEvent.click(await screen.findByRole("button", { name: "Switch to pre-launch" }));
+  const dialog = within(await screen.findByRole("dialog"));
+  fireEvent.click(dialog.getByRole("button", { name: "Switch to pre-launch" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(calls).toEqual([
+    {
+      method: "POST",
+      path: "/api/v1/projects/gamma/stage",
+      body: {
+        rev: peerGamma.rev,
+        stage: "pre-launch",
+        host: "host-d",
+        idempotency_key: expect.any(String),
+      },
+    },
+  ]);
+  const now = withoutDeleted(
+    projectsPath,
+    fixtureResource(projectsPath, "federated", NOW),
+    "federated",
+  ) as ProjectsResponse;
+  const moved = now.projects.find((row) => row.id === "gamma" && row.host === "host-d");
+  expect(moved?.stage).toBe("pre-launch");
+  // This host's gamma stays as it was.
+  expect(now.projects.find(localGamma)?.stage).toBe(projects.find(localGamma)?.stage);
 });
 
 test("a peer's project read is refused while its link is down or its pairing only reads", () => {

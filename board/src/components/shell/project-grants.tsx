@@ -5,6 +5,7 @@ import type { ReactNode, RefObject } from "react";
 import type { GrantRow, MutationResponse, Project } from "../../lib/api-types";
 import { MERGE_ACTIONS } from "../../lib/away";
 import { formatLisbonDay, lisbonField16, serverNow } from "../../lib/clock";
+import { hostField, ownerOf } from "../../lib/peers";
 import { projectFieldsQuery, projectGrantsQuery } from "../../lib/queries";
 import { sendMutation } from "../attention/api";
 import { InlineReceipt } from "../attention/receipt";
@@ -221,7 +222,7 @@ export function GrantsTab({
   first: RefObject<HTMLButtonElement | null>;
   onClose: () => void;
 }) {
-  const read = useQuery(projectGrantsQuery(project.id));
+  const read = useQuery(projectGrantsQuery(project.id, ownerOf(project)));
   const [making, setMaking] = useState(false);
   const [revoking, setRevoking] = useState<GrantRow | null>(null);
   const [receipt, setReceipt] = useState<{ key: string; text: string } | null>(null);
@@ -295,7 +296,9 @@ export function GrantsTab({
         </button>
       </div>
       {making ? <NewGrant project={project} onClose={closeNew} onMade={made} /> : null}
-      {revoking ? <RevokeGrant grant={revoking} onClose={closeRevoke} onRevoked={made} /> : null}
+      {revoking ? (
+        <RevokeGrant project={project} grant={revoking} onClose={closeRevoke} onRevoked={made} />
+      ) : null}
     </>
   );
 }
@@ -371,7 +374,7 @@ function NewGrant({
   onClose: () => void;
   onMade: (receiptKey: string, text: string) => void;
 }) {
-  const fields = useQuery(projectFieldsQuery(project.id));
+  const fields = useQuery(projectFieldsQuery(project.id, ownerOf(project)));
   const cancel = useRef<HTMLButtonElement>(null);
   const [pending, setPending] = useState(false);
   return (
@@ -458,17 +461,21 @@ function GrantForm({
     (idempotency_key: string) =>
       sendMutation<GrantRow>("POST", `/api/v1/projects/${project.id}/grants`, {
         ...(JSON.parse(body) as Record<string, unknown>),
+        // A peer's project: the board host forwards the grant (UA-43).
+        ...hostField(project),
         idempotency_key,
       }),
-    [body, project.id],
+    [body, project],
   );
   const recorded = useCallback(
     (_: MutationResponse<GrantRow>, receiptKey: string) => {
-      void queryClient.invalidateQueries({ queryKey: projectGrantsQuery(project.id).queryKey });
+      void queryClient.invalidateQueries({
+        queryKey: projectGrantsQuery(project.id, ownerOf(project)).queryKey,
+      });
       onMade(receiptKey, "Grant made");
       onClose();
     },
-    [onClose, onMade, project.id, queryClient],
+    [onClose, onMade, project, queryClient],
   );
   const action = useAction({ binding: `grant-new:${opening}:${body}`, send, onRecorded: recorded });
   const { pending, error } = action;
@@ -717,10 +724,12 @@ function GrantForm({
 
 // Revoke: destructive, so the dialog asks first, and Keep takes focus.
 function RevokeGrant({
+  project,
   grant,
   onClose,
   onRevoked,
 }: {
+  project: Project;
   grant: GrantRow;
   onClose: () => void;
   onRevoked: (receiptKey: string, text: string) => void;
@@ -729,18 +738,21 @@ function RevokeGrant({
   const keep = useRef<HTMLButtonElement>(null);
   const send = useCallback(
     (idempotency_key: string) =>
-      sendMutation<GrantRow>("DELETE", `/api/v1/grants/${grant.id}`, { idempotency_key }),
-    [grant.id],
+      sendMutation<GrantRow>("DELETE", `/api/v1/grants/${grant.id}`, {
+        ...hostField(project),
+        idempotency_key,
+      }),
+    [grant.id, project],
   );
   const recorded = useCallback(
     (_: MutationResponse<GrantRow>, receiptKey: string) => {
       void queryClient.invalidateQueries({
-        queryKey: projectGrantsQuery(grant.project_id).queryKey,
+        queryKey: projectGrantsQuery(grant.project_id, ownerOf(project)).queryKey,
       });
       onRevoked(receiptKey, "Grant revoked");
       onClose();
     },
-    [grant.project_id, onClose, onRevoked, queryClient],
+    [grant.project_id, onClose, onRevoked, project, queryClient],
   );
   const action = useAction({ binding: `grant-revoke:${grant.id}`, send, onRecorded: recorded });
   const title = grantTitle(grant);

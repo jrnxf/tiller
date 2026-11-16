@@ -300,12 +300,13 @@ export const projectFieldsPath = (projectId: string, host?: string): QueryPath =
 export const projectFieldsQuery = (projectId: string, host?: string) =>
   queryOptions({ ...readQuery<ProjectFields>(projectFieldsPath(projectId, host)), staleTime: 0 });
 
-// Every grant of one of this host's projects, live and ended. A `grant` event
-// refreshes it, and so does an `approval` one, which moves a grant's uses
-// (lib/sse.ts).
-const projectGrantsPath = (projectId: string): QueryPath => `/api/v1/projects/${projectId}/grants`;
-export const projectGrantsQuery = (projectId: string) =>
-  queryOptions({ ...readQuery<ProjectGrants>(projectGrantsPath(projectId)), staleTime: 0 });
+// Every grant of a project, live and ended, with `host` a peer's (UA-43). A
+// `grant` event refreshes it, and so does an `approval` one, which moves a
+// grant's uses (lib/sse.ts).
+const projectGrantsPath = (projectId: string, host?: string): QueryPath =>
+  withParams(`/api/v1/projects/${projectId}/grants`, { host });
+export const projectGrantsQuery = (projectId: string, host?: string) =>
+  queryOptions({ ...readQuery<ProjectGrants>(projectGrantsPath(projectId, host)), staleTime: 0 });
 
 // A single-entity read takes `?host=<label>` for a peer's record; absent means
 // this host (protocol.md section 7.3).

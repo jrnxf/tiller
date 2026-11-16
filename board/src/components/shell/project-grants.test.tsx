@@ -275,21 +275,21 @@ test("Revoke asks first, Keep sends nothing, and the revoked grant moves to Ende
   expect(await dialog.findByText(/Grant revoked/)).toBeTruthy();
 });
 
-test("a peer's project shows no grants: its own host keeps them", async () => {
+test("a peer's project opens the same Grants and settings, read from that peer", async () => {
+  const reads: string[] = [];
+  vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+    reads.push(String(input));
+    return json({ project: "alpha", grants: [] });
+  });
   renderDetail({ ...alpha, host: "host-b", link: "live" });
-  expect(await screen.findByRole("button", { name: "Edit" })).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Grants and settings" })).toBeNull();
-  expect(screen.queryByText("Grants")).toBeNull();
-  // The panel says where they are, so the missing control is not a dead end.
-  expect(screen.getByTestId("peer-only").textContent).toBe(
-    "Grants and the stage switch of this project are on host-b's own board.",
-  );
-});
-
-test("a project of this host has no such note", async () => {
-  renderDetail(alpha);
-  expect(await screen.findByRole("button", { name: "Grants and settings" })).toBeTruthy();
-  expect(screen.queryByTestId("peer-only")).toBeNull();
+  fireEvent.click(await screen.findByRole("button", { name: "Grants and settings" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "alpha on host-b" }));
+  expect(await dialog.findByText(/No grant is active/)).toBeTruthy();
+  expect(dialog.getByRole("button", { name: "Edit" })).toBeTruthy();
+  // The panel's count and the dialog read the peer's grants, never this host's.
+  expect(reads).toContain("/api/v1/projects/alpha/grants?host=host-b");
+  expect(reads).not.toContain("/api/v1/projects/alpha/grants");
+  expect(screen.getByRole("button", { name: /^Switch to / })).toHaveProperty("disabled", false);
 });
 
 // The stand-in daemon refuses what `tiller grant create` and
@@ -359,10 +359,27 @@ test("the fixture refuses a grant the daemon refuses", () => {
   });
 });
 
-test("the fixture's board host does not forward a grant change to a peer", () => {
-  const { reply } = fixtureMutation("DELETE", "/api/v1/grants/01JGR00000000001ABCDEFGHJK", {
-    idempotency_key: "k",
-    host: "host-b",
-  });
-  expect(reply.status).toBe(502);
+test("the fixture's board host forwards a grant change to the peer it names", () => {
+  const made = fixtureMutation(
+    "POST",
+    "/api/v1/projects/gamma/grants",
+    {
+      idempotency_key: "k-peer-1",
+      host: "host-d",
+      kind: "merge",
+      conditions: { v: 1, actions: ["squash"] },
+    },
+    "federated",
+  );
+  expect(made.reply.status).toBe(200);
+  expect(grantsFor("gamma", "host-d").grants).toHaveLength(1);
+  // A grant the peer does not have is its refusal, with its label.
+  const { reply } = fixtureMutation(
+    "DELETE",
+    "/api/v1/grants/01JGR00000000001ABCDEFGHJK",
+    { idempotency_key: "k-peer-2", host: "host-d" },
+    "federated",
+  );
+  expect(reply.status).toBe(404);
+  expect((reply.body as { error: { host?: string } }).error.host).toBe("host-d");
 });

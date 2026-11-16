@@ -415,6 +415,10 @@ export function withoutDeleted(path: string, body: unknown, scenario: Scenario):
   const host = on?.host;
   if (host) {
     if (fields?.[1] && body === undefined) return peerFieldsFor(scenario, host, fields[1]);
+    const grants = /^\/api\/v1\/projects\/([^/]+)\/grants$/.exec(pathname);
+    if (grants?.[1]) {
+      return peerLive(scenario, host, grants[1]) ? grantsFor(grants[1], host) : undefined;
+    }
     if (pathname === projectsPath && url.searchParams.has("retired")) {
       return peerRetiredFor(scenario, host);
     }
@@ -743,8 +747,9 @@ function peerRetiredFor(scenario: Scenario, host: string): ProjectsResponse {
   };
 }
 
-// A forwarded project add, edit, archive or delete, run as the peer runs it:
-// the same checks a local one has, and a refusal names the peer.
+// A forwarded project add, edit, archive, delete or stage switch, or a grant
+// (UA-43), run as the peer runs it: the same checks a local one has, and a
+// refusal names the peer.
 function peerProjectMutation(
   method: string,
   path: string,
@@ -780,6 +785,33 @@ function peerProjectMutation(
     peerFields.set(peerKey(host, id), result.next);
     peerRows.set(peerKey(host, id), result.row);
     return { reply: recorded(result.row, null, null), followUps: [] };
+  }
+  const stage = /^\/api\/v1\/projects\/([^/]+)\/stage$/.exec(path);
+  if (method === "POST" && stage?.[1]) {
+    const project = peerLive(scenario, host, stage[1]);
+    if (!project) return named(refusal(404, "not_found", `no project ${stage[1]}`));
+    if (body.rev !== project.rev) {
+      return named({
+        reply: refused(
+          409,
+          "stale",
+          `project ${project.id} is at rev ${project.rev}, you changed rev ${String(body.rev)}`,
+          { rev: project.rev },
+        ),
+        followUps: [],
+      });
+    }
+    if (body.stage !== "pre-launch" && body.stage !== "launched") {
+      return named(refusal(422, "refused", "stage must be pre-launch or launched"));
+    }
+    const next = restaged(project, body.stage);
+    peerRows.set(peerKey(host, project.id), next);
+    return { reply: recorded(next, null, null), followUps: [] };
+  }
+  const grant = grantMutation(method, path, body, (id) => !!peerLive(scenario, host, id), host);
+  if (grant) {
+    if (!grant.ok) return named(refusal(grant.status, grant.code, grant.message));
+    return { reply: recorded(grant.data, null, null), followUps: [] };
   }
   const action = /^\/api\/v1\/projects\/([^/]+)\/(delete|retire)$/.exec(path);
   if (method !== "POST" || !action?.[1]) return null;
@@ -838,8 +870,7 @@ function forwarded(
   const host = body.host;
   if (typeof host !== "string") return null;
   if (
-    /\/(stage|focus|label|bug-project|grants)$/.test(path) ||
-    path.startsWith("/api/v1/grants/") ||
+    /\/(focus|label|bug-project)$/.test(path) ||
     path.startsWith("/api/v1/peers/") ||
     path.startsWith("/api/v1/peer-keys/") ||
     /\/memory\//.test(path) ||

@@ -257,15 +257,14 @@ test("a peer's project is edited from here: the read and the save go to that pee
   const reads: string[] = [];
   const patches = serve(undefined, reads);
   renderDetail(onB, [peerB()]);
-  // Grants stay on their own host, so the button opens the fields alone.
-  expect(screen.queryByRole("button", { name: "Grants and settings" })).toBeNull();
-  fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+  // The same dialog as this host's projects: grants first (UA-43), then Edit.
+  fireEvent.click(await screen.findByRole("button", { name: "Grants and settings" }));
   const dialog = within(await screen.findByRole("dialog", { name: "alpha on host-b" }));
+  fireEvent.click(dialog.getByRole("button", { name: "Edit" }));
   expect(dialog.getByText(/Changes this project on host-b/)).toBeTruthy();
-  expect(dialog.queryByRole("button", { name: "Grants" })).toBeNull();
   await dialog.findByLabelText("Name");
   expect(reads).toContain("/api/v1/projects/alpha?host=host-b");
-  expect(reads.some((path) => path.includes("/grants"))).toBe(false);
+  expect(reads).toContain("/api/v1/projects/alpha/grants?host=host-b");
 
   fireEvent.click(dialog.getByRole("button", { name: "One slot more" }));
   fireEvent.click(dialog.getByRole("button", { name: "Save" }));
@@ -294,8 +293,9 @@ test("a peer's refusal of an edit names the peer", async () => {
     }),
   );
   renderDetail(onB, [peerB()]);
-  fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Grants and settings" }));
   const dialog = within(await screen.findByRole("dialog", { name: "alpha on host-b" }));
+  fireEvent.click(dialog.getByRole("button", { name: "Edit" }));
   await dialog.findByLabelText("Name");
   fireEvent.click(dialog.getByRole("button", { name: "One slot more" }));
   fireEvent.click(dialog.getByRole("button", { name: "Save" }));
@@ -304,7 +304,7 @@ test("a peer's refusal of an edit names the peer", async () => {
   );
 });
 
-test("a peer the board cannot act on shows Edit, Archive and Delete off, with the reason", async () => {
+test("a peer the board cannot act on shows its settings, stage switch, Archive and Delete off, with the reason", async () => {
   serve();
   const cases: [Machine, string, string][] = [
     [peerB({ peer_scope: "read" }), "view only pairing", "host-b: view only pairing"],
@@ -318,7 +318,7 @@ test("a peer the board cannot act on shows Edit, Archive and Delete off, with th
     renderDetail({ ...onB, link: machine.link ?? null }, [machine]);
     // A tooltip does not show on a touch screen, so the panel says it too.
     expect(await screen.findByText(shown, { selector: ".pdetail-off" })).toBeTruthy();
-    for (const name of ["Edit", "Archive", "Delete"]) {
+    for (const name of ["Grants and settings", /^Switch to /, "Archive", "Delete"]) {
       const button = (await screen.findByRole("button", { name })) as HTMLButtonElement;
       expect(button.disabled).toBe(true);
       expect(button.title).toBe(reason);

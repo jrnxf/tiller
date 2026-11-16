@@ -13,7 +13,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tiller_core::domain::{Approval, Attention, Card, PeerKey, PeerScope, Project, Session};
+use tiller_core::domain::{Approval, Attention, Card, Grant, PeerKey, PeerScope, Project, Session};
 use tiller_core::state::peers::parse_public_key;
 use tiller_core::state::{get, resolve_card, resolve_id};
 use tiller_core::{Actor, Ctx, Error, Store, Timestamp, ids};
@@ -26,9 +26,9 @@ use crate::mirror::Mirrors;
 // -- the allowlist ----------------------------------------------------------------
 
 /// A mutation the board may forward to a peer: exactly the 7.4 list, with
-/// the agent verbs of `authority.md` G46 and the project add, edit, retire
-/// and delete of D22. `stage`, `focus`, grants, config and memory
-/// decisions are not on it.
+/// the agent verbs of `authority.md` G46, the project add, edit, retire
+/// and delete of D22, and the stage switch and grants of UA-43. `focus`,
+/// config and memory decisions are not on it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
     CreateCard,
@@ -60,6 +60,9 @@ pub enum Op {
     ProjectEdit,
     ProjectRetire,
     ProjectDelete,
+    ProjectStage,
+    GrantCreate,
+    GrantRevoke,
 }
 
 /// Where the peer runs a forwarded op, which also sets how long the board
@@ -76,7 +79,7 @@ pub enum Lane {
 }
 
 impl Op {
-    pub const ALL: [Op; 29] = [
+    pub const ALL: [Op; 32] = [
         Op::CreateCard,
         Op::EditCard,
         Op::Comment,
@@ -106,6 +109,9 @@ impl Op {
         Op::ProjectEdit,
         Op::ProjectRetire,
         Op::ProjectDelete,
+        Op::ProjectStage,
+        Op::GrantCreate,
+        Op::GrantRevoke,
     ];
 
     /// The 7.4 endpoint, as a `mutate` frame's `op` names it.
@@ -140,13 +146,17 @@ impl Op {
             Op::ProjectEdit => "PATCH /api/v1/projects/{id}",
             Op::ProjectRetire => "POST /api/v1/projects/{id}/retire",
             Op::ProjectDelete => "POST /api/v1/projects/{id}/delete",
+            Op::ProjectStage => "POST /api/v1/projects/{id}/stage",
+            Op::GrantCreate => "POST /api/v1/projects/{id}/grants",
+            Op::GrantRevoke => "DELETE /api/v1/grants/{id}",
         }
     }
 
     /// Where the peer runs the op. A verb that waits for its proof makes
     /// the board host wait [`super::PROOF_WAIT`] for its `result`, and a
     /// project add, retire or delete [`super::PROJECT_WAIT`], not the query
-    /// wait (`protocol.md` 7.4).
+    /// wait (`protocol.md` 7.4). A stage switch to pre-launch fetches the
+    /// default branch, so it runs off the link thread as well.
     pub fn lane(self) -> Lane {
         match self {
             Op::Interrupt
@@ -155,7 +165,9 @@ impl Op {
             | Op::Relaunch
             | Op::PromptAnswer
             | Op::StartRun => Lane::Proof,
-            Op::ProjectAdd | Op::ProjectRetire | Op::ProjectDelete => Lane::Project,
+            Op::ProjectAdd | Op::ProjectRetire | Op::ProjectDelete | Op::ProjectStage => {
+                Lane::Project
+            }
             _ => Lane::Inline,
         }
     }
@@ -380,7 +392,16 @@ fn target_project(store: &Store, op: Op, frame: &Mutate) -> tiller_core::Result<
         | Op::StartOrchestrator
         | Op::ProjectEdit
         | Op::ProjectRetire
-        | Op::ProjectDelete => Some(target.to_owned()),
+        | Op::ProjectDelete
+        | Op::ProjectStage
+        | Op::GrantCreate => Some(target.to_owned()),
+        Op::GrantRevoke => match found(resolve_id(conn, "grants", "grant", target))? {
+            Some(id) => {
+                let grant: Grant = get(conn, "grant", &id)?;
+                Some(grant.project_id)
+            }
+            None => None,
+        },
         // Every stale session on this host: no project to own.
         Op::RestartStale => None,
         Op::EditCard
@@ -523,9 +544,8 @@ mod tests {
             assert_eq!(Op::named(op.as_str()), Some(op));
         }
         for refused in [
-            // Stage, grants, config and the host stay this host's own (D22).
-            "POST /api/v1/projects/{id}/stage",
-            "POST /api/v1/projects/{id}/grants",
+            // Config and the host stay this host's own (D22).
+            "GET /api/v1/projects/{id}/grants",
             "POST /api/v1/config",
             "PATCH /api/v1/host",
             "POST /api/v1/peers",

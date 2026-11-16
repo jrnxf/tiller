@@ -9,12 +9,11 @@ import { GrantsTab } from "./project-grants";
 
 type Tab = "grants" | "edit";
 
-// One project's settings on this host, as tabs: its grants, as
-// `tiller grant create` and `tiller grant revoke` manage them, and the fields
-// `tiller project edit` sets. The dialog opens on the grants, so the whole
-// policy is in view before one more grant joins it. A peer's project shows its
-// fields alone: the edit is forwarded to that peer (D22), and grants stay on
-// their own host.
+// One project's settings, as tabs: its grants, as `tiller grant create` and
+// `tiller grant revoke` manage them, and the fields `tiller project edit` sets.
+// The dialog opens on the grants, so the whole policy is in view before one
+// more grant joins it. A peer's project opens the same dialog: its edit (D22)
+// and its grants (UA-43) are forwarded to that peer.
 export function ProjectSettings({
   project,
   onClose,

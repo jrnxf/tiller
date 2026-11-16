@@ -235,9 +235,9 @@ const isContributions = (path: string) => path.startsWith(CONTRIBUTIONS_PREFIX);
 // `/api/v1/projects/<id>/setup`, whatever the project.
 const PROJECT_SETUP_PATH = /^\/api\/v1\/projects\/[^/?]+\/setup$/;
 
-// `/api/v1/projects/<id>/grants`, whatever the project: a grant event names
-// the grant, not its project.
-const PROJECT_GRANTS_PATH = /^\/api\/v1\/projects\/[^/?]+\/grants$/;
+// `/api/v1/projects/<id>/grants`, whatever the project and whichever host: a
+// grant event names the grant, not its project.
+const PROJECT_GRANTS_PATH = /^\/api\/v1\/projects\/[^/?]+\/grants(\?host=[^&]+)?$/;
 
 // `/api/v1/projects/<id>/replies`, whatever the project.
 const PROJECT_REPLIES_PATH = /^\/api\/v1\/projects\/[^/?]+\/replies$/;

@@ -1,7 +1,9 @@
 // The grants of the dev and preview servers and of tests: alpha starts with
 // two live grants and an ended one, kept in memory so New grant and Revoke
 // change what the next read answers (authority.md section 6, protocol.md
-// sections 7.3 and 7.4). The daemon's refusals are mirrored here.
+// sections 7.3 and 7.4). A peer's grants are its own records, kept apart by
+// its label: the board host forwards a grant to it (UA-43). The daemon's
+// refusals are mirrored here.
 import type { GrantConditions, GrantRow, ProjectGrants } from "./api-types.ts";
 import { lisbonField16 } from "./clock.ts";
 
@@ -14,6 +16,8 @@ type GrantReply =
   | { ok: false; status: number; code: string; message: string };
 
 let rows: GrantRow[] | null = null;
+// Each peer's grants, by its label; a peer starts with none.
+const peerGrants = new Map<string, GrantRow[]>();
 let counter = 0;
 
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -99,20 +103,29 @@ function seed(now: number): GrantRow[] {
   ];
 }
 
-function current(): GrantRow[] {
+// The grants of this host, or with `host` that peer's.
+function current(host?: string): GrantRow[] {
+  if (host) return peerGrants.get(host) ?? [];
   rows ??= seed(Date.now());
   return rows;
+}
+
+function put(host: string | undefined, next: GrantRow[]): void {
+  if (host) peerGrants.set(host, next);
+  else rows = next;
 }
 
 // Tests start each case from the seeded grants.
 export function resetGrantsFixture(now: number = Date.now()): void {
   rows = seed(now);
+  peerGrants.clear();
   counter = 0;
 }
 
-// `GET /api/v1/projects/{id}/grants` for a project this host knows.
-export function grantsFor(project: string): ProjectGrants {
-  return { project, grants: current().filter((grant) => grant.project_id === project) };
+// `GET /api/v1/projects/{id}/grants` for a project the host knows, with
+// `host` a peer's (`?host=`).
+export function grantsFor(project: string, host?: string): ProjectGrants {
+  return { project, grants: current(host).filter((grant) => grant.project_id === project) };
 }
 
 function refusal(status: number, code: string, message: string): GrantReply {
@@ -145,8 +158,13 @@ const ACTIONS: Record<string, string[]> = {
 };
 
 // `POST /api/v1/projects/{project}/grants`, with the checks
-// `tiller grant create` makes. `known` says whether this host has the project.
-function create(project: string, known: boolean, body: Record<string, unknown>): GrantReply {
+// `tiller grant create` makes. `known` says whether the host has the project.
+function create(
+  project: string,
+  known: boolean,
+  body: Record<string, unknown>,
+  host?: string,
+): GrantReply {
   const allowed = new Set(["idempotency_key", "host", "kind", "conditions", "expires"]);
   const unknown = Object.keys(body).find((key) => !allowed.has(key));
   if (unknown) return refusal(400, "usage", `unknown field \`${unknown}\``);
@@ -193,34 +211,39 @@ function create(project: string, known: boolean, body: Record<string, unknown>):
     revoke_reason: null,
     uses: 0,
   };
-  rows = [grant, ...current()];
+  put(host, [grant, ...current(host)]);
   return { ok: true, data: grant };
 }
 
 // `DELETE /api/v1/grants/{id}`: by its id or short form, and a no-op on a
 // grant already revoked.
-function revoke(id: string, body: Record<string, unknown>): GrantReply {
+function revoke(id: string, body: Record<string, unknown>, host?: string): GrantReply {
   const reason = typeof body.reason === "string" ? body.reason : "revoked by the owner";
   if (reason.trim() === "") return refusal(400, "usage", "reason is required");
-  const found = current().find((grant) => grant.id === id || grant.short === id);
+  const found = current(host).find((grant) => grant.id === id || grant.short === id);
   if (!found) return refusal(404, "not_found", `no grant ${id}`);
   if (found.revoked_at) return { ok: true, data: found };
   const revoked = { ...found, revoked_at: new Date().toISOString(), revoke_reason: reason };
-  rows = current().map((grant) => (grant.id === found.id ? revoked : grant));
+  put(
+    host,
+    current(host).map((grant) => (grant.id === found.id ? revoked : grant)),
+  );
   return { ok: true, data: revoked };
 }
 
 // A grant mutation, or `null` when `path` is not one. `known` says whether
-// this host has the project a create names.
+// the host has the project a create names; `host` is a peer's label, for a
+// grant the board host forwarded.
 export function grantMutation(
   method: string,
   path: string,
   body: Record<string, unknown>,
   known: (project: string) => boolean,
+  host?: string,
 ): GrantReply | null {
   const made = /^\/api\/v1\/projects\/([^/]+)\/grants$/.exec(path);
-  if (method === "POST" && made?.[1]) return create(made[1], known(made[1]), body);
+  if (method === "POST" && made?.[1]) return create(made[1], known(made[1]), body, host);
   const ended = /^\/api\/v1\/grants\/([^/]+)$/.exec(path);
-  if (method === "DELETE" && ended?.[1]) return revoke(ended[1], body);
+  if (method === "DELETE" && ended?.[1]) return revoke(ended[1], body, host);
   return null;
 }

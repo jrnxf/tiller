@@ -1323,7 +1323,7 @@ fn spawn_not_forwardable() {
     let before = last_seq(&pair.peer);
     for op in [
         "POST /api/v1/runs",
-        "POST /api/v1/projects/{id}/stage",
+        "POST /api/v1/bug-project",
         "POST /api/v1/interventions/{id}/label",
         "POST /api/v1/agents/{session}/focus",
         "POST /api/v1/memory/proposals/{id}/decide",
@@ -1348,11 +1348,6 @@ async fn spawn_not_forwardable_from_the_board() {
     for (method, path, body) in [
         (
             "POST",
-            "/api/v1/projects/alpha/stage",
-            json!({"idempotency_key": "k-1", "host": "peer", "rev": 1, "stage": "launched"}),
-        ),
-        (
-            "POST",
             "/api/v1/agents/w1:p1/focus",
             json!({"idempotency_key": "k-2", "host": "peer"}),
         ),
@@ -1365,17 +1360,6 @@ async fn spawn_not_forwardable_from_the_board() {
             "POST",
             "/api/v1/config",
             json!({"idempotency_key": "k-4", "host": "peer", "key": "spawn.claude", "value": "claude"}),
-        ),
-        (
-            "POST",
-            "/api/v1/projects/alpha/grants",
-            json!({"idempotency_key": "k-5", "host": "peer", "kind": "merge",
-                "conditions": {"v": 1, "actions": ["squash"]}}),
-        ),
-        (
-            "DELETE",
-            "/api/v1/grants/0000001",
-            json!({"idempotency_key": "k-6", "host": "peer"}),
         ),
     ] {
         let answer = send(&app, mutation(method, path, body, &[("cookie", &cookie)])).await;
@@ -5106,4 +5090,401 @@ async fn a_read_pairing_cannot_manage_a_peer_project() {
     }
     assert_eq!((last_seq(&pair.board), last_seq(&pair.peer)), before);
     assert_eq!(projects_named(&pair.peer, "gamma"), 1);
+}
+
+// -- peer grants and stage (UA-43) ---------------------------------------------
+
+/// A `merge` grant's version 1 conditions, as the board's form writes them.
+fn merge_conditions() -> Value {
+    json!({"v": 1, "actions": ["squash"]})
+}
+
+/// The grants of `project` on `fleet`: id, kind and whether it is revoked.
+fn grants_on(fleet: &Fleet, project: &str) -> Vec<(String, String, bool)> {
+    let store = fleet.open();
+    let mut statement = store
+        .conn()
+        .prepare("SELECT id, kind, revoked_at IS NOT NULL FROM grants WHERE project_id = ?1")
+        .unwrap();
+    statement
+        .query_map([project], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// A live `merge` grant on `project`, made on `fleet` by its own owner.
+fn grant_on(fleet: &Fleet, project: &str) -> String {
+    fleet
+        .open()
+        .grant_create(
+            &tiller_core::store::Ctx::new(tiller_core::store::Actor::Owner),
+            tiller_core::state::approvals::NewGrant {
+                project_id: project.into(),
+                kind: tiller_core::domain::GrantKind::Merge,
+                conditions: merge_conditions(),
+            },
+        )
+        .unwrap()
+        .value
+        .id
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_board_grants_lists_and_revokes_on_a_peer_project() {
+    let pair = pair();
+    add_project(&pair.peer, "gamma");
+    let (peers, _stop) = start(pair.board.dir.path(), Wire::new(pair.peer.dir.path()));
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    let board_before = last_seq(&pair.board);
+    let peer_before = last_seq(&pair.peer);
+    let act = |method: &str, path: &str, body: Value| {
+        mutation(method, path, body, &[("cookie", cookie.as_str())])
+    };
+
+    // Create: the grant is the peer's record, and the same key replays.
+    let create = json!({"idempotency_key": "k-g-1", "host": "peer", "kind": "merge",
+        "conditions": merge_conditions(), "expires": "2099-01-01"});
+    let path = "/api/v1/projects/gamma/grants";
+    let made = applied(&send(&app, act("POST", path, create.clone())).await);
+    assert_eq!(made.host.as_deref(), Some("peer"));
+    let again = applied(&send(&app, act("POST", path, create)).await);
+    assert!(again.replayed, "the same key again was not a replay");
+    let grants = grants_on(&pair.peer, "gamma");
+    assert_eq!(grants.len(), 1, "{grants:?}");
+    assert!(grants_on(&pair.board, "gamma").is_empty());
+    let id = grants[0].0.clone();
+
+    // List: the board reads the peer's grants over the link.
+    let listed = get(&app, "/api/v1/projects/gamma/grants?host=peer").await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    let listed: Value = serde_json::from_str(&listed.body).unwrap();
+    let row = &listed["grants"][0];
+    assert_eq!(row["id"], Value::from(id.clone()), "{listed}");
+    assert_eq!(row["granted_by"], "board@test-host", "{listed}");
+    assert!(row["conditions"]["expires_at"].is_string(), "{listed}");
+
+    // Revoke, by the short form the dialog shows.
+    let short = tiller_core::ids::short(&id).to_owned();
+    let revoke = json!({"idempotency_key": "k-g-2", "host": "peer"});
+    let path = format!("/api/v1/grants/{short}");
+    let revoked = applied(&send(&app, act("DELETE", &path, revoke)).await);
+    assert_eq!(revoked.host.as_deref(), Some("peer"));
+    assert!(
+        grants_on(&pair.peer, "gamma")[0].2,
+        "the grant is still live"
+    );
+
+    // Nothing on the board host; on the peer, the forwarded owner did both.
+    assert_eq!(last_seq(&pair.board), board_before);
+    let events = events_since(&pair.peer, peer_before);
+    assert_eq!(events.len(), 2, "{events:?}");
+    for event in &events {
+        assert!(event.contains(" board@test-host "), "{event}");
+        assert!(event.contains("via_peer"), "{event}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_grant_refusal_passes_back_with_its_host() {
+    let pair = pair();
+    add_project(&pair.peer, "gamma");
+    add_project(&pair.board, "gamma");
+    let (peers, _stop) = start(pair.board.dir.path(), Wire::new(pair.peer.dir.path()));
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    let before = last_seq(&pair.peer);
+    let act = |method: &str, path: &str, body: Value| {
+        mutation(method, path, body, &[("cookie", cookie.as_str())])
+    };
+    for (method, path, body) in [
+        // An action the kind does not take: the store's own check.
+        (
+            "POST",
+            "/api/v1/projects/gamma/grants",
+            json!({"idempotency_key": "k-gr-1", "kind": "merge",
+                "conditions": {"v": 1, "actions": ["fly"]}}),
+        ),
+        // A grant that does not exist.
+        (
+            "DELETE",
+            "/api/v1/grants/nosuch",
+            json!({"idempotency_key": "k-gr-2"}),
+        ),
+    ] {
+        let here = send(&app, act(method, path, body.clone())).await;
+        let mut there_body = body;
+        there_body["host"] = json!("peer");
+        there_body["idempotency_key"] = json!(format!(
+            "{}-peer",
+            there_body["idempotency_key"].as_str().unwrap()
+        ));
+        let there = send(&app, act(method, path, there_body)).await;
+        assert!(here.status.is_client_error(), "{path}: {}", here.body);
+        assert_eq!(there.status, here.status, "{path}: {}", there.body);
+        let here = refusal(&here, here.status);
+        let there = refusal(&there, there.status);
+        assert_eq!(there.code, here.code, "{path}");
+        assert_eq!(there.host.as_deref(), Some("peer"), "{path}");
+    }
+    assert_eq!(last_seq(&pair.peer), before);
+}
+
+/// A `local-only` project `id` on `fleet` whose checkout is a git
+/// repository with one commit on `main`; its head.
+fn local_project_with_checkout(fleet: &Fleet, id: &str) -> String {
+    let checkout = fleet.dir.path().join(format!("{id}-checkout"));
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&checkout)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    std::fs::create_dir_all(&checkout).unwrap();
+    git(&["init", "-q", "-b", "main"]);
+    git(&[
+        "-c",
+        "user.email=dev@example.com",
+        "-c",
+        "user.name=Dev",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "base",
+    ]);
+    std::fs::write(
+        fleet.dir.path().join("config.toml"),
+        format!("[checkouts]\n{id} = {:?}\n", checkout.to_str().unwrap()),
+    )
+    .unwrap();
+    fleet
+        .open()
+        .project_add(
+            &tiller_core::store::Ctx::new(tiller_core::store::Actor::Owner),
+            tiller_core::state::projects::NewProject {
+                id: id.into(),
+                name: id.into(),
+                repo: None,
+                remote: None,
+                default_branch: None,
+                delivery: tiller_core::domain::Delivery::LocalOnly,
+                checks: None,
+                capacity: None,
+                deploy_workflow: None,
+                deploy_environment: None,
+                deploy_timeout_minutes: None,
+            },
+        )
+        .unwrap();
+    git(&["rev-parse", "HEAD"])
+}
+
+/// A project's `stage`, `rev` and `reviewed_through_sha` on `fleet`.
+fn stage_of(fleet: &Fleet, id: &str) -> (String, i64, Option<String>) {
+    fleet
+        .open()
+        .conn()
+        .query_row(
+            "SELECT stage, rev, reviewed_through_sha FROM projects WHERE id = ?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_board_switches_a_peer_projects_stage_from_the_peers_checkout() {
+    let pair = pair();
+    let head = local_project_with_checkout(&pair.peer, "gamma");
+    // The board host has a project of the same id and no checkout for it:
+    // the switch reads the peer's own.
+    add_project(&pair.board, "gamma");
+    let (peers, _stop) = start(pair.board.dir.path(), Wire::new(pair.peer.dir.path()));
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    let board_before = last_seq(&pair.board);
+    let act = |body: Value| {
+        mutation(
+            "POST",
+            "/api/v1/projects/gamma/stage",
+            body,
+            &[("cookie", cookie.as_str())],
+        )
+    };
+
+    let (_, rev, _) = stage_of(&pair.peer, "gamma");
+    let staged = applied(
+        &send(
+            &app,
+            act(
+                json!({"idempotency_key": "k-s-1", "host": "peer", "rev": rev,
+                "stage": "pre-launch"}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(staged.host.as_deref(), Some("peer"));
+    let (stage, rev, reviewed) = stage_of(&pair.peer, "gamma");
+    assert_eq!(stage, "pre-launch");
+    assert_eq!(reviewed.as_deref(), Some(head.as_str()));
+
+    // A stale rev is the peer's conflict, with its host.
+    let stale = send(
+        &app,
+        act(
+            json!({"idempotency_key": "k-s-2", "host": "peer", "rev": rev - 1,
+            "stage": "launched"}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        refusal(&stale, StatusCode::CONFLICT).host.as_deref(),
+        Some("peer")
+    );
+
+    let launched = applied(
+        &send(
+            &app,
+            act(
+                json!({"idempotency_key": "k-s-3", "host": "peer", "rev": rev,
+                "stage": "launched"}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(launched.host.as_deref(), Some("peer"));
+    assert_eq!(stage_of(&pair.peer, "gamma").0, "launched");
+    assert_eq!(stage_of(&pair.board, "gamma").0, "launched");
+    assert_eq!(last_seq(&pair.board), board_before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_pairing_cannot_grant_or_stage_on_a_peer_project() {
+    let pair = pair();
+    add_project(&pair.peer, "gamma");
+    let grant = grant_on(&pair.peer, "gamma");
+    read_scope(&pair.board);
+    read_scope(&pair.peer);
+    let wire = Wire::new(pair.peer.dir.path());
+    let sent = wire.sent.clone();
+    let (peers, _stop) = start(pair.board.dir.path(), wire);
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    let before = (last_seq(&pair.board), last_seq(&pair.peer));
+
+    let actions = [
+        (
+            "POST",
+            "/api/v1/projects/gamma/grants".to_owned(),
+            json!({"idempotency_key": "k-rg-1", "host": "peer", "kind": "merge",
+                "conditions": merge_conditions()}),
+        ),
+        (
+            "DELETE",
+            format!("/api/v1/grants/{grant}"),
+            json!({"idempotency_key": "k-rg-2", "host": "peer"}),
+        ),
+        (
+            "POST",
+            "/api/v1/projects/gamma/stage".to_owned(),
+            json!({"idempotency_key": "k-rg-3", "host": "peer", "rev": 1,
+                "stage": "pre-launch"}),
+        ),
+    ];
+    for (method, path, body) in actions {
+        let answer = send(
+            &app,
+            mutation(method, &path, body, &[("cookie", cookie.as_str())]),
+        )
+        .await;
+        let error = refusal(&answer, StatusCode::BAD_GATEWAY);
+        assert_eq!(error.reason.as_deref(), Some("read_scope"), "{path}");
+        assert_eq!(error.host.as_deref(), Some("peer"), "{path}");
+    }
+    let listed = get(&app, "/api/v1/projects/gamma/grants?host=peer").await;
+    assert_eq!(
+        refusal(&listed, listed.status).reason.as_deref(),
+        Some("read_scope")
+    );
+    assert!(!wire_text(&sent).contains(r#""type":"mutate""#));
+
+    // On the peer: signed frames under the read key are refused there too.
+    let mut link = linked(&pair);
+    for (op, target, body) in [
+        (
+            Op::GrantCreate,
+            "gamma".to_owned(),
+            json!({"kind": "merge", "conditions": merge_conditions()}),
+        ),
+        (Op::GrantRevoke, grant.clone(), json!({})),
+        (
+            Op::ProjectStage,
+            "gamma".to_owned(),
+            json!({"rev": 1, "stage": "launched"}),
+        ),
+    ] {
+        let mut body = body;
+        body["idempotency_key"] = json!("k-rg-f");
+        let frame = Mutate::signed(
+            &signer(&pair),
+            &pair.peer.host,
+            Order {
+                op,
+                target: Some(target),
+                body,
+                idempotency_key: "k-rg-f".to_owned(),
+            },
+            Timestamp::now(),
+        );
+        assert_refused(&pair, link.mutate(frame), "read_scope", before.1);
+    }
+    assert_eq!((last_seq(&pair.board), last_seq(&pair.peer)), before);
+}
+
+#[test]
+fn a_grant_revoke_for_another_hosts_project_is_refused() {
+    let pair = pair();
+    let grant = grant_on(&pair.peer, "alpha");
+    {
+        let store = pair.peer.open();
+        let other = "01JHOSTC0000000000000000000";
+        store
+            .conn()
+            .execute(
+                "INSERT INTO hosts (id, label, kind) VALUES (?1, 'host-c', 'remote')",
+                [other],
+            )
+            .unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE projects SET owner_host_id = ?1 WHERE id = 'alpha'",
+                [other],
+            )
+            .unwrap();
+    }
+    let mut link = linked(&pair);
+    let before = last_seq(&pair.peer);
+    let frame = Mutate::signed(
+        &signer(&pair),
+        &pair.peer.host,
+        Order {
+            op: Op::GrantRevoke,
+            target: Some(grant),
+            body: json!({"idempotency_key": "k-fg"}),
+            idempotency_key: "k-fg".to_owned(),
+        },
+        Timestamp::now(),
+    );
+    assert_refused(&pair, link.mutate(frame), "foreign_project", before);
 }

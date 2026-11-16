@@ -57,3 +57,10 @@ The owner approved the ADR on Tuesday 2026-11-03 (Lisbon time) and took the reco
 - **What changes:** the forwarded owner keeps the board's full row for agents and their records. The tail and the prompt read go as a `query` on the peer link. The prompt answer, interrupt, steer, stop, pause, unpause, resume, relaunch and an attention item's withdraw go as a forwarded `mutate`. Keys and Fit stay on the pane link (HR1). The routes, frames and error codes are in `protocol.md` 7.4 (Agent verbs on a peer) and 10.7, and the rows in `authority.md` section 3, section 4 and G46.
 - **What stays:** the owner only, on the board host, with the `act` scope (the tail excepted), each action signed and checked again by the owning host. A `read` pairing and every fleet role stay refused. No host forwards to a third (G42). The owner-CLI-only powers (grants, away mode, pairing, landing, `tiller spawn`) and the host and project admin (config, projects, host edit, backups, pollers, memory decisions) stay local.
 - **Build task:** HR2 in `docs/design/terminal-holder.md` section 13, after H11 and before H12.
+
+## Amendment: grants and stage from one board (UA-43)
+
+- **Date:** Monday 2026-11-16 (Lisbon time)
+- **Decision:** the owner visits one board. "Grants and settings" and the stage switch work the same for a peer's project as for the board host's own.
+- **What changes:** `grant.create`, `grant.revoke` and `project.stage` join the forwarding allowlist (`protocol.md` 7.4). The board host reads a peer's grants with a `projects/{id}/grants` `query` on the link, with the `act` scope (10.2). A stage switch runs on the peer off the link's thread, as a project add does, since the switch to pre-launch may fetch. Grants leave the owner-CLI-only list of the D20 amendment.
+- **What stays:** a grant is the owning host's record, checked and matched there alone, and recorded as `board@<label>`. A `read` pairing and every fleet role stay refused. No host forwards to a third (G42). Config, host edit, bug project and pairing stay local.

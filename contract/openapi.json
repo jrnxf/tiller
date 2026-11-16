@@ -3585,7 +3585,27 @@
             }
           },
           "502": {
-            "description": "`peer_refused`: not forwarded",
+            "description": "`peer_refused`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`peer_unreachable`: nothing was sent or queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`forward_uncertain`: retry with the same key",
             "content": {
               "application/json": {
                 "schema": {
@@ -5293,6 +5313,18 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "host",
+            "in": "query",
+            "description": "A host id or label.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -5306,6 +5338,16 @@
             }
           },
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`peer_unreachable`: the peer `host` names did not answer",
             "content": {
               "application/json": {
                 "schema": {
@@ -5381,7 +5423,27 @@
             }
           },
           "502": {
-            "description": "`peer_refused`: not forwarded",
+            "description": "`peer_refused`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`peer_unreachable`: nothing was sent or queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`forward_uncertain`: retry with the same key",
             "content": {
               "application/json": {
                 "schema": {
@@ -5744,7 +5806,27 @@
             }
           },
           "502": {
-            "description": "`peer_refused`: not forwarded",
+            "description": "`peer_refused`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`peer_unreachable`: nothing was sent or queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`forward_uncertain`: retry with the same key",
             "content": {
               "application/json": {
                 "schema": {
@@ -7880,7 +7962,7 @@
       },
       "CreateGrant": {
         "type": "object",
-        "description": "`POST /api/v1/projects/{id}/grants`, as `tiller grant create` does. Owner\nonly, local to the owning host; it is not forwarded to a peer.",
+        "description": "`POST /api/v1/projects/{id}/grants`, as `tiller grant create` does. Owner\nonly. The grant is the owning host's record; for a peer's project the\nboard host forwards it (UA-43).",
         "required": [
           "idempotency_key",
           "kind",
@@ -7903,7 +7985,7 @@
               "string",
               "null"
             ],
-            "description": "A paired peer's label. Refused: a grant is not forwarded."
+            "description": "A paired peer's label: forward the mutation to it (`protocol.md`\n7.4, 10.3). Absent means this host."
           },
           "idempotency_key": {
             "type": "string"
@@ -11884,7 +11966,7 @@
       },
       "RevokeGrant": {
         "type": "object",
-        "description": "`DELETE /api/v1/grants/{id}`, as `tiller grant revoke` does. Owner only,\nlocal to the owning host.",
+        "description": "`DELETE /api/v1/grants/{id}`, as `tiller grant revoke` does. Owner only;\nfor a grant on a peer's project the board host forwards it (UA-43).",
         "required": [
           "idempotency_key"
         ],
@@ -11894,7 +11976,7 @@
               "string",
               "null"
             ],
-            "description": "A paired peer's label. Refused: a revoke is not forwarded."
+            "description": "A paired peer's label: forward the mutation to it (`protocol.md`\n7.4, 10.3). Absent means this host."
           },
           "idempotency_key": {
             "type": "string"

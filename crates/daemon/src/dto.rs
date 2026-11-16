@@ -1437,12 +1437,14 @@ pub struct GrantRow {
 }
 
 /// `POST /api/v1/projects/{id}/grants`, as `tiller grant create` does. Owner
-/// only, local to the owning host; it is not forwarded to a peer.
+/// only. The grant is the owning host's record; for a peer's project the
+/// board host forwards it (UA-43).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateGrant {
     pub idempotency_key: String,
-    /// A paired peer's label. Refused: a grant is not forwarded.
+    /// A paired peer's label: forward the mutation to it (`protocol.md`
+    /// 7.4, 10.3). Absent means this host.
     #[serde(default)]
     pub host: Option<String>,
     /// `merge` or `land_direct`.
@@ -1456,13 +1458,14 @@ pub struct CreateGrant {
     pub expires: Option<String>,
 }
 
-/// `DELETE /api/v1/grants/{id}`, as `tiller grant revoke` does. Owner only,
-/// local to the owning host.
+/// `DELETE /api/v1/grants/{id}`, as `tiller grant revoke` does. Owner only;
+/// for a grant on a peer's project the board host forwards it (UA-43).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RevokeGrant {
     pub idempotency_key: String,
-    /// A paired peer's label. Refused: a revoke is not forwarded.
+    /// A paired peer's label: forward the mutation to it (`protocol.md`
+    /// 7.4, 10.3). Absent means this host.
     #[serde(default)]
     pub host: Option<String>,
     /// Why the grant ends; "revoked by the owner" when absent.

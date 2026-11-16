@@ -2090,6 +2090,12 @@ enum Parsed {
     ProjectRetire(bool),
     /// The id typed again matched.
     ProjectDelete,
+    /// The `rev` the switch is against, and the stage to move to.
+    ProjectStage(i64, Stage),
+    /// The grant to write, its `expires` already in its conditions.
+    GrantCreate(NewGrant),
+    /// Why the grant ends.
+    GrantRevoke(String),
 }
 
 impl Mutation {
@@ -2368,6 +2374,49 @@ impl Mutation {
                 }
                 (request.idempotency_key, request.host, Parsed::ProjectDelete)
             }
+            Op::ProjectStage => {
+                let request: StageProject = body(bytes)?;
+                let stage: Stage = request.stage.parse()?;
+                (
+                    request.idempotency_key,
+                    request.host,
+                    Parsed::ProjectStage(request.rev, stage),
+                )
+            }
+            Op::GrantCreate => {
+                let request: CreateGrant = body(bytes)?;
+                let kind = request.kind.parse::<GrantKind>()?;
+                // The checks `tiller grant create` makes before the store's own.
+                let mut conditions = request.conditions;
+                if !conditions.is_object() {
+                    return Err(Error::Usage("conditions is a JSON object".into()).into());
+                }
+                if let Some(expires) = &request.expires {
+                    conditions["expires_at"] =
+                        json!(tiller_core::time::lisbon::parse_when(expires)?);
+                }
+                let new = NewGrant {
+                    project_id: target.clone().unwrap_or_default(),
+                    kind,
+                    conditions,
+                };
+                (
+                    request.idempotency_key,
+                    request.host,
+                    Parsed::GrantCreate(new),
+                )
+            }
+            Op::GrantRevoke => {
+                let request: RevokeGrant = body(bytes)?;
+                let reason = request
+                    .reason
+                    .unwrap_or_else(|| "revoked by the owner".into());
+                (
+                    request.idempotency_key,
+                    request.host,
+                    Parsed::GrantRevoke(reason),
+                )
+            }
         };
         Ok(Self {
             op,
@@ -2522,6 +2571,8 @@ impl Mutation {
                 Done::of(store.run_unpause(ctx, &run.id)?)
             }
             Parsed::ProjectEdit(rev, edit) => Done::of(store.project_edit(ctx, id, rev, *edit)?),
+            Parsed::GrantCreate(new) => Done::of(store.grant_create(ctx, new)?),
+            Parsed::GrantRevoke(reason) => Done::of(store.grant_revoke(ctx, id, &reason)?),
             // Need the daemon's starter, the agent's pane or this host's
             // home, so they never reach the store alone.
             Parsed::StartOrchestrator(_)
@@ -2534,8 +2585,9 @@ impl Mutation {
             | Parsed::StartRun
             | Parsed::ProjectAdd(..)
             | Parsed::ProjectRetire(_)
-            | Parsed::ProjectDelete => Err(Error::Internal(
-                "a start, a restart, an agent control or a project add, retire or delete runs through its starter, its pane or its home"
+            | Parsed::ProjectDelete
+            | Parsed::ProjectStage(..) => Err(Error::Internal(
+                "a start, a restart, an agent control or a project add, retire, delete or stage switch runs through its starter, its pane or its home"
                     .into(),
             )),
         }
@@ -2566,8 +2618,10 @@ impl Mutation {
                 relaunch_here(hands.controls()?, store, ctx, id, relaunch)
             }
             Parsed::StartRun => start_run_here(hands.controls()?, store, ctx, id),
-            parsed
-            @ (Parsed::ProjectAdd(..) | Parsed::ProjectRetire(_) | Parsed::ProjectDelete) => {
+            parsed @ (Parsed::ProjectAdd(..)
+            | Parsed::ProjectRetire(_)
+            | Parsed::ProjectDelete
+            | Parsed::ProjectStage(..)) => {
                 let done =
                     Self { parsed, ..self }.apply_project(store, ctx, hands.home, hands.panes())?;
                 return Ok(done.response());
@@ -2614,9 +2668,10 @@ impl Mutation {
 }
 
 impl Mutation {
-    /// A project add, retire or delete (D22), the same on this host's board
-    /// and in `peer serve`: they need this host's home, for `config.toml`
-    /// and a clone, and its panes, for the agents a retire or a delete
+    /// A project add, retire or delete (D22), or a stage switch (UA-43), the
+    /// same on this host's board and in `peer serve`: they need this host's
+    /// home, for `config.toml`, a clone and the checkout a switch to
+    /// pre-launch reads, and its panes, for the agents a retire or a delete
     /// stops.
     fn apply_project(
         self,
@@ -2646,7 +2701,28 @@ impl Mutation {
                     .map_err(|error| stopped_or(id, error))?;
                 Ok(Done::of(deleted)?)
             }
-            _ => Err(Error::Internal("not a project add, retire or delete".into()).into()),
+            Parsed::ProjectStage(rev, stage) => {
+                // To pre-launch, the reviewed commit is the default-branch
+                // head read now, as `tiller project stage` reads it. A
+                // replay, a stale rev or the current stage fetches nothing.
+                let head = if store.stage_reads_head(ctx, id, rev, stage)? {
+                    let project: tiller_core::domain::Project =
+                        get_row(store.conn(), "project", id)?;
+                    Some(prelaunch_head(home, &project)?)
+                } else {
+                    None
+                };
+                Ok(Done::of(store.project_stage(
+                    ctx,
+                    id,
+                    rev,
+                    stage,
+                    head.as_deref(),
+                )?)?)
+            }
+            _ => Err(
+                Error::Internal("not a project add, retire, delete or stage switch".into()).into(),
+            ),
         }
     }
 }
@@ -3327,35 +3403,16 @@ async fn close(
 #[utoipa::path(post, path = "/api/v1/projects/{id}/stage", tag = "mutations", request_body = StageProject,
     params(("id" = String, Path)),
     responses((status = 200, body = MutationResponse), (status = 409, body = ErrorBody),
-              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+              (status = 502, body = ErrorBody, description = "`peer_refused`"),
+              (status = 503, body = ErrorBody, description = "`peer_unreachable`: nothing was sent or queued"),
+              (status = 504, body = ErrorBody, description = "`forward_uncertain`: retry with the same key")))]
 async fn stage_project(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers).await?;
-    let request: StageProject = body(&bytes)?;
-    not_forwarded(&state, request.host.as_deref(), "a stage switch").await?;
-    let stage: Stage = request.stage.parse()?;
-    let home = state.0.home.clone();
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, _| {
-            // To pre-launch, the reviewed commit is the default-branch head
-            // read now, as `tiller project stage` reads it. A replay, a stale
-            // rev or the current stage fetches nothing.
-            let head = if store.stage_reads_head(ctx, &id, request.rev, stage)? {
-                let project: tiller_core::domain::Project = get_row(store.conn(), "project", &id)?;
-                Some(prelaunch_head(&home, &project)?)
-            } else {
-                None
-            };
-            Done::of(store.project_stage(ctx, &id, request.rev, stage, head.as_deref())?)
-        },
-    )
-    .await
+    submit_project(state, headers, Op::ProjectStage, Some(id), bytes).await
 }
 
 #[utoipa::path(post, path = "/api/v1/projects/{id}/asks", tag = "mutations", request_body = AskNote,
@@ -4364,13 +4421,26 @@ async fn edit_project(
 }
 
 #[utoipa::path(get, path = "/api/v1/projects/{id}/grants", tag = "reads",
-    params(("id" = String, Path)),
-    responses((status = 200, body = ProjectGrants), (status = 404, body = ErrorBody)))]
+    params(("id" = String, Path), HostQuery),
+    responses((status = 200, body = ProjectGrants), (status = 404, body = ErrorBody),
+              (status = 503, body = ErrorBody, description = "`peer_unreachable`: the peer `host` names did not answer")))]
 async fn project_grants(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<HostQuery>,
 ) -> ApiResult<ProjectGrants> {
-    read(&state, move |store| {
+    if let Some(grants) = project_read(&state, query.host.as_deref(), &id, "/grants").await? {
+        return Ok(Json(grants));
+    }
+    read(&state, move |store| grants_of(store, id))
+        .await
+        .map(Json)
+}
+
+/// Every grant of project `id`, as Grants and settings lists them, for this
+/// host's board and a peer's `projects/{id}/grants` query alike (UA-43).
+pub(crate) fn grants_of(store: &Store, id: String) -> tiller_core::Result<ProjectGrants> {
+    {
         let grants = store
             .grants(&id)?
             .into_iter()
@@ -4391,9 +4461,7 @@ async fn project_grants(
             project: id,
             grants,
         })
-    })
-    .await
-    .map(Json)
+    }
 }
 
 #[utoipa::path(post, path = "/api/v1/projects/{id}/grants", tag = "mutations", request_body = CreateGrant,
@@ -4401,65 +4469,32 @@ async fn project_grants(
     responses((status = 200, body = MutationResponse, description = "`data` is the new grant"),
               (status = 400, body = ErrorBody, description = "`usage`: the kind, the conditions or `expires` is not one a grant takes"),
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
-              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+              (status = 502, body = ErrorBody, description = "`peer_refused`"),
+              (status = 503, body = ErrorBody, description = "`peer_unreachable`: nothing was sent or queued"),
+              (status = 504, body = ErrorBody, description = "`forward_uncertain`: retry with the same key")))]
 async fn create_grant(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers).await?;
-    let request: CreateGrant = body(&bytes)?;
-    not_forwarded(&state, request.host.as_deref(), "a grant").await?;
-    let kind = request.kind.parse::<GrantKind>()?;
-    // The checks `tiller grant create` makes before the store's own.
-    let mut conditions = request.conditions;
-    if !conditions.is_object() {
-        return Err(Error::Usage("conditions is a JSON object".into()).into());
-    }
-    if let Some(expires) = &request.expires {
-        conditions["expires_at"] = json!(tiller_core::time::lisbon::parse_when(expires)?);
-    }
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, _| {
-            Done::of(store.grant_create(
-                ctx,
-                NewGrant {
-                    project_id: id,
-                    kind,
-                    conditions,
-                },
-            )?)
-        },
-    )
-    .await
+    submit(&state, &headers, Op::GrantCreate, Some(id), &bytes).await
 }
 
 #[utoipa::path(delete, path = "/api/v1/grants/{id}", tag = "mutations", request_body = RevokeGrant,
     params(("id" = String, Path, description = "A grant's ULID or its short form")),
     responses((status = 200, body = MutationResponse, description = "`data` is the revoked grant; revoking a revoked grant returns it"),
               (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
-              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+              (status = 502, body = ErrorBody, description = "`peer_refused`"),
+              (status = 503, body = ErrorBody, description = "`peer_unreachable`: nothing was sent or queued"),
+              (status = 504, body = ErrorBody, description = "`forward_uncertain`: retry with the same key")))]
 async fn revoke_grant(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers).await?;
-    let request: RevokeGrant = body(&bytes)?;
-    not_forwarded(&state, request.host.as_deref(), "a grant revoke").await?;
-    let reason = request
-        .reason
-        .unwrap_or_else(|| "revoked by the owner".into());
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, _| Done::of(store.grant_revoke(ctx, &id, &reason)?),
-    )
-    .await
+    submit(&state, &headers, Op::GrantRevoke, Some(id), &bytes).await
 }
 
 #[utoipa::path(get, path = "/api/v1/start-settings", tag = "reads",
