@@ -9,8 +9,8 @@ Started Monday 2026-11-16, Lisbon time.
 On Monday 2026-11-16 at about 15:30 Lisbon time, the owner said yes to every item below. Build each one as its recommendation in `usability-audit.md` ("Needs owner") says. For UA-15 part 2 the owner added the model: a person visits one board, and that board listens to its peers and shows their work in its own view. So every reply, read state and action on a peer's ask goes through the board the owner is on.
 
 - [x] UA-57 (P0): a `local-only` project starts its runs from the checkout's default branch when it is ahead of `origin` (`docs/spec/state.md` section 3, `base_sha`)
-- [ ] UA-15 part 2 (P0): the answer to an ask sent to a peer project shows on the board that sent it
-- [ ] UA-18: cancel and open an ask on the board (`POST /api/v1/asks/{id}/cancel`, `GET /api/v1/asks/{id}`)
+- [x] UA-15 part 2 (P0): the answer to an ask sent to a peer project shows on the board that sent it
+- [x] UA-18: cancel and open an ask on the board (`POST /api/v1/asks/{id}/cancel`, `GET /api/v1/asks/{id}`)
 - [x] UA-19: a worker's `blocked` or `needs-decision` report puts its card in "Needs you" (a `recovery` item)
 - [x] UA-20: "Start" a run on the board (`POST /api/v1/cards/{id}/runs`)
 - [x] UA-38: a note about an ended approval leaves the list
@@ -18,7 +18,7 @@ On Monday 2026-11-16 at about 15:30 Lisbon time, the owner said yes to every ite
 - [x] UA-51: the store refuses a start on a held card
 - [x] UA-53: one spec sentence for `approvals.repo` of a `local-only` project with no repo
 - [x] UA-01: the spec names `refuses_runs` and the `floors` doctor check
-- [ ] UA-17: "Mark read" in the CLI (`tiller ask show <ask> --mark-read`)
+- [x] UA-17: "Mark read" in the CLI (`tiller ask show <ask> --mark-read`)
 - [x] UA-09: a short answer for a person at a terminal, the full record with `--json` or `--full`
 - [x] UA-03: the owner's CLI reaches a peer's work through the local daemon
 - [x] UA-30: one "Away" for every paired host
@@ -46,6 +46,9 @@ The owner skipped the full test passes on Monday 2026-11-16 to get a release out
 - [ ] UA-43: a grant made and revoked, and a stage switched, on a peer's project from main's board, through a real SSH link
 - [ ] UA-30: away mode started, edited and ended on main and the peer from main's board, with one status and one brief, through a real SSH link
 - [ ] UA-03: the owner CLI socket, the peer rows in the CLI lists and the forwarded card writes, with no walk on the bench
+- [ ] UA-15 part 2: a peer's answer on the tile, in the Inbox and in the ask panel, and Mark read forwarded, over a real `act` link
+- [ ] UA-18: the ask panel and its Cancel, on this host and on a peer (checked in fixture mode only)
+- [ ] UA-17: `tiller ask show <ask> --mark-read` from the owner's shell, then the Inbox and `tiller recap`
 - [ ] Every owner decision above, as each one lands
 - [ ] UA-19: the daemon's `recovery` item for a worker that waits 5 minutes with no item (R23), and the age of the report on the tile
 - [ ] UA-38: a new request or a rejection withdraws the notes of the PR's earlier approvals, and Withdraw works on a note whose approval ended
