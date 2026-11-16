@@ -10,6 +10,7 @@ import { useStanding } from "../board/peer-state";
 import { ActionFailure } from "./action-failure";
 import { ActionError, sendMutation } from "./api";
 import { answeredStore, markAnswered } from "./answered";
+import { awaitsDecision, useApprovalPr } from "./approval-facts";
 import { shortSha } from "./format";
 import { GitIcon, InfoIcon } from "./icons";
 import { ReceiptPanel } from "./receipt";
@@ -75,14 +76,73 @@ function useDecide(item: AttentionItem, decision: Decision, onStale: (r: StaleRe
   });
 }
 
+// An approval while the checks fail can only end unused: the daemon marks it
+// stale at once and merges nothing. So Approve is off until they pass. Reject
+// stays on.
+const CHECKS_FAILED = "The checks failed, so an approval would merge nothing.";
+
+// What stands in place of the buttons on a merge item that asks for no
+// decision: what happened to the approval, what comes next, and how the note
+// leaves the list. The item's question says why (the daemon's words).
+function ApprovalNotice({ item }: { item: AttentionItem }) {
+  const approval = item.approval;
+  if (!approval) return null;
+  const sha = shortSha(approval.head_sha);
+  const text =
+    approval.state === "stale"
+      ? {
+          head: "Nothing merged",
+          body: `The approval of ${sha} ended before the merge, so there is nothing to approve here. The orchestrator asks for a new approval when the pull request is ready. That request shows as its own item.`,
+        }
+      : approval.state === "accepted"
+        ? {
+            head: "Your approval stands",
+            body: `The approval of ${sha} is saved. The daemon lands the pull request by itself once this is fixed.`,
+          }
+        : approval.state === "executing"
+          ? { head: "The merge is under way", body: `The daemon merges ${sha} now.` }
+          : {
+              head: `This approval is ${approval.state}`,
+              body: "There is nothing more to decide here.",
+            };
+  return (
+    <div className="appr apn" role="note" data-testid="approval-notice">
+      <div className="a-h">
+        <InfoIcon />
+        {text.head}
+      </div>
+      <p>{text.body}</p>
+      <p className="apn-sub">
+        This note leaves the list when the card closes.
+        {ownerOf(item) ? null : (
+          <>
+            {" "}
+            To remove it now:{" "}
+            <code>tiller attention withdraw {item.id.slice(-7)} --reason seen</code>
+          </>
+        )}
+      </p>
+    </div>
+  );
+}
+
 // Approve or reject, bound to the head SHA the board shows (state.md, Approval).
 export function ApproveBlock({ item }: { item: AttentionItem }) {
+  return awaitsDecision(item) || !item.approval ? (
+    <ApproveBlockFor item={item} />
+  ) : (
+    <ApprovalNotice item={item} />
+  );
+}
+
+function ApproveBlockFor({ item }: { item: AttentionItem }) {
   const [refusal, setRefusal] = useState<StaleRefusal | null>(null);
   const answered = useStore(answeredStore)[item.id]?.answer;
   const standing = useStanding(item);
   const off = standing.canAct ? null : standing.reason;
   const accept = useDecide(item, "accept", setRefusal);
   const reject = useDecide(item, "reject", setRefusal);
+  const checksFailed = useApprovalPr(item).pr?.checks === "failing";
   const approval = item.approval;
   if (!approval) return null;
 
@@ -138,8 +198,8 @@ export function ApproveBlock({ item }: { item: AttentionItem }) {
                 type="button"
                 className="btn primary lg"
                 // Until the new head arrives there is nothing current to approve.
-                disabled={pending || headSha === shown?.shown || off !== null}
-                title={off ?? undefined}
+                disabled={pending || headSha === shown?.shown || off !== null || checksFailed}
+                title={off ?? (checksFailed ? CHECKS_FAILED : undefined)}
                 onClick={accept.trigger}
               >
                 {accept.pending ? "Approving..." : `Approve ${shortSha(headSha)}`}
@@ -184,11 +244,16 @@ export function ApproveActions({ item }: { item: AttentionItem | undefined }) {
 }
 
 function ApproveActionsFor({ item }: { item: AttentionItem }) {
+  return awaitsDecision(item) ? <ApproveButtons item={item} /> : <ApprovalNotice item={item} />;
+}
+
+function ApproveButtons({ item }: { item: AttentionItem }) {
   const [refusal, setRefusal] = useState<StaleRefusal | null>(null);
   const standing = useStanding(item);
   const off = standing.canAct ? null : standing.reason;
   const accept = useDecide(item, "accept", setRefusal);
   const reject = useDecide(item, "reject", setRefusal);
+  const checksFailed = useApprovalPr(item).pr?.checks === "failing";
   const approval = item.approval;
   if (!approval) return null;
   const headSha = approval.head_sha;
@@ -225,14 +290,18 @@ function ApproveActionsFor({ item }: { item: AttentionItem }) {
         <button
           type="button"
           className="btn primary"
-          disabled={pending || headSha === stale?.shown || off !== null}
-          title={off ?? undefined}
+          disabled={pending || headSha === stale?.shown || off !== null || checksFailed}
+          title={off ?? (checksFailed ? CHECKS_FAILED : undefined)}
           onClick={accept.trigger}
         >
           {accept.pending ? "Approving..." : `Approve ${shortSha(headSha)}`}
         </button>
       </div>
-      <p className="meta">Bound to {shortSha(headSha)}. A new push asks again.</p>
+      <p className="meta">
+        {checksFailed
+          ? "Approve is off until the checks pass."
+          : `Bound to ${shortSha(headSha)}. A new push asks again.`}
+      </p>
       <ActionFailure error={otherError} host={ownerOf(item)} />
     </div>
   );

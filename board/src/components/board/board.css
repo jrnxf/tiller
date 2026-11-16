@@ -2089,6 +2089,9 @@ a.card:hover {
 .cq .apf {
   margin: 4px 0 10px;
 }
+.cq .apn {
+  margin-bottom: 0;
+}
 /* The drawer is narrow: one option per line. */
 .card-page.in-drawer .cq .opts {
   grid-template-columns: minmax(0, 1fr);

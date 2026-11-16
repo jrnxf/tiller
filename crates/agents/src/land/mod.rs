@@ -277,9 +277,12 @@ impl Lander<'_> {
                 let card = approval.card_id.clone();
                 let landed = self.stale(lock, store, approval, "checks failed")?;
                 if let Some(card) = card {
+                    // The owner reads this as an Inbox headline: a short
+                    // hash, what happened and what did not.
                     let why = format!(
-                        "PR #{} checks failed at {}; the merge approval is stale",
-                        pr.number, view.head_sha
+                        "PR #{}: the checks failed at {} after the approval. Nothing merged.",
+                        pr.number,
+                        view.head_sha.get(..12).unwrap_or(&view.head_sha)
                     );
                     self.notice(lock, store, &card, landed.approval(), "checks", why)?;
                 }

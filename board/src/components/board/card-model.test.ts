@@ -1,7 +1,14 @@
 import { expect, test } from "vitest";
 
 import type { CardApproval, CardPr, CardReview, TimelineEntry } from "../../lib/api-types";
-import { approvalFor, approvalStanding, mergeTimeline, reviewFor, sameSha } from "./card-model";
+import {
+  approvalFor,
+  approvalStanding,
+  endedAtSameHead,
+  mergeTimeline,
+  reviewFor,
+  sameSha,
+} from "./card-model";
 
 const pr = (head: string, state: CardPr["state"] = "open"): CardPr => ({
   id: "pr1",
@@ -55,6 +62,19 @@ test("a replaced stale approval does not hide the current one, in either order",
   const current = { ...approval("accepted", "aaa"), id: "new" };
   expect(approvalFor([stale, current], pr("aaa"))?.id).toBe("new");
   expect(approvalFor([current, stale], pr("aaa"))?.id).toBe("new");
+});
+
+test("a rejection after a stale approval reads as the rejection", () => {
+  const stale = { ...approval("stale", "aaa"), id: "01A" };
+  const rejected = { ...approval("rejected", "aaa"), id: "01B" };
+  expect(approvalFor([stale, rejected], pr("aaa"))?.id).toBe("01B");
+  expect(approvalFor([rejected, stale], pr("aaa"))?.id).toBe("01B");
+});
+
+test("a stale approval at the head the PR still has ended without a push", () => {
+  expect(endedAtSameHead(approval("stale", "AAA"), pr("aaa"))).toBe(true);
+  expect(endedAtSameHead(approval("stale", "aaa"), pr("bbb"))).toBe(false);
+  expect(endedAtSameHead(approval("accepted", "aaa"), pr("aaa"))).toBe(false);
 });
 
 test("the approval for a PR is the one bound to it", () => {

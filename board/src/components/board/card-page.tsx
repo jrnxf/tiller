@@ -57,7 +57,14 @@ import {
   useOwnedBy,
   useStanding,
 } from "./peer-state";
-import { approvalFor, approvalStanding, mergeTimeline, reviewFor, sameSha } from "./card-model";
+import {
+  approvalFor,
+  approvalStanding,
+  endedAtSameHead,
+  mergeTimeline,
+  reviewFor,
+  sameSha,
+} from "./card-model";
 import { durationSeconds, formatAge, formatLisbonMoment, secondsSince, shortSha } from "./format";
 import { FOCUS_TOOLTIP, useOpenInTerminal, useOpenKey } from "./terminal-open";
 import { LiveTerminal, TerminalToggle, useTerminalOpen } from "./live-terminal";
@@ -467,6 +474,8 @@ function PullRequest({
   const approval = approvalFor(approvals, pr);
   const standing = approval ? approvalStanding(approval, pr) : null;
   const stale = standing === "stale";
+  // Ended by the daemon at the head the pull request still has: no push moved it.
+  const ended = stale && approval !== null && endedAtSameHead(approval, pr);
   const checkTone = pr.checks === "passing" ? "ok" : pr.checks === "failing" ? "bad" : "yel";
   const who = approval?.decided_by === "owner" ? "you" : (approval?.decided_by ?? "someone");
   return (
@@ -492,8 +501,8 @@ function PullRequest({
           <dl>
             <dt>Head</dt>
             <dd>
-              <span className={`sha${stale ? " new" : ""}`}>{shortSha(pr.head_sha)}</span>
-              {stale && approval ? (
+              <span className={`sha${stale && !ended ? " new" : ""}`}>{shortSha(pr.head_sha)}</span>
+              {stale && approval && !ended ? (
                 <span className="meta">
                   +{approval.newer_commits.length} commit
                   {approval.newer_commits.length === 1 ? "" : "s"} since approval
@@ -544,6 +553,15 @@ function PullRequest({
                     by {who}
                     {approval.decided_at ? `, ${formatLisbonMoment(approval.decided_at)}` : ""},
                     bound to <span className="sha">{shortSha(approval.head_sha ?? "")}</span>
+                  </span>
+                </>
+              ) : ended ? (
+                <>
+                  <span className="lab sm yel">ended</span>
+                  <span className="meta">
+                    before the merge, at{" "}
+                    <span className="sha">{shortSha(approval?.head_sha ?? "")}</span>. Nothing
+                    merged.
                   </span>
                 </>
               ) : stale ? (
@@ -796,12 +814,22 @@ export function CardPage({
       {staleApproval && stalePr ? (
         <div className="pk-banner">
           <WarnIcon />
-          <div>
-            <b>Approval is stale.</b> It was bound to{" "}
-            <span className="sha old">{shortSha(staleApproval.head_sha)}</span> and the head is now{" "}
-            <span className="sha new">{shortSha(stalePr.head_sha)}</span>. Merging needs a fresh
-            approval.
-          </div>
+          {endedAtSameHead(staleApproval, stalePr) ? (
+            <div data-testid="approval-ended">
+              <b>Nothing merged.</b> The approval of{" "}
+              <span className="sha">{shortSha(staleApproval.head_sha ?? "")}</span> ended before the
+              merge
+              {stalePr.checks === "failing" ? ": the checks failed" : ""}. Merging needs a new
+              approval. The orchestrator asks for one when the pull request is ready.
+            </div>
+          ) : (
+            <div>
+              <b>Approval is stale.</b> It was bound to{" "}
+              <span className="sha old">{shortSha(staleApproval.head_sha)}</span> and the head is
+              now <span className="sha new">{shortSha(stalePr.head_sha)}</span>. Merging needs a
+              fresh approval.
+            </div>
+          )}
         </div>
       ) : null}
 

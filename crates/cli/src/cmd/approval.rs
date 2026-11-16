@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 use tiller_agents::handoff::ReturnBrief;
 use tiller_agents::land::DaemonLock;
 use tiller_core::domain::{
-    AnsweredVia, Approval, ApprovalAction, ApprovalKind, ApprovalState, GrantKind, Pr, Role, Run,
-    Worktree,
+    AnsweredVia, Approval, ApprovalAction, ApprovalKind, ApprovalState, Checks, GrantKind, Pr,
+    Role, Run, Worktree,
 };
 use tiller_core::state::approvals::{Decision, NewApproval, NewGrant};
 use tiller_core::state::{find, get, list, resolve_card, resolve_id};
@@ -356,6 +356,9 @@ struct About {
     card: Option<(String, String)>,
     pr: Option<(i64, String)>,
     head: Option<String>,
+    /// The pull request's checks, as the daemon last read them: a failure
+    /// lands nothing at this head, and a pending run makes the land wait.
+    checks: Option<Checks>,
 }
 
 impl About {
@@ -368,12 +371,14 @@ impl About {
         let pr = approval
             .pr_id
             .as_deref()
-            .and_then(|id| get::<Pr>(conn, "pr", id).ok())
-            .map(|pr| (pr.number, pr.url));
+            .and_then(|id| get::<Pr>(conn, "pr", id).ok());
+        let checks = pr.as_ref().map(|pr| pr.checks);
+        let pr = pr.map(|pr| (pr.number, pr.url));
         Self {
             approval: approval.id.clone(),
             card,
             pr,
+            checks,
             head: approval
                 .head_sha
                 .as_deref()
@@ -416,7 +421,15 @@ impl About {
             Some((number, _)) => format!("PR #{number} of {}", self.subject()),
             None => self.subject(),
         };
-        if daemon {
+        if self.checks == Some(Checks::Failure) {
+            // The land sequence ends an approval whose checks failed
+            // (`authority.md` section 6, step 3), so say it before it happens.
+            format!(
+                "Approved {what} at {head}, but its checks fail. Nothing lands: the daemon ends this approval unused. After the checks pass, the orchestrator asks again."
+            )
+        } else if daemon && self.checks == Some(Checks::Pending) {
+            format!("Approved {what} at {head}. The daemon lands it once its checks pass.")
+        } else if daemon {
             format!("Approved {what} at {head}. The daemon lands it now.")
         } else {
             format!(
@@ -432,6 +445,29 @@ impl About {
         )
     }
 
+    /// Why nothing can be decided or landed: what became of the newest
+    /// approval, and who moves next.
+    fn ended(&self, conn: &rusqlite::Connection, state: ApprovalState) -> String {
+        let head = self.head.as_deref().unwrap_or("its head");
+        let what = match &self.pr {
+            Some((number, _)) => format!("PR #{number} at {head}"),
+            None => head.to_owned(),
+        };
+        match state {
+            ApprovalState::Stale => {
+                let why = stale_reason(conn, &self.approval)
+                    .map(|why| format!(" ({why})"))
+                    .unwrap_or_default();
+                format!(
+                    "the approval of {what} ended before the merge{why}. Nothing merged. The orchestrator asks for a new approval when the pull request is ready"
+                )
+            }
+            ApprovalState::Rejected => format!("the approval of {what} was rejected"),
+            ApprovalState::Succeeded => format!("{what} has landed"),
+            other => format!("the approval of {what} is {other}"),
+        }
+    }
+
     fn landed(&self, sha: Option<&str>) -> String {
         let what = match &self.pr {
             Some((number, _)) => format!("PR #{number} of {}", self.subject()),
@@ -445,6 +481,20 @@ impl About {
             None => format!("Landed {what}."),
         }
     }
+}
+
+/// The reason the daemon gave when it marked an approval stale ("checks
+/// failed", "head moved to ..."), from the event that did it.
+fn stale_reason(conn: &rusqlite::Connection, approval: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT json_extract(payload, '$.reason') FROM events
+         WHERE entity = 'approval' AND entity_id = ?1 AND kind = 'approval.stale'
+         ORDER BY seq DESC LIMIT 1",
+        [approval],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
 }
 
 /// `tiller land`: the owner asks the daemon to land and waits for the result.
@@ -525,6 +575,14 @@ pub fn land(app: &App, args: Land) -> Done {
                 ))
                 .hint(About::of(store.conn(), &approval).review_step()));
             }
+            ApprovalState::Stale => {
+                let about = About::of(store.conn(), &approval);
+                return Err(Failure::refused(format!(
+                    "{} did not land: {}",
+                    about.name(),
+                    about.ended(store.conn(), ApprovalState::Stale)
+                )));
+            }
             other => {
                 let why = approval
                     .result
@@ -560,21 +618,28 @@ fn resolve_land_target(conn: &rusqlite::Connection, input: &str) -> Result<Strin
         "card_id = ?1 AND kind = 'merge' ORDER BY requested_at DESC, id DESC",
         &[&card.id],
     )?;
-    approvals
-        .into_iter()
-        .find(|approval| {
-            matches!(
-                approval.state,
-                ApprovalState::Requested
-                    | ApprovalState::Accepted
-                    | ApprovalState::Executing
-                    | ApprovalState::Uncertain
-            )
-        })
-        .map(|approval| approval.id)
-        .ok_or_else(|| {
-            Failure::refused(format!("{} has no pending merge approval", card.display_id))
-        })
+    let pending = approvals.iter().find(|approval| {
+        matches!(
+            approval.state,
+            ApprovalState::Requested
+                | ApprovalState::Accepted
+                | ApprovalState::Executing
+                | ApprovalState::Uncertain
+        )
+    });
+    if let Some(approval) = pending {
+        return Ok(approval.id.clone());
+    }
+    // Nothing to decide: say what became of the newest one, so the owner
+    // does not have to look it up on the board.
+    Err(Failure::refused(match approvals.first() {
+        Some(last) => format!(
+            "{} has no pending merge approval: {}",
+            card.display_id,
+            About::of(conn, last).ended(conn, last.state)
+        ),
+        None => format!("{} has no pending merge approval", card.display_id),
+    }))
 }
 
 /// How often `tiller land` re-reads the approval while the daemon works.

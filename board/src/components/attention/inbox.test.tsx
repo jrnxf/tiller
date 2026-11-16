@@ -523,6 +523,33 @@ test("an approval shows the pull request it lands, with a link and its checks", 
   expect(detail).not.toContain("head_sha");
 });
 
+// UA-38: the daemon opens a merge item about an approval that already ended
+// (failed checks after the approval). A decision on it is always refused, so
+// it shows what happened and no Approve or Reject.
+test("a merge item whose approval ended shows what happened and no buttons", async () => {
+  stubDaemon("default");
+  await renderInbox("default", MERGE, (queryClient) =>
+    queryClient.setQueryData<AttentionResponse>(attentionQuery().queryKey, (attention) =>
+      attention
+        ? {
+            ...attention,
+            items: attention.items.map((item) =>
+              item.id === MERGE && item.approval
+                ? { ...item, approval: { ...item.approval, state: "stale" } }
+                : item,
+            ),
+          }
+        : attention,
+    ),
+  );
+
+  const notice = await screen.findByTestId("approval-notice");
+  expect(notice.textContent).toContain("Nothing merged");
+  expect(notice.textContent).toContain(`tiller attention withdraw ${MERGE.slice(-7)}`);
+  expect(screen.queryByRole("button", { name: /^Approve/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Reject" })).toBeNull();
+});
+
 test("approve sends the head SHA the board shows, once", async () => {
   stubDaemon("default", true);
   replies = [ok({ approval_id: "01JAPPR0000000000000000000" })];

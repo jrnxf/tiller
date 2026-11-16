@@ -242,6 +242,37 @@ fn approve_takes_a_card_and_says_what_to_review() {
     assert_eq!(out.error_code(), "refused", "{}", out.json);
 }
 
+/// An approval the daemon ended (failed checks) leaves nothing to decide.
+/// `approve` and `land` say what became of it and that nothing merged,
+/// instead of "no pending merge approval" alone.
+#[test]
+fn an_approval_that_ended_unused_says_why_and_that_nothing_merged() {
+    let world = World::initialized();
+    let approval = requested(&world);
+    world.must(&["approve", &approval, "--sha", &HEAD[..12]]);
+    world
+        .store()
+        .approval_stale(&Ctx::new(Actor::Daemon), &approval, "checks failed")
+        .unwrap();
+
+    for command in [
+        vec!["land", "alpha-1"],
+        vec!["approve", "alpha-1", "--sha", &HEAD[..12]],
+        vec!["land", approval.as_str()],
+    ] {
+        let out = world.run(&command);
+        assert_eq!(out.error_code(), "refused", "{}", out.json);
+        let said = out.json["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            said.contains(&format!(
+                "the approval of PR #7 at {} ended before the merge (checks failed). Nothing merged.",
+                &HEAD[..12]
+            )),
+            "{command:?}: {said}"
+        );
+    }
+}
+
 #[test]
 fn land_with_an_unreadable_result_exits_eight() {
     let world = World::initialized();

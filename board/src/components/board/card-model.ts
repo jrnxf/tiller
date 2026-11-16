@@ -35,19 +35,43 @@ export function approvalStanding(approval: CardApproval, pr: CardPr | null): App
   return "current";
 }
 
-// The approval that binds a PR: one that can still be acted on beats a stale or
-// spent one, whatever order the list came in.
-const RANK: Record<ApprovalStanding, number> = { current: 0, pending: 1, stale: 2, spent: 3 };
+// The approval that binds a PR: one that can still be acted on beats one that
+// ended, whatever order the list came in. Among those that ended (stale, used
+// or turned down) the newest decides, so a rejection after a stale approval
+// reads as the rejection. Ids are ULIDs: the larger one is the newer one.
+const LIVE: Record<ApprovalStanding, number | null> = {
+  current: 0,
+  pending: 1,
+  stale: null,
+  spent: null,
+};
+
+function beats(a: CardApproval, b: CardApproval, pr: CardPr): boolean {
+  const rankA = LIVE[approvalStanding(a, pr)];
+  const rankB = LIVE[approvalStanding(b, pr)];
+  if (rankA !== null && rankB !== null) return rankA < rankB;
+  if (rankA !== null || rankB !== null) return rankA !== null;
+  return a.id > b.id;
+}
 
 export function approvalFor(approvals: CardApproval[], pr: CardPr): CardApproval | null {
   let best: CardApproval | null = null;
   for (const approval of approvals) {
     if (approval.pr_id !== pr.id) continue;
-    if (!best || RANK[approvalStanding(approval, pr)] < RANK[approvalStanding(best, pr)]) {
-      best = approval;
-    }
+    if (!best || beats(approval, best, pr)) best = approval;
   }
   return best;
+}
+
+// A stale approval whose head is still the pull request's head did not go
+// stale by a push: the daemon ended it before the merge (failed checks, a
+// closed pull request, a grant that stopped holding).
+export function endedAtSameHead(approval: CardApproval, pr: CardPr): boolean {
+  return (
+    approval.state === "stale" &&
+    approval.head_sha !== null &&
+    sameSha(approval.head_sha, pr.head_sha)
+  );
 }
 
 // Merge the first page and the pages loaded later. Every page is newest first and

@@ -15,7 +15,8 @@ const NAMES = { recorded: "Recorded", delivered: "Delivered", done: "Done" } as 
 
 const FAILED: Record<string, string> = {
   failed: "Delivery failed. The daemon opened a recovery item for it.",
-  stale: "The head moved before the merge started, so the approval no longer applies.",
+  stale:
+    "Nothing merged. The approval ended before the merge started: the head moved, or the checks failed.",
   uncertain: "The merge was sent but its result could not be read. Reconcile resolves it.",
 };
 

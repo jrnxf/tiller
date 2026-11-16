@@ -1619,7 +1619,17 @@ fn timeline_text(event: &Event) -> String {
         "session.ended" => "ended the session".to_owned(),
         "session.resume_attempted" => "tried to resume the session".to_owned(),
         "approval.requested" => "asked for an approval".to_owned(),
-        "approval.decided" => "decided an approval".to_owned(),
+        // The owner reads who let the work land: their own click, or a
+        // standing grant of theirs.
+        "approval.decided" => match event.payload.get("accepted").and_then(Value::as_bool) {
+            Some(true) if field("decided_by").is_some_and(|by| by.starts_with("grant:")) => {
+                "approved the landing under a standing grant".to_owned()
+            }
+            Some(true) => "approved the landing".to_owned(),
+            Some(false) => "rejected the landing".to_owned(),
+            None => "decided an approval".to_owned(),
+        },
+        "approval.stale" => "ended an approval before the landing".to_owned(),
         "approval.executing" => "started the approved action".to_owned(),
         "approval.finished" => "finished the approved action".to_owned(),
         "pr.linked" => "linked a pull request".to_owned(),
@@ -2581,6 +2591,28 @@ mod tests {
         assert_eq!(
             text("ask.replied", serde_json::json!({"to": "ask"})),
             "replied to your ask"
+        );
+        // Who let the work land, and why an approval ended unused.
+        assert_eq!(
+            text(
+                "approval.decided",
+                serde_json::json!({"accepted": true, "decided_by": "grant:01ABC"})
+            ),
+            "approved the landing under a standing grant"
+        );
+        assert_eq!(
+            text(
+                "approval.decided",
+                serde_json::json!({"accepted": false, "decided_by": "owner"})
+            ),
+            "rejected the landing"
+        );
+        assert_eq!(
+            text(
+                "approval.stale",
+                serde_json::json!({"reason": "checks failed", "was": "accepted"})
+            ),
+            "ended an approval before the landing: checks failed"
         );
     }
 

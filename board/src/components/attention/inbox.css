@@ -694,6 +694,26 @@ a.irow:hover {
   color: var(--fg-3);
 }
 
+/* A merge item that asks for no decision: what happened, in place of buttons. */
+.apn p {
+  margin: 8px 0 0;
+  font-size: var(--fs-small);
+  line-height: 1.5;
+  color: var(--fg-2);
+  text-align: left;
+}
+.apn .apn-sub {
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+.apn code {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--mono);
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+
 /* Receipts */
 
 .receipt {
