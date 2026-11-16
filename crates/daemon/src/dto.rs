@@ -77,10 +77,15 @@ pub struct AskedRow {
     /// predates it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-    /// The ask's first line, at most 200 characters. Only on this host's
-    /// rows: a peer link carries no ask text.
+    /// The ask's first line, at most 200 characters. On this host's rows,
+    /// and on a peer's rows over an `act` pairing (`protocol.md` section
+    /// 10): a `read` link carries no ask text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// When the newest reply to the ask came, read or not; absent while it
+    /// has none. Carried as `summary` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered_at: Option<String>,
     /// The owning host's label, on every row once a peer is paired
     /// (`protocol.md` 7.3); absent on a host with none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1898,9 +1903,14 @@ pub struct ReplyItem {
     pub read_at: Option<String>,
     pub rev: i64,
     pub card: Option<ReplyCard>,
+    /// The owning host's label, on a peer's reply; absent on this host's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 }
 
 /// `GET /api/v1/projects/{id}/replies`: the unread replies, newest first.
+/// With a peer `host`, that peer's unread replies as its last snapshot
+/// carried them (`act` pairings only), each tagged with its label.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct RepliesResponse {
     pub replies: Vec<ReplyItem>,
@@ -1912,9 +1922,59 @@ pub struct RepliesResponse {
 #[serde(deny_unknown_fields)]
 pub struct MarkReplyRead {
     pub idempotency_key: String,
-    /// A paired peer's label. Refused: a reply is read on the daemon that
-    /// holds it, not forwarded.
+    /// A paired peer's reply: the mark is forwarded to that host.
     #[serde(default)]
+    pub host: Option<String>,
+}
+
+/// `POST /api/v1/asks/{id}/cancel`: the owner cancels an ask, as `ask.resolve
+/// cancelled` with the reason "cancelled by the owner on the board".
+/// Cancelling it again changes nothing.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CancelAsk {
+    pub idempotency_key: String,
+    /// A paired peer's ask: the cancel is forwarded to that host.
+    #[serde(default)]
+    pub host: Option<String>,
+}
+
+/// Whether an ask's words reached its orchestrator: the note they went as.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct AskDelivery {
+    /// The note's outbox state: `pending`, `delivered`, `acked` or `failed`.
+    pub state: String,
+    pub sent_at: String,
+    pub delivered_at: Option<String>,
+    /// When the orchestrator acknowledged the note.
+    pub seen_at: Option<String>,
+    pub failed_at: Option<String>,
+    pub failure_reason: Option<String>,
+}
+
+/// `GET /api/v1/asks/{id}`: one ask with its full text, whether it reached
+/// the orchestrator, and every reply, oldest first. With a peer `host`, the
+/// peer's ask, read over the link (`act` scope).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct AskDetail {
+    pub id: String,
+    pub project_id: String,
+    pub session_id: Option<String>,
+    /// `prompt`, `board`, `script` or `import`.
+    pub source: String,
+    pub text: String,
+    pub received_at: String,
+    /// `unresolved`, `new`, `followup`, `chat` or `cancelled`.
+    pub disposition: String,
+    pub resolved_at: Option<String>,
+    /// The note the ask went as; null when none was sent (an ask typed into
+    /// a pane, or one recorded while no orchestrator ran).
+    pub delivery: Option<AskDelivery>,
+    /// When the newest reply came; null while it has none.
+    pub answered_at: Option<String>,
+    pub replies: Vec<ReplyItem>,
+    /// The owning host's label, on a peer's ask; absent on this host's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
 }
 

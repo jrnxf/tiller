@@ -287,7 +287,8 @@ impl Connector for Frozen {
                 tiller_version: "test".into(),
                 server_time: now.to_string(),
             });
-            let snapshot = own_snapshot(&store, now).map_err(std::io::Error::other)?;
+            let snapshot =
+                own_snapshot(&store, now, PeerScope::Act).map_err(std::io::Error::other)?;
             let snapshot = Frame::Snapshot(Box::new(snapshot));
             Ok::<_, std::io::Error>(welcome.line()? + &snapshot.line()?)
         })();
@@ -739,7 +740,7 @@ fn serve_never_opens_onward_link() {
     add_card(&third, "a card on the third host");
     let third_card = {
         let store = third.open();
-        let snapshot = own_snapshot(&store, Timestamp::now()).unwrap();
+        let snapshot = own_snapshot(&store, Timestamp::now(), PeerScope::Act).unwrap();
         let rows = snapshot.queries.board.rows;
         rows.into_iter()
             .find(|row| row.title == "a card on the third host")
@@ -2025,6 +2026,160 @@ async fn forwarded_ask_is_recorded_on_the_peer_once() {
     .await;
     let error = refusal(&missing, StatusCode::NOT_FOUND);
     assert_eq!(error.host.as_deref(), Some("peer"));
+}
+
+/// An ask recorded on `fleet` from the board, and its orchestrator's reply:
+/// the ask's id and the reply's.
+fn asked_and_answered(fleet: &Fleet, text: &str) -> (String, String) {
+    use tiller_core::domain::AskSource;
+    use tiller_core::state::asks::NewAsk;
+    use tiller_core::state::replies::NewReply;
+    let mut store = fleet.open();
+    let ask = store
+        .ask_record(
+            &owner(),
+            Some("k-ask"),
+            NewAsk {
+                project_id: "alpha".into(),
+                session_id: None,
+                source: AskSource::Board,
+                text: text.into(),
+            },
+        )
+        .unwrap()
+        .value
+        .ask;
+    let orchestrator = tiller_core::Ctx::new(tiller_core::Actor::Session(
+        fleet.orchestrator_session.clone(),
+    ));
+    let reply = store
+        .reply_send(
+            &orchestrator,
+            None,
+            NewReply {
+                to: ask.id.clone(),
+                text: "Yes, at 02:00.".into(),
+                card: None,
+            },
+        )
+        .unwrap()
+        .value
+        .reply;
+    (ask.id, reply.id)
+}
+
+/// UA-15 and UA-18: an ask sent to a peer's project and answered there
+/// shows on the board host. The `act` link carries the ask's first line,
+/// its `answered_at` and the unread reply; the full ask is read over the
+/// link; Mark read and Cancel are forwarded and applied on the peer as
+/// `board@<viewer>`. The board host's own database is untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peers_answer_shows_on_the_board_and_is_marked_read_there() {
+    let pair = pair();
+    let (ask, reply) = asked_and_answered(&pair.peer, "Can the export run nightly?\nDetails.");
+    let (peers, _stop) = start(pair.board.dir.path(), Wire::new(pair.peer.dir.path()));
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    let board_before = last_seq(&pair.board);
+    let peer_before = last_seq(&pair.peer);
+
+    let board = get(&app, "/api/v1/board?filter=all").await;
+    let board: Value = serde_json::from_str(&board.body).unwrap();
+    let row = board["asked"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == ask.as_str())
+        .unwrap_or_else(|| panic!("no peer ask in {board}"));
+    assert_eq!(row["host"], "peer");
+    assert_eq!(row["summary"], "Can the export run nightly?");
+    assert!(row["answered_at"].is_string(), "{row}");
+
+    let replies = get(&app, "/api/v1/projects/alpha/replies?host=peer").await;
+    assert_eq!(replies.status, StatusCode::OK, "{}", replies.body);
+    let replies: Value = serde_json::from_str(&replies.body).unwrap();
+    assert_eq!(replies["replies"][0]["id"], reply.as_str(), "{replies}");
+    assert_eq!(replies["replies"][0]["host"], "peer");
+    assert_eq!(replies["replies"][0]["body"], "Yes, at 02:00.");
+    // This host's own list of the same project id is not the peer's.
+    let here = get(&app, "/api/v1/projects/alpha/replies").await;
+    let here: Value = serde_json::from_str(&here.body).unwrap();
+    assert_eq!(here["replies"], json!([]), "{here}");
+
+    let detail = get(&app, &format!("/api/v1/asks/{ask}?host=peer")).await;
+    assert_eq!(detail.status, StatusCode::OK, "{}", detail.body);
+    let detail: Value = serde_json::from_str(&detail.body).unwrap();
+    assert_eq!(detail["text"], "Can the export run nightly?\nDetails.");
+    assert_eq!(detail["host"], "peer");
+    assert_eq!(detail["replies"][0]["host"], "peer");
+    assert!(detail["answered_at"].is_string(), "{detail}");
+
+    let marked = send(
+        &app,
+        mutation(
+            "POST",
+            &format!("/api/v1/replies/{reply}/read"),
+            json!({"idempotency_key": "k-read", "host": "peer"}),
+            &[("cookie", &cookie)],
+        ),
+    )
+    .await;
+    let marked = applied(&marked);
+    assert_eq!(marked.host.as_deref(), Some("peer"));
+    assert!(marked.data["read_at"].is_string(), "{:?}", marked.data);
+    // The next snapshot drops the read reply from the board host's copy.
+    until("the read reply to leave the cache", || {
+        let federation = peers.federation();
+        let queries = federation.peers.first()?.queries.as_ref()?;
+        queries.replies.is_empty().then_some(())
+    })
+    .await;
+
+    let cancelled = send(
+        &app,
+        mutation(
+            "POST",
+            &format!("/api/v1/asks/{ask}/cancel"),
+            json!({"idempotency_key": "k-cancel", "host": "peer"}),
+            &[("cookie", &cookie)],
+        ),
+    )
+    .await;
+    let cancelled = applied(&cancelled);
+    assert_eq!(cancelled.data["ask"]["disposition"], "cancelled");
+    let events = events_since(&pair.peer, peer_before);
+    assert!(
+        events
+            .iter()
+            .any(|e| e.starts_with("reply.read") && e.contains("board@test-host")),
+        "{events:?}"
+    );
+    assert!(
+        events.iter().any(|e| e.starts_with("ask.resolve")
+            && e.contains("board@test-host")
+            && e.contains("cancelled by the owner on the board")),
+        "{events:?}"
+    );
+    assert_eq!(last_seq(&pair.board), board_before);
+}
+
+/// A `read` pairing carries no ask text, no answer time and no replies, and
+/// refuses the full ask (`protocol.md` section 10).
+#[test]
+fn a_read_link_carries_no_ask_text_or_replies() {
+    let pair = pair();
+    asked_and_answered(&pair.peer, "Can the export run nightly?");
+    let store = pair.peer.open();
+    let read = own_snapshot(&store, Timestamp::now(), PeerScope::Read).unwrap();
+    let row = &read.queries.board.asked[0];
+    assert_eq!((&row.summary, &row.answered_at), (&None, &None));
+    assert!(read.queries.replies.is_empty());
+    let act = own_snapshot(&store, Timestamp::now(), PeerScope::Act).unwrap();
+    let row = &act.queries.board.asked[0];
+    assert_eq!(row.summary.as_deref(), Some("Can the export run nightly?"));
+    assert!(row.answered_at.is_some());
+    assert_eq!(act.queries.replies.len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

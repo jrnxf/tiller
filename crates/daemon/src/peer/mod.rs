@@ -31,7 +31,7 @@ use tiller_core::state::peers::{PEER_PROTOCOL, parse_public_key};
 
 use crate::dto::{
     AgentsResponse, AttentionItem, AttentionResponse, BoardResponse, ChangeEvent, LinkState,
-    Machine, MachinesResponse, Project, ProjectsResponse,
+    Machine, MachinesResponse, Project, ProjectsResponse, ReplyItem,
 };
 use crate::views::SNAPSHOT_PATHS;
 
@@ -133,6 +133,12 @@ pub struct PeerQueries {
     pub machines: MachinesResponse,
     #[serde(rename = "/api/v1/projects")]
     pub projects: ProjectsResponse,
+    /// Every unread reply on the peer, newest first, the rows of each
+    /// project's `GET /api/v1/projects/{id}/replies`. Only an `act` pairing
+    /// carries them; empty over a `read` one and from a peer that predates
+    /// them.
+    #[serde(default)]
+    pub replies: Vec<ReplyItem>,
 }
 
 impl PeerQueries {

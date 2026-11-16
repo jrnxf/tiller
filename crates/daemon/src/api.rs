@@ -47,7 +47,7 @@ use tiller_core::host_config;
 // the link to a peer.
 use tiller_core::limits::{self, ANSWER_MAX_CHARS, COMMENT_MAX_CHARS, STEER_MAX_CHARS, within};
 use tiller_core::state::approvals::{Decision, NewGrant};
-use tiller_core::state::asks::NewAsk;
+use tiller_core::state::asks::{NewAsk, Resolution};
 use tiller_core::state::cards::{CardEdit, NewCard};
 use tiller_core::state::peers::{
     self as pairing, KeyFile, NewPairing, check_alias, check_label, fingerprint,
@@ -1304,6 +1304,8 @@ fn routes() -> Router<AppState> {
         .route("/api/v1/recap/seen", post(mark_recap_seen))
         .route("/api/v1/projects/{id}/replies", get(project_replies))
         .route("/api/v1/replies/{id}/read", post(mark_reply_read))
+        .route("/api/v1/asks/{id}", get(ask_detail))
+        .route("/api/v1/asks/{id}/cancel", post(cancel_ask))
         .route("/api/v1/signals", get(signals))
         .route("/api/v1/events", get(events))
         .route("/api/v1/session", get(session))
@@ -2172,6 +2174,8 @@ enum Parsed {
     AwayEdit(Value),
     /// Why away mode ended.
     AwayEnd(String),
+    MarkReplyRead,
+    CancelAsk,
 }
 
 impl Mutation {
@@ -2514,6 +2518,14 @@ impl Mutation {
                     Parsed::AwayEnd(reason),
                 )
             }
+            Op::MarkReplyRead => {
+                let request: MarkReplyRead = body(bytes)?;
+                (request.idempotency_key, request.host, Parsed::MarkReplyRead)
+            }
+            Op::CancelAsk => {
+                let request: CancelAsk = body(bytes)?;
+                (request.idempotency_key, request.host, Parsed::CancelAsk)
+            }
         };
         Ok(Self {
             op,
@@ -2691,6 +2703,25 @@ impl Mutation {
                     warning: None,
                 })
             }
+            Parsed::MarkReplyRead => {
+                let read = store.reply_read(ctx, id)?;
+                Ok(Done {
+                    data: serde_json::to_value(views::reply_item(read.value))?,
+                    events: read.events,
+                    replayed: read.replayed,
+                    outbox_id: None,
+                    approval_id: None,
+                    warning: None,
+                })
+            }
+            // The same core call as `tiller ask resolve <ask> cancelled`.
+            Parsed::CancelAsk => Done::of(store.ask_resolve(
+                ctx,
+                id,
+                Resolution::Cancelled {
+                    reason: Some(OWNER_CANCEL.to_owned()),
+                },
+            )?),
             // Need the daemon's starter, the agent's pane or this host's
             // home, so they never reach the store alone.
             Parsed::StartOrchestrator(_)
@@ -4868,42 +4899,27 @@ async fn mark_recap_seen(
     .await
 }
 
-fn reply_item(view: tiller_core::state::replies::ReplyView) -> ReplyItem {
-    let relation = view.card_relation.map(|relation| relation.to_string());
-    ReplyItem {
-        id: view.reply.id,
-        project: view.reply.project_id,
-        to: view.to.as_str().to_owned(),
-        ask_id: view.reply.ask_id,
-        message_id: view.reply.message_id,
-        question: view.question,
-        asked_at: view.asked_at.to_string(),
-        body: view.reply.body,
-        replied_at: view.reply.replied_at.to_string(),
-        read_at: view.reply.read_at.map(|at| at.to_string()),
-        rev: view.reply.rev,
-        card: view.card.map(|card| ReplyCard {
-            id: card.id,
-            display_id: card.display_id,
-            title: card.title,
-            relation,
-        }),
-    }
-}
-
 #[utoipa::path(get, path = "/api/v1/projects/{id}/replies", tag = "reads",
-    params(("id" = String, Path)),
+    params(("id" = String, Path), HostQuery),
     responses((status = 200, body = RepliesResponse), (status = 404, body = ErrorBody),
               (status = 503, body = ErrorBody)))]
 async fn project_replies(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<HostQuery>,
 ) -> ApiResult<RepliesResponse> {
+    // A peer's replies come from its last snapshot, so a link that is down
+    // still shows what it last carried (`protocol.md` section 10).
+    match addressed(&state, query.host.as_deref()).await? {
+        Addressed::Peer(view) => return Ok(Json(views::peer_replies(&view, &id))),
+        Addressed::Unlinked(_) => return Ok(Json(RepliesResponse { replies: vec![] })),
+        Addressed::Here => {}
+    }
     read(&state, move |store| {
         let project = store.project(&id)?;
         let replies = tiller_core::state::replies::unread(store.conn(), &project.id)?;
         Ok(RepliesResponse {
-            replies: replies.into_iter().map(reply_item).collect(),
+            replies: replies.into_iter().map(views::reply_item).collect(),
         })
     })
     .await
@@ -4913,33 +4929,76 @@ async fn project_replies(
 #[utoipa::path(post, path = "/api/v1/replies/{id}/read", tag = "mutations", request_body = MarkReplyRead,
     params(("id" = String, Path)),
     responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody),
-              (status = 404, body = ErrorBody),
-              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+              (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
+              (status = 502, body = ErrorBody, description = "`peer_refused`"),
+              (status = 503, body = ErrorBody, description = "`peer_unreachable`: nothing was sent or queued")))]
 async fn mark_reply_read(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers).await?;
-    let request: MarkReplyRead = body(&bytes)?;
-    not_forwarded(&state, request.host.as_deref(), "marking a reply read").await?;
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, _| {
-            let read = store.reply_read(ctx, &id)?;
-            Ok(Done {
-                data: serde_json::to_value(reply_item(read.value))?,
-                events: read.events,
-                replayed: read.replayed,
-                outbox_id: None,
-                approval_id: None,
-                warning: None,
-            })
-        },
-    )
-    .await
+    submit(&state, &headers, Op::MarkReplyRead, Some(id), &bytes).await
+}
+
+/// The reason an ask cancelled from the board records (`protocol.md` 7.4).
+const OWNER_CANCEL: &str = "cancelled by the owner on the board";
+
+#[utoipa::path(post, path = "/api/v1/asks/{id}/cancel", tag = "mutations", request_body = CancelAsk,
+    params(("id" = String, Path)),
+    responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody),
+              (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
+              (status = 422, body = ErrorBody, description = "`invalid_transition`: the ask is already resolved"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`"),
+              (status = 503, body = ErrorBody, description = "`peer_unreachable`: nothing was sent or queued")))]
+async fn cancel_ask(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    submit(&state, &headers, Op::CancelAsk, Some(id), &bytes).await
+}
+
+#[utoipa::path(get, path = "/api/v1/asks/{id}", tag = "reads",
+    params(("id" = String, Path), HostQuery),
+    responses((status = 200, body = AskDetail), (status = 403, body = ErrorBody),
+              (status = 404, body = ErrorBody), (status = 503, body = ErrorBody)))]
+async fn ask_detail(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<HostQuery>,
+) -> ApiResult<AskDetail> {
+    let host = query.host.as_deref();
+    let path = || {
+        if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(ApiError::from(Error::NotFound {
+                entity: "ask",
+                id: id.clone(),
+                candidates: Vec::new(),
+            }));
+        }
+        Ok(format!("asks/{id}"))
+    };
+    if let Some(mut detail) = host_read::<AskDetail>(&state, host, path, true).await? {
+        // The peer's ask, and the replies the owner marks read there.
+        let label = host.and_then(|host| {
+            state
+                .0
+                .peers
+                .federation()
+                .peer(host)
+                .map(|v| v.label.clone())
+        });
+        for reply in &mut detail.replies {
+            reply.host.clone_from(&label);
+        }
+        detail.host = label;
+        return Ok(Json(detail));
+    }
+    read(&state, move |store| views::ask_detail(store, &id))
+        .await
+        .map(Json)
 }
 
 #[utoipa::path(get, path = "/api/v1/host", tag = "reads",
@@ -6865,7 +6924,7 @@ async fn app_shell(
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, add_dep, remove_dep, close,
         cancel, reopen, start_card_run, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, steer_agent, interrupt_agent, stop_agent, pause_agent, unpause_agent, resume_agent, relaunch_agent, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, project_fields, edit_project, start_settings, host_config_read, set_config,
         project_grants, create_grant, revoke_grant,
-        away_start, away_edit, away_end, away_brief, host_fields, edit_host, crate::backups::list, crate::backups::take, pick_bug_project, recap, mark_recap_seen, project_replies, mark_reply_read, relabel_intervention, memory::view, memory::revision,
+        away_start, away_edit, away_end, away_brief, host_fields, edit_host, crate::backups::list, crate::backups::take, pick_bug_project, recap, mark_recap_seen, project_replies, mark_reply_read, ask_detail, cancel_ask, relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo, memory::repropose, memory::eval::eval_plan,
         memory::eval::eval_start, crate::retros::list_retros, crate::retros::run_retro,
         crate::pairings::list, crate::pairings::unpair, crate::pairings::revoke, session, login_code, logout
@@ -7595,7 +7654,9 @@ pub(crate) mod tests {
             assert_eq!(booted[index]["summary"], row["summary"], "{snapshot}");
         }
 
-        let peer = crate::peer::serve::own_snapshot(&fleet.open(), Timestamp::now()).unwrap();
+        let peer =
+            crate::peer::serve::own_snapshot(&fleet.open(), Timestamp::now(), PeerScope::Read)
+                .unwrap();
         let carried = &peer.queries.board.asked;
         assert_eq!(carried.len(), 2);
         assert!(
@@ -13862,6 +13923,90 @@ pub(crate) mod tests {
         assert_eq!(again.status, StatusCode::OK, "{}", again.body);
         let missing = get(&app, "/api/v1/projects/nope/replies").await;
         assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.body);
+
+        // UA-18: the ask's panel reads its full text, its answer time and
+        // every reply, read or not.
+        let detail = get(&app, &format!("/api/v1/asks/{}", ask.id)).await;
+        assert_eq!(detail.status, StatusCode::OK, "{}", detail.body);
+        let detail: Value = serde_json::from_str(&detail.body).unwrap();
+        assert_eq!(detail["text"], "Can the export run nightly?");
+        assert_eq!(detail["replies"][0]["id"], reply.id.as_str(), "{detail}");
+        assert!(detail["answered_at"].is_string(), "{detail}");
+        let missing = get(&app, "/api/v1/asks/NOPE").await;
+        assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.body);
+        // The ask was resolved by a new card: Cancel refuses it.
+        let cancel = |key: &str, id: &str| {
+            mutation(
+                "POST",
+                &format!("/api/v1/asks/{id}/cancel"),
+                json!({"idempotency_key": key}),
+                &headers,
+            )
+        };
+        let refused = send(&app, cancel("k-cancel", &ask.id)).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            refused.body
+        );
+    }
+
+    /// UA-18: Cancel on the board's ask panel resolves an open ask as
+    /// cancelled, with the reason the owner sees, and needs the owner.
+    #[tokio::test]
+    async fn the_owner_cancels_an_open_ask_from_the_board() {
+        use tiller_core::domain::AskSource;
+        let mut fleet = Fleet::new();
+        let ask = fleet
+            .store
+            .ask_record(
+                &Ctx::new(Actor::Board),
+                Some("k-ask"),
+                NewAsk {
+                    project_id: "alpha".into(),
+                    session_id: None,
+                    source: AskSource::Board,
+                    text: "Is the export still needed?".into(),
+                },
+            )
+            .unwrap()
+            .value
+            .ask;
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let path = format!("/api/v1/asks/{}/cancel", ask.id);
+        let anonymous = send(
+            &app,
+            mutation("POST", &path, json!({"idempotency_key": "k-0"}), &[]),
+        )
+        .await;
+        assert_ne!(anonymous.status, StatusCode::OK, "{}", anonymous.body);
+
+        let cookie = owner_cookie(fleet.dir.path());
+        let cancelled = send(
+            &app,
+            mutation(
+                "POST",
+                &path,
+                json!({"idempotency_key": "k-1"}),
+                &[("cookie", cookie.as_str())],
+            ),
+        )
+        .await;
+        assert_eq!(cancelled.status, StatusCode::OK, "{}", cancelled.body);
+        let detail = get(&app, &format!("/api/v1/asks/{}", ask.id)).await;
+        let detail: Value = serde_json::from_str(&detail.body).unwrap();
+        assert_eq!(detail["disposition"], "cancelled", "{detail}");
+        let reason: String = fleet
+            .open()
+            .conn()
+            .query_row(
+                "SELECT payload ->> '$.reason' FROM events WHERE txn = 'ask.resolve' AND payload ->> '$.disposition' = 'cancelled'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reason, "cancelled by the owner on the board");
     }
 
     /// The card page's Depends on row (P13): `POST` and `DELETE`

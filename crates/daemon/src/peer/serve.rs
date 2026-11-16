@@ -33,7 +33,7 @@ use crate::api::{
 use crate::dto::{Doctor, ErrorBody, MachinesResponse};
 use crate::mirror::Mirrors;
 use crate::sse::{self, Opening};
-use crate::views::{self, Filter, LocalHealth};
+use crate::views::{self, LocalHealth};
 
 /// Rows sent per read while replaying or streaming.
 const BATCH: i64 = 200;
@@ -497,7 +497,7 @@ impl Link<'_> {
 
     /// Sends a `snapshot` and returns its `last_event_seq`.
     fn send_snapshot(&self, output: &mut impl Write) -> Result<i64, ServeError> {
-        let snapshot = own_snapshot(&self.store, Timestamp::now())?;
+        let snapshot = own_snapshot(&self.store, Timestamp::now(), self.key.scope)?;
         let seq = snapshot.last_event_seq;
         send(output, &Frame::Snapshot(Box::new(snapshot)))?;
         Ok(seq)
@@ -532,6 +532,11 @@ impl Link<'_> {
                     detail.pane_tail = pane_tail_of(self.config.holder.as_deref(), target);
                 }
                 serde_json::to_value(detail)
+            }
+            // The ask's text and answer, which only an `act` pairing reads.
+            Query::Ask(id) => {
+                self.acts()?;
+                serde_json::to_value(views::ask_detail(store, &id)?)
             }
             Query::Tail(session) => {
                 let (session_id, pane, remote) = pane_target(store, &session)?;
@@ -813,6 +818,8 @@ enum Query {
     Card(String),
     Timeline(String, Option<i64>),
     Run(String),
+    /// An ask's text, delivery and replies, for an `act` key only.
+    Ask(String),
     Doctor,
     /// An agent's tail (`protocol.md` 7.4).
     Tail(String),
@@ -858,6 +865,7 @@ fn parse_query(path: &str) -> Result<Query, ApiError> {
         ["cards", id] if before.is_none() => Query::Card((*id).to_owned()),
         ["cards", id, "timeline"] => Query::Timeline((*id).to_owned(), before),
         ["runs", id] if before.is_none() => Query::Run((*id).to_owned()),
+        ["asks", id] if before.is_none() => Query::Ask((*id).to_owned()),
         ["doctor"] if before.is_none() => Query::Doctor,
         ["away", "brief"] if before.is_none() => Query::AwayBrief,
         ["agents", session, "terminal", "tail"] if before.is_none() => {
@@ -870,7 +878,7 @@ fn parse_query(path: &str) -> Result<Query, ApiError> {
         ["projects", id, "grants"] if before.is_none() => Query::Grants((*id).to_owned()),
         _ => {
             return Err(usage(
-                "a query is cards/{id}, cards/{id}/timeline, runs/{id}, doctor, agents/{session}/terminal/tail, agents/{session}/prompt, projects/{id}, projects/{id}/retire, projects/{id}/delete, projects/{id}/grants, projects/checkout, projects?retired=true or away/brief",
+                "a query is cards/{id}, cards/{id}/timeline, runs/{id}, asks/{id}, doctor, agents/{session}/terminal/tail, agents/{session}/prompt, projects/{id}, projects/{id}/retire, projects/{id}/delete, projects/{id}/grants, projects/checkout, projects?retired=true or away/brief",
             ));
         }
     };
@@ -878,6 +886,7 @@ fn parse_query(path: &str) -> Result<Query, ApiError> {
         Query::Card(id)
         | Query::Timeline(id, _)
         | Query::Run(id)
+        | Query::Ask(id)
         | Query::Tail(id)
         | Query::Prompt(id)
         | Query::Project(id)
@@ -914,8 +923,16 @@ fn checkout_query(params: &str) -> Result<Query, ApiError> {
 }
 
 /// This host's own rows, built by the same views as the boot snapshot, in
-/// one read transaction with `last_event_seq` (`protocol.md` 10.2).
-pub fn own_snapshot(store: &Store, now: Timestamp) -> tiller_core::Result<PeerSnapshot> {
+/// one read transaction with `last_event_seq` (`protocol.md` 10.2). An
+/// `act` key's snapshot also carries each ask's first line and the time of
+/// its answer, and the unread replies (UA-15); a `read` key's carries no
+/// ask text.
+pub fn own_snapshot(
+    store: &Store,
+    now: Timestamp,
+    scope: PeerScope,
+) -> tiller_core::Result<PeerSnapshot> {
+    let act = scope == PeerScope::Act;
     store.conn().execute_batch("BEGIN")?;
     let built = (|| -> tiller_core::Result<PeerSnapshot> {
         let last_event_seq = store.last_seq()?;
@@ -929,11 +946,15 @@ pub fn own_snapshot(store: &Store, now: Timestamp) -> tiller_core::Result<PeerSn
             server_time: now.to_string(),
             last_event_seq,
             queries: PeerQueries {
-                board: views::board(store, None, Filter::All, None)?,
+                board: views::peer_snapshot_board(store, act)?,
                 attention: views::attention(store)?,
                 agents: views::agents(store, None)?,
                 machines: MachinesResponse { machines },
                 projects: views::projects(store, now)?,
+                replies: match act {
+                    true => views::unread_replies(store)?,
+                    false => Vec::new(),
+                },
             },
         })
     })();
@@ -961,6 +982,11 @@ mod tests {
             parse_query("runs/01JC").ok(),
             Some(Query::Run("01JC".into()))
         );
+        assert_eq!(
+            parse_query("asks/01JA").ok(),
+            Some(Query::Ask("01JA".into()))
+        );
+        assert!(parse_query("asks/").is_err());
         assert_eq!(parse_query("doctor").ok(), Some(Query::Doctor));
         assert_eq!(
             parse_query("agents/01JS/terminal/tail").ok(),

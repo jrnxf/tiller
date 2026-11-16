@@ -13,7 +13,9 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tiller_core::domain::{Approval, Attention, Card, Grant, PeerKey, PeerScope, Project, Session};
+use tiller_core::domain::{
+    Approval, Ask, Attention, Card, Grant, PeerKey, PeerScope, Project, Reply, Session,
+};
 use tiller_core::state::peers::parse_public_key;
 use tiller_core::state::{get, resolve_card, resolve_id};
 use tiller_core::{Actor, Ctx, Error, Store, Timestamp, ids};
@@ -66,6 +68,8 @@ pub enum Op {
     AwayStart,
     AwayEdit,
     AwayEnd,
+    MarkReplyRead,
+    CancelAsk,
 }
 
 /// Where the peer runs a forwarded op, which also sets how long the board
@@ -82,7 +86,7 @@ pub enum Lane {
 }
 
 impl Op {
-    pub const ALL: [Op; 35] = [
+    pub const ALL: [Op; 37] = [
         Op::CreateCard,
         Op::EditCard,
         Op::Comment,
@@ -118,6 +122,8 @@ impl Op {
         Op::AwayStart,
         Op::AwayEdit,
         Op::AwayEnd,
+        Op::MarkReplyRead,
+        Op::CancelAsk,
     ];
 
     /// The 7.4 endpoint, as a `mutate` frame's `op` names it.
@@ -158,6 +164,8 @@ impl Op {
             Op::AwayStart => "POST /api/v1/away",
             Op::AwayEdit => "PUT /api/v1/away",
             Op::AwayEnd => "DELETE /api/v1/away",
+            Op::MarkReplyRead => "POST /api/v1/replies/{id}/read",
+            Op::CancelAsk => "POST /api/v1/asks/{id}/cancel",
         }
     }
 
@@ -428,6 +436,20 @@ fn target_project(store: &Store, op: Op, frame: &Mutate) -> tiller_core::Result<
             Some(id) => {
                 let approval: Approval = get(conn, "approval", &id)?;
                 Some(approval.project_id)
+            }
+            None => None,
+        },
+        Op::MarkReplyRead => match found(resolve_id(conn, "replies", "reply", target))? {
+            Some(id) => {
+                let reply: Reply = get(conn, "reply", &id)?;
+                Some(reply.project_id)
+            }
+            None => None,
+        },
+        Op::CancelAsk => match found(resolve_id(conn, "asks", "ask", target))? {
+            Some(id) => {
+                let ask: Ask = get(conn, "ask", &id)?;
+                Some(ask.project_id)
             }
             None => None,
         },

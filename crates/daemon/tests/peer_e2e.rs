@@ -990,8 +990,11 @@ fn board_starts_a_peers_orchestrator_and_asks_it() {
         .find(|row| row["id"] == ask.as_str())
         .unwrap_or_else(|| panic!("the peer's ask is not on the board: {board}"));
     assert_eq!(row["host"], LABEL);
-    // The ask's text stays on the peer (protocol.md section 10).
-    assert!(row.get("summary").is_none(), "{row}");
+    // An `act` link carries the ask's first line (protocol.md 10.2, UA-15).
+    assert_eq!(
+        row["summary"], "write a haiku and put it in a new haiku.txt file",
+        "{row}"
+    );
     let target: String = world
         .peer
         .open()

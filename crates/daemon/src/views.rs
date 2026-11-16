@@ -264,11 +264,15 @@ fn own_board(
             rows.push(row);
         }
     }
-    let asked = store
-        .asked(project)?
-        .into_iter()
-        .map(|row| AskedRow {
+    let mut asked = Vec::new();
+    for row in store.asked(project)? {
+        let answered_at = match summaries {
+            true => answered_at(store, &row.ask.id)?,
+            false => None,
+        };
+        asked.push(AskedRow {
             summary: summaries.then(|| ask_summary(&row.ask.text)),
+            answered_at,
             source: Some(row.ask.source.to_string()),
             id: row.ask.id,
             project_id: row.ask.project_id,
@@ -278,9 +282,105 @@ fn own_board(
             host: None,
             as_of: None,
             link: None,
-        })
-        .collect();
+        });
+    }
     Ok(BoardResponse { rows, asked })
+}
+
+/// The board rows a peer link's snapshot carries (`protocol.md` 10.2): an
+/// `act` pairing's asked rows have the ask's first line and `answered_at`,
+/// a `read` pairing's have neither.
+pub fn peer_snapshot_board(store: &Store, act: bool) -> Result<BoardResponse> {
+    own_board(store, None, Filter::All, None, act)
+}
+
+/// When the newest reply to an ask came, read or not.
+fn answered_at(store: &Store, ask: &str) -> Result<Option<String>> {
+    let replies = tiller_core::state::replies::for_ask(store.conn(), ask)?;
+    Ok(replies.last().map(|reply| at(reply.replied_at)))
+}
+
+/// A reply as the board reads it, with the question it answers.
+pub fn reply_item(view: tiller_core::state::replies::ReplyView) -> ReplyItem {
+    let relation = view.card_relation.map(|relation| relation.to_string());
+    ReplyItem {
+        id: view.reply.id,
+        project: view.reply.project_id,
+        to: view.to.as_str().to_owned(),
+        ask_id: view.reply.ask_id,
+        message_id: view.reply.message_id,
+        question: view.question,
+        asked_at: at(view.asked_at),
+        body: view.reply.body,
+        replied_at: at(view.reply.replied_at),
+        read_at: view.reply.read_at.map(at),
+        rev: view.reply.rev,
+        card: view.card.map(|card| ReplyCard {
+            id: card.id,
+            display_id: card.display_id,
+            title: card.title,
+            relation,
+        }),
+        host: None,
+    }
+}
+
+/// Every unread reply on this host, newest first: what an `act` pairing's
+/// snapshot carries for the board host's Inbox.
+pub fn unread_replies(store: &Store) -> Result<Vec<ReplyItem>> {
+    let replies = tiller_core::state::replies::unread_on_host(store.conn(), None)?;
+    Ok(replies.into_iter().map(reply_item).collect())
+}
+
+/// `GET /api/v1/asks/{id}` on this host: the ask's full text, the note it
+/// went as and every reply, oldest first.
+pub fn ask_detail(store: &Store, reference: &str) -> Result<AskDetail> {
+    use tiller_core::state::replies;
+    let conn = store.conn();
+    let id = tiller_core::state::resolve_id(conn, "asks", "ask", reference)?;
+    let ask: tiller_core::domain::Ask = get(conn, "ask", &id)?;
+    let note = replies::ask_note(conn, &id)?;
+    let mut shown = Vec::new();
+    for reply in replies::for_ask(conn, &id)? {
+        shown.push(reply_item(replies::view(conn, reply)?));
+    }
+    Ok(AskDetail {
+        answered_at: shown.last().map(|reply| reply.replied_at.clone()),
+        delivery: note.map(|note| AskDelivery {
+            state: note.state.to_string(),
+            sent_at: at(note.created_at),
+            delivered_at: note.delivered_at.map(at),
+            seen_at: note.acked_at.map(at),
+            failed_at: note.failed_at.map(at),
+            failure_reason: note.failure_reason,
+        }),
+        id: ask.id,
+        project_id: ask.project_id,
+        session_id: ask.session_id,
+        source: ask.source.to_string(),
+        text: ask.text,
+        received_at: at(ask.received_at),
+        disposition: ask.disposition.to_string(),
+        resolved_at: ask.resolved_at.map(at),
+        replies: shown,
+        host: None,
+    })
+}
+
+/// A peer's unread replies of one project, from its last snapshot, tagged
+/// with its label. Empty over a `read` pairing, whose link carries none.
+pub fn peer_replies(view: &PeerView, project: &str) -> RepliesResponse {
+    let replies = view.queries.as_ref().map_or_else(Vec::new, |queries| {
+        (queries.replies.iter())
+            .filter(|reply| reply.project == project)
+            .cloned()
+            .map(|reply| ReplyItem {
+                host: Some(view.label.clone()),
+                ..reply
+            })
+            .collect()
+    });
+    RepliesResponse { replies }
 }
 
 pub(crate) fn host_id(store: &Store, host: &str) -> Result<String> {

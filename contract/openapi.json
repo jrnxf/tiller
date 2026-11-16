@@ -1694,6 +1694,170 @@
         }
       }
     },
+    "/api/v1/asks/{id}": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "ask_detail",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "host",
+            "in": "query",
+            "description": "A host id or label.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AskDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/asks/{id}/cancel": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "cancel_ask",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CancelAsk"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`invalid_transition`: the ask is already resolved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`peer_unreachable`: nothing was sent or queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/attention": {
       "get": {
         "tags": [
@@ -5554,6 +5718,18 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "host",
+            "in": "query",
+            "description": "A host id or label.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -5978,6 +6154,15 @@
               }
             }
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
             "content": {
               "application/json": {
@@ -5988,7 +6173,17 @@
             }
           },
           "502": {
-            "description": "`peer_refused`: not forwarded",
+            "description": "`peer_refused`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`peer_unreachable`: nothing was sent or queued",
             "content": {
               "application/json": {
                 "schema": {
@@ -6709,6 +6904,126 @@
           }
         }
       },
+      "AskDelivery": {
+        "type": "object",
+        "description": "Whether an ask's words reached its orchestrator: the note they went as.",
+        "required": [
+          "state",
+          "sent_at"
+        ],
+        "properties": {
+          "delivered_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "failed_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "failure_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "seen_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the orchestrator acknowledged the note."
+          },
+          "sent_at": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "description": "The note's outbox state: `pending`, `delivered`, `acked` or `failed`."
+          }
+        }
+      },
+      "AskDetail": {
+        "type": "object",
+        "description": "`GET /api/v1/asks/{id}`: one ask with its full text, whether it reached\nthe orchestrator, and every reply, oldest first. With a peer `host`, the\npeer's ask, read over the link (`act` scope).",
+        "required": [
+          "id",
+          "project_id",
+          "source",
+          "text",
+          "received_at",
+          "disposition",
+          "replies"
+        ],
+        "properties": {
+          "answered_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the newest reply came; null while it has none."
+          },
+          "delivery": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AskDelivery",
+                "description": "The note the ask went as; null when none was sent (an ask typed into\na pane, or one recorded while no orchestrator ran)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "disposition": {
+            "type": "string",
+            "description": "`unresolved`, `new`, `followup`, `chat` or `cancelled`."
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The owning host's label, on a peer's ask; absent on this host's."
+          },
+          "id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "received_at": {
+            "type": "string"
+          },
+          "replies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReplyItem"
+            }
+          },
+          "resolved_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": "string",
+            "description": "`prompt`, `board`, `script` or `import`."
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      },
       "AskNote": {
         "type": "object",
         "description": "`POST /api/v1/projects/{id}/asks`: a note typed in the board's ask box,\nrecorded and sent to the project's orchestrator as `tiller ask note` does.",
@@ -6747,6 +7062,13 @@
           "age_seconds": {
             "type": "number",
             "format": "double"
+          },
+          "answered_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the newest reply to the ask came, read or not; absent while it\nhas none. Carried as `summary` is."
           },
           "as_of": {
             "type": [
@@ -6800,7 +7122,7 @@
               "string",
               "null"
             ],
-            "description": "The ask's first line, at most 200 characters. Only on this host's\nrows: a peer link carries no ask text."
+            "description": "The ask's first line, at most 200 characters. On this host's rows,\nand on a peer's rows over an `act` pairing (`protocol.md` section\n10): a `read` link carries no ask text."
           }
         }
       },
@@ -7350,6 +7672,26 @@
             "type": "string"
           }
         }
+      },
+      "CancelAsk": {
+        "type": "object",
+        "description": "`POST /api/v1/asks/{id}/cancel`: the owner cancels an ask, as `ask.resolve\ncancelled` with the reason \"cancelled by the owner on the board\".\nCancelling it again changes nothing.",
+        "required": [
+          "idempotency_key"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's ask: the cancel is forwarded to that host."
+          },
+          "idempotency_key": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       },
       "CardApproval": {
         "type": "object",
@@ -9334,7 +9676,7 @@
               "string",
               "null"
             ],
-            "description": "A paired peer's label. Refused: a reply is read on the daemon that\nholds it, not forwarded."
+            "description": "A paired peer's reply: the mark is forwarded to that host."
           },
           "idempotency_key": {
             "type": "string"
@@ -11647,7 +11989,7 @@
       },
       "RepliesResponse": {
         "type": "object",
-        "description": "`GET /api/v1/projects/{id}/replies`: the unread replies, newest first.",
+        "description": "`GET /api/v1/projects/{id}/replies`: the unread replies, newest first.\nWith a peer `host`, that peer's unread replies as its last snapshot\ncarried them (`act` pairings only), each tagged with its label.",
         "required": [
           "replies"
         ],
@@ -11722,6 +12064,13 @@
                 "type": "null"
               }
             ]
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The owning host's label, on a peer's reply; absent on this host's."
           },
           "id": {
             "type": "string"
