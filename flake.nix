@@ -525,6 +525,8 @@
               pkgs.cargo-nextest
               pkgs.sccache
               pkgs.sqlite
+              # scripts/usability-bench.sh reads the CLI's JSON with it.
+              pkgs.jq
               bun2nixCli
             ]
             # Pixel diff for board screenshots, where nixpkgs builds it.

@@ -1,6 +1,7 @@
 //! Rebuild when the board build changes, so a release binary never keeps a
 //! stale or empty embed after `board/dist` is rebuilt. Debug builds read the
-//! board from disk at run time, so they never need to rebuild for it.
+//! board from disk at run time (`assets::board_from_disk`), so they never
+//! need to rebuild for it, even when it was missing at compile time.
 //!
 //! Cargo treats a missing `rerun-if-changed` path as always stale, so only
 //! paths that exist are watched.

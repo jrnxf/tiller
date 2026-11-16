@@ -10,12 +10,34 @@ use rust_embed::{EmbeddedFile, RustEmbed};
 
 pub const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 
-/// The board build, embedded in release builds and read from disk in debug
-/// builds.
+/// The board build, embedded in release builds. Debug builds read it from
+/// disk with [`board_from_disk`] instead.
 #[derive(RustEmbed)]
 #[folder = "../../board/dist"]
 #[allow_missing = true]
 pub struct Board;
+
+/// A file of `board/dist`, read when it is asked for (debug builds).
+///
+/// rust-embed's own debug mode is not used: compiled while `board/dist` is
+/// missing, it keeps the folder's path with its `..` parts, no file it later
+/// resolves starts with that path, and so it answers "not built" even after
+/// the board is built. A compiler cache then hands that same binary to every
+/// later build.
+#[cfg(debug_assertions)]
+fn board_from_disk(path: &str) -> Option<EmbeddedFile> {
+    use std::path::{Component, Path};
+    let relative = Path::new(path);
+    // Only plain names: no `..`, no root, nothing that leaves the build.
+    if !relative
+        .components()
+        .all(|part| matches!(part, Component::Normal(_)))
+    {
+        return None;
+    }
+    let dist = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../board/dist");
+    rust_embed::utils::read_file_from_fs(&dist.join(relative)).ok()
+}
 
 /// A board build to serve: the real one, or a test fixture.
 #[derive(Clone, Copy)]
@@ -29,7 +51,11 @@ impl Assets {
     }
 
     pub fn board() -> Self {
-        Self::of::<Board>()
+        #[cfg(debug_assertions)]
+        let get = board_from_disk;
+        #[cfg(not(debug_assertions))]
+        let get = <Board as RustEmbed>::get;
+        Self { get }
     }
 
     /// The app shell's HTML, if the board is built.
@@ -112,6 +138,22 @@ mod tests {
     #[derive(RustEmbed)]
     #[folder = "tests/fixtures/dist"]
     struct Fixture;
+
+    /// A debug build's board path never leaves `board/dist`, and a file that
+    /// is not there is simply not found.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn board_from_disk_reads_only_inside_the_build() {
+        for path in [
+            "../package.json",
+            "assets/../../package.json",
+            "/etc/hosts",
+            "",
+        ] {
+            assert!(board_from_disk(path).is_none(), "{path:?}");
+        }
+        assert!(board_from_disk("assets/no-such-file-0.js").is_none());
+    }
 
     #[test]
     fn is_file_and_file_agree_on_every_kind_of_path() {
