@@ -202,7 +202,7 @@ export function AskPanel({ askId, owner }: { askId: string; owner?: string }) {
         <span className="muted">{project?.name ?? ask?.project_id ?? "Ask"}</span>
         <ChevronRightIcon />
         <b>ask</b>
-        <HostChip entity={who} />
+        <HostChip entity={who} always />
         <span className="cp-tools">
           <Link
             to="/"
