@@ -155,14 +155,59 @@ export function useCardLifecycle(card: BoardRow) {
       [card],
     ),
   });
-  return { dialog, open, release, reopen };
+  // Start the run of a queued card, as `tiller spawn` does. The daemon picks
+  // the role from the card's kind and the model from the dispatch table, and
+  // its refusals (capacity, a floor, the quota) come back as the reason.
+  const start = useAction({
+    binding: `${card.id}:${card.rev}:start`,
+    send: useCallback(
+      (idempotency_key: string) =>
+        sendMutation("POST", `/api/v1/cards/${card.id}/runs`, {
+          ...hostField(card),
+          idempotency_key,
+        }),
+      [card],
+    ),
+    onRecorded: () => showToast("ok", `Started ${card.display_id}`, null),
+  });
+  return { dialog, open, release, reopen, start };
+}
+
+// A card Start applies to: open, nothing started, and of a kind with a run.
+export function canStart(card: BoardRow): boolean {
+  return (
+    card.column === "queued" &&
+    phaseOf(card) === "open" &&
+    (card.kind === "ship" || card.kind === "scout")
+  );
 }
 
 export type Lifecycle = ReturnType<typeof useCardLifecycle>;
 
 // Why a Release or Reopen did not go through, under the controls.
 export function LifecycleFailure({ card, life }: { card: BoardRow; life: Lifecycle }) {
-  return <ActionFailure error={life.release.error ?? life.reopen.error} host={ownerOf(card)} />;
+  return (
+    <>
+      <ActionFailure error={life.release.error ?? life.reopen.error} host={ownerOf(card)} />
+      <ActionFailure error={life.start.error} host={ownerOf(card)} proof />
+    </>
+  );
+}
+
+// Start on a queued card: the run `tiller spawn` would start for it.
+export function StartButton({ life, off }: { life: Lifecycle; off: string | null }) {
+  return (
+    <button
+      type="button"
+      className="btn primary"
+      disabled={life.start.pending || life.start.recorded || off !== null}
+      title={off ?? "Starts the card's run, as tiller spawn does"}
+      onClick={life.start.trigger}
+    >
+      <PlayIcon />
+      {life.start.pending ? "Starting..." : "Start"}
+    </button>
+  );
 }
 
 // The rightmost control of a card's actions: Close for an open card, Release

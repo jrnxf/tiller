@@ -1,3 +1,4 @@
+import { choose } from "../../test-select";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -855,6 +856,71 @@ test("New card files a card for its lane's project and never folds the lane", as
   expect(laneToggle(header).getAttribute("aria-expanded")).toBe("true");
 });
 
+// UA-20: "File and start" files the card, then starts its run as
+// `tiller spawn` does, and says why when the start is refused.
+test("File and start files the card and then starts its run", async () => {
+  const posted = stubApi("degraded", 200, { card: { id: "01JNEWCARD", display_id: "kiln-9" } });
+  await renderApp("degraded");
+  const header = screen.getByTestId("lane-kiln").querySelector(".lane-h") as HTMLElement;
+  fireEvent.click(within(header).getByRole("button", { name: "New card" }));
+  const dialog = await screen.findByRole("dialog", { name: "New card in kiln" });
+  fireEvent.change(within(dialog).getByLabelText("Title"), { target: { value: "Fix the upload" } });
+  fireEvent.click(within(dialog).getByRole("button", { name: "File and start" }));
+
+  await waitFor(() => expect(posted).toHaveLength(2));
+  expect(posted.map((call) => call.path)).toEqual([
+    "/api/v1/cards",
+    "/api/v1/cards/01JNEWCARD/runs",
+  ]);
+  const filing = posted[0]?.body as { idempotency_key: string };
+  expect(posted[1]?.body).toEqual({ idempotency_key: `${filing.idempotency_key}:start` });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.getByTestId("toast").textContent).toContain("Filed and started kiln-9");
+});
+
+test("File and start keeps the dialog open with the reason when the start is refused", async () => {
+  const posted = stubApi("degraded", 200, { card: { id: "01JNEWCARD", display_id: "kiln-9" } });
+  const served = globalThis.fetch;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) =>
+      String(input).endsWith("/runs")
+        ? new Response(
+            JSON.stringify({
+              ok: false,
+              error: { code: "refused", message: "project kiln is at capacity (2 of 2)" },
+            }),
+            { status: 422 },
+          )
+        : served(input, init),
+    ),
+  );
+  await renderApp("degraded");
+  const header = screen.getByTestId("lane-kiln").querySelector(".lane-h") as HTMLElement;
+  fireEvent.click(within(header).getByRole("button", { name: "New card" }));
+  const dialog = await screen.findByRole("dialog", { name: "New card in kiln" });
+  fireEvent.change(within(dialog).getByLabelText("Title"), { target: { value: "Fix the upload" } });
+  fireEvent.click(within(dialog).getByRole("button", { name: "File and start" }));
+
+  const reason = await within(dialog).findByRole("alert");
+  expect(reason.textContent).toBe(
+    "kiln-9 is filed, but no run started: project kiln is at capacity (2 of 2)",
+  );
+  // The card was filed once, and the start is what was refused.
+  expect(posted.map((call) => call.path)).toEqual(["/api/v1/cards"]);
+});
+
+test("a question or ops card offers no File and start", async () => {
+  stubApi("degraded");
+  await renderApp("degraded");
+  const header = screen.getByTestId("lane-kiln").querySelector(".lane-h") as HTMLElement;
+  fireEvent.click(within(header).getByRole("button", { name: "New card" }));
+  const dialog = await screen.findByRole("dialog", { name: "New card in kiln" });
+  expect(within(dialog).getByRole("button", { name: "File and start" })).toBeTruthy();
+  await choose(within(dialog).getByLabelText("Kind"), "ops");
+  expect(within(dialog).queryByRole("button", { name: "File and start" })).toBeNull();
+});
+
 test("no lane offers Start orchestrator while the agents cannot be read", async () => {
   stubApi("degraded");
   const served = globalThis.fetch;
@@ -958,12 +1024,10 @@ test("the I key opens the details with the attach command, branch, worktree, lab
 test("a machine filter keeps only that machine's agents and redraws the tree", async () => {
   stubApi("federated");
   await renderApp("federated", `/agents?host=${HOST_D}`);
-  const hosts = new Set(
-    within(agentList())
-      .getAllByTestId("host-chip")
-      .map((chip) => chip.textContent),
-  );
-  expect(hosts).toEqual(new Set(["host-d"]));
+  // host-d is live and healthy, so its rows carry no host chip: the filter
+  // chip in the header names it.
+  expect(within(agentList()).queryAllByTestId("host-chip")).toHaveLength(0);
+  expect(screen.getByRole("link", { name: "Remove the host-d filter" })).toBeTruthy();
   expect(within(agentList()).queryByText("alpha-42")).toBeNull();
 });
 

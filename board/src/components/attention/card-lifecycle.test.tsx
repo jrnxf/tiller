@@ -145,6 +145,59 @@ test("a card that has not started has no Close button, says what it waits for an
   expect(await screen.findByRole("dialog", { name: "Close beta-8" })).toBeTruthy();
 });
 
+// UA-20: Start on a queued card runs `tiller spawn` for it, as the board.
+test("a queued card has Start, which sends the run once, and a card with a run has none", async () => {
+  stubApi({}, QUEUED);
+  const actions = await renderCard(QUEUED);
+  const start = within(actions).getByRole("button", { name: "Start" });
+  fireEvent.click(start);
+  await waitFor(() => expect(posted).toHaveLength(1));
+  expect(sent()).toMatchObject({
+    path: `/api/v1/cards/${QUEUED}/runs`,
+    method: "POST",
+    body: { idempotency_key: expect.any(String) },
+  });
+  fireEvent.click(start);
+  expect(posted).toHaveLength(1);
+});
+
+test("a refused Start shows the reason under the buttons", async () => {
+  stubApi({}, QUEUED);
+  const served = globalThis.fetch;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) =>
+      String(input).endsWith("/runs")
+        ? new Response(
+            JSON.stringify({
+              ok: false,
+              error: { code: "refused", message: "beta refuses new runs: 31 GB of disk free" },
+            }),
+            { status: 422 },
+          )
+        : served(input, init),
+    ),
+  );
+  const actions = await renderCard(QUEUED);
+  fireEvent.click(within(actions).getByRole("button", { name: "Start" }));
+  const reason = await screen.findByRole("alert");
+  expect(reason.textContent).toBe("beta refuses new runs: 31 GB of disk free");
+  // The control stays on, so a retry after making room is one click.
+  expect(
+    (within(actions).getByRole("button", { name: "Start" }) as HTMLButtonElement).disabled,
+  ).toBe(false);
+});
+
+test("a card that is working or closed has no Start", async () => {
+  stubApi();
+  const actions = await renderCard();
+  expect(within(actions).queryByRole("button", { name: "Start" })).toBeNull();
+  cleanup();
+  stubApi({ closed_at: "2026-11-10T10:00:00Z" }, QUEUED);
+  const closed = await renderCard(QUEUED);
+  expect(within(closed).queryByRole("button", { name: "Start" })).toBeNull();
+});
+
 test("a card with a run says nothing about a wait", async () => {
   stubApi();
   await renderCard();

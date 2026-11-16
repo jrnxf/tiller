@@ -24,7 +24,7 @@ function ArchivedRow({ project }: { project: Project }) {
         <span className="nm">{project.name}</span>
         {isPeerRow(project) ? (
           <span className="pchips">
-            <HostChip entity={project} />
+            <HostChip entity={project} always />
           </span>
         ) : null}
       </span>

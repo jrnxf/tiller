@@ -14,6 +14,8 @@ import {
   outcomeLabel,
   phaseOf,
   useCardLifecycle,
+  canStart,
+  StartButton,
 } from "../attention/card-lifecycle";
 import { PRIORITIES } from "../attention/format";
 import { PauseIcon } from "../attention/icons";
@@ -128,6 +130,7 @@ export function CardHeader({
                   withClose={unstarted}
                 />
               )}
+              {canStart(column) ? <StartButton life={life} off={off} /> : null}
               {unstarted ? null : <LifecyclePrimary phase={phase} life={life} off={off} />}
             </div>
           ) : null}

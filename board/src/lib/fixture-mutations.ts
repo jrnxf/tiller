@@ -1364,6 +1364,24 @@ function createBug(body: Record<string, unknown>): MutationResult {
   };
 }
 
+// `POST /api/v1/cards/{id}/runs`: the run `tiller spawn` starts for the card.
+// A card of the `beta` project meets the capacity refusal, so the board's
+// reason line can be seen.
+function startRun(card: string, scenario: Scenario): MutationResult {
+  const board = fixtureResponses(scenario)[boardPath()] as BoardResponse;
+  const known =
+    madeCards.get(card) ?? board.rows.find((row) => row.id === card || row.display_id === card);
+  if (known?.project_id === "beta" || card.startsWith("beta-")) {
+    return refusal(
+      422,
+      "refused",
+      "project beta is at capacity (2 of 2 runs): wait for one to end, or raise the limit in Settings",
+    );
+  }
+  const name = `${known?.display_id ?? card}-build`;
+  return { reply: recorded({ name }, null, null), followUps: [] };
+}
+
 // `POST /api/v1/cards/{id}/close`: the card moves to Done with its outcome.
 function closeCard(id: string, body: Record<string, unknown>): MutationResult {
   const row = closedCards.get(id) ?? knownCard(id);
@@ -1513,6 +1531,8 @@ function handle(
       ],
     };
   }
+  const runs = /^\/api\/v1\/cards\/([^/]+)\/runs$/.exec(path);
+  if (method === "POST" && runs?.[1]) return startRun(runs[1], scenario);
   if (method === "PATCH" && /^\/api\/v1\/cards\/[^/]+$/.test(path)) {
     return { reply: recorded({ priority: body.priority }, null, null), followUps: [] };
   }

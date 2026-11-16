@@ -8,8 +8,8 @@ import { connectionStore } from "../../lib/connection";
 import { fixtureMutation } from "../../lib/fixture-mutations";
 import { fixtureResource, fixtureSnapshot } from "../../lib/fixtures";
 import type { Scenario } from "../../lib/fixtures";
-import type { AgentsResponse } from "../../lib/api-types";
-import { agentsPath, queryKeyFor } from "../../lib/queries";
+import type { AgentsResponse, MachinesResponse } from "../../lib/api-types";
+import { agentsPath, machinesQuery, queryKeyFor } from "../../lib/queries";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
 import { receiptsStore } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
@@ -130,15 +130,32 @@ test("each peer project is a lane of its own, even when its slug is one this hos
   expect(screen.getByTestId("lane-host-f/atlas")).toBeTruthy();
 });
 
-test("every card carries the chip of the host that owns it", async () => {
+// UA-07: the host shows on a row only when that host needs the owner's eye.
+test("a card shows its host only when that host is down, view only or refuses runs", async () => {
   stubApi("federated");
-  await renderApp("federated");
+  const { queryClient } = await renderApp("federated");
+  // host-d and host-a are live and healthy: their cards carry no chip.
   const card = screen.getByText("Cache the release manifest").closest<HTMLElement>(".card");
-  expect(within(card as HTMLElement).getByTestId("host-chip").textContent).toBe("host-d");
+  expect(within(card as HTMLElement).queryByTestId("host-chip")).toBeNull();
   const own = screen
     .getByText("Add the machines summary to the sidebar")
     .closest<HTMLElement>(".card");
-  expect(within(own as HTMLElement).getByTestId("host-chip").textContent).toBe("host-a");
+  expect(within(own as HTMLElement).queryByTestId("host-chip")).toBeNull();
+
+  // A floor under host-d makes it refuse runs: its card now says so.
+  const machines = fixtureResource("/api/v1/machines", "federated") as MachinesResponse;
+  act(() =>
+    queryClient.setQueryData<MachinesResponse>(machinesQuery().queryKey, {
+      machines: machines.machines.map((entry) =>
+        entry.label === "host-d"
+          ? { ...entry, refuses_runs: ["disk: 31744 MB free, floor 40960 MB"] }
+          : entry,
+      ),
+    }),
+  );
+  const chip = await within(card as HTMLElement).findByTestId("host-chip");
+  expect(chip.textContent).toBe("host-d");
+  expect(chip.title).toContain("under the 40 GB floor");
 });
 
 // The ask tiles in a lane: an ask has no card number, its id reads "ask".
@@ -154,7 +171,7 @@ test("a peer's ask is a tile in that host's own lane, with its host chip and wha
   // host-d's ask is in host-d's `fleet`, not in this host's lane of that slug.
   const [ask] = askTiles(screen.getByTestId("lane-host-d/fleet"));
   expect(ask).toBeDefined();
-  expect(within(ask as HTMLElement).getByTestId("host-chip").textContent).toBe("host-d");
+  expect(within(ask as HTMLElement).queryByTestId("host-chip")).toBeNull();
   // The link carries no ask text and no answer: the tile says where they are.
   expect(ask?.textContent).toContain("Ask kept on host-d");
   expect(ask?.textContent).toContain("Text and answer are on host-d");
@@ -535,7 +552,7 @@ test("an ask names its host, and a display id two hosts use is host-qualified", 
   stubApi("federated");
   await renderApp("federated", `/inbox?item=${ASK_D}`);
   const row = await screen.findByTestId(`inbox-row-${ASK_D}`);
-  expect(within(row).getByTestId("host-chip").textContent).toBe("host-d");
+  expect(within(row).queryByTestId("host-chip")).toBeNull();
   expect(row.textContent).toContain("host-d · gamma-12");
   expect(screen.getByTestId("inbox").textContent).not.toContain("host-d · fleet-3");
 });
@@ -586,7 +603,8 @@ test("the Agents screen shows the host of every agent, and a peer's pane is watc
   const hosts = new Set(
     (await screen.findAllByTestId("host-chip")).map((chip) => chip.textContent),
   );
-  expect(hosts).toEqual(new Set(["host-a", "host-d", "host-e", "host-f"]));
+  // Only the hosts that are down or view only keep a chip.
+  expect(hosts).toEqual(new Set(["host-e", "host-f"]));
   const open = (await screen.findByRole("button", {
     name: /Open in terminal/,
   })) as HTMLButtonElement;

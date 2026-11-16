@@ -812,7 +812,7 @@ export function CardPage({
         <span className="muted">{project?.name ?? card.project_id}</span>
         <ChevronRightIcon />
         <b>{id}</b>
-        <HostChip entity={column} />
+        <HostChip entity={column} always />
         {variant === "drawer" ? (
           <span className="cp-tools">
             <Link

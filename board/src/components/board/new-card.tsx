@@ -8,7 +8,7 @@ import { prefsStore, visibleProjects } from "../../lib/prefs";
 import { projectsQuery } from "../../lib/queries";
 import { createStore, useStore } from "../../lib/store";
 import { ActionFailure } from "../attention/action-failure";
-import { sendMutation } from "../attention/api";
+import { ActionError, sendMutation } from "../attention/api";
 import { PRIORITIES } from "../attention/format";
 import { LimitNote } from "../attention/limit-note";
 import { useAction } from "../attention/use-action";
@@ -52,7 +52,13 @@ const DEFAULT_PRIORITY = 2;
 
 // What `POST /api/v1/cards` returns: the card filed, and `warning` when the
 // project has no orchestrator to tell (protocol.md 2.2).
-type Filed = { card?: { display_id?: string }; warning?: string | null } | null;
+type Filed = { card?: { id?: string; display_id?: string }; warning?: string | null } | null;
+
+// The kinds that have a run to start: `tiller spawn` takes a builder for a
+// ship card and a scout for a scout card (protocol.md 7.4).
+function startsRun(kind: string): boolean {
+  return kind === "ship" || kind === "scout";
+}
 
 // The lane header's New card: the fields `tiller card create` takes. The
 // card is filed through the board's own ask, so its orchestrator is told.
@@ -77,12 +83,47 @@ export function NewCardDialog({ project, onClose }: { project: Project; onClose:
       }),
     [body, kind, priority, project, title],
   );
+  // File, then start the run of the card as `tiller spawn` does. The card
+  // is saved before the start is tried. A refusal of the start says so and
+  // names its reason, and a retry replays the filing with the same key, so
+  // it never files a second card.
+  const sendAndStart = useCallback(
+    async (idempotency_key: string) => {
+      const filed = await send(idempotency_key);
+      const id = filed.data?.card?.id ?? filed.data?.card?.display_id;
+      const shown = filed.data?.card?.display_id ?? "The card";
+      if (!id)
+        throw new ActionError(0, "internal", `${shown} was filed, but it has no id to start.`);
+      try {
+        await sendMutation("POST", `/api/v1/cards/${id}/runs`, {
+          ...hostField(project),
+          idempotency_key: `${idempotency_key}:start`,
+        });
+      } catch (caught) {
+        if (caught instanceof ActionError) {
+          throw new ActionError(
+            caught.status,
+            caught.code,
+            `${shown} is filed, but no run started: ${caught.message}`,
+            caught.current ?? undefined,
+            caught.hint ?? undefined,
+            caught.host ?? undefined,
+          );
+        }
+        throw caught;
+      }
+      return filed;
+    },
+    [project, send],
+  );
   const recorded = useCallback(
-    ({ data }: MutationResponse<Filed>) => {
+    ({ data }: MutationResponse<Filed>, started = false) => {
       onClose();
       const filed = data?.card?.display_id;
-      const heading = filed ? `Filed ${filed}` : `Filed a card in ${project.name}`;
-      if (data?.warning === "no_orchestrator") {
+      const heading = filed
+        ? `${started ? "Filed and started" : "Filed"} ${filed}`
+        : `Filed a card in ${project.name}`;
+      if (data?.warning === "no_orchestrator" && !started) {
         showToast("ok", heading, "No orchestrator is running, so it is told when one starts.");
       } else {
         showToast("ok", heading, null);
@@ -95,13 +136,19 @@ export function NewCardDialog({ project, onClose }: { project: Project; onClose:
   const action = useAction({
     binding: `new-card:${project.id}:${kind}:${priority}:${title.trim()}:${body.trim()}`,
     send,
-    onRecorded: recorded,
+    onRecorded: (response) => recorded(response),
   });
+  const start = useAction({
+    binding: `new-card-start:${project.id}:${kind}:${priority}:${title.trim()}:${body.trim()}`,
+    send: sendAndStart,
+    onRecorded: (response) => recorded(response, true),
+  });
+  const pending = action.pending || start.pending;
   const over = isTooLong(title.trim(), LIMITS.cardTitle) || isTooLong(body.trim(), LIMITS.cardBody);
-  const armed = title.trim() !== "" && !over && !action.pending;
+  const armed = title.trim() !== "" && !over && !pending;
 
   return (
-    <ProjectDialog name="new-card" pending={action.pending} onClose={onClose} initial={first}>
+    <ProjectDialog name="new-card" pending={pending} onClose={onClose} initial={first}>
       <h2 id="new-card-dialog-title">New card in {project.name}</h2>
       <p id="new-card-dialog-body">
         Files a card, as <code>tiller card create</code> does, and tells the project's orchestrator.
@@ -120,7 +167,7 @@ export function NewCardDialog({ project, onClose }: { project: Project; onClose:
             className="note-in"
             autoComplete="off"
             value={title}
-            disabled={action.pending}
+            disabled={pending}
             onChange={(event) => setTitle(event.target.value)}
           />
           <label htmlFor={`${fields}-kind`}>Kind</label>
@@ -128,7 +175,7 @@ export function NewCardDialog({ project, onClose }: { project: Project; onClose:
             id={`${fields}-kind`}
             className="form-select"
             value={kind}
-            disabled={action.pending}
+            disabled={pending}
             onValueChange={setKind}
             options={KINDS.map((k) => ({ value: k, label: k }))}
           />
@@ -137,7 +184,7 @@ export function NewCardDialog({ project, onClose }: { project: Project; onClose:
             id={`${fields}-priority`}
             className="form-select"
             value={priority}
-            disabled={action.pending}
+            disabled={pending}
             onValueChange={setPriority}
             options={PRIORITIES.map((label, index) => ({ value: String(index), label }))}
           />
@@ -149,17 +196,29 @@ export function NewCardDialog({ project, onClose }: { project: Project; onClose:
             className="note-in area"
             placeholder="Optional"
             value={body}
-            disabled={action.pending}
+            disabled={pending}
             onChange={(event) => setBody(event.target.value)}
           />
         </div>
         <LimitNote what="title" text={title.trim()} limit={LIMITS.cardTitle} />
         <LimitNote what="body" text={body.trim()} limit={LIMITS.cardBody} />
         <ActionFailure error={action.error} host={ownerOf(project)} />
+        <ActionFailure error={start.error} host={ownerOf(project)} proof />
         <div className="dialog-actions">
-          <button type="button" className="btn" disabled={action.pending} onClick={onClose}>
+          <button type="button" className="btn" disabled={pending} onClick={onClose}>
             Cancel
           </button>
+          {startsRun(kind) ? (
+            <button
+              type="button"
+              className="btn"
+              disabled={!armed}
+              title="Files the card and starts its run, as tiller spawn does"
+              onClick={start.trigger}
+            >
+              {start.pending ? "Starting..." : "File and start"}
+            </button>
+          ) : null}
           <button type="submit" className="btn primary" disabled={!armed}>
             {action.pending ? "Filing..." : "File card"}
           </button>
