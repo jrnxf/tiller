@@ -206,8 +206,9 @@ function peerCard(
   };
 }
 
-// The peers' unresolved asks. A peer link carries no ask text. host-d's is in
-// its `fleet`, a slug this host uses too; host-e's is behind a link that is down.
+// The peers' unresolved asks, with the first line an `act` link carries.
+// host-d's is in its `fleet`, a slug this host uses too, and its orchestrator
+// answered it; host-e's is behind a link that is down.
 export function peerAsks(now: number): AskedRow[] {
   return [
     {
@@ -216,7 +217,9 @@ export function peerAsks(now: number): AskedRow[] {
       session_id: null,
       received_at: at(now, 3),
       age_seconds: 180,
-      source: "prompt",
+      source: "board",
+      summary: "Is the signing key rotation safe to run tonight?",
+      answered_at: at(now, 1),
       ...tag("host-d", now),
     },
     {
@@ -226,6 +229,7 @@ export function peerAsks(now: number): AskedRow[] {
       received_at: at(now, 9),
       age_seconds: 540,
       source: "board",
+      summary: "Can the ledger export leave out the archived years?",
       ...tag("host-e", now),
     },
   ];

@@ -462,7 +462,7 @@
   border-color: var(--line-3);
   background: var(--bg-card-hover);
 }
-.card[aria-current="true"] {
+.card[aria-current] {
   border-color: color-mix(in lch, var(--accent), transparent 40%);
   box-shadow: 0 0 0 1px color-mix(in lch, var(--accent), transparent 60%);
 }
@@ -1192,6 +1192,17 @@ button.colh:hover {
 }
 .drawer .cp-nav {
   margin-bottom: 12px;
+}
+/* The ask panel's one-line states: delivery, no answer yet, resolved. */
+.ask-state {
+  margin: 0;
+  color: var(--fg-2);
+  font-size: 14px;
+  line-height: 1.55;
+}
+.ask-panel .reply-acts {
+  justify-content: flex-end;
+  margin-top: 24px;
 }
 .cp-tools {
   margin-left: auto;

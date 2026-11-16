@@ -2,6 +2,7 @@ import { queryOptions } from "@tanstack/react-query";
 
 import type {
   AgentsResponse,
+  AskDetail,
   AwayBriefResponse,
   AttentionResponse,
   BackupList,
@@ -136,13 +137,21 @@ export const attentionQuery = () => readQuery<AttentionResponse>(attentionPath);
 // shows it, but the fixture server still answers it as the daemon does.
 export const recapPath: QueryPath = "/api/v1/recap";
 
-// One of this host's projects' unread replies from the orchestrator, newest
-// first. Never federated: a peer's replies stay on the peer. An `ask.replied`
-// or `reply.read` event refreshes it (lib/sse.ts).
-export const repliesPath = (projectId: string): QueryPath =>
-  `/api/v1/projects/${projectId}/replies`;
-export const repliesQuery = (projectId: string) =>
-  readQuery<RepliesResponse>(repliesPath(projectId));
+// A project's unread replies from the orchestrator, newest first. With a
+// peer `host`, the replies its `act` link last carried (protocol.md section
+// 10). An `ask.replied` or `reply.read` event refreshes this host's, and the
+// peer's next snapshot (`peer_reset`) refreshes a peer's (lib/sse.ts).
+export const repliesPath = (projectId: string, host?: string): QueryPath =>
+  withParams(`/api/v1/projects/${projectId}/replies`, { host });
+export const repliesQuery = (projectId: string, host?: string) =>
+  readQuery<RepliesResponse>(repliesPath(projectId, host));
+
+// One ask in full: its text, its delivery and every reply. A peer's ask is
+// read over the link.
+const askPath = (askId: string, host?: string): QueryPath =>
+  withParams(`/api/v1/asks/${askId}`, { host });
+export const askQuery = (askId: string, host?: string) =>
+  readQuery<AskDetail>(askPath(askId, host));
 
 export const agentsPath = (host?: string): QueryPath => withParams("/api/v1/agents", { host });
 export const agentsQuery = (host?: string) => readQuery<AgentsResponse>(agentsPath(host));

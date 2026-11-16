@@ -31,6 +31,7 @@ import { memoryMutation } from "./fixtures-memory.ts";
 import { RUN_MS, retroMutation } from "./fixtures-retros.ts";
 import {
   DIALOG_SESSIONS,
+  boardRowsFor,
   FIXTURE_HEAD_SHA,
   FixtureRefusal,
   fixtureResource,
@@ -55,7 +56,7 @@ import {
 import { backupsFor, takeBackup } from "./fixtures-backups.ts";
 import { anyUnpaired, peerLinkMutation, peersFor, withoutUnpaired } from "./fixtures-peers.ts";
 import { recapFor } from "./fixtures-recap.ts";
-import { markReplyRead } from "./fixtures-replies.ts";
+import { cancelAsk, markReplyRead } from "./fixtures-replies.ts";
 import {
   agentsPath,
   attentionPath,
@@ -1867,6 +1868,36 @@ function handle(
             rev_after: null,
             card_id: null,
             entity_state: null,
+          },
+        },
+      ],
+    };
+  }
+  const askCancel = /^\/api\/v1\/asks\/([^/]+)\/cancel$/.exec(path);
+  if (method === "POST" && askCancel?.[1]) {
+    const id = askCancel[1];
+    const host = typeof body.host === "string" ? body.host : undefined;
+    const done = cancelAsk(boardRowsFor(scenario, Date.now()), id, host, Date.now());
+    if (!done) return { reply: refused(404, "not_found", `no ask ${id}`), followUps: [] };
+    if (done === "resolved") {
+      return {
+        reply: refused(422, "invalid_transition", `ask ${id} is already resolved`),
+        followUps: [],
+      };
+    }
+    return {
+      reply: recorded(done, null, null),
+      followUps: [
+        {
+          delayMs: 200,
+          event: {
+            kind: "ask.resolved",
+            txn: "ask.resolve",
+            entity: "ask",
+            entity_id: id,
+            rev_after: null,
+            card_id: null,
+            entity_state: "cancelled",
           },
         },
       ],

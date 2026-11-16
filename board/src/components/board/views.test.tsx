@@ -210,8 +210,10 @@ test("an ask with no answer shows its source and its first line, and says what i
   const chat = tileOf("Can the card fade on exit instead of sliding?");
   expect(within(chat).getByText("chat")).toBeTruthy();
   expect(within(chat).getByText("Waiting for the orchestrator")).toBeTruthy();
-  // It has nothing to open yet, so it is not a link.
-  expect(chat.tagName).toBe("DIV");
+  // Every ask opens its panel, with its text and its delivery (UA-18).
+  expect(chat.tagName).toBe("A");
+  expect(chat.getAttribute("href")).toContain("ask=01JASK000000000000000000A1");
+  expect(chat.dataset.answered).toBeUndefined();
   const board = tileOf(
     "Move the export settings into their own page, keep the old links working, and say in the release notes where each one went",
   );
@@ -222,7 +224,7 @@ test("an ask with no answer shows its source and its first line, and says what i
   expect(screen.queryByText(/to tag/)).toBeNull();
 });
 
-test("an answered ask says so, shows the answer's first line and opens it in the Inbox", async () => {
+test("an answered ask says so, shows the answer's first line and opens its panel", async () => {
   stubApi("default");
   const { queryClient } = await renderApp();
   // The Inbox's notice of a new reply repeats the question, so find the tile.
@@ -260,7 +262,7 @@ test("an answered ask says so, shows the answer's first line and opens it in the
   });
   const tile = await waitFor(() => {
     const found = askTile();
-    expect(found.tagName).toBe("A");
+    expect(found.dataset.unread).toBe("true");
     return found;
   });
   expect(
@@ -268,17 +270,32 @@ test("an answered ask says so, shows the answer's first line and opens it in the
   ).toBeTruthy();
   expect(within(tile).getByText(/^Answered /)).toBeTruthy();
   expect(within(tile).queryByText("Waiting for the orchestrator")).toBeNull();
-  expect(tile.getAttribute("href")).toContain("/inbox");
-  expect(tile.getAttribute("href")).toContain(reply.id);
+  expect(tile.getAttribute("href")).toContain("ask=01JASK000000000000000000A1");
   // Another ask is not marked by that answer.
   const other = tileOf("Nightly check: the staging certificate expires in 6 days");
-  expect(other.tagName).toBe("DIV");
+  expect(other.dataset.answered).toBeUndefined();
 
   // Mark read takes the reply off the list, and the tile waits again.
   act(() => {
     queryClient.setQueryData<RepliesResponse>(queryKeyFor(repliesPath("alpha")), { replies: [] });
   });
-  await waitFor(() => expect(askTile().tagName).toBe("DIV"));
+  await waitFor(() => expect(askTile().dataset.unread).toBeUndefined());
+  expect(within(askTile()).getByText("Waiting for the orchestrator")).toBeTruthy();
+
+  // Once the board row says when the answer came, the tile keeps saying so.
+  const board = queryClient.getQueryData<BoardResponse>(queryKeyFor(boardPath()));
+  if (!board) throw new Error("no board");
+  act(() => {
+    queryClient.setQueryData<BoardResponse>(queryKeyFor(boardPath()), {
+      ...board,
+      asked: board.asked.map((row) =>
+        row.id === reply.ask_id ? { ...row, answered_at: reply.replied_at } : row,
+      ),
+    });
+  });
+  await waitFor(() => expect(askTile().dataset.answered).toBe("true"));
+  expect(within(askTile()).getByText("Answered, and read")).toBeTruthy();
+  expect(within(askTile()).getByText(/^Answered /)).toBeTruthy();
 });
 
 test("an ask with no text says it waits, once", async () => {

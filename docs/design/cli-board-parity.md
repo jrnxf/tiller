@@ -32,10 +32,10 @@ The CLI reads and writes this host only. The board also shows a paired host's pr
 | Card dependencies | Full: `card dep add`, `card dep rm` | Full | The card page's Depends on row: a chip per dependency, open or released, with an x that asks first and then removes it, and Add, which picks an open card of the same project on the same host and turns off the cards that would make a loop. Both run the same core checks. On a peer's card both are forwarded to that host (`protocol.md` 7.4). |
 | Read cards | Full: `card show`, `card list`, `card timeline` | Full | The card page and the lanes. |
 | Add a note to the orchestrator | Full: `ask note` | Full | The Ask dialog sends one note per mentioned project. Both cap a note at 8,000 characters. "Ask <project>" in the command palette opens the dialog with that project picked. |
-| Resolve, link and list asks | Full: `ask resolve`, `ask link`, `ask list`, `ask show` | No | These are orchestrator tools. |
-| Reply to an ask or a comment | Full: `reply` | No | An orchestrator tool. The orchestrator sends its answer with `tiller reply`. The board reads the unread replies in the Inbox and on the card timeline, and an ask's tile in the Asked column shows its unread answer and opens it. |
-| Read the answer to an ask | Full: `ask show`, `ask list`, `recap` | Full | `ask show <ask>` prints whether the note reached the orchestrator (`delivery`) and every reply, oldest first. Each row of `ask list` has `answered_at`, `replies` and `unread_replies`. `tiller recap` lists the unread replies beside the decisions. After `ask note` the owner's help line is the `ask show` command for that ask. The board shows the same in the Inbox and on the ask's tile. Both read this host only. |
-| Mark a reply read | No | Full | The Inbox's Mark read. It does not forward the call to a peer. |
+| Resolve, link and list asks | Full: `ask resolve`, `ask link`, `ask list`, `ask show` | Part | These are orchestrator tools. The board cancels an open ask from its panel (`ask.resolve` `cancelled`, with the reason "cancelled by the owner on the board"), and forwards that to a peer (UA-18). |
+| Reply to an ask or a comment | Full: `reply` | No | An orchestrator tool. The orchestrator sends its answer with `tiller reply`. The board reads the unread replies in the Inbox and on the card timeline, and an ask's tile in the Asked column shows its unread answer and opens the ask's panel. |
+| Read the answer to an ask | Full: `ask show`, `ask list`, `recap` | Full | `ask show <ask>` prints whether the note reached the orchestrator (`delivery`) and every reply, oldest first. Each row of `ask list` has `answered_at`, `replies` and `unread_replies`. `tiller recap` lists the unread replies beside the decisions. After `ask note` the owner's help line is the `ask show` command for that ask. The board shows the same in the Inbox, on the ask's tile and in the ask's panel, which the tile opens: its text, delivery, answer, Ask again and Cancel. The board reads a peer's answer too, over an `act` link (UA-15). The CLI reads this host only. |
+| Mark a reply read | Full: `ask show --mark-read` | Full | The Inbox's Mark read. `ask show <ask> --mark-read` marks every unread reply of the ask read, as the owner; a session is refused. The board forwards the call to a peer for a peer's reply (UA-17). |
 | Answer an attention item | Full: `attention answer` | Part | The CLI can cite a chat ask with `--ask`. The board answer has no ask citation. The board takes the answer in the Inbox and at the top of the item's card, with the same control. Both cap a typed answer at 20,000 characters. An answer cited with `--ask` is the owner's recorded words and has no cap. |
 | Withdraw an attention item | Full: `attention withdraw` | Part | The board withdraws only stale items, with a fixed reason, and does not forward the call to a peer. |
 | Open and list attention | Full: `attention open`, `attention list` | Part | The board lists the items in the Inbox, the most urgent card first and then the longest wait, and shows a card's open items on the card. `attention open` is an agent tool. |
@@ -81,7 +81,6 @@ The CLI reads and writes this host only. The board also shows a paired host's pr
 - Signals and contributions on the Health page.
 - Editing an away window in place.
 - Marking a recap seen.
-- Marking a reply read.
 - Acting on a paired host's records from this board (the `host` field).
 - Signing out.
 

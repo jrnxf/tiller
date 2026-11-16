@@ -239,8 +239,12 @@ const PROJECT_SETUP_PATH = /^\/api\/v1\/projects\/[^/?]+\/setup$/;
 // grant event names the grant, not its project.
 const PROJECT_GRANTS_PATH = /^\/api\/v1\/projects\/[^/?]+\/grants(\?host=[^&]+)?$/;
 
-// `/api/v1/projects/<id>/replies`, whatever the project.
-const PROJECT_REPLIES_PATH = /^\/api\/v1\/projects\/[^/?]+\/replies$/;
+// `/api/v1/projects/<id>/replies`, whatever the project, and a peer's with
+// its `?host=`.
+const PROJECT_REPLIES_PATH = /^\/api\/v1\/projects\/[^/?]+\/replies(\?host=[^&]+)?$/;
+
+// `/api/v1/asks/<id>`, the ask panel's read, whatever the ask.
+const ASK_PATH = /^\/api\/v1\/asks\/[^/?]+(\?host=[^&]+)?$/;
 
 // The list read of each entity the board writes in place from `entity_state`.
 // The daemon sends no state when it could not read the entity (one bad row
@@ -360,11 +364,16 @@ export function applyChange(
         predicate: (query) => String(query.queryKey[1] ?? "").startsWith("/api/v1/board"),
         refetchType: "active",
       });
+      // An open ask panel shows its disposition.
+      refetchMatching(queryClient, (path) => ASK_PATH.test(path));
       break;
     case "reply":
       // `ask.replied` adds a reply to the Inbox and `reply.read` takes it
       // off. The event's card id refreshes the card's timeline below.
-      refetchMatching(queryClient, (path) => PROJECT_REPLIES_PATH.test(path));
+      refetchMatching(
+        queryClient,
+        (path) => PROJECT_REPLIES_PATH.test(path) || ASK_PATH.test(path),
+      );
       break;
     case "grant":
       refetchMatching(queryClient, (path) => PROJECT_GRANTS_PATH.test(path));
@@ -560,6 +569,13 @@ function applyPeerReset(queryClient: QueryClient, event: PeerResetEvent): void {
   );
   queryClient.setQueryData<ProjectsResponse | undefined>(queryKeyFor(projectsPath), (old) =>
     old ? { projects: replaceHost(old.projects, host, at("/api/v1/projects").projects) } : old,
+  );
+  // The peer's unread replies and its open ask: the daemon answers both from
+  // what the link carries, which this snapshot just renewed.
+  const ofPeer = `?${new URLSearchParams({ host }).toString()}`;
+  refetchMatching(
+    queryClient,
+    (path) => (PROJECT_REPLIES_PATH.test(path) || ASK_PATH.test(path)) && path.endsWith(ofPeer),
   );
   // A filtered board list may need a card to enter or leave.
   queryClient.invalidateQueries({

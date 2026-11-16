@@ -302,10 +302,8 @@ test("a peer's project is asked through the board host with its host label", asy
   await waitFor(() => expect(prose()).toBeTruthy());
   write(chip("alpha"), " ", chip("fleet", "host-d/fleet"), " go");
   expect(row("host / host-d").textContent).toContain("on host-d");
-  // Before the send: the peer keeps the answer, and the dialog says so.
-  expect(screen.getByRole("status").textContent).toContain(
-    "shows on the board of host-d, not in this Inbox.",
-  );
+  // The answer comes back to this board (UA-15), so no line says otherwise.
+  expect(screen.queryByText(/not in this Inbox/)).toBeNull();
   fireEvent.click(sendButton());
   await waitFor(() => expect(onClose).toHaveBeenCalled());
   expect(asksTo("alpha")[0]?.body).not.toHaveProperty("host");

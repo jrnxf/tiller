@@ -22,6 +22,7 @@ import { Lane } from "./lane";
 import { COLUMNS, onHost, passesFilter, tilesOf } from "./model";
 import type { ColumnId, Tile } from "./model";
 import { LayersIcon, CloseIcon } from "../shell/icons";
+import { AskPanel } from "./ask-panel";
 import { CardPage } from "./card-page";
 import "./board.css";
 import { useNamedProjects } from "./peer-state";
@@ -148,21 +149,48 @@ function CardDrawer({ cardId, owner }: { cardId: string; owner: string | undefin
   );
 }
 
+// The ask a tile opened, docked as a card is (UA-18): its text, delivery and
+// answer, with Ask again and Cancel.
+function AskDrawer({ askId, owner }: { askId: string; owner: string | undefined }) {
+  const navigate = useNavigate();
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented || shortcutsBlocked(event)) return;
+      const target = event.target;
+      if (target instanceof Element && target.closest("[role=dialog], [role=menu]")) return;
+      void navigate({
+        to: "/",
+        search: (prev) => ({ ...prev, ask: undefined, owner: undefined }),
+      });
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [navigate]);
+  return (
+    <aside className="drawer" aria-label="Ask details" data-testid="ask-drawer">
+      <AskPanel key={`${owner ?? ""}/${askId}`} askId={askId} owner={owner} />
+    </aside>
+  );
+}
+
 export function BoardView({
   host,
   filter,
   card,
+  ask,
   owner,
 }: {
   host: string | undefined;
   filter: BoardFilter;
   card?: string;
+  ask?: string;
   owner?: string;
 }) {
   return (
-    <div className="board-split" data-docked={card ? "true" : "false"}>
+    <div className="board-split" data-docked={card || ask ? "true" : "false"}>
       <Board host={host} filter={filter} />
       {card ? <CardDrawer cardId={card} owner={owner} /> : null}
+      {!card && ask ? <AskDrawer askId={ask} owner={owner} /> : null}
     </div>
   );
 }

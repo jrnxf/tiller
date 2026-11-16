@@ -60,9 +60,12 @@ export interface AskedRow extends Federated {
   // Where the ask came from: typed in an agent's pane (`prompt`), the board's
   // ask box, a script or an import. Absent on a row from an older peer.
   source?: AskSource;
-  // The ask's first line, at most 200 characters. Only on this host's rows:
-  // a peer link carries no ask text.
+  // The ask's first line, at most 200 characters. On this host's rows and
+  // on an `act` peer's; a `read` link carries no ask text.
   summary?: string;
+  // When the newest reply to the ask came, read or not; absent while it has
+  // none. Carried as `summary` is.
+  answered_at?: string;
 }
 
 export type AskSource = "prompt" | "board" | "script" | "import";
@@ -941,7 +944,9 @@ interface ReplyCard {
 }
 
 // One reply from the orchestrator, with the question it answers.
-export interface ReplyItem {
+// A peer's reply carries its host (from the daemon) and its link (from the
+// project, on this board).
+export interface ReplyItem extends Federated {
   id: string;
   project: string;
   to: "ask" | "comment";
@@ -959,6 +964,37 @@ export interface ReplyItem {
 // `GET /api/v1/projects/{id}/replies`: the unread replies, newest first.
 export interface RepliesResponse {
   replies: ReplyItem[];
+}
+
+// Whether an ask's words reached its orchestrator: the note they went as.
+export interface AskDelivery {
+  state: "pending" | "delivered" | "acked" | "failed";
+  sent_at: string;
+  delivered_at: string | null;
+  // When the orchestrator acknowledged the note.
+  seen_at: string | null;
+  failed_at: string | null;
+  failure_reason: string | null;
+}
+
+export type AskDisposition = "unresolved" | "new" | "followup" | "chat" | "cancelled";
+
+// `GET /api/v1/asks/{id}`: one ask with its full text, its delivery and
+// every reply, oldest first. A peer's ask is read over the link.
+export interface AskDetail {
+  id: string;
+  project_id: string;
+  session_id: string | null;
+  source: AskSource;
+  text: string;
+  received_at: string;
+  disposition: AskDisposition;
+  resolved_at: string | null;
+  // Null when no note went to an orchestrator.
+  delivery: AskDelivery | null;
+  answered_at: string | null;
+  replies: ReplyItem[];
+  host?: string;
 }
 
 export interface MutationResponse<T = unknown> {

@@ -66,7 +66,7 @@ test("a lane on a host whose terminal holder is down says so, with the last time
   expect(note.textContent).toMatch(/last known state from .+ \(17 min ago\)/);
   expect(note.textContent).toContain("Answers and Open in terminal pause until it is back.");
   // The cards keep their last known state, dimmed, never "observed".
-  const cards = [...alpha.querySelectorAll("a.dim")];
+  const cards = [...alpha.querySelectorAll("a.dim:not([data-kind=ask])")];
   expect(cards.length).toBeGreaterThan(0);
   for (const card of cards) {
     expect(card.textContent).toContain("last known");

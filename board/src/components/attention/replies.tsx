@@ -4,7 +4,7 @@ import { useCallback } from "react";
 import type { CSSProperties, ReactNode } from "react";
 
 import type { MutationResponse, Project, RepliesResponse, ReplyItem } from "../../lib/api-types";
-import { isPeerRow, projectIndex } from "../../lib/peers";
+import { hostField, ownerKey, ownerOf, projectIndex } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import { queryKeyFor, repliesPath, repliesQuery } from "../../lib/queries";
 import { askPrefillStore } from "../shell/ask-prefill";
@@ -15,17 +15,24 @@ import { formatAgo, formatWhen } from "./format";
 import { ReplyIcon } from "./icons";
 import { useAction } from "./use-action";
 
-// The unread replies of this host's shown projects, newest first. A peer's
-// project is left out: replies are never federated, and a peer's stay there.
-// A project whose read fails shows nothing, and the rest still show.
+// The unread replies of the shown projects, newest first. A peer's come from
+// what its `act` link carries (protocol.md section 10), each tagged with the
+// project's host and link, so it reads, dims and is marked read as that
+// peer's. A project whose read fails shows nothing, and the rest still show.
 // `loading` holds while a first read is still on its way: the boot snapshot
 // does not carry replies, so a link to one waits for it.
 export function useReplies(projects: Project[]): { replies: ReplyItem[]; loading: boolean } {
-  const local = projects.filter((project) => !isPeerRow(project));
   const results = useQueries({
-    queries: local.map((project) => repliesQuery(project.id)),
+    queries: projects.map((project) => repliesQuery(project.id, ownerOf(project))),
   });
-  const replies = results.flatMap((result) => result.data?.replies ?? []);
+  const replies = results.flatMap((result, index) => {
+    const project = projects[index];
+    const owner = project ? ownerOf(project) : undefined;
+    const rows = result.data?.replies ?? [];
+    return owner && project
+      ? rows.map((reply) => ({ ...reply, host: owner, link: project.link, as_of: project.as_of }))
+      : rows;
+  });
   replies.sort((a, b) => b.replied_at.localeCompare(a.replied_at));
   return { replies, loading: results.some((result) => result.isPending) };
 }
@@ -40,7 +47,7 @@ function ProjectOf({
   projects: Project[];
   sep: string;
 }) {
-  const index = projectIndex(projects, { project_id: reply.project });
+  const index = projectIndex(projects, { ...reply, project_id: reply.project });
   const project = projects[index];
   if (!project) return null;
   return (
@@ -100,19 +107,22 @@ function MarkRead({ reply }: { reply: ReplyItem }) {
   const navigate = useNavigate();
   const send = useCallback(
     (idempotency_key: string) =>
-      sendMutation<ReplyItem>("POST", `/api/v1/replies/${reply.id}/read`, { idempotency_key }),
-    [reply.id],
+      sendMutation<ReplyItem>("POST", `/api/v1/replies/${reply.id}/read`, {
+        idempotency_key,
+        ...hostField(reply),
+      }),
+    [reply],
   );
   const onRecorded = useCallback(
     (_response: MutationResponse<ReplyItem>) => {
       queryClient.setQueryData<RepliesResponse | undefined>(
-        queryKeyFor(repliesPath(reply.project)),
+        queryKeyFor(repliesPath(reply.project, ownerOf(reply))),
         (old) => (old ? { replies: old.replies.filter((other) => other.id !== reply.id) } : old),
       );
       // The reply is gone from the list, so the Inbox shows what leads it.
       void navigate({ to: "/inbox", search: ({ host }) => ({ host }) });
     },
-    [queryClient, navigate, reply.id, reply.project],
+    [queryClient, navigate, reply],
   );
   const action = useAction<ReplyItem>({ binding: reply.id, send, onRecorded });
   return (
@@ -127,7 +137,7 @@ function MarkRead({ reply }: { reply: ReplyItem }) {
         <CheckIcon />
         {action.pending ? "Marking..." : "Mark read"}
       </button>
-      <ActionFailure error={action.error} host={undefined} />
+      <ActionFailure error={action.error} host={ownerOf(reply)} />
     </>
   );
 }
@@ -179,6 +189,7 @@ export function ReplyDetail({
           <Link
             to="/cards/$cardId"
             params={{ cardId: card.display_id }}
+            search={{ owner: ownerOf(reply) }}
             className="reply-card"
             data-testid="reply-card"
           >
@@ -192,7 +203,9 @@ export function ReplyDetail({
         <button
           type="button"
           className="btn"
-          onClick={() => askPrefillStore.set({ project: reply.project, text: reply.question })}
+          onClick={() =>
+            askPrefillStore.set({ project: ownerKey(reply.project, reply), text: reply.question })
+          }
         >
           Ask again
         </button>

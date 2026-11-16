@@ -203,6 +203,9 @@ const ASK_SOURCE: Record<AskSource, string> = {
 // until the orchestrator files it or answers it (state.md, section 6).
 const WAITING = "Waiting for the orchestrator";
 
+// What an ask's tile says once its answer was read.
+const READ_ANSWER = "Answered, and read";
+
 // The first line of an answer that has text, as the tile's one line shows it.
 function firstLine(text: string): string {
   return (
@@ -213,44 +216,66 @@ function firstLine(text: string): string {
   );
 }
 
-// The unread answer to one of this host's asks, when the orchestrator sent
-// one. The Inbox and the sidebar read the same list, so this adds no request.
-// A peer's replies are never federated, so a peer's ask has none here.
-function useAnswer(ask: NonNullable<Tile["ask"]>, peer: boolean): ReplyItem | undefined {
-  const { data } = useQuery({ ...repliesQuery(ask.project_id), enabled: !peer });
-  return peer ? undefined : data?.replies.find((reply) => reply.ask_id === ask.id);
+// The unread answer to an ask, when the orchestrator sent one. The Inbox and
+// the sidebar read the same list, so this adds no request. A peer's comes from
+// what its `act` link carries, as its ask's first line does.
+function useAnswer(
+  ask: NonNullable<Tile["ask"]>,
+  owner: string | undefined,
+): ReplyItem | undefined {
+  const { data } = useQuery(repliesQuery(ask.project_id, owner));
+  return data?.replies.find((reply) => reply.ask_id === ask.id);
 }
 
 // An ask that is not a card yet: what was asked, and what became of it. An
-// ask with an unread answer says so, shows the answer's first line, and opens
-// that answer in the Inbox. A peer's ask carries no text and its answer stays
-// on the peer, so its tile says where both are read. Like a card, it dims
-// with its lane or its link.
+// ask with an unread answer says so and shows the answer's first line; one
+// whose answer was read says when it came. Every ask tile opens the ask's
+// panel, with its text, delivery and answer. A peer's ask reads the same as
+// this host's on an `act` link; a `read` link carries no text, so its tile
+// says where the text is. Like a card, it dims with its lane or its link.
 function AskTile({ ask, lane }: { ask: NonNullable<Tile["ask"]>; lane: LaneHealth["kind"] }) {
   const source = ask.source ? ASK_SOURCE[ask.source] : null;
   const summary = ask.summary || null;
   const standing = useStanding(ask);
   const owner = ownerOf(ask);
-  const answer = useAnswer(ask, owner !== undefined);
+  const answer = useAnswer(ask, owner);
+  const answeredAt = answer?.replied_at ?? ask.answered_at ?? null;
+  const textless = owner !== undefined && !summary && !answer;
   // Short, since the tile cuts this line at its width; the tooltip has room.
   const state = answer
     ? firstLine(answer.body)
-    : owner
-      ? `Text and answer are on ${owner}`
-      : summary
-        ? WAITING
-        : null;
-  const title = summary ?? (owner ? `Ask kept on ${owner}` : answer ? answer.question : WAITING);
+    : answeredAt
+      ? READ_ANSWER
+      : textless
+        ? `Its text is on ${owner}`
+        : summary
+          ? WAITING
+          : null;
+  const title = summary ?? answer?.question ?? (textless ? `Ask kept on ${owner}` : WAITING);
   const tip = answer
-    ? `Answered: ${firstLine(answer.body)}\nOpen the answer in the Inbox`
-    : owner
-      ? `This ask's text and its answer show on the board of ${owner}, not here`
-      : WAITING;
+    ? `Answered: ${firstLine(answer.body)}\nOpen the ask to read the answer`
+    : answeredAt
+      ? `${READ_ANSWER}\nOpen the ask to read it again`
+      : textless
+        ? `${owner} is paired view only, so its ask text stays there`
+        : WAITING;
+  const selected = useSearch({ strict: false });
+  const open = selected.ask === ask.id && (selected.owner ?? undefined) === owner;
   const className = `card${lane === "disconnected" || standing.dim ? " dim" : ""}`;
   const peerState = standing.peer ? (standing.dim ? "stale" : "live") : undefined;
   const hover = title === tip ? title : `${title}\n${tip}`;
-  const body = (
-    <>
+  return (
+    <Link
+      to="/"
+      search={(prev) => ({ ...prev, card: undefined, ask: ask.id, owner })}
+      className={className}
+      data-kind="ask"
+      data-peer-state={peerState}
+      data-answered={answeredAt ? "true" : undefined}
+      data-unread={answer ? "true" : undefined}
+      aria-current={open ? "true" : undefined}
+      title={hover}
+    >
       <div className="c-top">
         <Status mark="asked" />
         <span className="id">ask</span>
@@ -271,9 +296,9 @@ function AskTile({ ask, lane }: { ask: NonNullable<Tile["ask"]>; lane: LaneHealt
       ) : null}
       <div className="c-chips">
         <HostChip entity={ask} />
-        {answer ? (
-          <span className="lab sm ok">
-            <Ago at={answer.replied_at} prefix="Answered" />
+        {answeredAt ? (
+          <span className={`lab sm${answer ? " ok" : ""}`}>
+            <Ago at={answeredAt} prefix="Answered" />
           </span>
         ) : (
           <span className="lab sm">
@@ -281,26 +306,7 @@ function AskTile({ ask, lane }: { ask: NonNullable<Tile["ask"]>; lane: LaneHealt
           </span>
         )}
       </div>
-    </>
-  );
-  if (answer) {
-    return (
-      <Link
-        to="/inbox"
-        search={({ host }) => ({ host, item: answer.id })}
-        className={className}
-        data-peer-state={peerState}
-        data-answered="true"
-        title={hover}
-      >
-        {body}
-      </Link>
-    );
-  }
-  return (
-    <div className={className} data-peer-state={peerState} title={hover}>
-      {body}
-    </div>
+    </Link>
   );
 }
 

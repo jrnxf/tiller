@@ -4,7 +4,7 @@ import { lazy, Suspense, useId, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 
 import type { Project, SettingProblem } from "../../lib/api-types";
-import { answersElsewhere, askFor, mentionedKeys, messageFor } from "../../lib/ask-plan";
+import { askFor, mentionedKeys, messageFor } from "../../lib/ask-plan";
 import type { AskPiece } from "../../lib/ask-plan";
 import { LIMITS, isTooLong } from "../../lib/limits";
 import { isFederated, ownerOf, projectKey, standingOf } from "../../lib/peers";
@@ -35,14 +35,12 @@ function sentToast(targets: AskTarget[], outcomes: Record<string, Outcome>) {
     const outcome = outcomes[projectKey(target.project)];
     return outcome?.status === "sent" && outcome.started;
   };
-  const elsewhere = elsewhereOf(targets);
-  const lines = (first: string | null) => [first, elsewhere].filter(Boolean).join(" ") || null;
   if (targets.length === 1 && targets[0]) {
     const [only] = targets;
     showToast(
       "ok",
       `Sent to the ${only.project.name} orchestrator`,
-      lines(started(only) ? "Its orchestrator was not running, so one was started." : null),
+      started(only) ? "Its orchestrator was not running, so one was started." : null,
     );
     return;
   }
@@ -50,18 +48,9 @@ function sentToast(targets: AskTarget[], outcomes: Record<string, Outcome>) {
   showToast(
     "ok",
     `Sent ${targets.length} asks`,
-    lines(
-      startedCount > 0
-        ? `${startedCount} orchestrator${startedCount === 1 ? " was" : "s were"} started first.`
-        : null,
-    ),
-  );
-}
-
-// The projects of an ask as `answersElsewhere` reads them.
-function elsewhereOf(targets: AskTarget[]): string | null {
-  return answersElsewhere(
-    targets.map(({ project }) => ({ name: project.name, owner: ownerOf(project) })),
+    startedCount > 0
+      ? `${startedCount} orchestrator${startedCount === 1 ? " was" : "s were"} started first.`
+      : null,
   );
 }
 
@@ -276,9 +265,6 @@ function AskBody({
       hint = "Say what they should do.";
     } else if (tooLong) {
       hint = `The ask is longer than ${LIMITS.askNote} characters.`;
-    } else {
-      hint = elsewhereOf(targets);
-      warn = hint !== null;
     }
   }
 

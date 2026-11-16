@@ -30,6 +30,7 @@ export interface Tile {
     | "received_at"
     | "source"
     | "summary"
+    | "answered_at"
     | "host"
     | "as_of"
     | "link"

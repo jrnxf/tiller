@@ -779,6 +779,29 @@ test("peer_reset replaces that host's asks, so a peer's new ask shows without a 
   stop();
 });
 
+test("peer_reset reads that host's replies and open ask again, and no one else's", () => {
+  const { queryClient, stop, source } = federatedStream();
+  const paths = [
+    "/api/v1/projects/fleet/replies?host=host-d",
+    "/api/v1/asks/01JPASKD00000000000000000D?host=host-d",
+    "/api/v1/projects/fleet/replies",
+    "/api/v1/projects/ledger/replies?host=host-e",
+  ];
+  for (const path of paths) queryClient.setQueryData(queryKeyFor(path as QueryPath), {});
+  source.emit("peer_reset", {
+    host: "host-d",
+    host_id: "01JPEERD0000000000000000D",
+    link: "live",
+    as_of: "2026-11-02T12:00:02.000Z",
+    queries: {},
+  });
+  const stale = paths.map(
+    (path) => queryClient.getQueryState(queryKeyFor(path as QueryPath))?.isInvalidated,
+  );
+  expect(stale).toEqual([true, true, false, false]);
+  stop();
+});
+
 test("a link event updates that machine's link state and no other", () => {
   const { queryClient, stop, source } = federatedStream();
   const machine = (label: string) =>

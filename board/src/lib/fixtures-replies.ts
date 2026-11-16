@@ -1,4 +1,10 @@
-import type { RepliesResponse, ReplyItem } from "./api-types.ts";
+import type {
+  AskDetail,
+  AskedRow,
+  BoardResponse,
+  RepliesResponse,
+  ReplyItem,
+} from "./api-types.ts";
 import type { Scenario } from "./fixtures.ts";
 
 const MINUTE = 60_000;
@@ -63,8 +69,29 @@ function allReplies(now: number): ReplyItem[] {
       rev: 1,
       card: null,
     },
+    // An `act` peer's answer, as its link carries it (protocol.md 10).
+    {
+      id: "01JPREPLYD000000000000000D",
+      project: "fleet",
+      to: "ask",
+      ask_id: PEER_ASK_D,
+      message_id: null,
+      question: PEER_ASK_D_TEXT,
+      asked_at: at(now, 3),
+      body: "Yes. The new key is in place, and the old one stays valid for 24 hours, so nothing in flight breaks. I start the rotation at 22:00.",
+      replied_at: at(now, 1),
+      read_at: null,
+      rev: 1,
+      card: null,
+      host: "host-d",
+    },
   ];
 }
+
+// The ask on host-d that its orchestrator answered, and its full text.
+const PEER_ASK_D = "01JPASKD00000000000000000D";
+const PEER_ASK_D_TEXT =
+  "Is the signing key rotation safe to run tonight?\nThe release goes out at 23:00.";
 
 // What the owner marked read since the stand-in server started.
 const readAt = new Map<string, string>();
@@ -74,20 +101,32 @@ function hasReplies(scenario: Scenario): boolean {
 }
 
 // `GET /api/v1/projects/{id}/replies`: the project's unread replies, newest
-// first. `undefined` for a project the scenario does not know (a 404).
+// first, on this host or on the peer `host`. `undefined` for a project the
+// scenario does not know (a 404).
 export function repliesFor(
   scenario: Scenario,
   projectId: string,
+  host: string | undefined,
   known: boolean,
   now: number,
 ): RepliesResponse | undefined {
   if (!known) return undefined;
   if (!hasReplies(scenario)) return { replies: [] };
   const replies = allReplies(now).filter(
-    (reply) => reply.project === projectId && !readAt.has(reply.id),
+    (reply) => reply.project === projectId && reply.host === host && !readAt.has(reply.id),
   );
   replies.sort((a, b) => b.replied_at.localeCompare(a.replied_at));
   return { replies };
+}
+
+// Every reply to one ask, oldest first, read or not, as the ask panel reads
+// them.
+function repliesToAsk(askId: string, now: number): ReplyItem[] {
+  const replies = allReplies(now)
+    .filter((reply) => reply.ask_id === askId)
+    .map((reply) => ({ ...reply, read_at: readAt.get(reply.id) ?? null }));
+  replies.sort((a, b) => a.replied_at.localeCompare(b.replied_at));
+  return replies;
 }
 
 // `POST /api/v1/replies/{id}/read`. Marking a read reply again changes
@@ -97,4 +136,80 @@ export function markReplyRead(id: string, now: number): ReplyItem | undefined {
   if (!reply) return undefined;
   if (!readAt.has(id)) readAt.set(id, new Date(now).toISOString());
   return { ...reply, read_at: readAt.get(id) ?? null, rev: 2 };
+}
+
+// The asks the owner cancelled since the stand-in server started, keyed by
+// `host/id` (an empty host for this host's).
+const cancelled = new Map<string, string>();
+
+const askKey = (askId: string, host: string | undefined) => `${host ?? ""}/${askId}`;
+
+// Forget the cancels, so each test starts with every ask open.
+export function resetCancelledAsks(): void {
+  cancelled.clear();
+}
+
+export function isCancelledAsk(ask: Pick<AskedRow, "id" | "host">): boolean {
+  return cancelled.has(askKey(ask.id, ask.host));
+}
+
+// The full text of each ask the board lists by its first line.
+const ASK_TEXT: Record<string, string> = {
+  [PEER_ASK_D]: PEER_ASK_D_TEXT,
+  "01JASK000000000000000000A1":
+    "Can the card fade on exit instead of sliding?\nThe slide reads as a bug on the narrow layout.",
+};
+
+// `GET /api/v1/asks/{id}`, on this host or on the peer `host`: the ask the
+// board lists, with its full text, its delivery and every reply.
+export function askDetailFor(
+  board: BoardResponse,
+  askId: string,
+  host: string | undefined,
+  now: number,
+): AskDetail | undefined {
+  const row = board.asked.find((one) => one.id === askId && one.host === host);
+  if (!row) return undefined;
+  const replies = repliesToAsk(askId, now).filter((reply) => reply.host === host);
+  const cancelledAt = cancelled.get(askKey(askId, host)) ?? null;
+  const sent = row.received_at;
+  return {
+    id: row.id,
+    project_id: row.project_id,
+    session_id: row.session_id,
+    source: row.source ?? "board",
+    text: ASK_TEXT[row.id] ?? row.summary ?? "",
+    received_at: row.received_at,
+    disposition: cancelledAt ? "cancelled" : "unresolved",
+    resolved_at: cancelledAt,
+    // An ask typed in the orchestrator's pane went there as typed.
+    delivery:
+      row.source === "prompt"
+        ? null
+        : {
+            state: "delivered",
+            sent_at: sent,
+            delivered_at: sent,
+            seen_at: null,
+            failed_at: null,
+            failure_reason: null,
+          },
+    answered_at: replies.at(-1)?.replied_at ?? null,
+    replies,
+  };
+}
+
+// `POST /api/v1/asks/{id}/cancel`. An ask already resolved is refused, as the
+// daemon refuses it; an unknown ask is `undefined` (a 404).
+export function cancelAsk(
+  board: BoardResponse,
+  askId: string,
+  host: string | undefined,
+  now: number,
+): AskDetail | "resolved" | undefined {
+  const detail = askDetailFor(board, askId, host, now);
+  if (!detail) return undefined;
+  if (detail.disposition !== "unresolved") return "resolved";
+  cancelled.set(askKey(askId, host), new Date(now).toISOString());
+  return askDetailFor(board, askId, host, now);
 }

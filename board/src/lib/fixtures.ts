@@ -47,7 +47,7 @@ import { cardCancelled, withLifecycle } from "./fixtures-lifecycle.ts";
 import { memoryResource } from "./fixtures-memory.ts";
 import { retrosResource, settleRetros } from "./fixtures-retros.ts";
 import { recapFor } from "./fixtures-recap.ts";
-import { repliesFor } from "./fixtures-replies.ts";
+import { askDetailFor, isCancelledAsk, repliesFor } from "./fixtures-replies.ts";
 import { signalsFor } from "./fixtures-signals.ts";
 import { isPeerRow } from "./peers.ts";
 import {
@@ -791,7 +791,13 @@ function dialogRows(now: number): BoardRow[] {
   );
 }
 
+// The board, less the asks the owner cancelled on it.
 function boardFor(scenario: Scenario, now: number): BoardResponse {
+  const board = boardRowsFor(scenario, now);
+  return { ...board, asked: board.asked.filter((ask) => !isCancelledAsk(ask)) };
+}
+
+export function boardRowsFor(scenario: Scenario, now: number): BoardResponse {
   if (scenario === "empty") return { rows: [], asked: [] };
   if (scenario === "new-install") return { rows: newInstallRows(now), asked: [] };
   if (scenario === "blocked") return { rows: blockedRows(now), asked: [] };
@@ -1986,10 +1992,21 @@ export function fixtureResource(
   const replies = /^\/api\/v1\/projects\/([^/]+)\/replies$/.exec(url.pathname);
   if (replies?.[1]) {
     const id = replies[1];
+    // A peer's replies come from what its link carries (protocol.md 10).
+    const host = url.searchParams.get("host") ?? undefined;
     const known = projectsFor(served, now).projects.some(
-      (project) => project.id === id && !isPeerRow(project),
+      (project) =>
+        project.id === id && (host === undefined ? !isPeerRow(project) : project.host === host),
     );
-    return repliesFor(served, id, known, now);
+    return repliesFor(served, id, host, known, now);
+  }
+  const ask = /^\/api\/v1\/asks\/([^/]+)$/.exec(url.pathname);
+  if (ask?.[1]) {
+    // A cancelled ask leaves the board but still reads, as cancelled. A
+    // peer's is read over its link, so a link that is down refuses it.
+    const id = ask[1];
+    const all = boardRowsFor(served, now);
+    return projectRead(served, url, now, (host) => askDetailFor(all, id, host, now));
   }
   if (url.pathname === "/api/v1/health") return healthFor(served, now);
   if (url.pathname === "/api/v1/doctor") return doctorRead(served, url, now);

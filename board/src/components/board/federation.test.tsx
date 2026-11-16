@@ -8,8 +8,9 @@ import { connectionStore } from "../../lib/connection";
 import { fixtureMutation } from "../../lib/fixture-mutations";
 import { fixtureResource, fixtureSnapshot } from "../../lib/fixtures";
 import type { Scenario } from "../../lib/fixtures";
-import type { AgentsResponse, MachinesResponse } from "../../lib/api-types";
-import { agentsPath, machinesQuery, queryKeyFor } from "../../lib/queries";
+import { resetCancelledAsks } from "../../lib/fixtures-replies";
+import type { AgentsResponse, BoardResponse, MachinesResponse } from "../../lib/api-types";
+import { agentsPath, boardPath, machinesQuery, queryKeyFor } from "../../lib/queries";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
 import { receiptsStore } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
@@ -46,7 +47,7 @@ function stubApi(scenario: Scenario) {
       if (method !== "GET") {
         const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
         posted.push({ method, path, body });
-        const { reply } = fixtureMutation(method, path, body);
+        const { reply } = fixtureMutation(method, path, body, scenario);
         return new Response(JSON.stringify(reply.body), { status: reply.status });
       }
       const body = fixtureResource(path, scenario);
@@ -172,13 +173,37 @@ test("a peer's ask is a tile in that host's own lane, with its host chip and wha
   const [ask] = askTiles(screen.getByTestId("lane-host-d/fleet"));
   expect(ask).toBeDefined();
   expect(within(ask as HTMLElement).queryByTestId("host-chip")).toBeNull();
-  // The link carries no ask text and no answer: the tile says where they are.
-  expect(ask?.textContent).toContain("Ask kept on host-d");
-  expect(ask?.textContent).toContain("Text and answer are on host-d");
-  expect(ask?.title).toContain("show on the board of host-d, not here");
+  // UA-15: an `act` link carries the ask's first line and its answer, so the
+  // tile reads as this host's own: what was asked, and the answer.
+  expect(ask?.textContent).toContain("Is the signing key rotation safe to run tonight?");
+  await waitFor(() => expect(ask?.dataset.unread).toBe("true"));
+  expect(ask?.textContent).toContain("Yes. The new key is in place");
+  expect(ask?.textContent).toMatch(/Answered \d+ min ago/);
+  expect(ask?.textContent).not.toContain("host-d,");
+  expect(ask?.getAttribute("href")).toContain("ask=01JPASKD00000000000000000D");
+  expect(ask?.getAttribute("href")).toContain("owner=host-d");
   expect(ask?.textContent).not.toContain("tag");
   expect(ask?.className).not.toContain("dim");
   expect(askTiles(screen.getByTestId("lane-fleet"))).toHaveLength(0);
+});
+
+test("a peer's ask with no text says where its text is", async () => {
+  stubApi("federated");
+  const { queryClient } = await renderApp("federated");
+  const board = queryClient.getQueryData<BoardResponse>(queryKeyFor(boardPath()));
+  if (!board) throw new Error("no board");
+  // An older peer, or a `read` link, sends no first line and no answer.
+  act(() => {
+    queryClient.setQueryData<BoardResponse>(queryKeyFor(boardPath()), {
+      ...board,
+      asked: board.asked.map((row) =>
+        row.host === "host-e" ? { ...row, summary: undefined } : row,
+      ),
+    });
+  });
+  const [ask] = askTiles(screen.getByTestId("lane-host-e/ledger"));
+  await waitFor(() => expect(ask?.textContent).toContain("Ask kept on host-e"));
+  expect(ask?.textContent).toContain("Its text is on host-e");
 });
 
 test("an ask in a peer lane that is down is dimmed and says as of the last frame", async () => {
@@ -904,4 +929,59 @@ test("a view only peer's soft keys are off, and a tap sends no keys", async () =
   fireEvent.click(esc);
   await flush();
   expect(asked.filter(({ path }) => path.endsWith("/terminal/input"))).toEqual([]);
+});
+
+// ---- A peer's ask and its answer (UA-15, UA-18) ----
+
+const PEER_ASK = "01JPASKD00000000000000000D";
+const PEER_REPLY = "01JPREPLYD000000000000000D";
+
+test("the ask panel reads a peer's ask over the link: its text, its delivery and the answer", async () => {
+  stubApi("federated");
+  await renderApp("federated", `/?ask=${PEER_ASK}&owner=host-d`);
+  const panel = await screen.findByTestId("ask-panel");
+  await waitFor(() =>
+    expect(within(panel).getByTestId("ask-text").textContent).toBe(
+      "Is the signing key rotation safe to run tonight?\nThe release goes out at 23:00.",
+    ),
+  );
+  expect(within(panel).getByTestId("ask-delivery").textContent).toMatch(/^Delivered /);
+  expect(within(panel).getByTestId("ask-answer").textContent).toContain(
+    "Yes. The new key is in place",
+  );
+  expect(within(panel).getByTestId("host-chip").textContent).toBe("host-d");
+  expect(within(panel).getByText("Ask again")).toBeTruthy();
+});
+
+test("Cancel in the panel cancels a peer's ask on the peer", async () => {
+  onTestFinished(resetCancelledAsks);
+  const posted = stubApi("federated");
+  const { router } = await renderApp("federated", `/?ask=${PEER_ASK}&owner=host-d`);
+  const panel = await screen.findByTestId("ask-panel");
+  const cancel = await within(panel).findByTestId("ask-cancel");
+  fireEvent.click(cancel);
+  await waitFor(() => expect(posted).toHaveLength(1));
+  expect(posted[0]).toMatchObject({
+    method: "POST",
+    path: `/api/v1/asks/${PEER_ASK}/cancel`,
+    body: { host: "host-d" },
+  });
+  // The panel closes, and the ask leaves host-d's lane.
+  await waitFor(() => expect(router.state.location.search).toEqual({}));
+  expect(screen.queryByTestId("ask-panel")).toBeNull();
+  expect(askTiles(screen.getByTestId("lane-host-d/fleet"))).toHaveLength(0);
+});
+
+test("a peer's answer is in the Inbox, and Mark read goes to the peer", async () => {
+  const posted = stubApi("federated");
+  await renderApp("federated", `/inbox?item=${PEER_REPLY}`);
+  const mark = await screen.findByTestId("reply-mark-read");
+  expect(screen.getAllByText(/Yes\. The new key is in place/).length).toBeGreaterThan(0);
+  fireEvent.click(mark);
+  await waitFor(() => expect(posted).toHaveLength(1));
+  expect(posted[0]).toMatchObject({
+    method: "POST",
+    path: `/api/v1/replies/${PEER_REPLY}/read`,
+    body: { host: "host-d" },
+  });
 });
