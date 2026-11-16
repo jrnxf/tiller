@@ -2913,3 +2913,21 @@ fn tiller_rules_name_both_forms() {
     let allow = rules(&orchestrator, "allow");
     assert!(allow.contains(&format!("Bash({TILLER} *)").as_str()));
 }
+
+/// UA-17: any role reads an ask, but only the owner marks its reply read.
+#[test]
+fn ask_show_is_open_and_mark_read_is_the_owners() {
+    for role in Role::ALL {
+        assert!(
+            bash(role, "tiller ask show 01JABC").is_none(),
+            "{role}: a plain ask show is a read"
+        );
+        for command in [
+            "tiller ask show 01JABC --mark-read",
+            "tiller ask show --mark-read=true 01JABC",
+        ] {
+            let denial = bash(role, command).unwrap_or_else(|| panic!("{role}: {command} allowed"));
+            assert_eq!(denial.code, Code::OwnerOnly, "{role}: {command}");
+        }
+    }
+}

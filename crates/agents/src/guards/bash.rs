@@ -3550,6 +3550,14 @@ impl Walker<'_, '_> {
                 second != "list"
             }
             "mem" => unseen || second == "approve",
+            // Any role may read an ask; marking its reply read is the
+            // owner's (UA-17, `authority.md` "mark a reply read").
+            "ask" => {
+                (unseen || second == "show")
+                    && args.iter().any(|arg| {
+                        arg.text == "--mark-read" || arg.text.starts_with("--mark-read=")
+                    })
+            }
             // Every retro command is the owner's or the curator's: the CLI
             // refuses `list` and `show` to any session, core takes `sweep`
             // and `run` only from the owner or the daemon, and `finish` only
