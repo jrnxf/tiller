@@ -74,6 +74,17 @@ export function endedAtSameHead(approval: CardApproval, pr: CardPr): boolean {
   );
 }
 
+// An approval whose merge the forge refused, while the pull request is still
+// open at that head: the owner approved, and nothing merged.
+export function failedAtHead(approval: CardApproval, pr: CardPr): boolean {
+  return (
+    approval.state === "failed" &&
+    pr.state === "open" &&
+    approval.head_sha !== null &&
+    sameSha(approval.head_sha, pr.head_sha)
+  );
+}
+
 // Merge the first page and the pages loaded later. Every page is newest first and
 // each later page is older than the one before, so the order holds; an event that
 // appears twice (a refetched first page overlaps) is kept once.

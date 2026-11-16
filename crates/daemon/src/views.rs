@@ -1631,7 +1631,24 @@ fn timeline_text(event: &Event) -> String {
         },
         "approval.stale" => "ended an approval before the landing".to_owned(),
         "approval.executing" => "started the approved action".to_owned(),
-        "approval.finished" => "finished the approved action".to_owned(),
+        // "Finished" reads as a success, so the line says which it was.
+        "approval.finished" => match field("state") {
+            Some("succeeded") => "landed the approved work".to_owned(),
+            Some("failed") => {
+                let why = event
+                    .payload
+                    .pointer("/result/error")
+                    .and_then(Value::as_str)
+                    .map(|error| error.trim().trim_end_matches('.'))
+                    .map(|error| format!(": {}", error.strip_prefix("gh: ").unwrap_or(error)))
+                    .unwrap_or_default();
+                format!("could not land the approved work{why}. Nothing landed")
+            }
+            Some("uncertain") => {
+                "sent the approved action and could not read its result".to_owned()
+            }
+            _ => "finished the approved action".to_owned(),
+        },
         "pr.linked" => "linked a pull request".to_owned(),
         "pr.changed" => "updated a pull request".to_owned(),
         "pr.described" => "described a pull request".to_owned(),
@@ -2533,6 +2550,21 @@ mod tests {
                 serde_json::json!({"trigger": "startup", "revision_ids": [], "skipped": [skip]})
             ),
             "skipped projects/alpha.md, as it has no approved revision"
+        );
+        // A landing that failed never reads as "finished" (UA-44).
+        assert_eq!(
+            text(
+                "approval.finished",
+                serde_json::json!({"state": "failed", "result": {"error": "gh: Pull Request is not mergeable (HTTP 405)"}})
+            ),
+            "could not land the approved work: Pull Request is not mergeable (HTTP 405). Nothing landed"
+        );
+        assert_eq!(
+            text(
+                "approval.finished",
+                serde_json::json!({"state": "succeeded", "result": {"sha": "abc"}})
+            ),
+            "landed the approved work"
         );
         assert_eq!(
             text(

@@ -462,6 +462,17 @@ impl About {
                     "the approval of {what} ended before the merge{why}. Nothing merged. The orchestrator asks for a new approval when the pull request is ready"
                 )
             }
+            ApprovalState::Failed => {
+                let why = failed_reason(conn, &self.approval)
+                    .map(|why| {
+                        let why = why.trim().trim_end_matches('.');
+                        format!(": {}", why.strip_prefix("gh: ").unwrap_or(why))
+                    })
+                    .unwrap_or_default();
+                format!(
+                    "the merge of {what} failed{why}. Nothing merged. The item about it is in tiller attention list --open: answer it, and the orchestrator fixes the pull request and asks again"
+                )
+            }
             ApprovalState::Rejected => format!("the approval of {what} was rejected"),
             ApprovalState::Succeeded => format!("{what} has landed"),
             other => format!("the approval of {what} is {other}"),
@@ -490,6 +501,18 @@ fn stale_reason(conn: &rusqlite::Connection, approval: &str) -> Option<String> {
         "SELECT json_extract(payload, '$.reason') FROM events
          WHERE entity = 'approval' AND entity_id = ?1 AND kind = 'approval.stale'
          ORDER BY seq DESC LIMIT 1",
+        [approval],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+}
+
+/// The forge's or git's own words for a landing that failed, as the land
+/// sequence stored them on the approval.
+fn failed_reason(conn: &rusqlite::Connection, approval: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT json_extract(result, '$.error') FROM approvals WHERE id = ?1",
         [approval],
         |row| row.get::<_, Option<String>>(0),
     )
@@ -575,12 +598,12 @@ pub fn land(app: &App, args: Land) -> Done {
                 ))
                 .hint(About::of(store.conn(), &approval).review_step()));
             }
-            ApprovalState::Stale => {
+            state @ (ApprovalState::Stale | ApprovalState::Failed) => {
                 let about = About::of(store.conn(), &approval);
                 return Err(Failure::refused(format!(
                     "{} did not land: {}",
                     about.name(),
-                    about.ended(store.conn(), ApprovalState::Stale)
+                    about.ended(store.conn(), state)
                 )));
             }
             other => {
@@ -633,6 +656,12 @@ fn resolve_land_target(conn: &rusqlite::Connection, input: &str) -> Result<Strin
     // Nothing to decide: say what became of the newest one, so the owner
     // does not have to look it up on the board.
     Err(Failure::refused(match approvals.first() {
+        // A merge that failed is the news, not the missing approval.
+        Some(last) if last.state == ApprovalState::Failed => format!(
+            "{} did not land: {}",
+            card.display_id,
+            About::of(conn, last).ended(conn, last.state)
+        ),
         Some(last) => format!(
             "{} has no pending merge approval: {}",
             card.display_id,

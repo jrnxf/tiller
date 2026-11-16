@@ -62,6 +62,7 @@ import {
   approvalFor,
   approvalStanding,
   endedAtSameHead,
+  failedAtHead,
   mergeTimeline,
   reviewFor,
   sameSha,
@@ -565,6 +566,14 @@ function PullRequest({
                     merged.
                   </span>
                 </>
+              ) : failedAtHead(approval, pr) ? (
+                <>
+                  <span className="lab sm bad">merge failed</span>
+                  <span className="meta">
+                    at <span className="sha">{shortSha(approval.head_sha ?? "")}</span>. Nothing
+                    merged.
+                  </span>
+                </>
               ) : stale ? (
                 <>
                   <span className="lab sm yel">stale</span>
@@ -692,8 +701,10 @@ export function CardPage({
   // must not raise the banner while the new one is current.
   let staleApproval: CardApproval | null = null;
   let stalePr: CardPr | undefined;
+  let failedApproval: CardApproval | null = null;
   for (const pr of detail.prs) {
     const approval = approvalFor(detail.approvals, pr);
+    if (approval && failedAtHead(approval, pr)) failedApproval ??= approval;
     if (approval && approvalStanding(approval, pr) === "stale") {
       staleApproval = approval;
       stalePr = pr;
@@ -831,6 +842,17 @@ export function CardPage({
               fresh approval.
             </div>
           )}
+        </div>
+      ) : null}
+
+      {failedApproval && !staleApproval ? (
+        <div className="pk-banner">
+          <WarnIcon />
+          <div data-testid="merge-failed">
+            <b>Nothing merged.</b> The merge of{" "}
+            <span className="sha">{shortSha(failedApproval.head_sha ?? "")}</span> failed after the
+            approval. The pull request is still open. Merging needs a fix and a new approval.
+          </div>
         </div>
       ) : null}
 

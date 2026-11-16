@@ -5,6 +5,7 @@ import {
   approvalFor,
   approvalStanding,
   endedAtSameHead,
+  failedAtHead,
   mergeTimeline,
   reviewFor,
   sameSha,
@@ -75,6 +76,17 @@ test("a stale approval at the head the PR still has ended without a push", () =>
   expect(endedAtSameHead(approval("stale", "AAA"), pr("aaa"))).toBe(true);
   expect(endedAtSameHead(approval("stale", "aaa"), pr("bbb"))).toBe(false);
   expect(endedAtSameHead(approval("accepted", "aaa"), pr("aaa"))).toBe(false);
+});
+
+test("a failed merge shows while the PR is open at the head it was tried at", () => {
+  expect(failedAtHead(approval("failed", "AAA"), pr("aaa"))).toBe(true);
+  // A push after it: the next request is about the new head.
+  expect(failedAtHead(approval("failed", "aaa"), pr("bbb"))).toBe(false);
+  expect(failedAtHead(approval("failed", "aaa"), pr("aaa", "merged"))).toBe(false);
+  expect(failedAtHead(approval("succeeded", "aaa"), pr("aaa"))).toBe(false);
+  // A new request after the failure replaces it.
+  const again = { ...approval("requested", "aaa"), id: "ap2" };
+  expect(approvalFor([approval("failed", "aaa"), again], pr("aaa"))?.id).toBe("ap2");
 });
 
 test("the approval for a PR is the one bound to it", () => {

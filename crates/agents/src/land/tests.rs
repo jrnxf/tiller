@@ -2860,3 +2860,97 @@ fn review_record_takes_a_full_sha() {
         .value;
     assert_eq!(recorded.head_sha, Some(upper.to_ascii_lowercase()));
 }
+
+/// UA-44: a merge the forge refuses says so to the owner, once, with the
+/// forge's reason, and a standing grant does not accept the same head again.
+#[test]
+fn a_refused_merge_tells_the_owner_once_and_a_grant_waits_for_a_new_head() {
+    let mut world = World::new(Delivery::DirectPr);
+    let lock = world.lock();
+    let forge = FakeForge::new();
+    grant(&mut world, standing());
+    let (card, _) = world.pr();
+    review(&mut world, &card, Verdict::Pass, 0);
+    let lander = lander(&forge);
+    *forge.outcome.borrow_mut() =
+        MergeOutcome::Refused("gh: Pull Request is not mergeable (HTTP 405)".into());
+
+    let matched = lander
+        .match_grants(&lock, &mut world.store)
+        .unwrap()
+        .approvals;
+    assert_eq!(matched.len(), 1);
+    let landed = lander.land_ready(&lock, &mut world.store).unwrap();
+    assert!(
+        matches!(landed.as_slice(), [Landed::Failed { .. }]),
+        "{landed:?}"
+    );
+    let items = |world: &World| -> Vec<(String, String)> {
+        let mut statement = world
+            .store
+            .conn()
+            .prepare(
+                "SELECT kind, question FROM attention
+                 WHERE answered_at IS NULL AND withdrawn_at IS NULL ORDER BY id",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    };
+    let open = items(&world);
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0].0, "recovery");
+    assert_eq!(
+        open[0].1,
+        format!(
+            "PR #7 did not merge at {}: Pull Request is not mergeable (HTTP 405). \
+             Nothing merged. Have the orchestrator fix it and ask again, or stop?",
+            &HEAD[..12]
+        )
+    );
+
+    // The same head: no new approval, no second merge call, no second item.
+    for _ in 0..3 {
+        assert!(
+            lander
+                .match_grants(&lock, &mut world.store)
+                .unwrap()
+                .approvals
+                .is_empty()
+        );
+        assert!(
+            lander
+                .land_ready(&lock, &mut world.store)
+                .unwrap()
+                .is_empty()
+        );
+    }
+    assert_eq!(forge.merges().len(), 1);
+    assert_eq!(items(&world).len(), 1);
+
+    // A fixed pull request has a new head: the grant accepts it, it merges,
+    // and the question about the failed try leaves, so the card closes.
+    forge.set(|view| view.head_sha = MOVED.into());
+    world
+        .store
+        .conn()
+        .execute("UPDATE prs SET head_sha = ?1", [MOVED])
+        .unwrap();
+    review_at(&mut world, &card, MOVED, Verdict::Pass, 0);
+    *forge.outcome.borrow_mut() = MergeOutcome::Merged { sha: MERGED.into() };
+    let matched = lander
+        .match_grants(&lock, &mut world.store)
+        .unwrap()
+        .approvals;
+    assert_eq!(matched.len(), 1);
+    let landed = lander.land_ready(&lock, &mut world.store).unwrap();
+    assert!(
+        matches!(landed.as_slice(), [Landed::Succeeded { .. }]),
+        "{landed:?}"
+    );
+    assert!(items(&world).is_empty());
+    assert_eq!(world.store.card(&card.id).unwrap().state.as_str(), "closed");
+}

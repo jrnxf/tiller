@@ -113,12 +113,16 @@ export function parseEvidence(evidence: string | null): ParsedEvidence {
   }
   const object = parsed as Record<string, unknown>;
   const text = (key: string) => (typeof object[key] === "string" ? (object[key] as string) : null);
+  // A landing that failed carries the approval's own record (`state`, and
+  // `result` as JSON). The question says both in words, so neither is a line.
+  const hidden = (key: string) =>
+    POINTED.has(key) || ("approval_id" in object && (key === "state" || key === "result"));
   return {
     paneTail: text("pane_tail"),
     sessionId: text("session_id"),
     lastOutputAt: text("last_observation_at"),
     lines: Object.entries(object)
-      .filter(([key, value]) => !POINTED.has(key) && value !== null && value !== "")
+      .filter(([key, value]) => !hidden(key) && value !== null && value !== "")
       .map(([key, value]) => ({
         text: `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`,
         href: null,

@@ -593,6 +593,38 @@ impl Lander<'_> {
         approval: Approval,
         sha: String,
     ) -> Result<Landed> {
+        // The work is on the default branch now, so a question about an
+        // earlier failed landing of this card no longer applies. Left open it
+        // would keep the card open and in "Needs you" after it landed.
+        if let Some(card) = &approval.card_id {
+            let moot: Vec<String> = {
+                let mut statement = store
+                    .conn()
+                    .prepare(
+                        "SELECT id FROM attention
+                         WHERE card_id = ?1 AND kind = 'recovery'
+                           AND answered_at IS NULL AND withdrawn_at IS NULL
+                           AND CASE WHEN json_valid(evidence)
+                                    THEN json_extract(evidence, '$.state') = 'failed'
+                                         AND json_extract(evidence, '$.approval_id') IS NOT NULL
+                                    ELSE 0 END",
+                    )
+                    .map_err(tiller_core::Error::from)?;
+                statement
+                    .query_map([card], |row| row.get::<_, String>(0))
+                    .map_err(tiller_core::Error::from)?
+                    .collect::<std::result::Result<_, _>>()
+                    .map_err(tiller_core::Error::from)?
+            };
+            let short = sha.get(..12).unwrap_or(&sha);
+            for item in moot {
+                store.attention_withdraw(
+                    &lock.ctx(),
+                    &item,
+                    &format!("the work landed after it, as {short}"),
+                )?;
+            }
+        }
         let finished = store.approval_finish(
             &lock.ctx(),
             &approval.id,
@@ -619,8 +651,68 @@ impl Lander<'_> {
         let error = error.to_owned();
         Ok(match finish {
             Finish::Uncertain => Landed::Uncertain { approval, error },
-            _ => Landed::Failed { approval, error },
+            _ => {
+                self.failed_notice(lock, store, &approval, &error)?;
+                Landed::Failed { approval, error }
+            }
         })
+    }
+
+    /// A landing the forge or git refused ends `failed`, and the owner hears
+    /// it once: one `recovery` item with the reason, on the card (`recovery.md`
+    /// R08). Without it the card only stops moving, and "approved" reads as
+    /// "landed".
+    fn failed_notice(
+        &self,
+        lock: &DaemonLock,
+        store: &mut Store,
+        approval: &Approval,
+        error: &str,
+    ) -> Result<()> {
+        let Some(card) = approval.card_id.clone() else {
+            return Ok(());
+        };
+        let head = approval.head_sha.as_deref().unwrap_or("its head");
+        let head = head.get(..12).unwrap_or(head);
+        let number = match &approval.pr_id {
+            Some(pr_id) => get::<Pr>(store.conn(), "pr", pr_id)
+                .ok()
+                .map(|pr| pr.number),
+            None => None,
+        };
+        let what = match (approval.kind, number) {
+            (ApprovalKind::Merge, Some(number)) => format!("PR #{number} did not merge at {head}"),
+            (ApprovalKind::Merge, None) => format!("The merge at {head} did not happen"),
+            _ => format!("The landing of {head} did not happen"),
+        };
+        // The forge's own words, without the name of the tool that carried them.
+        let reason = error.trim().trim_end_matches('.');
+        let reason = reason.strip_prefix("gh: ").unwrap_or(reason);
+        let nothing = match approval.kind {
+            ApprovalKind::Merge => "Nothing merged",
+            _ => "Nothing landed",
+        };
+        let key = format!("land:{}:failed", approval.id);
+        store.attention_open(
+            &lock.ctx(),
+            Some(&key),
+            NewAttention {
+                card,
+                kind: AttentionKind::Recovery,
+                question: format!(
+                    "{what}: {reason}. {nothing}. Have the orchestrator fix it and ask again, or stop?"
+                ),
+                evidence: Some(
+                    json!({"approval_id": approval.id, "state": approval.state, "result": approval.result})
+                        .to_string(),
+                ),
+                options: Some(json!(["Fix it and ask again", "Stop"])),
+                // Follows the approval, not the run that asked.
+                run_id: None,
+                ..NewAttention::default()
+            },
+        )?;
+        Ok(())
     }
 
     /// One `merge` attention item per approval and reason, however many
@@ -673,8 +765,8 @@ impl Lander<'_> {
             "state = 'open' AND head_sha IS NOT NULL
              AND id NOT IN (SELECT pr_id FROM approvals WHERE pr_id IS NOT NULL
                             AND state IN ('requested', 'accepted', 'executing', 'uncertain'))
-             AND id NOT IN (SELECT pr_id FROM approvals WHERE pr_id IS NOT NULL AND state = 'stale'
-                            AND head_sha = prs.head_sha)
+             AND id NOT IN (SELECT pr_id FROM approvals WHERE pr_id IS NOT NULL
+                            AND state IN ('stale', 'failed') AND head_sha = prs.head_sha)
              ORDER BY linked_at, id",
             &[],
         )?;

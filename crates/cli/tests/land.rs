@@ -273,6 +273,44 @@ fn an_approval_that_ended_unused_says_why_and_that_nothing_merged() {
     }
 }
 
+/// UA-44: a merge the forge refused. `land` and `approve` give the forge's
+/// reason and say that nothing merged, in place of "is failed".
+#[test]
+fn a_failed_merge_says_why_and_that_nothing_merged() {
+    let world = World::initialized();
+    let approval = requested(&world);
+    world.must(&["approve", &approval, "--sha", &HEAD[..12]]);
+    {
+        let mut store = world.store();
+        let ctx = Ctx::new(Actor::Daemon);
+        store.approval_execute(&ctx, &approval, HEAD).unwrap();
+        store
+            .approval_finish(
+                &ctx,
+                &approval,
+                Finish::Failed,
+                json!({"error": "gh: Pull Request is not mergeable (HTTP 405)"}),
+            )
+            .unwrap();
+    }
+    for command in [
+        vec!["land", "alpha-1"],
+        vec!["approve", "alpha-1", "--sha", &HEAD[..12]],
+        vec!["land", approval.as_str()],
+    ] {
+        let out = world.run(&command);
+        assert_eq!(out.error_code(), "refused", "{}", out.json);
+        let said = out.json["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            said.contains(&format!(
+                "the merge of PR #7 at {} failed: Pull Request is not mergeable (HTTP 405). Nothing merged.",
+                &HEAD[..12]
+            )),
+            "{command:?}: {said}"
+        );
+    }
+}
+
 #[test]
 fn land_with_an_unreadable_result_exits_eight() {
     let world = World::initialized();
