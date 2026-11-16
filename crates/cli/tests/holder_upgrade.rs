@@ -132,8 +132,15 @@ fn shows(holder: &Holder, client: &HolderClient, pane: &Pane, read: Read, text: 
 /// record the new image resumes from as `record-exec`. A
 /// pid in `kill-pid` gets `SIGTERM` at each dry run, so a child exits
 /// while the upgrade runs.
+///
+/// The `--resume` call runs as the holder's own pid, with its panes as its
+/// children, so the shell must not start a command there: a shell waits
+/// with `waitpid(-1)`, which would reap a pane's child before the new
+/// image could and lose its exit. It hands the call to [`resume_tap`]
+/// instead, which keeps the record without a child.
 fn wrapper(world: &World) -> PathBuf {
     let dir = world.dir.path();
+    let tap = std::env::current_exe().unwrap();
     script(
         &dir.join("tiller-wrapper"),
         &format!(
@@ -146,12 +153,56 @@ if [ "$2" = "--dry-run-handover" ]; then
   if [ -e "$dir/kill-pid" ]; then kill -TERM "$(cat "$dir/kill-pid")"; fi
   exec '{TILLER}' "$@" < "$dir/record-$n"
 fi
-if [ "$2" = "--resume" ]; then cat "/dev/fd/$3" > "$dir/record-exec"; fi
+if [ "$2" = "--resume" ]; then
+  exec env {TAP_DIR}="$dir" {TAP_FD}="$3" '{tap}' --exact resume_tap --nocapture
+fi
 exec '{TILLER}' "$@"
 "#,
-            dir = dir.display()
+            dir = dir.display(),
+            tap = tap.display(),
         ),
     )
+}
+
+/// Where [`resume_tap`] keeps the record.
+const TAP_DIR: &str = "TILLER_TEST_TAP_DIR";
+/// The record's fd, which [`resume_tap`] hands on to the new image.
+const TAP_FD: &str = "TILLER_TEST_TAP_FD";
+
+/// Not a test: the new image's first half, which [`wrapper`] runs in the
+/// holder's process. It copies the handover record to `record-exec` and
+/// re-executes the real binary to resume from it, without a child of its
+/// own. The record is read from its start with `pread`: on macOS
+/// `/dev/fd/<n>` is a copy of the fd, whose offset the old image left at
+/// the record's end, and `pread` neither uses nor moves it.
+/// Without the variables it does nothing.
+#[test]
+fn resume_tap() {
+    use std::os::unix::fs::FileExt;
+    use std::os::unix::process::CommandExt;
+    let (Some(dir), Some(fd)) = (std::env::var_os(TAP_DIR), std::env::var_os(TAP_FD)) else {
+        return;
+    };
+    let fd = fd.to_str().unwrap().to_owned();
+    let file = std::fs::File::open(format!("/dev/fd/{fd}")).unwrap();
+    let mut bytes = Vec::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read_at(&mut buf, bytes.len() as u64).unwrap();
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buf[..n]);
+    }
+    drop(file);
+    std::fs::write(Path::new(&dir).join("record-exec"), bytes).unwrap();
+    let err = std::process::Command::new(TILLER)
+        .arg0("tiller")
+        .args(["holder", "--resume", &fd])
+        .env_remove(TAP_DIR)
+        .env_remove(TAP_FD)
+        .exec();
+    panic!("the tap could not re-execute {TILLER}: {err}");
 }
 
 /// An executable `/bin/sh` script at `path`.
@@ -574,7 +625,12 @@ fn a_counter_runs_through_the_upgrade_and_a_child_that_exits_in_it_keeps_its_cod
 
     // The child that the dry run's `SIGTERM` ended exits 7, and the new
     // image reports it.
-    assert_eq!(exit_code(&holder, &client, &exits.pane), Some(7));
+    assert_eq!(
+        exit_code(&holder, &client, &exits.pane),
+        Some(7),
+        "{}",
+        holder.log()
+    );
 
     // Every number once, in order.
     let text = shows(

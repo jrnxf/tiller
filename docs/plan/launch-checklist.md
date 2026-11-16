@@ -56,7 +56,9 @@ These fail without any change of the audit. Find out if they also fail on a quie
 - [ ] `tiller-cli::startup startup_is_under_ten_milliseconds` (CPU median about 24 ms)
 - [ ] `tiller-cli::hook hook_is_inside_the_ten_ms_budget_with_the_daemon_down` (CPU median about 27 ms)
 - [ ] `tiller-cli::holder` - two tests (a slow subscriber, and screen read with scrollback)
-- [ ] `tiller-cli::holder_upgrade` - three tests (a handover record reads `Short`, a close under way at the upgrade, a counter through the upgrade)
+- [x] `tiller-cli::holder_upgrade` a counter through the upgrade (also flaky on Linux): the test's wrapper ran `cat` as the holder's pid after the exec, and the shell's `waitpid(-1)` reaped a pane's child before the new image could. Fixed in the test, which now taps the record without a child
+- [ ] `tiller-cli::holder_upgrade` field by field: its record no longer reads `Short` (the same wrapper fix: macOS `/dev/fd` shares the record fd's offset), but on macOS 300 000 bytes queued to a raw PTY whose app reads nothing never reach the app, with no upgrade at all
+- [ ] `tiller-cli::holder_upgrade` a close under way at the upgrade: on macOS the pane's shell keeps the PTY as its controlling terminal, so its output never ends while it lives, and the close's kill comes first
 - [ ] `tiller-cli::holder_agents a_lost_holder_resumes_its_worker_and_notifies_the_owner_once`
 - [ ] `tiller-cli::soak a_short_soak_has_no_gap`
 
