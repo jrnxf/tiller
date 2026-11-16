@@ -11,11 +11,11 @@ On Monday 2026-11-16 at about 15:30 Lisbon time, the owner said yes to every ite
 - [x] UA-57 (P0): a `local-only` project starts its runs from the checkout's default branch when it is ahead of `origin` (`docs/spec/state.md` section 3, `base_sha`)
 - [ ] UA-15 part 2 (P0): the answer to an ask sent to a peer project shows on the board that sent it
 - [ ] UA-18: cancel and open an ask on the board (`POST /api/v1/asks/{id}/cancel`, `GET /api/v1/asks/{id}`)
-- [ ] UA-19: a worker's `blocked` or `needs-decision` report puts its card in "Needs you" (a `recovery` item)
+- [x] UA-19: a worker's `blocked` or `needs-decision` report puts its card in "Needs you" (a `recovery` item)
 - [x] UA-20: "Start" a run on the board (`POST /api/v1/cards/{id}/runs`)
-- [ ] UA-38: a note about an ended approval leaves the list
-- [ ] UA-46: a plain `tiller spawn` uses the owner's unused "Start now anyway"
-- [ ] UA-51: the store refuses a start on a held card
+- [x] UA-38: a note about an ended approval leaves the list
+- [x] UA-46: a plain `tiller spawn` uses the owner's unused "Start now anyway"
+- [x] UA-51: the store refuses a start on a held card
 - [x] UA-53: one spec sentence for `approvals.repo` of a `local-only` project with no repo
 - [x] UA-01: the spec names `refuses_runs` and the `floors` doctor check
 - [ ] UA-17: "Mark read" in the CLI (`tiller ask show <ask> --mark-read`)
@@ -44,6 +44,10 @@ The owner skipped the full test passes on Monday 2026-11-16 to get a release out
 - [ ] UA-63 and UA-64 from iteration 33: no seventh pass confirmed that the sixth pass found every P1
 - [ ] UA-09: the short answer at a real terminal, on the bench; only a pseudo-terminal test ran. A read with no sentence still prints its record
 - [ ] Every owner decision above, as each one lands
+- [ ] UA-19: the daemon's `recovery` item for a worker that waits 5 minutes with no item (R23), and the age of the report on the tile
+- [ ] UA-38: a new request or a rejection withdraws the notes of the PR's earlier approvals, and Withdraw works on a note whose approval ended
+- [ ] UA-46: a plain `tiller spawn` uses the owner's unused "Start now anyway" answer (`--past-quota-floor` is a no-op)
+- [ ] UA-51: a start on a card with a dated hold is refused, and a hold or release by the owner sends one note to the orchestrator
 
 ## Test failures on the macOS machine
 
