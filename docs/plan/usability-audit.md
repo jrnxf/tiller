@@ -12,9 +12,9 @@ Status values: `open`, `fixed` (with what was verified), `needs owner`, `to veri
 |---|---|
 | Phase | 1 - audit. Journeys 3 (ask), 4 (start a task) and 5 (trust) are walked on the board and the CLI. Journeys 1, 2 and 6 to 11 are not walked yet. |
 | Open P0 | 0. UA-15 is `needs owner`: the silent part is fixed, the answer itself needs a spec change. |
-| Open P1 | 4 (UA-03, UA-09, UA-17, UA-25). UA-20 is `needs owner`: a queued card says what it waits for and "Close" is out of the main place, and its "Start" control needs a spec change (see "Needs owner"). UA-18 is `needs owner`: the wrong status line is fixed, Cancel and the full view need a spec change. UA-19 is `needs owner`: the tile, the card and the timeline show the worker's report, and the "Needs you" rule needs a spec change. |
-| Fixed | UA-01, UA-02, UA-04, UA-05, UA-06, UA-12, UA-16, UA-21, UA-22, DX-01. UA-15 part 1 (the owner is told where the answer shows). UA-18 part 1 (the ask tile shows an unread answer and opens it). UA-19 part 1 (a worker's report shows on its tile, on the card and in the timeline). UA-20 part 1 (a queued card says what it waits for, and "Close" is under "More" until work starts). |
-| Next step | UA-25 (Health counts a live peer as not live; small, and it shares its cause with the `stale` peer row of UA-03). Then the CLI group (UA-17, UA-03, UA-09). Walk journeys 2, 6 and 8 after the stand-in forge of the bench gaps. UA-11 (P2) is not started: check `docs/spec/state.md` section 6 first, because the column of a card is a contract. |
+| Open P1 | 3 (UA-03, UA-09, UA-17). UA-20 is `needs owner`: a queued card says what it waits for and "Close" is out of the main place, and its "Start" control needs a spec change (see "Needs owner"). UA-18 is `needs owner`: the wrong status line is fixed, Cancel and the full view need a spec change. UA-19 is `needs owner`: the tile, the card and the timeline show the worker's report, and the "Needs you" rule needs a spec change. |
+| Fixed | UA-01, UA-02, UA-04, UA-05, UA-06, UA-12, UA-16, UA-21, UA-22, UA-25, DX-01. UA-15 part 1 (the owner is told where the answer shows). UA-18 part 1 (the ask tile shows an unread answer and opens it). UA-19 part 1 (a worker's report shows on its tile, on the card and in the timeline). UA-20 part 1 (a queued card says what it waits for, and "Close" is under "More" until work starts). |
+| Next step | The CLI group: UA-17 (read an answer in the CLI), then UA-03 and UA-09. Walk journeys 2, 6 and 8 after the stand-in forge of the bench gaps. UA-11 (P2) is not started: check `docs/spec/state.md` section 6 first, because the column of a card is a contract. |
 
 ## The bench
 
@@ -34,7 +34,7 @@ scripts/usability-bench.sh down      # stop every process, delete the homes
 | `session HOST PROJECT [CARD]` | the live session id of an orchestrator, or of a card's worker |
 | `login main\|peer` | a new owner sign-in link |
 | `daemon HOST stop\|start\|restart` | the daemon restart and outage cases; a restart keeps the port |
-| `link freeze\|thaw` | the peer stops answering, then answers again |
+| `link freeze\|thaw` | the peer stops answering, then answers again. A freeze lasts about 2 minutes: the link then starts a new `peer serve` |
 | `quota HOST PERCENT` | the weekly quota the next poll reads |
 | `kill-agent HOST SESSION` | a run that dies |
 | `shots DIR [PATH...]` | screenshots of the main board's screens, both themes, 1440 px and 390 px (needs `chrome-devtools-axi`; `DIR` must be outside the repository). A path may be a card page: `"/cards/<ulid>?owner=peer"` |
@@ -90,6 +90,7 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 | Answer a card that says "Decision" | 2 steps: open the card, click an option or press its digit. The question, the recommendation and the answer control are at the top of the card (UA-02; before: leave the card, open the Inbox, find the item, answer: 4 steps) | `attention answer <item>`, after `attention list --open` for the id |
 | Find the most urgent item in the Inbox | it is the first row and the one shown, and its row says "Urgent" (UA-05; before: the last of 7 rows) | `tiller recap` orders by kind, not by the card's priority |
 | Learn that a host starts no new run | a banner on every screen names the host, the numbers and the step ("peer refuses new runs. 4.6 GB of disk free, under the 878,906 GB floor. ..."); the sidebar row, Health and a queued card say it too, and all clear by themselves within 30 s of a fix (UA-01; before: nothing, until a `tiller spawn` was refused) | `tiller machines` has `refuses_runs` on this host's row, and `tiller doctor` has a `floors` line. Main's CLI does not show the peer's (UA-03) |
+| Learn that the peer is out | Health's Safety card reads "Watch" and "Only 1 of 2 machines are live" within 30 s, and "Good" again when the link is back (UA-25; before: "Watch" all day with the peer live) | `tiller machines` on main reads `stale` with `peer_link_down` within 30 s, and `ok` on the next read after the link is back (UA-25; before: `stale` from 2 minutes after every start) |
 | Learn that a run is blocked or done | the tile shows the worker's words and "Reports blocked" or "Reports done" within 2 s, on both hosts (UA-19; before, only when the orchestrator raised an item). The card enters "Needs you" only when the orchestrator raises an item | `tiller agents`, in a CSV row |
 
 ## Findings
@@ -374,6 +375,7 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 - Journey: 3, 4.
 - Happened: `tiller card create lantern --title ...` is refused with "a new card needs --kind ship|scout|question|ops"; the help lists `--kind` as an option, and the board defaults it to ship. `tiller ask note lantrn` answers "no project lantrn" with no near match. `tiller status "text"` fails on a parse error because the state comes first.
 - Fix: `--kind` defaults to `ship` as on the board. A `not_found` for a project names the nearest id ("did you mean lantern?"), and names the peer when the project lives there (UA-03).
+- `tiller machines` shows this host's `last_seen_at` as the time the daemon started. `docs/spec/protocol.md` section 9 says "now, while the daemon runs", and the daemon's own Machines row does that. Seen with UA-25.
 
 ### UA-24 - Small board defects seen in journeys 3 to 5 (P2, open)
 
@@ -388,14 +390,22 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 - A card with a live run has "Close" as its one filled button, but the daemon refuses a close while a run is active (`docs/spec/state.md`, `card.close`). Seen after UA-20's fix; not checked what the dialog says on the refusal.
 - To verify: the `A` key that opens the Ask box may also type "a" into its field. Seen once with a scripted key press (`chrome-devtools-axi press a`); not checked with a real keyboard.
 - To verify: `board/src/components/shell/ask-settings.test.tsx` (line 181, the folder field's value) failed once in a full `bun run test` while the bench ran, and passed 3 times alone and in the next full run. It has a `waitFor` deadline, so the cause is probably the machine's load.
+- Health's Safety card says "Only 1 of 2 machines are live" and does not name the machine that is out. Seen with UA-25.
 
-### UA-25 - Health says "Only 1 of 2 machines are live" while the peer is live (P1, open)
+### UA-25 - Health says "Only 1 of 2 machines are live" while the peer is live (P1, fixed)
 
 - Journey: 2, 7, 8.
 - Tried: opened Health on the main board during the walk of UA-01, with the peer's link live.
 - Happened: the Safety card reads "Watch", "Only 1 of 2 machines are live" and "machines live 1 of 2". The sidebar shows the peer with a green dot and its counts, and the peer's cards are live on the board. The count comes from `hosts.last_seen_at` in the last two minutes (`crates/core/src/state/signals.rs`, `machines_live`), and a live peer link does not keep that column fresh on the bench. `tiller machines` on main shows the same peer as `stale` for the same reason (UA-03).
 - Hurts: Safety is the card that says whether to worry. It says "Watch" every day for a state that is fine, so the owner learns to ignore it, and a real outage then looks the same.
-- Fix: count a paired peer as live from its link state (as the Machines read does), or have the link's frames refresh `last_seen_at`. Check which of the two `docs/spec/protocol.md` section 9 means by "`last_seen_at`: the last frame from the peer link" before the fix; the signals read and `tiller machines` should then agree with the board.
+- Cause: the link wrote `hosts.last_seen_at` only when its state changed. A link that stayed live wrote it once, so two minutes after the link came up every reader of the column called the peer stale. `docs/spec/protocol.md` section 9 defines the column as "the last frame from the peer link", so the write was the defect, not the readers.
+- Fixed:
+  - A live link now writes `last_seen_at` from its frames, at most once per 25 s, with no event (`Store::peer_seen`, `LinkTask::seen`).
+  - `tiller machines` and the Health count call a paired host stale as soon as its link is not live (`stale_reason` set), as section 9 says and as the board's Machines row does. Before, both waited two minutes after the last frame.
+- Verified on the bench (Mon 16 Nov 2026, Lisbon). Before: the peer's row of `tiller machines` on main read `stale` 2 minutes after the bench started, with the link live. After: 4 minutes after the start the row reads `ok` with a `last_seen_at` under 30 s old, the events table holds one `host.changed` row, and Health reads "Good", "Both machines are live" and "machines live 2 of 2". With `link freeze` the row reads `stale` with `peer_link_down` after 26 s and Health reads "Watch" and "Only 1 of 2 machines are live"; after `link thaw` the row reads `ok` on the next read. Health checked in light and dark at 1440 px and 390 px.
+- Tests: `a_live_link_keeps_last_seen_at_fresh_with_no_event` (daemon), `machines_calls_a_peer_stale_as_soon_as_its_link_is_not_live` (CLI), and one more host in `safety_counts_breaches_overlapping_runs_and_live_machines` (core).
+- Not done: main's `tiller machines` still shows no slots and no agent count for the peer (UA-03). The local host's own `last_seen_at` in `tiller machines` is the time the daemon started, not "now" (P2, added to UA-23). The Safety card does not name the machine that is not live (P2, added to UA-24).
+- Seen during the check, for journey 8: `link freeze` holds an outage for about 2 minutes only. The link then goes `down`, starts a new `peer serve` and is live again 5 s later, while the frozen process stays. While the peer is out, the board shows it only by the amber chips in the sidebar; no header banner says that the peer does not answer. Judge this in the walk of journey 8.
 
 ### DX-01 - A debug build made before the board was built never served the board (fixed)
 
@@ -435,7 +445,7 @@ Order of work, highest owner value first. Fixes that share a cause are grouped.
 3. Done: UA-02, UA-05, UA-06 and UA-12 (the "needs you" path). The question is on the card, the Inbox is ordered by urgency, and the kind is named.
 4. Done: UA-21 and UA-22 (find a card and start a job from anywhere on the board). Done as far as the contract allows: UA-20 part 1 (a queued card says what it waits for). Its "Start" control waits under "Needs owner".
 5. Done: UA-01 (a host that refuses every new run says so on the board, in `tiller machines` and in `tiller doctor`).
-6. UA-25 (a live peer counts as live on Health), then UA-17 with UA-03, UA-09, UA-10 and UA-23: the CLI as an owner surface.
+6. Done: UA-25 (a live peer counts as live on Health and in `tiller machines`). Next: UA-17 with UA-03, UA-09, UA-10 and UA-23: the CLI as an owner surface.
 7. Finish the audit in parallel with the fixes: close the bench gaps (the stand-in forge), then walk journeys 1, 2, 6, 8, 9, 10 and 11 and the rest of 5 and 7.
 8. UA-07 with UA-08: the host out of the owner's way.
 9. UA-11, UA-13, UA-14, UA-22, UA-24: polish.

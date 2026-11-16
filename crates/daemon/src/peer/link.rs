@@ -946,6 +946,7 @@ async fn run_link(
         peers,
         pairing,
         home,
+        seen_written: Mutex::new(None),
     };
     let mut attempt = 0;
     // Refusals in a row since the last session that was welcomed.
@@ -1022,6 +1023,8 @@ struct LinkTask {
     peers: Arc<Peers>,
     pairing: Pairing,
     home: PathBuf,
+    /// When `hosts.last_seen_at` was last written for this peer.
+    seen_written: Mutex<Option<Instant>>,
 }
 
 /// Unregisters a session's query channel however the session ends.
@@ -1090,7 +1093,7 @@ impl LinkTask {
         })
         .await;
         match written {
-            Ok(Ok(_)) => {}
+            Ok(Ok(_)) => self.seen_now(),
             Ok(Err(error)) => tracing::warn!(%error, "recording the link state failed"),
             Err(error) => tracing::warn!(%error, "recording the link state stopped"),
         }
@@ -1098,12 +1101,56 @@ impl LinkTask {
 
     /// A frame arrived: the link is fresh.
     async fn took_frame(&self) {
+        let now = Timestamp::now();
         let state = self.peers.update(self.host_id(), |view| {
-            view.last_frame_at = Some(Timestamp::now());
+            view.last_frame_at = Some(now);
             view.link
         });
-        if state.is_some_and(|state| state != LinkState::Live) {
-            self.set(LinkState::Live, None, None).await;
+        match state {
+            Some(LinkState::Live) => self.seen(now).await,
+            Some(_) => self.set(LinkState::Live, None, None).await,
+            None => {}
+        }
+    }
+
+    /// Marks `hosts.last_seen_at` as written now.
+    fn seen_now(&self) {
+        *self
+            .seen_written
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
+    }
+
+    /// Keeps `hosts.last_seen_at` at the last frame while the link stays
+    /// live (`protocol.md` section 9), so every reader of the row (the
+    /// Health signals, `tiller machines`) agrees with the board. A link
+    /// state change writes it too ([`LinkTask::set`]); between changes one
+    /// write per `timing.live` is enough, and it writes no event.
+    async fn seen(&self, at: Timestamp) {
+        let due = self
+            .seen_written
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_none_or(|written| written.elapsed() >= self.peers.timing.live);
+        if !due
+            || self.peers.damage.reason().is_some()
+            || tiller_core::owner::check(&self.home).is_err()
+        {
+            return;
+        }
+        // Before the write: a failing write is tried again after the same wait.
+        self.seen_now();
+        let home = self.home.clone();
+        let host_id = self.host_id().to_owned();
+        let written = tokio::task::spawn_blocking(move || {
+            let mut store = Store::open_current(home.join("state.db"))?;
+            store.peer_seen(&Ctx::new(Actor::Daemon), &host_id, at)
+        })
+        .await;
+        match written {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "recording the last frame failed"),
+            Err(error) => tracing::warn!(%error, "recording the last frame stopped"),
         }
     }
 

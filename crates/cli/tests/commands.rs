@@ -1299,6 +1299,57 @@ fn toon_is_the_default_and_shows_lisbon_time() {
     );
 }
 
+/// `protocol.md` section 9: a paired host's row is `ok` while its link is
+/// live and `stale` as soon as the link is not, with the reason; the row and
+/// the board's Machines section then agree.
+#[test]
+fn machines_calls_a_peer_stale_as_soon_as_its_link_is_not_live() {
+    let world = World::initialized();
+    let daemon = tiller_core::Ctx::new(tiller_core::Actor::Daemon);
+    let seen = tiller_core::Timestamp::now();
+    world
+        .store()
+        .conn()
+        .execute(
+            "INSERT INTO hosts (id, label, kind, last_seen_at) VALUES ('h2', 'host-b', 'remote', ?1)",
+            [seen.to_string()],
+        )
+        .unwrap();
+    let peer = |world: &World| {
+        let machines = world.must(&["machines"]).data()["machines"].clone();
+        let rows = machines.as_array().unwrap();
+        rows.iter()
+            .find(|row| row["label"] == "host-b")
+            .unwrap()
+            .clone()
+    };
+    let row = peer(&world);
+    assert_eq!(
+        (&row["health"], &row["stale_reason"]),
+        (&"ok".into(), &serde_json::Value::Null)
+    );
+
+    // The link went quiet seconds ago: `last_seen_at` is still recent.
+    let mut store = world.store();
+    store
+        .peer_link(&daemon, "h2", "lagging", Some("peer_link_down"), None)
+        .unwrap();
+    let row = peer(&world);
+    assert_eq!(row["health"], "stale", "{row}");
+    assert_eq!(row["stale_reason"], "peer_link_down", "{row}");
+
+    // Frames of a live link keep the row fresh, with no event.
+    store
+        .peer_link(&daemon, "h2", "live", None, Some(seen))
+        .unwrap();
+    let events = store.last_seq().unwrap();
+    store
+        .peer_seen(&daemon, "h2", tiller_core::Timestamp::now())
+        .unwrap();
+    assert_eq!(store.last_seq().unwrap(), events);
+    assert_eq!(peer(&world)["health"], "ok");
+}
+
 /// R16: `tiller machines` says that this host refuses every new run while a
 /// floor is breached, and drops the line when the owner clears the floor.
 #[test]

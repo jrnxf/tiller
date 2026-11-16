@@ -260,6 +260,23 @@ impl Store {
         })
     }
 
+    /// `cache.refresh` of a paired peer's `last_seen_at` while its link
+    /// stays live (`protocol.md` section 9: "the last frame from the peer
+    /// link"). The link state did not change, so it writes no event. It
+    /// never moves the column back, and it leaves `stale_reason` to
+    /// [`Store::peer_link`].
+    pub fn peer_seen(&mut self, ctx: &Ctx, host_id: &str, seen: Timestamp) -> Result<Applied<()>> {
+        self.write(ctx, "cache.refresh", None, |tx| {
+            tx.rebuildable();
+            tx.conn().execute(
+                "UPDATE hosts SET last_seen_at = ?2
+                 WHERE id = ?1 AND (last_seen_at IS NULL OR last_seen_at < ?2)",
+                params![host_id, seen],
+            )?;
+            Ok(())
+        })
+    }
+
     /// Every board host this peer accepted, live or revoked, oldest first.
     pub fn peer_keys(&self) -> Result<Vec<PeerKey>> {
         list(self.conn(), "1 ORDER BY accepted_at, id", &[])

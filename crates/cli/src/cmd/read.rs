@@ -392,6 +392,9 @@ fn machines_data(store: &Store, local_only: bool) -> Result<Value, Failure> {
                 Some(seen) if seen.as_jiff() < lisbon::plus_minutes(now, -REMOTE_STALE_MINUTES) => {
                     ("stale", host.stale_reason.clone())
                 }
+                // A link that is not live says so before the two minutes
+                // pass (`protocol.md` section 9: `stale` unless `live`).
+                Some(_) if host.stale_reason.is_some() => ("stale", host.stale_reason.clone()),
                 Some(_) => ("ok", None),
             }
         };

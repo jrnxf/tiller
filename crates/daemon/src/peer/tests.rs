@@ -585,6 +585,50 @@ async fn link_states_follow_frame_age() {
     );
 }
 
+/// `hosts.last_seen_at` of the peer on the board host.
+fn last_seen(fleet: &Fleet) -> Option<String> {
+    fleet
+        .open()
+        .conn()
+        .query_row(
+            "SELECT last_seen_at FROM hosts WHERE label = 'peer'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// A link that stays live keeps `hosts.last_seen_at` at the last frame
+/// (`protocol.md` section 9), so the Health count of live machines and
+/// `tiller machines` do not call a live peer stale two minutes after the
+/// link came up. It is a cache refresh with no change, so no event.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_link_keeps_last_seen_at_fresh_with_no_event() {
+    let pair = pair();
+    let (peers, _stop) = start(
+        pair.board.dir.path(),
+        Socket {
+            home: pair.peer.dir.path().to_owned(),
+            connects: Arc::default(),
+        },
+    );
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let first = until("the first write", || last_seen(&pair.board)).await;
+    let seq = last_seq(&pair.board);
+
+    // Only beats arrive from here on, and the link never leaves `live`.
+    let second = until("a later write", || {
+        last_seen(&pair.board).filter(|seen| *seen > first)
+    })
+    .await;
+    until("one more write", || {
+        last_seen(&pair.board).filter(|seen| *seen > second)
+    })
+    .await;
+    assert_eq!(peers.federation().peers[0].link, LinkState::Live);
+    assert_eq!(events_since(&pair.board, seq), Vec::<String>::new());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn frozen_serve_reaches_down_and_reconnects() {
     let pair = pair();

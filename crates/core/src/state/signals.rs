@@ -396,12 +396,14 @@ impl Store {
     }
 
     /// The local host is the daemon itself, so it is live; a remote host is
-    /// live when it was seen in the last two minutes.
+    /// live when it was seen in the last two minutes and its link reports
+    /// no problem (`stale_reason`), as its Machines row has it.
     fn machines_live(&self, now: Timestamp) -> Result<(i64, i64)> {
         let cutoff = now.plus_minutes(-HOST_LIVE_MINUTES);
         let live = count(
             self,
-            "SELECT COUNT(*) FROM hosts WHERE kind = 'local' OR last_seen_at >= ?1",
+            "SELECT COUNT(*) FROM hosts
+             WHERE kind = 'local' OR (last_seen_at >= ?1 AND stale_reason IS NULL)",
             params![cutoff],
         )?;
         let total = count(self, "SELECT COUNT(*) FROM hosts", params![])?;
@@ -668,9 +670,10 @@ mod tests {
         }
         sql(
             &store,
-            "INSERT INTO hosts (id, label, kind, last_seen_at)
-             VALUES ('h2', 'host-b', 'remote', '2026-11-01T11:59:00.000Z'),
-                    ('h3', 'host-c', 'remote', '2026-11-01T11:00:00.000Z')",
+            "INSERT INTO hosts (id, label, kind, last_seen_at, stale_reason)
+             VALUES ('h2', 'host-b', 'remote', '2026-11-01T11:59:00.000Z', NULL),
+                    ('h3', 'host-c', 'remote', '2026-11-01T11:00:00.000Z', NULL),
+                    ('h4', 'host-d', 'remote', '2026-11-01T11:59:30.000Z', 'peer_link_down')",
         );
         let signals = signals(&store);
         let [before, now] = signals.weeks.as_slice() else {
@@ -681,8 +684,9 @@ mod tests {
             (1, 1, 1)
         );
         assert_eq!((before.lost_work, before.unauthorized), (0, 1));
-        // The local host, and the remote seen a minute ago; not the one seen an hour ago.
-        assert_eq!((signals.machines_live, signals.machines_total), (2, 3));
+        // The local host, and the remote seen a minute ago; not the one seen an
+        // hour ago, and not the one whose link went quiet 30 seconds ago.
+        assert_eq!((signals.machines_live, signals.machines_total), (2, 4));
     }
 
     #[test]
