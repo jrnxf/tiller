@@ -43,7 +43,6 @@ import { CardQuestions } from "./card-questions";
 import { bugProjectOf, isTillerBug, isUntriaged, machineOf } from "./bugs";
 import { runRefusal, runRefusalStep } from "../../lib/machines";
 import { HostChip, PeerNote } from "./host-chip";
-import { ApproveActions } from "../attention/approve";
 import { phaseOf } from "../attention/card-lifecycle";
 import { AnswerForm } from "../attention/answer";
 import { CommentControl } from "../attention/card-actions";
@@ -452,17 +451,16 @@ function ReviewLine({ review, head }: { review: CardReview; head: string }) {
   );
 }
 
-// The pull request and its approval are one card: what is being approved on the
-// left, what you can do about it on the right.
+// The pull request and where its approval stands. The Approve and Reject
+// buttons are at the top of the card, with the question (card-questions.tsx):
+// one place to decide, and no second pair of buttons down here.
 function PullRequest({
   pr,
   approvals,
-  attention,
   reviews,
 }: {
   pr: CardPr;
   approvals: CardApproval[];
-  attention: AttentionItem[];
   reviews: CardReview[];
 }) {
   const review = reviewFor(reviews, pr);
@@ -532,7 +530,10 @@ function PullRequest({
                   {pr.state === "open" ? "None yet. One is requested once checks pass." : "None."}
                 </span>
               ) : standing === "pending" ? (
-                <span className="lab sm yel">waiting for you</span>
+                <>
+                  <span className="lab sm yel">waiting for you</span>
+                  <span className="meta">Approve or reject it at the top of this card.</span>
+                </>
               ) : standing === "current" ? (
                 <>
                   <span className="lab sm ok">
@@ -559,13 +560,6 @@ function PullRequest({
               )}
             </dd>
           </dl>
-          {approval && standing === "pending" ? (
-            <ApproveActions
-              item={attention.find(
-                (item) => item.still_current && item.approval?.id === approval.id,
-              )}
-            />
-          ) : null}
         </div>
         {stale && approval && approval.newer_commits.length > 0 ? (
           <ul className="prc-commits">
@@ -1033,7 +1027,6 @@ export function CardPage({
                 key={pr.id}
                 pr={pr}
                 approvals={detail.approvals}
-                attention={detail.attention}
                 reviews={detail.reviews}
               />
             ))

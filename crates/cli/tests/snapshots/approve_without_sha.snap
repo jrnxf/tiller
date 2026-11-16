@@ -5,7 +5,7 @@ exit: 2
 {
   "error": {
     "code": "usage",
-    "hint": "the board shows the head each approval binds",
+    "hint": "It binds 0123456789ab of PR #7: https://example.com/example/alpha/pull/7\nAfter you review that head: tiller approve alpha-1 --sha 0123456789ab\nTo turn it down: tiller approve alpha-1 --reject",
     "message": "an accept needs --sha <head>: pass the head you reviewed (7 or more hex characters)"
   },
   "ok": false

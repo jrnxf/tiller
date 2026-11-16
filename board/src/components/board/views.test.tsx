@@ -1860,15 +1860,31 @@ test("the switch to pre-launch says validation is skipped and a Saturday review 
   );
 });
 
-test("a PR waiting on the owner is decided in the PR card, Reject then Approve on the right", async () => {
+// UA-36: the approval is decided where the card asks for it, at the top, with
+// what it lands: the pull request's title, a link to read it and its checks.
+// Before, the box said "Approve it in the pull request section of this card",
+// and that section was under the timeline and the runs.
+test("a PR waiting on the owner is decided at the top of the card, with the pull request it lands", async () => {
   const posted = stubApi("default");
   await renderApp("default", `/cards/${CARD_44}`);
   const page = screen.getByTestId("card-page");
   const box = page.querySelector<HTMLElement>(".prc");
   expect(box?.dataset.standing).toBe("pending");
   expect(page.querySelector(".appr")).toBeNull();
+  // One pair of buttons on the page: none in the pull request section, which
+  // says where they are.
+  expect(within(box as HTMLElement).queryAllByRole("button")).toEqual([]);
+  expect(box?.textContent).toContain("Approve or reject it at the top of this card.");
+  const questions = within(page).getByTestId("card-questions");
+  expect(questions.textContent).not.toContain("pull request section");
+  const link = await within(questions).findByRole("link", { name: /^Open .+#\d+$/ });
+  const facts = within(questions).getByTestId("approval-facts");
+  expect(facts.contains(link)).toBe(true);
+  expect(link.textContent).toMatch(/^Open .+#\d+$/);
+  expect(link.getAttribute("href")).toMatch(/^https:\/\//);
+  expect(facts.textContent).toContain("Checks");
   expect(
-    within(box as HTMLElement)
+    within(questions)
       .getAllByRole("button")
       .map((button) => button.textContent),
   ).toEqual(["Reject", `Approve ${FIXTURE_HEAD_SHA.slice(0, 7)}`]);

@@ -42,7 +42,8 @@ pub struct RequestArgs {
 
 #[derive(Args, Debug)]
 pub struct Approve {
-    /// The approval: a ULID or its short form
+    /// An approval (a ULID or its short form), or a card (display id or id):
+    /// a card names its latest pending merge approval
     pub approval: String,
     /// Reject instead of accepting
     #[arg(long)]
@@ -239,8 +240,9 @@ fn request(app: &App, args: RequestArgs) -> Done {
 
 pub fn approve(app: &App, args: Approve) -> Done {
     let mut store = app.write()?;
-    let id = resolve_id(store.conn(), "approvals", "approval", &args.approval)?;
+    let id = resolve_land_target(store.conn(), &args.approval)?;
     let approval: Approval = get(store.conn(), "approval", &id)?;
+    let about = About::of(store.conn(), &approval);
     let sha_cited = args.sha.clone();
     if let Some(sha) = &sha_cited
         && (sha.len() < 7 || !sha.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -283,7 +285,7 @@ pub fn approve(app: &App, args: Approve) -> Done {
                 return Err(Failure::usage(
                     "an accept needs --sha <head>: pass the head you reviewed (7 or more hex characters)",
                 )
-                .hint("the board shows the head each approval binds"));
+                .hint(about.review_step()));
             }
             (app.ctx(), None)
         }
@@ -320,15 +322,129 @@ pub fn approve(app: &App, args: Approve) -> Done {
         ..decision
     };
     let applied = store.approval_decide(&ctx, Some(&keyed.key), &id, decision)?;
-    Ok(Outcome::applied_as(applied, |decided| {
+    let outcome = Outcome::applied_as(applied, |decided| {
         json!({
             "approval": decided.approval,
             "memory_approvals": decided.memory_approvals,
             "quoted_ask": cited.as_ref().map(|ask| json!({"id": ask.id, "text": ask.text})),
         })
     })
-    .with_key(&keyed)
-    .with_help("land it with: tiller land <approval>"))
+    .with_key(&keyed);
+    if args.reject {
+        return Ok(if app.person() {
+            outcome.with_summary(about.rejected())
+        } else {
+            outcome
+        });
+    }
+    if !app.person() {
+        return Ok(outcome.with_help("land it with: tiller land <approval>"));
+    }
+    let daemon = DaemonLock::held(&app.home);
+    Ok(outcome
+        .with_summary(about.approved(daemon))
+        .with_help(format!(
+            "tiller land {}: wait for the merge and print its result",
+            about.name()
+        )))
+}
+
+/// What an approval is about, in the owner's words: the card, the pull
+/// request and the head it binds.
+struct About {
+    approval: String,
+    card: Option<(String, String)>,
+    pr: Option<(i64, String)>,
+    head: Option<String>,
+}
+
+impl About {
+    fn of(conn: &rusqlite::Connection, approval: &Approval) -> Self {
+        let card = approval
+            .card_id
+            .as_deref()
+            .and_then(|id| get::<tiller_core::domain::Card>(conn, "card", id).ok())
+            .map(|card| (card.display_id, card.title));
+        let pr = approval
+            .pr_id
+            .as_deref()
+            .and_then(|id| get::<Pr>(conn, "pr", id).ok())
+            .map(|pr| (pr.number, pr.url));
+        Self {
+            approval: approval.id.clone(),
+            card,
+            pr,
+            head: approval
+                .head_sha
+                .as_deref()
+                .map(|sha| sha.chars().take(12).collect()),
+        }
+    }
+
+    /// What the owner types for it: the card's id, else the approval's.
+    fn name(&self) -> &str {
+        self.card
+            .as_ref()
+            .map_or(self.approval.as_str(), |(id, _)| id.as_str())
+    }
+
+    /// "harbor-1 (Add rate limits)", or the approval's id with no card.
+    fn subject(&self) -> String {
+        match &self.card {
+            Some((id, title)) => format!("{id} ({})", summary::quote(title)),
+            None => format!("approval {}", self.approval),
+        }
+    }
+
+    /// The hint of an accept with no `--sha`: where to look, then the command.
+    fn review_step(&self) -> String {
+        let head = self.head.as_deref().unwrap_or("<head>");
+        let look = match &self.pr {
+            Some((number, url)) => format!("It binds {head} of PR #{number}: {url}"),
+            None => format!("It binds {head}"),
+        };
+        format!(
+            "{look}\nAfter you review that head: tiller approve {} --sha {head}\nTo turn it down: tiller approve {} --reject",
+            self.name(),
+            self.name()
+        )
+    }
+
+    fn approved(&self, daemon: bool) -> String {
+        let head = self.head.as_deref().unwrap_or("its head");
+        let what = match &self.pr {
+            Some((number, _)) => format!("PR #{number} of {}", self.subject()),
+            None => self.subject(),
+        };
+        if daemon {
+            format!("Approved {what} at {head}. The daemon lands it now.")
+        } else {
+            format!(
+                "Approved {what} at {head}. Nothing lands yet: the daemon is not running (tiller daemon)."
+            )
+        }
+    }
+
+    fn rejected(&self) -> String {
+        format!(
+            "Rejected the merge of {}. Nothing lands, and its orchestrator hears it.",
+            self.subject()
+        )
+    }
+
+    fn landed(&self, sha: Option<&str>) -> String {
+        let what = match &self.pr {
+            Some((number, _)) => format!("PR #{number} of {}", self.subject()),
+            None => self.subject(),
+        };
+        match sha {
+            Some(sha) => format!(
+                "Landed {what}: merged as {}.",
+                sha.chars().take(12).collect::<String>()
+            ),
+            None => format!("Landed {what}."),
+        }
+    }
 }
 
 /// `tiller land`: the owner asks the daemon to land and waits for the result.
@@ -345,7 +461,14 @@ pub fn land(app: &App, args: Land) -> Done {
         let approval: Approval = get(store.conn(), "approval", &id)?;
         match approval.state {
             ApprovalState::Succeeded => {
-                return Ok(Outcome::read(json!({"approval": approval})));
+                let sha = approval
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.get("sha"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let line = About::of(store.conn(), &approval).landed(sha.as_deref());
+                return Ok(Outcome::read(json!({"approval": approval})).with_summary(line));
             }
             ApprovalState::Accepted | ApprovalState::Executing => {
                 if !DaemonLock::held(&app.home) {
@@ -400,10 +523,7 @@ pub fn land(app: &App, args: Land) -> Done {
                     "approval {} is requested; approve it first",
                     approval.id
                 ))
-                .hint(format!(
-                    "tiller approve {} --sha <head you reviewed>",
-                    approval.id
-                )));
+                .hint(About::of(store.conn(), &approval).review_step()));
             }
             other => {
                 let why = approval
@@ -422,9 +542,9 @@ pub fn land(app: &App, args: Land) -> Done {
     }
 }
 
-/// What `tiller land` was asked to land: an approval id stays an approval id;
-/// anything else that names a card lands that card's latest pending merge
-/// approval (one a decision or the daemon has not finished).
+/// What `tiller land` or `tiller approve` was given: an approval id stays an
+/// approval id; anything else that names a card is that card's latest pending
+/// merge approval (one a decision or the daemon has not finished).
 fn resolve_land_target(conn: &rusqlite::Connection, input: &str) -> Result<String, Failure> {
     let is_display = tiller_core::ids::parse_display_id(input.trim()).is_some();
     if !is_display {
@@ -453,10 +573,7 @@ fn resolve_land_target(conn: &rusqlite::Connection, input: &str) -> Result<Strin
         })
         .map(|approval| approval.id)
         .ok_or_else(|| {
-            Failure::refused(format!(
-                "{} has no pending merge approval to land",
-                card.display_id
-            ))
+            Failure::refused(format!("{} has no pending merge approval", card.display_id))
         })
 }
 

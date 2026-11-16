@@ -45,6 +45,7 @@ import {
 } from "./answered";
 import type { Withdrawn } from "./answered";
 import { AnswerForm } from "./answer";
+import { ApprovalFacts } from "./approval-facts";
 import { ApproveBlock } from "./approve";
 import { CardActions, TerminalMenu } from "./card-actions";
 import { CardOverflow } from "./card-lifecycle";
@@ -391,7 +392,10 @@ function DecisionDetail({
       <div className="blk">
         {withdrawn ? null : item.approval ? (
           item.still_current ? (
-            <ApproveBlock item={item} />
+            <>
+              <ApprovalFacts item={item} />
+              <ApproveBlock item={item} />
+            </>
           ) : null
         ) : (
           <AnswerForm item={item} />

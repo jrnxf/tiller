@@ -88,7 +88,16 @@ export interface ParsedEvidence {
   lines: EvidenceLine[];
 }
 
-const POINTED = new Set(["pane_tail", "session_id", "last_observation_at"]);
+// Keys the detail shows in a place of their own, never as a raw line. The two
+// approval keys are ids: the pull request block above the Approve button says
+// what they point at.
+const POINTED = new Set([
+  "pane_tail",
+  "session_id",
+  "last_observation_at",
+  "approval_id",
+  "head_sha",
+]);
 
 export function parseEvidence(evidence: string | null): ParsedEvidence {
   const none: ParsedEvidence = { paneTail: null, sessionId: null, lastOutputAt: null, lines: [] };

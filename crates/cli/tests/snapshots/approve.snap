@@ -42,8 +42,9 @@ exit: 0
     "<seq>"
   ],
   "help": [
-    "land it with: tiller land <approval>"
+    "tiller land alpha-1: wait for the merge and print its result"
   ],
   "ok": true,
-  "replayed": false
+  "replayed": false,
+  "summary": "Approved PR #7 of alpha-1 ('Dark mode for the board') at 0123456789ab. Nothing lands yet: the daemon is not running (tiller daemon)."
 }

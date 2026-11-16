@@ -6,6 +6,8 @@ import type { Owned } from "../../lib/peers";
 import { agentsQuery } from "../../lib/queries";
 import { useStore } from "../../lib/store";
 import { AnswerForm } from "../attention/answer";
+import { ApprovalFacts } from "../attention/approval-facts";
+import { ApproveActions } from "../attention/approve";
 import { answeredStore } from "../attention/answered";
 import { KIND_LABELS, recommender } from "../attention/format";
 import { NeedsIcon, OkIcon } from "../attention/icons";
@@ -13,7 +15,8 @@ import { Ago } from "./ago";
 
 // What the card asks of the owner now, at the top of the card and answered in
 // place with the Inbox's own answer control. A card that says "Decision"
-// shows the decision.
+// shows the decision, and one that says "Merge approval" shows the pull
+// request with Approve and Reject.
 export function CardQuestions({
   cardId,
   attention,
@@ -78,9 +81,10 @@ export function CardQuestions({
             ) : null}
             <div className="cq-answer">
               {item.approval ? (
-                <p className="cq-ctx">
-                  This is an approval. Approve it in the pull request section of this card.
-                </p>
+                <>
+                  <ApprovalFacts item={item} />
+                  <ApproveActions item={item} />
+                </>
               ) : (
                 <AnswerForm item={item} keys={item.id === keyed?.id} />
               )}

@@ -1,8 +1,9 @@
 # shellcheck shell=bash
 # The bench's seed data (scripts/usability-bench.sh sources this file and calls
 # `seed`): 14 invented projects, 8 on main and 6 on peer, with cards in every
-# column, live and blocked runs, open asks, questions for the owner, a past
-# away period and one unhealthy host. Every name here is invented.
+# column, live and blocked runs, open asks, questions for the owner, pull
+# requests on the stand-in forge with approvals that wait, a past away period
+# and one unhealthy host. Every name here is invented.
 
 # run HOST CARD ROLE STATE TEXT: a run on the card whose worker reported
 # `STATE TEXT`. Prints the worker's session.
@@ -13,6 +14,28 @@ run() {
   [ -n "$worker" ] || { echo "no worker session for $card on $host" >&2; exit 1; }
   qas "$host" "$worker" status "$state" "$text"
   echo "$worker"
+}
+
+# publish HOST CARD WORKER FILE TITLE BODY: the builder's last steps on a
+# `direct-pr` project. It commits FILE in its worktree, describes the pull
+# request and reports done; the daemon then pushes the branch and opens the
+# pull request on the stand-in forge. Returns once the card has it.
+publish() {
+  local host=$1 card=$2 worker=$3 file=$4 title=$5 body=$6 tree
+  tree=$(t "$host" --json card show "$card" | field '.data.runs[-1].run.worktree_path')
+  [ -d "$tree" ] || { echo "no worktree for $card on $host: $tree" >&2; exit 1; }
+  mkdir -p "$(dirname "$tree/$file")"
+  echo "// $title" >"$tree/$file"
+  git -C "$tree" add "$file"
+  git -C "$tree" -c user.name=Builder -c user.email=builder@example.com commit -q -m "$title"
+  qas "$host" "$worker" pr describe --title "$title" --body "$body"
+  qas "$host" "$worker" status done "Pull request ready: $title"
+  for _ in $(seq 1 120); do
+    [ "$(t "$host" --json card show "$card" | field '.data.prs | length')" != 0 ] && return 0
+    sleep 0.5
+  done
+  echo "the daemon of $host opened no pull request for $card" >&2
+  exit 1
 }
 
 # ask HOST PROJECT TEXT: prints the new ask's id.
@@ -48,12 +71,16 @@ seed() {
 
   # -- main ------------------------------------------------------------------
 
-  # harbor: a busy project. A live builder, a builder that needs a decision,
-  # a queue, a parked card and a card that waits for another.
+  # harbor: a busy project on the stand-in forge. A builder whose pull request
+  # waits for the owner's approval, a builder that needs a decision, a live
+  # builder, a queue, a parked card and a card that waits for another.
   o=$(session main harbor)
   c=$(card main harbor ship "Add rate limits to the public API" --size M \
     --acceptance "A client gets 429 after 100 requests in a minute" --priority 1)
-  run main "$c" builder working "Wiring the limiter into the request pipeline" >/dev/null
+  w=$(run main "$c" builder working "Wiring the limiter into the request pipeline")
+  publish main "$c" "$w" src/limits.rs "Add rate limits to the public API" \
+    "A client gets 429 after 100 requests in a minute. The limiter sits in the request pipeline, in front of the router."
+  qas main "$o" approval request "$c" --kind merge
   c=$(card main harbor ship "Rotate the signing keys without downtime" --size L --priority 0)
   run main "$c" builder needs-decision "Two rotation plans; need the owner's pick" >/dev/null
   qas main "$o" attention open "$c" --kind decision \
@@ -61,7 +88,8 @@ seed() {
     --recommendation "The 24 h overlap: no client fails, at the cost of one more deploy" \
     --consequence "Overlap: two deploys, no failed requests. Cut over: one deploy, clients with a cached key fail until they refresh." \
     --options '[{"label":"24 h overlap","recommended":true},{"label":"Cut over at once"}]'
-  card main harbor ship "Paginate the audit log endpoint" --size S >/dev/null
+  c=$(card main harbor ship "Paginate the audit log endpoint" --size S)
+  run main "$c" builder working "Adding the cursor to the query" >/dev/null
   card main harbor ship "Return problem+json for every error" --size M --priority 3 >/dev/null
   c=$(card main harbor ship "Move the session store to the new cluster" --size L)
   q main card hold "$c" --until "$next_week" --reason "The new cluster is not provisioned yet"
@@ -112,9 +140,13 @@ seed() {
     card main atlas ship "$title" >/dev/null
   done
 
-  # juniper: one live builder and work that is done.
+  # juniper: on the stand-in forge. A pull request whose checks still run, so
+  # nobody has asked for an approval yet, and work that is done.
   c=$(card main juniper ship "Add dark mode to the settings page" --size S)
-  run main "$c" builder working "Checking contrast on the form controls" >/dev/null
+  w=$(run main "$c" builder working "Checking contrast on the form controls")
+  publish main "$c" "$w" src/settings.css "Add dark mode to the settings page" \
+    "The settings page follows the system theme. Contrast is 7:1 on the form controls."
+  echo pending >"$bench/main/forge/juniper/1.checks"
   c=$(card main juniper ops "Archive last year's logs" --size S)
   q main card complete "$c" --evidence "Moved 41 GB to cold storage; the bucket lists 0 objects"
   c=$(card main juniper question "Which font do the invoices use?")
@@ -128,10 +160,14 @@ seed() {
 
   # -- peer ------------------------------------------------------------------
 
-  # pylon: the peer's busy project, the mirror of harbor.
+  # pylon: the peer's busy project, the mirror of harbor: a pull request that
+  # waits for the owner's approval.
   o=$(session peer pylon)
   c=$(card peer pylon ship "Retry failed webhook deliveries with backoff" --size M --priority 1)
-  run peer "$c" builder working "Writing the backoff schedule tests" >/dev/null
+  w=$(run peer "$c" builder working "Writing the backoff schedule tests")
+  publish peer "$c" "$w" src/backoff.rs "Retry failed webhook deliveries with backoff" \
+    "A failed delivery is sent again after 1, 5 and 30 minutes, then it is marked dead."
+  qas peer "$o" approval request "$c" --kind merge
   c=$(card peer pylon ship "Sign webhook payloads" --size M)
   run peer "$c" builder needs-decision "HMAC or asymmetric signatures; need the owner's pick" >/dev/null
   qas peer "$o" attention open "$c" --kind decision \

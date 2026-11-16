@@ -2082,6 +2082,13 @@ a.card:hover {
 .cq-answer {
   margin-top: 10px;
 }
+/* An approval at the top of the card: its buttons take the box's right edge. */
+.cq .prc-act {
+  max-width: none;
+}
+.cq .apf {
+  margin: 4px 0 10px;
+}
 /* The drawer is narrow: one option per line. */
 .card-page.in-drawer .cq .opts {
   grid-template-columns: minmax(0, 1fr);

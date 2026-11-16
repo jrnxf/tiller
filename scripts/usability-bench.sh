@@ -18,10 +18,16 @@
 #   scripts/usability-bench.sh link freeze|thaw  stop or continue the peer's `peer serve`
 #   scripts/usability-bench.sh quota HOST PERCENT   the weekly quota the next poll reads
 #   scripts/usability-bench.sh kill-agent HOST SESSION   kill that session's agent process
+#   scripts/usability-bench.sh checks HOST PROJECT NUMBER success|failure|pending
+#                                                the checks of a pull request on the stand-in
+#                                                forge (the daemon reads them within a minute)
 #   scripts/usability-bench.sh shots DIR [PATH...]   screenshots of the main board's pages
 #                                                (default: every screen) in both themes at
 #                                                1440 px and 390 px, with chrome-devtools-axi.
 #                                                Keep DIR outside the repository
+#
+# Harbor, Juniper and Pylon land through a stand-in forge: usability-bench-gh.sh
+# answers the daemon's `gh api` calls from files, with no network.
 #
 # The bench lives in $TILLER_BENCH_DIR (default /tmp/tiller-bench; keep it short,
 # the holder's socket path has a length limit).
@@ -64,7 +70,7 @@ bench_env() {
     "CLAUDE_CONFIG_DIR=$root/claude" \
     "TILLER_HOME=$root/home" \
     "TILLER_SSH=$shim" \
-    "TILLER_GH=/nonexistent/gh" \
+    "TILLER_GH=$root/gh" \
     "TILLER_QUOTA_AXI=$root/quota-axi" \
     "TERM=xterm-256color"
 }
@@ -265,7 +271,16 @@ case "\$1" in
   *) echo "treehouse stand-in 0.0.0" ;;
 esac
 STUB
-  chmod +x "$root/claude-stub" "$root/quota-axi" "$root/treehouse"
+  # gh's stand-in (the forge): pull requests are files under forge/, and a
+  # repository `example/<id>` is the bare repository origins/<id>.git.
+  mkdir -p "$root/forge"
+  {
+    echo '#!/bin/sh'
+    printf 'exec env BENCH_FORGE=%q BENCH_ORIGINS=%q BENCH_JQ=%q BENCH_GIT=%q %q "$@"\n' \
+      "$root/forge" "$root/origins" "$(command -v jq)" "$(command -v git)" \
+      "$repo/scripts/usability-bench-gh.sh"
+  } >"$root/gh"
+  chmod +x "$root/claude-stub" "$root/quota-axi" "$root/treehouse" "$root/gh"
 }
 
 init_home() {
@@ -278,10 +293,16 @@ init_home() {
   q "$host" config set spawn.treehouse "[\"$root/treehouse\"]"
 }
 
-# project HOST ID NAME: a local-only project with a checkout of its own.
+# project HOST ID NAME: a project with a checkout of its own. It is local-only,
+# or, when its id is in $forge_projects, a `direct-pr` project of the stand-in
+# forge whose repository is `example/<id>`.
+forge_projects=" harbor juniper pylon "
 project() {
   local host=$1 id=$2 name=$3 checkout=$bench/$1/checkouts/$2
-  q "$host" project add "$id" --name "$name" --delivery local-only --capacity 3
+  case "$forge_projects" in
+    *" $id "*) q "$host" project add "$id" --name "$name" --repo "example/$id" --delivery direct-pr --capacity 3 ;;
+    *) q "$host" project add "$id" --name "$name" --delivery local-only --capacity 3 ;;
+  esac
   # Its origin is a bare repository beside it: a run starts from origin's head.
   git init -q --bare -b main "$bench/$host/origins/$id.git"
   git init -q -b main "$checkout"
@@ -453,6 +474,14 @@ case "$command" in
     ;;
   shots) shots "$@" ;;
   quota) echo "${2:?percent left}" >"$bench/${1:?main or peer}/quota-percent" ;;
+  checks)
+    file=$bench/${1:?main or peer}/forge/${2:?project}/${3:?pull request number}
+    [ -f "$file.json" ] || { echo "no pull request $3 of $2 on $1" >&2; exit 1; }
+    case "${4:?success, failure or pending}" in
+      success | failure | pending) echo "$4" >"$file.checks" ;;
+      *) echo "checks HOST PROJECT NUMBER success|failure|pending" >&2; exit 2 ;;
+    esac
+    ;;
   kill-agent)
     log=$bench/${1:?main or peer}/agent-logs/${2:?session}.jsonl
     kill "$(jq -r 'select(.event == "start") | .pid' "$log" | tail -n 1)"

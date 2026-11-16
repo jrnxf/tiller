@@ -151,7 +151,19 @@ fn answer(app: &App, args: Answer) -> Done {
         &json!({"item": args.item, "answer": words, "ask": cited}),
         &args.key.key,
     )?;
-    let applied = store.attention_answer(&app.ctx(), Some(&keyed.key), &args.item, &words, via)?;
+    let applied =
+        match store.attention_answer(&app.ctx(), Some(&keyed.key), &args.item, &words, via) {
+            Ok(applied) => applied,
+            Err(error) => {
+                // A merge item is an approval: name the command that decides it.
+                let step = merge_step(&store, &args.item);
+                let failure = Failure::from(error);
+                return Err(match step {
+                    Some(step) => failure.hint(step),
+                    None => failure,
+                });
+            }
+        };
     let outcome = Outcome::applied_as(applied, |answered| {
         json!({
             "attention": answered.attention,
@@ -168,6 +180,28 @@ fn answer(app: &App, args: Answer) -> Done {
     }
     let line = summary::answered(&outcome.data);
     Ok(outcome.with_summary(line))
+}
+
+/// For a `merge` item: the approve and reject commands of its approval, by
+/// the card's id. `None` for any other item.
+fn merge_step(store: &tiller_core::Store, item: &str) -> Option<String> {
+    let id = resolve_id(store.conn(), "attention", "attention", item).ok()?;
+    let item: Attention = get(store.conn(), "attention", &id).ok()?;
+    if item.kind != AttentionKind::Merge {
+        return None;
+    }
+    let card: tiller_core::domain::Card = get(store.conn(), "card", &item.card_id).ok()?;
+    let evidence: Value = serde_json::from_str(item.evidence.as_deref()?).ok()?;
+    let head: String = evidence
+        .get("head_sha")?
+        .as_str()?
+        .chars()
+        .take(12)
+        .collect();
+    Some(format!(
+        "After you review that head: tiller approve {} --sha {head}\nTo turn it down: tiller approve {} --reject",
+        card.display_id, card.display_id
+    ))
 }
 
 /// The ask that carries the owner's words from chat (`authority.md` G06): a

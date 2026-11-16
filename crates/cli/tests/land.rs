@@ -112,6 +112,11 @@ fn land_waits_for_the_daemon_and_reports_the_result() {
     daemon.join().unwrap();
     assert_eq!(out.code, 0, "{}", out.json);
     assert_eq!(out.data()["approval"]["state"], "succeeded");
+    assert_eq!(
+        out.json["summary"], "Landed PR #7 of alpha-1 ('One'): merged as ffffffffffff.",
+        "{}",
+        out.json
+    );
     assert!(
         started.elapsed() >= Duration::from_millis(500),
         "it waited for the daemon"
@@ -168,6 +173,73 @@ fn land_gives_up_after_its_wait_and_names_the_notice() {
         "the merge App gave no token"
     );
     drop(lock);
+}
+
+/// UA-36: the owner decides by the card's id, and every refusal on the way
+/// names the head, the pull request to read and the whole command. Before,
+/// `tiller approve alpha-1` found no approval, an accept with no `--sha`
+/// said "the board shows the head", and a decision printed a record only.
+#[test]
+fn approve_takes_a_card_and_says_what_to_review() {
+    let world = World::initialized();
+    let approval = requested(&world);
+    let sha = &HEAD[..12];
+    let command = format!("tiller approve alpha-1 --sha {sha}");
+    let hint = |out: &common::Out| {
+        out.json["error"]["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    };
+
+    let out = world.run(&["approve", "alpha-1"]);
+    assert_eq!(out.error_code(), "usage", "{}", out.json);
+    let said = hint(&out);
+    assert!(
+        said.contains("PR #7: https://example.com/example/alpha/pull/7")
+            && said.contains(&command)
+            && said.contains("tiller approve alpha-1 --reject"),
+        "{said}"
+    );
+
+    // The Inbox item of the approval is not answered in words: it names the
+    // command that decides it.
+    let item: String = world
+        .store()
+        .conn()
+        .query_row("SELECT id FROM attention WHERE kind = 'merge'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let out = world.run(&["attention", "answer", &item, "--text", "yes"]);
+    assert_eq!(out.error_code(), "refused", "{}", out.json);
+    assert!(hint(&out).contains(&command), "{}", out.json);
+
+    let out = world.run(&["land", "alpha-1"]);
+    assert_eq!(out.error_code(), "refused", "{}", out.json);
+    assert!(hint(&out).contains(&command), "{}", out.json);
+
+    let out = world.must(&["approve", "alpha-1", "--sha", sha]);
+    assert_eq!(out.data()["approval"]["id"], approval.as_str());
+    assert_eq!(out.data()["approval"]["state"], "accepted");
+    // No daemon runs in this test, and the sentence says so.
+    assert_eq!(
+        out.json["summary"],
+        format!(
+            "Approved PR #7 of alpha-1 ('One') at {sha}. Nothing lands yet: the daemon is not running (tiller daemon)."
+        ),
+        "{}",
+        out.json
+    );
+    assert!(
+        out.json["help"].to_string().contains("tiller land alpha-1"),
+        "{}",
+        out.json
+    );
+
+    // A card with nothing to decide says so.
+    let out = world.run(&["approve", "alpha-1", "--reject"]);
+    assert_eq!(out.error_code(), "refused", "{}", out.json);
 }
 
 #[test]

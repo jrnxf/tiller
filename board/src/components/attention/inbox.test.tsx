@@ -500,6 +500,29 @@ test("an option that changes capacity says so, and the answer says it was applie
   expect(screen.getByText(/Applied gamma capacity from 1 to 2\./)).toBeTruthy();
 });
 
+// UA-36: the owner approves a pull request, not a commit hash. The detail names
+// it, links to it and says where its checks stand, and shows no raw id.
+test("an approval shows the pull request it lands, with a link and its checks", async () => {
+  stubDaemon("default");
+  await renderInbox("default", MERGE);
+
+  // The block reads the card: a line says so until the pull request is there.
+  const link = await screen.findByRole("link", { name: /^Open .+#\d+$/ });
+  const facts = screen.getByTestId("approval-facts");
+  expect(facts.contains(link)).toBe(true);
+  expect(link.textContent).toMatch(/^Open .+#\d+$/);
+  expect(link.getAttribute("href")).toMatch(/^https:\/\//);
+  expect(link.getAttribute("target")).toBe("_blank");
+  expect(facts.textContent).toContain("Checks");
+  expect(facts.textContent).toContain("Merges into");
+  // The facts come before the buttons.
+  const approve = screen.getByRole("button", { name: `Approve ${FIXTURE_HEAD_SHA.slice(0, 7)}` });
+  expect(facts.compareDocumentPosition(approve) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  const detail = document.body.textContent ?? "";
+  expect(detail).not.toContain("approval_id");
+  expect(detail).not.toContain("head_sha");
+});
+
 test("approve sends the head SHA the board shows, once", async () => {
   stubDaemon("default", true);
   replies = [ok({ approval_id: "01JAPPR0000000000000000000" })];
