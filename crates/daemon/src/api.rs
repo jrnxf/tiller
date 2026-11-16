@@ -37,8 +37,8 @@ use tiller_agents::spawn::orchestrator::Orchestrator;
 use tiller_agents::spawn::readings;
 use tiller_core::config_file as config_toml;
 use tiller_core::domain::{
-    Activity, AnsweredVia, Approval, AskSource, CardKind, CardOutcome, HoldReleaseReason, Host,
-    OutboxKind, PeerScope, Run, Session,
+    Activity, AnsweredVia, Approval, AskSource, Card, CardKind, CardOutcome, HoldReleaseReason,
+    Host, OutboxKind, PeerScope, Run, RunRole, Session,
 };
 use tiller_core::domain::{Boundary, Delivery, GrantKind, InterventionKind, Stage};
 use tiller_core::host_config;
@@ -174,6 +174,19 @@ pub trait OrchestratorStart: Send + Sync {
         _relaunch: BoardRelaunch,
     ) -> Result<Controlled, StartError> {
         Err(cannot("relaunch agents"))
+    }
+
+    /// `tiller spawn <card> <role>` as the board: the dispatch table picks
+    /// the model and effort, and the spawn's own refusals hold. `ctx.key`
+    /// keeps a retry from starting a second run.
+    fn start_run(
+        &self,
+        _store: &mut Store,
+        _ctx: &Ctx,
+        _card: &Card,
+        _role: RunRole,
+    ) -> Result<Controlled, StartError> {
+        Err(cannot("start runs"))
     }
 
     /// The host-level settings a start reads, and what it would refuse
@@ -1104,6 +1117,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/cards/{id}/close", post(close))
         .route("/api/v1/cards/{id}/cancel", post(cancel))
         .route("/api/v1/cards/{id}/reopen", post(reopen))
+        .route("/api/v1/cards/{id}/runs", post(start_card_run))
         .route("/api/v1/attention", get(attention))
         .route("/api/v1/attention/{id}/answer", post(answer))
         .route("/api/v1/attention/{id}/withdraw", post(withdraw_attention))
@@ -2046,6 +2060,8 @@ enum Parsed {
     Close(Transition, CardOutcome),
     Cancel(String),
     Reopen(String),
+    /// Start the run of the card's kind, as `tiller spawn` does.
+    StartRun,
     AddDep(String),
     RemoveDep(String),
     Answer(AnswerBody),
@@ -2145,6 +2161,10 @@ impl Mutation {
                     Parsed::Reopen(reason)
                 };
                 (request.idempotency_key, request.host, parsed)
+            }
+            Op::StartRun => {
+                let request: StartRunBody = body(bytes)?;
+                (request.idempotency_key, request.host, Parsed::StartRun)
             }
             Op::AddDep | Op::RemoveDep => {
                 let request: DepBody = body(bytes)?;
@@ -2511,6 +2531,7 @@ impl Mutation {
             | Parsed::Stop
             | Parsed::Resume
             | Parsed::Relaunch(_)
+            | Parsed::StartRun
             | Parsed::ProjectAdd(..)
             | Parsed::ProjectRetire(_)
             | Parsed::ProjectDelete => Err(Error::Internal(
@@ -2544,6 +2565,7 @@ impl Mutation {
             Parsed::Relaunch(relaunch) => {
                 relaunch_here(hands.controls()?, store, ctx, id, relaunch)
             }
+            Parsed::StartRun => start_run_here(hands.controls()?, store, ctx, id),
             parsed
             @ (Parsed::ProjectAdd(..) | Parsed::ProjectRetire(_) | Parsed::ProjectDelete) => {
                 let done =
@@ -2794,6 +2816,34 @@ fn resume_here(
 ) -> Result<Controlled, StartError> {
     let (_, run) = session_run(store, session, "resume")?;
     starter.resume_run(store, ctx, &run)
+}
+
+/// The run `tiller spawn` starts for card `card`, through `starter`: the
+/// role comes from the card's kind (a `ship` card gets a builder, a `scout`
+/// card a scout), the model and effort from the dispatch table, and every
+/// refusal of a spawn holds (capacity, the floors, quota).
+fn start_run_here(
+    starter: &dyn OrchestratorStart,
+    store: &mut Store,
+    ctx: &Ctx,
+    card: &str,
+) -> Result<Controlled, StartError> {
+    let card = tiller_core::state::resolve_card(store.conn(), card)?;
+    let role = match card.kind {
+        CardKind::Ship => RunRole::Builder,
+        CardKind::Scout => RunRole::Scout,
+        CardKind::Question | CardKind::Ops => {
+            return Err(StartError::from(Error::Refused {
+                entity: "card",
+                id: card.display_id.clone(),
+                fact: format!(
+                    "a {} card has no run to start; it is answered or done by hand",
+                    card.kind
+                ),
+            }));
+        }
+    };
+    starter.start_run(store, ctx, &card, role)
 }
 
 /// A new session on the session's run, through `starter`.
@@ -4936,6 +4986,37 @@ async fn cancel(
     submit(&state, &headers, Op::Cancel, Some(id), &bytes).await
 }
 
+/// Start the run of the card's kind, as `tiller spawn` does (`protocol.md`
+/// 7.4).
+#[utoipa::path(post, path = "/api/v1/cards/{id}/runs", tag = "mutations", request_body = StartRunBody,
+    params(("id" = String, Path)),
+    responses((status = 200, body = MutationResponse, description = "`data` is the spawn: `run`, `session`, `reservation`, `worktree`, `branch`, `pane_id`, `name` and `dispatch`; a replayed key returns the run it started"),
+              (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
+              (status = 422, body = ErrorBody, description = "`refused`: a card with no run to start (a question or ops card), a run already active, capacity, the RAM or disk floor or the quota floor; nothing was started"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: a read-scope pairing, or the peer refused it"),
+              (status = 503, body = ErrorBody, description = "the terminal holder or the peer is unreachable"),
+              (status = 504, body = ErrorBody, description = "`forward_uncertain`: the peer link dropped before the peer answered")))]
+async fn start_card_run(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers).await?;
+    let request: StartRunBody = body(&bytes)?;
+    if let Some(answer) =
+        on_peer(&state, request.host.as_deref(), Op::StartRun, &id, &bytes).await?
+    {
+        return Ok(Json(answer));
+    }
+    control(
+        &state,
+        key(&request.idempotency_key)?,
+        move |starter, store, ctx| start_run_here(starter, store, ctx, &id),
+    )
+    .await
+}
+
 #[utoipa::path(post, path = "/api/v1/cards/{id}/reopen", tag = "mutations", request_body = Transition,
     params(("id" = String, Path)),
     responses((status = 200, body = MutationResponse),
@@ -6631,7 +6712,7 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health, doctor, run_poller,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, add_dep, remove_dep, close,
-        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, steer_agent, interrupt_agent, stop_agent, pause_agent, unpause_agent, resume_agent, relaunch_agent, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, project_fields, edit_project, start_settings, host_config_read, set_config,
+        cancel, reopen, start_card_run, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, steer_agent, interrupt_agent, stop_agent, pause_agent, unpause_agent, resume_agent, relaunch_agent, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, project_fields, edit_project, start_settings, host_config_read, set_config,
         project_grants, create_grant, revoke_grant,
         away_start, away_edit, away_end, away_brief, host_fields, edit_host, crate::backups::list, crate::backups::take, pick_bug_project, recap, mark_recap_seen, project_replies, mark_reply_read, relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo, memory::repropose, memory::eval::eval_plan,
@@ -14069,6 +14150,141 @@ pub(crate) mod tests {
             ));
             Ok(Self::warned(json!({"run": run.id})))
         }
+
+        fn start_run(
+            &self,
+            _store: &mut Store,
+            ctx: &Ctx,
+            card: &Card,
+            role: RunRole,
+        ) -> Result<Controlled, StartError> {
+            self.record(format!(
+                "start-run {} {} {role} key={}",
+                ctx.actor,
+                card.display_id,
+                ctx.key.as_deref().unwrap_or("-")
+            ));
+            if card.title.contains("full") {
+                return Err(StartError::Refused {
+                    exit: 5,
+                    code: "refused",
+                    message: "project alpha is at capacity (2 of 2)".into(),
+                    hint: None,
+                    current: None,
+                });
+            }
+            Ok(Self::warned(
+                json!({"name": format!("{}-build", card.display_id)}),
+            ))
+        }
+    }
+
+    /// UA-20: `POST /api/v1/cards/{id}/runs` is `tiller spawn` as the board.
+    /// The role comes from the card's kind, a question or ops card has no run
+    /// to start, a refusal of the spawn reaches the board with its reason,
+    /// and only the owner may ask.
+    #[tokio::test]
+    async fn the_board_starts_the_run_of_a_card_through_the_spawn_path() {
+        let mut fleet = Fleet::new();
+        let owner = Ctx::new(Actor::Owner);
+        let mut file = |kind: CardKind, title: &str| {
+            fleet
+                .store
+                .card_create(
+                    &owner,
+                    None,
+                    tiller_core::state::cards::NewCard {
+                        project_id: "alpha".into(),
+                        kind,
+                        title: title.into(),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .unwrap()
+                .value
+        };
+        let ship = file(CardKind::Ship, "Add the export");
+        let scout = file(CardKind::Scout, "Look at the export");
+        let ops = file(CardKind::Ops, "Rotate the key");
+        let full = file(CardKind::Ship, "Run while full");
+        let starter = Arc::new(FakeControls::default());
+        let app = app_restarting(fleet.dir.path(), starter.clone());
+        let cookie = owner_cookie(fleet.dir.path());
+        let post = |card: &str, body: Value| {
+            let app = app.clone();
+            let cookie = cookie.clone();
+            let path = format!("/api/v1/cards/{card}/runs");
+            async move {
+                send(
+                    &app,
+                    mutation("POST", &path, body, &[("cookie", cookie.as_str())]),
+                )
+                .await
+            }
+        };
+
+        let started = post(&ship.display_id, json!({"idempotency_key": "k-ship"})).await;
+        assert_eq!(started.status, StatusCode::OK, "{}", started.body);
+        let started: Value = serde_json::from_str(&started.body).unwrap();
+        assert_eq!(
+            started["data"]["name"],
+            format!("{}-build", ship.display_id)
+        );
+        assert_eq!(started["warning"], "the cleanup refused");
+        let scouted = post(&scout.display_id, json!({"idempotency_key": "k-scout"})).await;
+        assert_eq!(scouted.status, StatusCode::OK, "{}", scouted.body);
+
+        let ops_card = post(&ops.display_id, json!({"idempotency_key": "k-ops"})).await;
+        assert_eq!(
+            ops_card.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            ops_card.body
+        );
+        assert!(
+            ops_card.body.contains("has no run to start"),
+            "{}",
+            ops_card.body
+        );
+
+        let refused = post(&full.display_id, json!({"idempotency_key": "k-full"})).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            refused.body
+        );
+        assert!(refused.body.contains("at capacity"), "{}", refused.body);
+
+        let unknown = post("alpha-999", json!({"idempotency_key": "k-none"})).await;
+        assert_eq!(unknown.status, StatusCode::NOT_FOUND, "{}", unknown.body);
+
+        let anonymous = send(
+            &app,
+            mutation(
+                "POST",
+                &format!("/api/v1/cards/{}/runs", ship.display_id),
+                json!({"idempotency_key": "k-anon"}),
+                &[],
+            ),
+        )
+        .await;
+        assert_eq!(
+            anonymous.status,
+            StatusCode::FORBIDDEN,
+            "{}",
+            anonymous.body
+        );
+
+        assert_eq!(
+            starter.calls(),
+            [
+                format!("start-run board {} builder key=k-ship", ship.display_id),
+                format!("start-run board {} scout key=k-scout", scout.display_id),
+                format!("start-run board {} builder key=k-full", full.display_id),
+            ]
+        );
     }
 
     /// P11: the board's Stop, Resume and Relaunch reach the commands' own

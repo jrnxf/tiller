@@ -3490,6 +3490,16 @@ impl OrchestratorStart for AgentStarter {
     ) -> Result<Controlled, StartError> {
         self.answer(format!("relaunch: {}", relaunch.note), ctx)
     }
+
+    fn start_run(
+        &self,
+        _store: &mut Store,
+        ctx: &tiller_core::Ctx,
+        card: &tiller_core::domain::Card,
+        role: tiller_core::domain::RunRole,
+    ) -> Result<Controlled, StartError> {
+        self.answer(format!("start-run {} {role}", card.display_id), ctx)
+    }
 }
 
 /// A paired board and peer with a builder in a terminal holder pane on the
@@ -4322,6 +4332,73 @@ async fn a_forwarded_relaunch_starts_its_agent_on_the_owning_host_only() {
     );
     assert_eq!(last_seq(&agent.pair.peer), before);
     assert_eq!(agent.starter.seen().len(), 1);
+}
+
+/// UA-20: "Start" on a peer's card goes over the link as a `mutate`, and the
+/// run starts on the peer's host, with its own starter, as the forwarded
+/// owner. The board host starts nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forwarded_start_of_a_card_runs_on_the_owning_host_only() {
+    let agent = peer_agent(quick(), |_| {}).await;
+    add_card(&agent.pair.peer, "start me");
+    let display_id: String = agent
+        .pair
+        .peer
+        .open()
+        .conn()
+        .query_row(
+            "SELECT display_id FROM cards WHERE title = 'start me'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let board_before = last_seq(&agent.pair.board);
+    let started = send(
+        &agent.app,
+        mutation(
+            "POST",
+            &format!("/api/v1/cards/{display_id}/runs"),
+            json!({"idempotency_key": "k-start", "host": "peer"}),
+            &[("cookie", agent.cookie.as_str())],
+        ),
+    )
+    .await;
+    assert_eq!(applied(&started).host.as_deref(), Some("peer"));
+    assert_eq!(
+        agent.starter.seen(),
+        [(
+            format!("start-run {display_id} builder"),
+            "board@test-host".to_owned(),
+            Some("k-start".to_owned())
+        )]
+    );
+    assert_eq!(last_seq(&agent.pair.board), board_before);
+    assert!(
+        agent
+            .asked()
+            .contains(&"mutate POST /api/v1/cards/{id}/runs".to_owned()),
+        "{:?}",
+        agent.asked()
+    );
+
+    // A refusal of the peer's spawn comes back with its reason.
+    agent.starter.refuse.store(true, Ordering::SeqCst);
+    let refused = send(
+        &agent.app,
+        mutation(
+            "POST",
+            &format!("/api/v1/cards/{display_id}/runs"),
+            json!({"idempotency_key": "k-again", "host": "peer"}),
+            &[("cookie", agent.cookie.as_str())],
+        ),
+    )
+    .await;
+    let error = refusal(&refused, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        error.message.contains("the stub refuses"),
+        "{}",
+        refused.body
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -573,6 +573,46 @@ impl tiller_daemon::api::OrchestratorStart for BoardStart {
         ))
     }
 
+    fn start_run(
+        &self,
+        store: &mut tiller_core::Store,
+        ctx: &tiller_core::Ctx,
+        card: &tiller_core::domain::Card,
+        role: tiller_core::domain::RunRole,
+    ) -> Result<Controlled, StartError> {
+        let tools = Tools::load(&self.app).map_err(refused)?;
+        // The same readings and the same call as `tiller spawn`, with no
+        // model, brief or quota override: the dispatch rule picks the model.
+        let disk = tools
+            .config
+            .checkouts
+            .get(&card.project_id)
+            .and_then(|checkout| readings::disk_free_mb(checkout));
+        let world = tools.world(readings::ram_free_mb(), disk);
+        let applied = agents::spawn(
+            store,
+            ctx,
+            ctx.key.as_deref(),
+            &world,
+            Request {
+                card: card.id.clone(),
+                role,
+                asked: None,
+                brief: None,
+                harness: "claude".to_owned(),
+                past_quota_floor: false,
+            },
+        );
+        let warning = match &applied {
+            Ok(applied) => match &applied.value {
+                agents::Outcome::Spawned(spawned) => spawned.warning.clone(),
+                agents::Outcome::Replayed { .. } => None,
+            },
+            Err(_) => None,
+        };
+        controlled(applied.map(|applied| (applied, warning)))
+    }
+
     fn doctor(&self) -> Option<tiller_daemon::dto::DoctorReport> {
         Some(super::doctor::report(&self.app))
     }

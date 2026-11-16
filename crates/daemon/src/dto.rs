@@ -2422,6 +2422,17 @@ pub struct RelaunchBody {
     pub host: Option<String>,
 }
 
+/// `POST /api/v1/cards/{id}/runs`: `tiller spawn` for the card, as the board.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StartRunBody {
+    pub idempotency_key: String,
+    /// A paired peer's label: the start is forwarded to it, and the run
+    /// starts on that host.
+    #[serde(default)]
+    pub host: Option<String>,
+}
+
 /// `POST /api/v1/agents/{session}/focus`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]

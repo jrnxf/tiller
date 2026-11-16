@@ -39,6 +39,7 @@ pub enum Op {
     Close,
     Cancel,
     Reopen,
+    StartRun,
     AddDep,
     RemoveDep,
     Answer,
@@ -75,7 +76,7 @@ pub enum Lane {
 }
 
 impl Op {
-    pub const ALL: [Op; 28] = [
+    pub const ALL: [Op; 29] = [
         Op::CreateCard,
         Op::EditCard,
         Op::Comment,
@@ -84,6 +85,7 @@ impl Op {
         Op::Close,
         Op::Cancel,
         Op::Reopen,
+        Op::StartRun,
         Op::AddDep,
         Op::RemoveDep,
         Op::Answer,
@@ -117,6 +119,7 @@ impl Op {
             Op::Close => "POST /api/v1/cards/{id}/close",
             Op::Cancel => "POST /api/v1/cards/{id}/cancel",
             Op::Reopen => "POST /api/v1/cards/{id}/reopen",
+            Op::StartRun => "POST /api/v1/cards/{id}/runs",
             Op::AddDep => "POST /api/v1/cards/{id}/deps",
             Op::RemoveDep => "DELETE /api/v1/cards/{id}/deps",
             Op::Answer => "POST /api/v1/attention/{id}/answer",
@@ -146,7 +149,12 @@ impl Op {
     /// wait (`protocol.md` 7.4).
     pub fn lane(self) -> Lane {
         match self {
-            Op::Interrupt | Op::Stop | Op::Resume | Op::Relaunch | Op::PromptAnswer => Lane::Proof,
+            Op::Interrupt
+            | Op::Stop
+            | Op::Resume
+            | Op::Relaunch
+            | Op::PromptAnswer
+            | Op::StartRun => Lane::Proof,
             Op::ProjectAdd | Op::ProjectRetire | Op::ProjectDelete => Lane::Project,
             _ => Lane::Inline,
         }
@@ -382,6 +390,7 @@ fn target_project(store: &Store, op: Op, frame: &Mutate) -> tiller_core::Result<
         | Op::Close
         | Op::Cancel
         | Op::Reopen
+        | Op::StartRun
         | Op::AddDep
         | Op::RemoveDep => found(resolve_card(conn, target))?.map(|card| card.project_id),
         Op::PromptAnswer
