@@ -301,7 +301,23 @@ fn hold(app: &App, args: Hold_) -> Done {
     let until = lisbon::parse_when(&args.until)?;
     let mut store = app.write()?;
     let applied = store.card_hold(&app.ctx(), &args.card, until, &args.reason)?;
-    Ok(Outcome::applied(applied))
+    let outcome = Outcome::applied(applied);
+    if !app.person() {
+        return Ok(outcome);
+    }
+    // A person held it. No rule refuses a start on a held card (`state.md`,
+    // `run.start`), so the hold works only when the orchestrator knows of it.
+    let card = &args.card;
+    Ok(outcome
+        .with_summary(format!(
+            "{card} is held until {} (Lisbon). Its orchestrator is not told, and `tiller spawn` does not refuse a held card.",
+            args.until
+        ))
+        .with_help(format!(
+            "tiller card comment {card} --text \"start no run on this card before {}\": tell the orchestrator",
+            args.until
+        ))
+        .with_help(format!("tiller card unhold {card}: release it sooner")))
 }
 
 fn unhold(app: &App, card: &str) -> Done {

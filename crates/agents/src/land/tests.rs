@@ -251,6 +251,11 @@ struct World {
 
 impl World {
     fn new(delivery: Delivery) -> Self {
+        Self::with_repo(delivery, Some("example/alpha"))
+    }
+
+    /// A world whose project names `repo`, or none.
+    fn with_repo(delivery: Delivery, repo: Option<&str>) -> Self {
         let home = tempfile::tempdir().unwrap();
         let mut store = Store::open(home.path().join("state.db")).unwrap();
         store
@@ -271,7 +276,7 @@ impl World {
                 NewProject {
                     id: "alpha".into(),
                     name: "Alpha".into(),
-                    repo: Some("example/alpha".into()),
+                    repo: repo.map(Into::into),
                     remote: None,
                     default_branch: Some("main".into()),
                     delivery,
@@ -1684,6 +1689,46 @@ fn local_repos() -> (tempfile::TempDir, tempfile::TempDir, String) {
     );
     let head = commit(work.path(), "feature");
     (main, work, head)
+}
+
+/// A `local-only` project that names no repo, as `project add` makes one
+/// for a checkout with no remote, still lands: a request that needed a repo
+/// left such a project with no way to land at all.
+#[test]
+fn local_only_project_with_no_repo_requests_and_lands() {
+    let forge = FakeForge::new();
+    let (main, work, head) = local_repos();
+    let mut world = World::with_repo(Delivery::LocalOnly, None);
+    let lock = world.lock();
+    let approval = direct_approval(&mut world, work.path(), &head);
+    let landed = lander(&forge)
+        .land(&lock, &mut world.store, &approval.id)
+        .unwrap();
+    assert!(matches!(landed, Landed::Succeeded { .. }), "{landed:?}");
+    assert_eq!(git(main.path(), &["rev-parse", "refs/heads/main"]), head);
+    assert!(forge.merges().is_empty());
+
+    // Any other project with no repo is still refused, with the way out.
+    let mut world = World::with_repo(Delivery::LocalOnly, None);
+    let card = world.card("merge it");
+    let refused = world
+        .store
+        .approval_request(
+            &owner(),
+            NewApproval {
+                kind: ApprovalKind::Merge,
+                card: card.id.clone(),
+                run_id: None,
+                pr_id: None,
+                branch: None,
+                head_sha: head.clone(),
+                action: ApprovalAction::Squash,
+                memory_paths: None,
+                grant_id: None,
+            },
+        )
+        .unwrap_err();
+    assert!(refused.to_string().contains("--repo"), "{refused}");
 }
 
 #[test]

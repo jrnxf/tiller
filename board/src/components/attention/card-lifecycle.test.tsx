@@ -244,10 +244,14 @@ test("Hold sends a Lisbon time as an instant, with a reason", async () => {
     target: { value: "wait for infra" },
   });
   fireEvent.click(within(dialog).getByRole("button", { name: "Hold card" }));
-  await waitFor(() => expect(posted).toHaveLength(1));
+  await waitFor(() => expect(posted).toHaveLength(2));
   expect(sent().path).toBe(`/api/v1/cards/${SHIP}/hold`);
   expect(sent().body.reason).toBe("wait for infra");
   expect(String(sent().body.until)).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z$/);
+  // No rule refuses a start on a held card, so the orchestrator is told.
+  expect(posted[1]?.path).toBe(`/api/v1/cards/${SHIP}/comment`);
+  expect(String(posted[1]?.body.text)).toMatch(/^Hold: start no new run .* wait for infra$/);
+  expect(posted[1]?.body.idempotency_key).toBe(`${String(sent().body.idempotency_key)}:told`);
 });
 
 test("a held card shows its hold with Release as the primary", async () => {
@@ -277,9 +281,12 @@ test("a held card shows its hold with Release as the primary", async () => {
   const buttons = within(actions).getAllByRole("button");
   expect(buttons.at(-1)?.textContent).toBe("Release");
   fireEvent.click(buttons.at(-1) as HTMLElement);
-  await waitFor(() => expect(posted).toHaveLength(1));
+  await waitFor(() => expect(posted).toHaveLength(2));
   expect(sent().method).toBe("DELETE");
   expect(sent().path).toBe(`/api/v1/cards/${SHIP}/hold`);
+  // The orchestrator hears of the release too.
+  expect(posted[1]?.path).toBe(`/api/v1/cards/${SHIP}/comment`);
+  expect(posted[1]?.body.text).toBe("The hold is released: this card may start again.");
 });
 
 test("a closed card has only Reopen", async () => {

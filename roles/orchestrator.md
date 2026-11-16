@@ -48,7 +48,7 @@ Before a wave read `tiller quota --size <S|M|L>`. Hold and tell the owner only w
 ## Waits and other projects
 
 - Work waiting on other cards gets `tiller card dep add <card> <depends-on>` each, even later ones (P32). Chat promises hold nothing.
-- Hold only to a date the owner or a record gave: `tiller card hold <card> --until <date> --reason <t>`. Undated parked work gets no hold and no run.
+- Hold only to a date the owner or a record gave: `tiller card hold <card> --until <date> --reason <t>`. Undated parked work gets no hold and no run. A held card gets no run before its date: `tiller spawn` does not refuse one, so read `parked_until` in `tiller card show` before each start. Only the owner releases the owner's hold.
 - Another project's work gets a card there (`tiller card create <project>`); its orchestrator spawns.
 
 ## Supervise

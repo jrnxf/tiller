@@ -10,7 +10,9 @@ import { lisbonDate, lisbonInstant } from "../../lib/lisbon-input";
 import { hostField, ownerOf } from "../../lib/peers";
 import type { Owned } from "../../lib/peers";
 import { cardQuery } from "../../lib/queries";
+import { formatLisbonMoment } from "../board/format";
 import { ChevronDownIcon } from "../board/icons";
+import { showToast } from "../board/toast";
 import { CheckIcon } from "../shell/icons";
 import { ProjectDialog } from "../shell/project-dialog";
 import { Segmented } from "../ui/segmented";
@@ -91,6 +93,38 @@ const REOPEN_REASON = "Reopened from the board";
 
 export type DialogName = "close" | "cancel" | "hold" | "edit";
 
+// What the orchestrator is told about a hold made on the board, and about its
+// release. The store does not refuse a start on a held card (`state.md`,
+// `run.start`), so the hold works only when the orchestrator knows of it.
+function holdNote(until: string, reason: string): string {
+  return `Hold: start no new run on this card before ${formatLisbonMoment(until)} (Lisbon). ${reason}`;
+}
+
+const RELEASE_NOTE = "The hold is released: this card may start again.";
+
+// Sends that word as a comment, the one call that reaches the orchestrator.
+// The hold or the release is already saved when this runs, so a failure does
+// not fail the click: a toast says that nobody was told.
+async function tellOrchestrator(card: BoardRow, text: string, key: string, done: string) {
+  try {
+    await sendMutation("POST", `/api/v1/cards/${card.id}/comment`, {
+      text,
+      ...hostField(card),
+      idempotency_key: `${key}:told`,
+    });
+  } catch (caught) {
+    const why = caught instanceof Error ? caught.message : "the daemon did not answer";
+    // With no orchestrator there is nobody to tell, and nobody starts a run:
+    // the next one reads the hold on the card (`roles/orchestrator.md`).
+    if (/no live orchestrator/.test(why)) return;
+    showToast(
+      "bad",
+      `${card.display_id} is ${done}, but its orchestrator was not told.`,
+      `${why}. Until it knows, it may act as before. Send it a comment on the card.`,
+    );
+  }
+}
+
 // One card's lifecycle controls: which dialog is open, and the two moves that
 // ask nothing (Release and Reopen), each a single idempotent click.
 export function useCardLifecycle(card: BoardRow) {
@@ -98,11 +132,14 @@ export function useCardLifecycle(card: BoardRow) {
   const release = useAction({
     binding: `${card.id}:${card.rev}:release`,
     send: useCallback(
-      (idempotency_key: string) =>
-        sendMutation("DELETE", `/api/v1/cards/${card.id}/hold`, {
+      async (idempotency_key: string) => {
+        const released = await sendMutation("DELETE", `/api/v1/cards/${card.id}/hold`, {
           ...hostField(card),
           idempotency_key,
-        }),
+        });
+        await tellOrchestrator(card, RELEASE_NOTE, idempotency_key, "released");
+        return released;
+      },
       [card],
     ),
   });
@@ -493,14 +530,19 @@ function HoldDialog({ card, onClose }: { card: BoardRow; onClose: () => void }) 
   const [reason, setReason] = useState("");
   const until = lisbonInstant(date, time);
   const send = useCallback(
-    (idempotency_key: string) =>
-      sendMutation("POST", `/api/v1/cards/${card.id}/hold`, {
+    async (idempotency_key: string) => {
+      const held = await sendMutation("POST", `/api/v1/cards/${card.id}/hold`, {
         until,
         reason: reason.trim(),
         rev: card.rev,
         ...hostField(card),
         idempotency_key,
-      }),
+      });
+      if (until !== null) {
+        await tellOrchestrator(card, holdNote(until, reason.trim()), idempotency_key, "held");
+      }
+      return held;
+    },
     [card, until, reason],
   );
   const action = useAction({
@@ -514,7 +556,8 @@ function HoldDialog({ card, onClose }: { card: BoardRow; onClose: () => void }) 
     <ProjectDialog name="hold-card" pending={action.pending} onClose={onClose} initial={keep}>
       <h2 id="hold-card-dialog-title">Hold {card.display_id}</h2>
       <p id="hold-card-dialog-body">
-        A held card starts no new run until the time below. Release brings it back sooner.
+        The orchestrator is told to start no new run on this card until the time below. A run that
+        is live goes on. Release brings the card back sooner.
       </p>
       <Field label="Until (Lisbon time)" htmlFor="hold-date">
         <div className="dlg-when">

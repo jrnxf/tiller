@@ -552,8 +552,22 @@ impl Store {
                 return Err(Error::refused("card", &card.display_id, "card is closed"));
             }
             let project: Project = get(tx.conn(), "project", &card.project_id)?;
-            let Some(repo) = project.repo.clone() else {
-                return Err(Error::refused("project", &project.id, "project has no repo to bind"));
+            let repo = match project.repo.clone() {
+                Some(repo) => repo,
+                // A `local-only` project has no forge and may name no repo:
+                // its landing binds the branch and the head SHA and merges in
+                // the checkout (`authority.md` section 6, P12). The project's
+                // id stands in the snapshot column, which no forge call reads.
+                None if new.kind == ApprovalKind::LandDirect && project.delivery == Delivery::LocalOnly => {
+                    project.id.clone()
+                }
+                None => {
+                    return Err(Error::refused(
+                        "project",
+                        &project.id,
+                        "the project names no repo to bind. Set one with tiller project edit <project> --repo <owner/name>",
+                    ));
+                }
             };
             match new.kind {
                 ApprovalKind::Merge => {

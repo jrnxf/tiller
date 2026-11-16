@@ -1,6 +1,6 @@
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 
 import type {
@@ -676,10 +676,13 @@ export function CardPage({
   // The drawer is the same card, docked beside the board.
   variant?: "page" | "drawer";
 }) {
-  const { data: detail } = useSuspenseQuery(cardQuery(cardId, owner));
+  const { data: read } = useSuspenseQuery(cardQuery(cardId, owner));
   const projects = useNamedProjects(useSuspenseQuery(projectsQuery()).data);
-  const { card } = detail;
-  const column = useOwnedBy(detail.column, owner);
+  const { card } = read;
+  const column = useOwnedBy(read.column, owner);
+  // A peer's read names no host on its row. Every control below takes the
+  // detail with the owned row, so its writes go to the host that owns the card.
+  const detail = useMemo(() => ({ ...read, column }), [read, column]);
   const standing = useStanding(column);
   const id = shownId(column.host ? { ...card, host: column.host } : card, useAmbiguousIds());
   // A peer's project is the one that host owns, whatever slug this host uses.

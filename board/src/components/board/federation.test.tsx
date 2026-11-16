@@ -433,6 +433,57 @@ test("a peer's card adds a dependency on its own host, and is off for a down pee
   expect(off.parentElement?.title).toContain("host-e is unreachable");
 });
 
+// The peer's own read names no host on the card's row (the test above), and
+// the header and the dependency row once took that row as it came: their
+// writes went to this host, which answered "no card".
+test("a peer's card whose read names no host still sends its header and dependency writes to that host", async () => {
+  const posted: Posted[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      const method = init?.method ?? "GET";
+      if (method !== "GET") {
+        const sent = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        posted.push({ method, path, body: sent });
+        const { reply } = fixtureMutation(method, path, sent);
+        return new Response(JSON.stringify(reply.body), { status: reply.status });
+      }
+      const body = fixtureResource(path, "federated") as Record<string, unknown> | undefined;
+      if (body === undefined) return new Response("{}", { status: 404 });
+      if (path.startsWith(`/api/v1/cards/${GAMMA_12_D}?`)) {
+        const {
+          host: _host,
+          as_of: _asOf,
+          link: _link,
+          ...column
+        } = body.column as Record<string, unknown>;
+        return new Response(JSON.stringify({ ...body, column }), { status: 200 });
+      }
+      return new Response(JSON.stringify(body), { status: 200 });
+    }),
+  );
+  await renderApp("federated", `/cards/${GAMMA_12_D}?owner=host-d`);
+  const row = await screen.findByTestId("depends-on");
+  fireEvent.click(within(row).getByRole("button", { name: "Add" }));
+  const list = await screen.findByRole("listbox", { name: "Cards" });
+  await waitFor(() => expect(within(list).getAllByRole("option").length).toBeGreaterThan(0));
+  fireEvent.click(within(list).getAllByRole("option")[0] as HTMLElement);
+  await waitFor(() => expect(posted).toHaveLength(1));
+  expect(posted[0]?.path).toBe(`/api/v1/cards/${GAMMA_12_D}/deps`);
+  expect(posted[0]?.body.host).toBe("host-d");
+
+  const page = screen.getByTestId("card-page");
+  fireEvent.click(within(page).getByRole("button", { name: "More card actions" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Hold..." }));
+  const dialog = await screen.findByRole("dialog");
+  fireEvent.change(within(dialog).getByLabelText("Reason"), { target: { value: "wait" } });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Hold card" }));
+  await waitFor(() => expect(posted.length).toBeGreaterThanOrEqual(2));
+  expect(posted[1]?.path).toBe(`/api/v1/cards/${GAMMA_12_D}/hold`);
+  expect(posted[1]?.body.host).toBe("host-d");
+});
+
 test("a forward the peer did not confirm reads 'Sent, not confirmed' and a retry keeps its key", async () => {
   const posted = stubApi("federated");
   await renderApp("federated", `/inbox?item=${ASK_D}`);
