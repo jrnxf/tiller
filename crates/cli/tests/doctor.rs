@@ -16,9 +16,7 @@ use tiller_core::domain::MergeGate;
 use tiller_core::{Actor, Ctx};
 
 fn script(dir: &Path, name: &str, body: &str) {
-    let path = dir.join(name);
-    fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    tiller_daemon::testing::stub_script(dir, name, body);
 }
 
 /// A world whose tools are all fakes that answer. Returns the `bin` dir.

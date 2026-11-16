@@ -67,6 +67,8 @@ These fail without any change of the audit. Find out if they also fail on a quie
 - [ ] `tiller-cli::holder_upgrade` a close under way at the upgrade: on macOS the pane's shell keeps the PTY as its controlling terminal, so its output never ends while it lives, and the close's kill comes first
 - [ ] `tiller-cli::holder_agents a_lost_holder_resumes_its_worker_and_notifies_the_owner_once`
 - [ ] `tiller-cli::soak a_short_soak_has_no_gap`
+- [x] `tiller-cli::doctor` 9 to 17 of 24 tests fail with "did not answer within 5s" in a full parallel `cargo nextest run -p tiller-cli` (all pass with `-j 2`): the first run of each freshly written fake tool script costs the OS 0.2 to 0.5 s of checking, and many tests at once queue behind it. Fixed in the tests: every fake tool is a link to one shared, already checked script (`tiller_daemon::testing::stub_script`). A real `tiller doctor` was never slow. Three full runs before: 14, 17 and 18 doctor failures. After: 0, 0, 0
+- [x] `tiller-daemon::health` two tests fail under load and pass alone: the same cause (fresh fake scripts read past the 5 s tool deadline, and the daemon reads versions once at start). Same fix. Not reproduced in the package's own suite before the fix (3 of 3 passed), so this is by cause, not by a failing run
 
 ## Polish (P2, open)
 

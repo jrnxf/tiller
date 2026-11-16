@@ -71,3 +71,47 @@ pub fn sign_in(home: &Path, port: u16) -> SignedIn {
         .unwrap_or_else(|| panic!("the login link handed no owner token: {answer}"));
     SignedIn { cookie, token }
 }
+
+/// The one script every [`stub_script`] links to: it runs the body that sits
+/// beside the link it was started through.
+const STUB: &str = "#!/bin/sh\n. \"$0.body\"\n";
+
+/// Where the shared stub lives: one file for every test process of the user,
+/// so a build of the tests pays for it once.
+fn stub_path() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("tiller-test-stub-{:x}", STUB.len()))
+}
+
+/// A fake tool `dir/name` that runs the shell `body` and is cheap to start.
+///
+/// A script written fresh is checked by the OS the first time it runs (on
+/// macOS that is 0.2 to 0.5 s, and a lot more with many tests starting
+/// scripts at once), which sent a tool read past its 5 s deadline in the
+/// doctor and health tests under load. The name is a symlink to one shared
+/// script that the OS has checked once, and the body is a data file beside
+/// it, so a fake tool never costs a fresh check. Returns the path to run.
+pub fn stub_script(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let stub = stub_path();
+    if !stub.exists() {
+        let part = stub.with_extension(format!("part{}", std::process::id()));
+        std::fs::write(&part, STUB).unwrap();
+        std::fs::set_permissions(&part, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Run it once now, so the OS checks it before any test waits on a
+        // tool (it fails to find a body, which is no matter).
+        let _ = std::process::Command::new(&part)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        // The first writer wins; a later one keeps the file already there,
+        // so its checked state is never thrown away.
+        let _ = std::fs::hard_link(&part, &stub);
+        let _ = std::fs::remove_file(&part);
+    }
+    let path = dir.join(name);
+    let _ = std::fs::remove_file(&path);
+    symlink(&stub, &path).unwrap();
+    std::fs::write(dir.join(format!("{name}.body")), format!("{body}\n")).unwrap();
+    path
+}

@@ -11,7 +11,6 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -34,10 +33,7 @@ fn tiller() -> PathBuf {
 
 /// An executable that prints `output`, or runs `body` when it is a script.
 fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
-    let path = dir.join(name);
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    path
+    tiller_daemon::testing::stub_script(dir, name, body)
 }
 
 struct Daemon {
