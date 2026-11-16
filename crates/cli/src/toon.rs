@@ -10,10 +10,12 @@
 use serde_json::{Map, Value};
 
 /// A response: `ok` first and `data` before the bookkeeping, then the rest.
+/// `summary` and `help` come last, where a terminal leaves them in view.
 pub fn encode_response(value: &Value) -> String {
-    const ORDER: [&str; 8] = [
-        "ok", "error", "data", "events", "replayed", "key", "warning", "help",
+    const ORDER: [&str; 7] = [
+        "ok", "error", "data", "events", "replayed", "key", "warning",
     ];
+    const LAST: [&str; 2] = ["summary", "help"];
     let Value::Object(map) = value else {
         return encode(value);
     };
@@ -24,7 +26,12 @@ pub fn encode_response(value: &Value) -> String {
         }
     }
     for (name, item) in map {
-        if !ORDER.contains(&name.as_str()) {
+        if !ORDER.contains(&name.as_str()) && !LAST.contains(&name.as_str()) {
+            field(&mut out, 0, name, item);
+        }
+    }
+    for name in LAST {
+        if let Some(item) = map.get(name) {
             field(&mut out, 0, name, item);
         }
     }
@@ -245,6 +252,22 @@ mod tests {
         assert_eq!(
             text,
             "data:\n  empty: {}\n  id: alpha-1\n  note: null\n  rev: 3\nok: true\n"
+        );
+    }
+
+    #[test]
+    fn a_response_ends_with_the_summary_and_the_help() {
+        let text = encode_response(&json!({
+            "ok": true,
+            "summary": "Started the builder of alpha-42 on host-a.",
+            "help": ["tiller attach alpha-42-build"],
+            "data": {"id": "alpha-42"},
+            "warning": "slow",
+            "extra": 1,
+        }));
+        assert_eq!(
+            text,
+            "ok: true\ndata:\n  id: alpha-42\nwarning: slow\nextra: 1\nsummary: Started the builder of alpha-42 on host-a.\nhelp[1]: tiller attach alpha-42-build\n"
         );
     }
 

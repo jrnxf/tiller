@@ -48,5 +48,6 @@ exit: 0
     "tiller ask show <id5.short>: whether it arrived, and the answer"
   ],
   "ok": true,
-  "replayed": false
+  "replayed": false,
+  "summary": "Sent to the Alpha Project orchestrator: 'add a dark mode'."
 }

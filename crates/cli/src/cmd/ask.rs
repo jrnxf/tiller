@@ -8,7 +8,7 @@ use tiller_core::state::asks::{NewAsk, Resolution};
 use tiller_core::state::replies;
 use tiller_core::state::{get, list, resolve_id};
 
-use super::{CardFields, KeyArg, tag};
+use super::{CardFields, KeyArg, summary, tag};
 use crate::app::{App, Done, Failure, Outcome, text_input};
 
 #[derive(Subcommand, Debug)]
@@ -120,10 +120,24 @@ fn note(app: &App, args: Note) -> Done {
             short(&applied.value.ask.id)
         ),
     };
-    Ok(Outcome::applied(applied)
+    let sent = applied.value.message.is_some();
+    let outcome = Outcome::applied(applied)
         .with_warning(warning)
-        .with_key(&keyed)
-        .with_help(help))
+        .with_key(&keyed);
+    if session.is_some() || !app.person() {
+        return Ok(outcome.with_help(help));
+    }
+    let project = summary::project_name(&store, &args.project);
+    let line = summary::asked(&outcome.data, &project);
+    let outcome = outcome.with_summary(line).with_help(help);
+    Ok(if sent {
+        outcome
+    } else {
+        outcome.with_help(format!(
+            "tiller orchestrator start {}: then it reads the question",
+            args.project
+        ))
+    })
 }
 
 /// The short form of a ULID: its last 7 characters.

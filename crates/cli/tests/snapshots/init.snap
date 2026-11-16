@@ -73,8 +73,11 @@ exit: 0
     "<seq>"
   ],
   "help": [
-    "tiller project add <id> --name <n> --delivery <d>"
+    "tiller daemon: start Tiller; it serves the board on http://127.0.0.1:7421",
+    "tiller project add <id> --name <n> --delivery <d>",
+    "tiller peer add <label> --ssh <alias>: pair a second machine"
   ],
   "ok": true,
-  "replayed": false
+  "replayed": false,
+  "summary": "Tiller is set up on host-a, with room for 2 runs at a time."
 }

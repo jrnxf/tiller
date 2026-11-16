@@ -9,7 +9,7 @@ use tiller_core::domain::{
 use tiller_core::state::cards::{CardEdit, DispatchOverride};
 use tiller_core::state::{get, list, resolve_card};
 
-use super::{CardFields, KeyArg, card_of, clearable, parse_dispatch, tag};
+use super::{CardFields, KeyArg, card_of, clearable, parse_dispatch, summary, tag};
 use crate::app::{App, Done, Failure, Outcome, text_input};
 use crate::lisbon;
 
@@ -231,9 +231,28 @@ fn create(app: &App, args: Create) -> Done {
     let keyed = app.key(&store, "card.create", &normalized, &args.key.key)?;
     let applied = store.card_create(&app.ctx(), Some(&keyed.key), new, args.ask.as_deref())?;
     let label = tag(&applied.value.display_id);
-    Ok(Outcome::applied(applied)
-        .with_key(&keyed)
-        .with_help(format!("start each line about this card with {label}")))
+    let outcome = Outcome::applied(applied).with_key(&keyed);
+    if !app.person() {
+        return Ok(outcome.with_help(format!("start each line about this card with {label}")));
+    }
+    // A person filed it: say so in a sentence, and name the two ways on.
+    let project = summary::project_name(&store, &args.project);
+    let line = summary::card_created(&outcome.data, &project);
+    let card = outcome.data["display_id"]
+        .as_str()
+        .unwrap_or("<card>")
+        .to_owned();
+    let role = match outcome.data["kind"].as_str() {
+        Some("ship") => "builder",
+        Some("scout" | "question") => "scout",
+        _ => "<role>",
+    };
+    Ok(outcome
+        .with_summary(line)
+        .with_help(format!(
+            "tiller spawn {card} {role}: start it now; without it the {project} orchestrator decides when it runs"
+        ))
+        .with_help(format!("tiller card show {card}")))
 }
 
 fn edit(app: &App, args: Edit) -> Done {

@@ -62,5 +62,6 @@ exit: 0
   ],
   "key": "shell:<id29>",
   "ok": true,
-  "replayed": false
+  "replayed": false,
+  "summary": "Answered 'Follow the system theme?' with 'yes, follow it'. The agent that asked is told."
 }

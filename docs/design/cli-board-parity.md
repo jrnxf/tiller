@@ -14,6 +14,8 @@ How to read the table:
 
 The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI writes `state.db` directly. Board mutations always carry an `idempotency_key`. The CLI mints one per run unless you pass `--key` (protocol 6.3).
 
+A CLI command that a person runs (not an agent session) ends with a `summary` line, one sentence that says what it did with names in place of ids, and `help` lines with the next step. `init`, `project add`, `orchestrator start`, `card create`, `spawn`, `ask note` and `attention answer` have one (added on Monday 2026-11-16, Lisbon time). The full record still prints above it. The board says the same in a toast or on the card.
+
 ## Capabilities
 
 | Capability | CLI | Board | Notes |

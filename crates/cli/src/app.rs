@@ -24,6 +24,10 @@ pub struct Outcome {
     /// The key a shell caller can repeat the command with (6.3).
     pub key: Option<String>,
     pub warning: Option<String>,
+    /// One sentence for a person: what the command did, with names in place
+    /// of ids. It prints after the record and before `help`, so it is what a
+    /// terminal shows last.
+    pub summary: Option<String>,
     pub help: Vec<String>,
 }
 
@@ -34,6 +38,7 @@ impl Outcome {
             mutation: None,
             key: None,
             warning: None,
+            summary: None,
             help: Vec::new(),
         }
     }
@@ -44,6 +49,7 @@ impl Outcome {
             mutation: Some((applied.events, applied.replayed)),
             key: None,
             warning: None,
+            summary: None,
             help: Vec::new(),
         }
     }
@@ -55,12 +61,18 @@ impl Outcome {
             mutation: Some((applied.events, applied.replayed)),
             key: None,
             warning: None,
+            summary: None,
             help: Vec::new(),
         }
     }
 
     pub fn with_help(mut self, line: impl Into<String>) -> Self {
         self.help.push(line.into());
+        self
+    }
+
+    pub fn with_summary(mut self, line: impl Into<String>) -> Self {
+        self.summary = Some(line.into());
         self
     }
 
@@ -90,6 +102,9 @@ impl Outcome {
         }
         if let Some(warning) = self.warning {
             response.insert("warning".into(), Value::String(warning));
+        }
+        if let Some(summary) = self.summary {
+            response.insert("summary".into(), Value::String(summary));
         }
         if !self.help.is_empty() {
             response.insert("help".into(), json!(self.help));
@@ -371,6 +386,13 @@ impl App {
     /// Why a caller with no session id is a script, when it is one.
     pub fn not_owner(&self) -> Option<&str> {
         self.caller().not_owner.as_deref()
+    }
+
+    /// Whether a person may read the answer: the owner's shell or a script,
+    /// not an agent session. Such a caller gets a `summary` line, and the
+    /// owner's next step in `help`.
+    pub fn person(&self) -> bool {
+        !matches!(self.actor(), Actor::Session(_) | Actor::Curator(_))
     }
 
     /// The context of a mutation. After [`App::key`] it also carries the

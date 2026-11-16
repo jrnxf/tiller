@@ -25,6 +25,7 @@ pub mod review;
 pub mod run;
 pub mod spawn;
 pub mod stale;
+pub mod summary;
 
 use clap::Args;
 use serde_json::Value;

@@ -12,9 +12,9 @@ Status values: `open`, `fixed` (with what was verified), `needs owner`, `to veri
 |---|---|
 | Phase | 1 - audit. Journeys 3 (ask), 4 (start a task) and 5 (trust) are walked on the board and the CLI. Journeys 1, 2 and 6 to 11 are not walked yet. |
 | Open P0 | 0. UA-15 is `needs owner`: the silent part is fixed, the answer itself needs a spec change. |
-| Open P1 | 2 (UA-03, UA-09). UA-17 is fixed but for "Mark read" in the CLI, which is `needs owner`. UA-20 is `needs owner`: a queued card says what it waits for and "Close" is out of the main place, and its "Start" control needs a spec change (see "Needs owner"). UA-18 is `needs owner`: the wrong status line is fixed, Cancel and the full view need a spec change. UA-19 is `needs owner`: the tile, the card and the timeline show the worker's report, and the "Needs you" rule needs a spec change. |
-| Fixed | UA-01, UA-02, UA-04, UA-05, UA-06, UA-12, UA-16, UA-21, UA-22, UA-25, DX-01. UA-17 (read an answer in the CLI; "Mark read" in the CLI needs a spec change). UA-15 part 1 (the owner is told where the answer shows). UA-18 part 1 (the ask tile shows an unread answer and opens it). UA-19 part 1 (a worker's report shows on its tile, on the card and in the timeline). UA-20 part 1 (a queued card says what it waits for, and "Close" is under "More" until work starts). |
-| Next step | The CLI group: UA-09 (a short summary in place of the raw record), then UA-03. Walk journeys 2, 6 and 8 after the stand-in forge of the bench gaps. UA-11 (P2) is not started: check `docs/spec/state.md` section 6 first, because the column of a card is a contract. |
+| Open P1 | 1 (UA-03). UA-09 is `needs owner`: seven owner commands end with a sentence and the next step, and a short answer in place of the record needs a spec change. UA-17 is fixed but for "Mark read" in the CLI, which is `needs owner`. UA-20 is `needs owner`: a queued card says what it waits for and "Close" is out of the main place, and its "Start" control needs a spec change (see "Needs owner"). UA-18 is `needs owner`: the wrong status line is fixed, Cancel and the full view need a spec change. UA-19 is `needs owner`: the tile, the card and the timeline show the worker's report, and the "Needs you" rule needs a spec change. |
+| Fixed | UA-01, UA-02, UA-04, UA-05, UA-06, UA-12, UA-16, UA-21, UA-22, UA-25, DX-01. UA-17 (read an answer in the CLI; "Mark read" in the CLI needs a spec change). UA-15 part 1 (the owner is told where the answer shows). UA-18 part 1 (the ask tile shows an unread answer and opens it). UA-19 part 1 (a worker's report shows on its tile, on the card and in the timeline). UA-20 part 1 (a queued card says what it waits for, and "Close" is under "More" until work starts). UA-09 part 1 (a `summary` sentence and the owner's next step at the end of `init`, `project add`, `orchestrator start`, `card create`, `spawn`, `ask note` and `attention answer`). |
+| Next step | UA-03, the last open P1: check `docs/spec` first (is the CLI host-local by contract?), then at least name the peer in a `not_found` and count the peer's items in `tiller recap`. After it, phase 3: walk all journeys again. Walk journeys 2, 6 and 8 after the stand-in forge of the bench gaps. UA-11 (P2) is not started: check `docs/spec/state.md` section 6 first, because the column of a card is a contract. |
 
 ## The bench
 
@@ -77,7 +77,7 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 
 | Job | Board | CLI |
 |---|---|---|
-| Ask a project | 4 steps, about 10 s: `A`, `@` and two letters, Enter, the text, Enter. Good. | 1 command, 36 lines of answer (UA-09). The last line is the next step: `tiller ask show <ask>` (UA-17) |
+| Ask a project | 4 steps, about 10 s: `A`, `@` and two letters, Enter, the text, Enter. Good. | 1 command. The last two lines are a sentence ("Sent to the Lantern orchestrator: '...'") and the next step, `tiller ask show <ask>` (UA-09, UA-17; before: 36 lines of record and no sentence). The record still prints above them |
 | See that the ask arrived | main project: the tile shows at once. Peer project: the tile shows in about 1 s (UA-16, fixed; it was never without a reload) | `tiller ask show <ask>`: `delivery.state` reads `delivered` within 6 s (UA-17; before: no delivery state) |
 | Read the answer | main project: 1 click on the ask's tile, which shows "Answered" and the first line within 2 s (UA-18), or Inbox, 2 clicks. Peer project: only on the peer's board; the Ask box, the toast and the tile now say so (UA-15) | main project: the same `tiller ask show <ask>` prints the reply's words; `tiller recap` lists every unread answer (UA-17; before: not possible). Peer project: only in a shell on the peer (UA-03) |
 | Ask again | 1 click on "Ask again" in the reply | type the command again |
@@ -85,7 +85,7 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 | Idea to a filed card | 3 steps: New card on the project's row, the title, Enter | 1 command, after one refusal for a missing `--kind` (UA-23) |
 | Idea to a filed card, from anywhere | 4 steps, about 8 s: `C`, two letters of the project, Enter, the title, Enter. In a one-project view: `C`, the title, Enter (UA-22; before: scroll to the project's row for its button) | the same command |
 | Find one card among 43 | `Cmd+K`, a word of its title or its id, Enter: about 4 s, on both hosts (UA-21; before: scroll the board, "No command matches") | `card list`, then read 43 records (UA-09) |
-| Filed card to a running card | no board control (UA-20, needs owner). The card says who starts it ("Waits for: The Lantern orchestrator") and prints the shell command. With no orchestrator: 1 click on "Start orchestrator" in the card | `tiller spawn <card> builder`, 73 lines of answer (UA-09) |
+| Filed card to a running card | no board control (UA-20, needs owner). The card says who starts it ("Waits for: The Lantern orchestrator") and prints the shell command. With no orchestrator: 1 click on "Start orchestrator" in the card | `tiller spawn <card> builder`. The last two lines are "Started the builder of lantern-5 on main (sonnet, medium)." and `tiller attach lantern-5-build` (UA-09; before: 73 lines of record, the host as a 26-character id, no next step). The record still prints above them |
 | Read what happened on a card | the timeline shows the owner's news only (`harbor-2`: 4 lines in place of 24), with the question, the answer and a comment quoted (UA-04) | `card timeline` prints raw events (UA-09) |
 | Answer a card that says "Decision" | 2 steps: open the card, click an option or press its digit. The question, the recommendation and the answer control are at the top of the card (UA-02; before: leave the card, open the Inbox, find the item, answer: 4 steps) | `attention answer <item>`, after `attention list --open` for the id |
 | Find the most urgent item in the Inbox | it is the first row and the one shown, and its row says "Urgent" (UA-05; before: the last of 7 rows) | `tiller recap` orders by kind, not by the card's priority |
@@ -202,13 +202,28 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 - Happened: the sidebar and the board list the two host health projects among the owner's projects, in lower case. The breadcrumb counts "All projects 16". The owner has 14.
 - Fix: move host health out of the project list to the Machines section, and count only the owner's projects.
 
-### UA-09 - CLI answers are raw records (P1, open)
+### UA-09 - CLI answers are raw records (P1, needs owner; the summary line and the next step are fixed)
 
 - Journey: 1, 3, 4.
 - Happened: `tiller init` prints about 60 lines of fields (`stage_changed_at: null`, `reviewed_through_sha: null`) and one hint. It does not say to start the daemon, open the board or pair a host. `tiller spawn`, `tiller ask note` and `tiller card create` print the whole row, most of it `null`. The answer to "did it start, where, on which model" is in there, among 40 other lines.
 - Hurts: the owner has to read a record to confirm an action. The next step is not shown.
 - Confirmed in journeys 3 and 4: `ask note` answers with 36 lines, `spawn` with 73. The host is a 26-character id, never its label. The one hint after `card create` is "start each line about this card with [lantern-5]", which is an instruction for an orchestrator, not for the owner.
 - Fix: a short human summary by default for owner commands ("Started harbor-1 build on main, sonnet, medium. Watch: tiller attach harbor-1-build"), with the next step. `--json` stays the full record.
+- Spec check: `docs/spec/protocol.md` section 6.1 fixes the output. The default is TOON, every response has `ok` and `data`, both forms come from one struct, and a response may end with `help` lines. So the record cannot leave the default answer without a spec change. A new field beside `key` and `warning` is additive.
+- Done (iteration 13): a response of a command that a person runs (the owner's shell or a script, not an agent session) has a `summary` field: one sentence with the project's name and the host's label in place of ids. TOON prints `summary` and `help` last, so they are the lines a terminal leaves in view. `help` now holds the owner's next step:
+  - `tiller init`: "Tiller is set up on main, with room for 12 runs at a time." Next: `tiller daemon` (with the board's address), `tiller project add`, `tiller peer add`.
+  - `tiller project add`: "Added the project Lantern (lantern). It has no orchestrator yet." Next: `tiller orchestrator start lantern`.
+  - `tiller orchestrator start`: "Started the Meadow orchestrator on main." (or "already runs"). Next: `tiller ask note meadow --text ...`, `tiller attach meadow`.
+  - `tiller card create`: "Filed lantern-5 'Add a monthly digest toggle' in Lantern (ship, P2). No run has started." Next: `tiller spawn lantern-5 builder` (with "without it the Lantern orchestrator decides when it runs"), `tiller card show lantern-5`. The orchestrator's hint ("start each line about this card with [lantern-5]") now goes only to an agent session.
+  - `tiller spawn`: "Started the builder of lantern-5 on main (sonnet, medium)." Next: `tiller attach lantern-5-build`, `tiller card show lantern-5`.
+  - `tiller ask note`: "Sent to the Lantern orchestrator: 'Is the digest behind a flag?'." With no orchestrator: "Recorded for Meadow: '...'. No orchestrator runs there, so nobody reads it yet.", and the next step is `tiller orchestrator start meadow`.
+  - `tiller attention answer`: "Answered '<question>' with '<answer>'.", plus whether the agent is told and whether a card closed.
+- Found on the way and fixed: `tiller attach lantern-5-build` matched no agent. Attach compared the target with the pane's label (`lantern-5 build`, with a space), so the run name of `protocol.md` 6.1 did not work and the owner had to quote the label. Attach now takes the run name too.
+- Proof: on the bench, `card create`, `spawn`, `ask note` (with and without an orchestrator), `orchestrator start` (first and second time) and `attention answer` printed the sentence quoted here as the second-last line and the next step as the last line. `tiller attach lantern-5-build` in a pseudo-terminal showed the builder's screen (before: "no agent matches"). `init` and `project add` are checked by their snapshots, not on the bench. Tests: `cmd::summary` (4 unit tests), `attach::a_run_name_names_the_pane_of_its_label`, `the_owner_reads_one_sentence_and_the_next_step` (crates/cli/tests/commands.rs: the owner gets `summary`, an agent session does not), and the snapshots of `init` and the other changed commands (additive only).
+- Not done:
+  - The record still prints in full above the sentence (`spawn`: 73 lines, then 2). A short answer by default needs the spec change under "Needs owner".
+  - `tiller approve`, `tiller land`, `tiller away`, `tiller card close` and the other card edits, `tiller peer add` and the reads (`card list`, `card timeline`, `board`) have no sentence yet. The pattern is `Outcome::with_summary` and `crates/cli/src/cmd/summary.rs`.
+  - Two or more `help` lines print on one line, comma separated and quoted (the TOON form of a list of strings). It reads badly for a person (P2, added to UA-23).
 
 ### UA-10 - `tiller host edit` needs a rev that no command prints (P2, open)
 
@@ -387,6 +402,9 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 - Happened: `tiller card create lantern --title ...` is refused with "a new card needs --kind ship|scout|question|ops"; the help lists `--kind` as an option, and the board defaults it to ship. `tiller ask note lantrn` answers "no project lantrn" with no near match. `tiller status "text"` fails on a parse error because the state comes first.
 - Fix: `--kind` defaults to `ship` as on the board. A `not_found` for a project names the nearest id ("did you mean lantern?"), and names the peer when the project lives there (UA-03).
 - `tiller machines` shows this host's `last_seen_at` as the time the daemon started. `docs/spec/protocol.md` section 9 says "now, while the daemon runs", and the daemon's own Machines row does that. Seen with UA-25.
+- Two or more `help` lines print on one line, comma separated and quoted. Seen with UA-09.
+- A second `tiller spawn lantern-5 builder` is refused with "builder run 01M7... is already active": a 26-character id and no next step (`tiller attach lantern-5-build`). Seen with UA-09.
+- The help of `tiller attach` says a card names an agent, but no pane carries a `card` field, so `tiller attach lantern-5` matches nothing. Seen with UA-09.
 
 ### UA-24 - Small board defects seen in journeys 3 to 5 (P2, open)
 
@@ -456,7 +474,7 @@ Order of work, highest owner value first. Fixes that share a cause are grouped.
 3. Done: UA-02, UA-05, UA-06 and UA-12 (the "needs you" path). The question is on the card, the Inbox is ordered by urgency, and the kind is named.
 4. Done: UA-21 and UA-22 (find a card and start a job from anywhere on the board). Done as far as the contract allows: UA-20 part 1 (a queued card says what it waits for). Its "Start" control waits under "Needs owner".
 5. Done: UA-01 (a host that refuses every new run says so on the board, in `tiller machines` and in `tiller doctor`).
-6. Done: UA-25 (a live peer counts as live on Health and in `tiller machines`) and UA-17 (the CLI prints the delivery state and the answer of an ask). Next: UA-09, then UA-03, UA-10 and UA-23: the CLI as an owner surface.
+6. Done: UA-25 (a live peer counts as live on Health and in `tiller machines`) and UA-17 (the CLI prints the delivery state and the answer of an ask). Done as far as the contract allows: UA-09 part 1 (a sentence and the next step after seven owner commands). Next: UA-03, then UA-10 and UA-23: the CLI as an owner surface.
 7. Finish the audit in parallel with the fixes: close the bench gaps (the stand-in forge), then walk journeys 1, 2, 6, 8, 9, 10 and 11 and the rest of 5 and 7.
 8. UA-07 with UA-08: the host out of the owner's way.
 9. UA-11, UA-13, UA-14, UA-22, UA-24: polish.
@@ -476,6 +494,8 @@ Order of work, highest owner value first. Fixes that share a cause are grouped.
 - UA-01, the spec text: the fix added the field `refuses_runs` to the Machines row and a `floors` line to `tiller doctor`. `docs/spec/recovery.md` R16 asks for the first ("The Machines row shows the breached floor"), but the field table of `docs/spec/protocol.md` section 9 and the list of checks in its section 6.4 do not name them, and this audit may not edit a spec. Recommendation: add one row to the table (`refuses_runs`: one line per breached RAM or disk floor, absent while the host can start a run; a peer's from its own row while the link is live) and "the floors" to the list of doctor checks. No code changes with a yes.
 
 - UA-17, "Mark read" in the CLI: `docs/spec/authority.md` (the row "mark a reply read") says the owner marks read "on the board", and `docs/spec/state.md` lists the board as the actor of `reply.read`. The store itself asks only for the owner. Recommendation: let `tiller ask show <ask> --mark-read` run the same `reply.read` for the owner, and change the two spec rows to "the owner, on the board or in the CLI". The work after a yes is small: one flag, one test, and the parity row "Mark a reply read" becomes Full.
+
+- UA-09, the short answer: `docs/spec/protocol.md` section 6.1 says that the default output is TOON with the full `data`, for agents. The owner's commands now end with a `summary` sentence and `help`, but 40 to 70 lines of record print first. Recommendation: when the caller is a person (no agent session) and stdout is a terminal, print only `summary`, a `warning` if any, and `help`; `--json` and a pipe keep the full record, and so does a new `--full`. Add `summary` to the list of response fields in 6.1 ("a sentence for a person; absent for an agent session"). The work after a yes is small: one branch in `emit` (crates/cli/src/main.rs) and a sentence for the commands that have none yet.
 
 Two more candidates, to settle when their fix starts:
 

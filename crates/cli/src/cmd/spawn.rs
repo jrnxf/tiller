@@ -20,7 +20,7 @@ use tiller_panes::{Panes, PanesError};
 use tiller_reconcile::git::GitScanner;
 
 use super::admin::load_config;
-use super::{KeyArg, resolve_session};
+use super::{KeyArg, resolve_session, summary};
 use crate::app::{App, Done, Failure, Outcome};
 
 #[derive(Args, Debug)]
@@ -214,6 +214,7 @@ pub fn spawn(app: &App, args: Spawn) -> Done {
     let tools = Tools::load(app)?;
     let mut store = app.write()?;
     let card = resolve_card(store.conn(), &args.card)?;
+    let display_id = card.display_id.clone();
     // The worktree lands beside the checkout, so that is the disk that fills.
     let disk = tools
         .config
@@ -268,9 +269,31 @@ pub fn spawn(app: &App, args: Spawn) -> Done {
         agents::Outcome::Spawned(spawned) => spawned.warning.clone(),
         agents::Outcome::Replayed { .. } => None,
     };
-    Ok(Outcome::applied(applied)
+    let name = match &applied.value {
+        agents::Outcome::Spawned(spawned) => spawned.name.clone(),
+        agents::Outcome::Replayed { run, .. } => {
+            agents::agent_name(&display_id, run.role, run.attempt)
+        }
+    };
+    let replayed = applied.replayed;
+    let outcome = Outcome::applied(applied)
         .with_key(&keyed)
-        .with_warning(warning))
+        .with_warning(warning);
+    if !app.person() {
+        return Ok(outcome);
+    }
+    let line = summary::spawned(
+        &outcome.data,
+        &display_id,
+        &summary::host_label(&store),
+        replayed,
+    );
+    Ok(outcome
+        .with_summary(line)
+        .with_help(format!("tiller attach {name}: watch it work"))
+        .with_help(format!(
+            "tiller card show {display_id}: its state and its runs"
+        )))
 }
 
 /// `tiller run clean`: closes the run's dead pane and returns its worktree
@@ -315,7 +338,19 @@ pub fn orchestrator_start(app: &App, project: &str, restart: bool) -> Done {
     let applied = start_orchestrator(&tools, &homes, &mut store, &app.ctx(), project, restart)
         .map_err(failure)?;
     let warning = applied.value.warning.clone();
-    Ok(Outcome::applied(applied).with_warning(warning))
+    let replayed = applied.replayed;
+    let outcome = Outcome::applied(applied).with_warning(warning);
+    if !app.person() {
+        return Ok(outcome);
+    }
+    let name = summary::project_name(&store, project);
+    let line = summary::orchestrator_started(&name, &summary::host_label(&store), replayed);
+    Ok(outcome
+        .with_summary(line)
+        .with_help(format!(
+            "tiller ask note {project} --text \"<your question>\""
+        ))
+        .with_help(format!("tiller attach {project}: watch it work")))
 }
 
 /// Where orchestrator homes live: `spawn.orchestrator_home`, or its default.

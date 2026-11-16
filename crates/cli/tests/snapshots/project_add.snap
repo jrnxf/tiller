@@ -30,6 +30,10 @@ exit: 0
   "events": [
     "<seq>"
   ],
+  "help": [
+    "tiller orchestrator start alpha"
+  ],
   "ok": true,
-  "replayed": false
+  "replayed": false,
+  "summary": "Added the project Alpha (alpha). It has no orchestrator yet."
 }

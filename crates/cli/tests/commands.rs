@@ -1376,3 +1376,74 @@ fn machines_names_a_breached_floor_until_it_goes() {
     world.must(&["host", "edit", "--rev", "2", "--no-disk-floor"]);
     assert!(local(&world).get("refuses_runs").is_none());
 }
+
+/// UA-09: a person who runs a command reads one sentence and the next step,
+/// with names in place of ids. An agent session keeps its own hint.
+#[test]
+fn the_owner_reads_one_sentence_and_the_next_step() {
+    let world = World::initialized();
+
+    // No orchestrator runs yet: the ask is recorded, and the sentence says
+    // that nobody reads it.
+    let unread = world.must(&["ask", "note", "alpha", "--text", "Is the export nightly?"]);
+    let line = unread.json["summary"].as_str().unwrap();
+    assert!(
+        line.starts_with("Recorded for Alpha: 'Is the export nightly?'."),
+        "{line}"
+    );
+    assert!(line.contains("nobody reads it yet"), "{line}");
+    assert_eq!(
+        unread.json["help"][1],
+        "tiller orchestrator start alpha: then it reads the question"
+    );
+
+    let orchestrator = world.orchestrator();
+    let sent = world.must(&["ask", "note", "alpha", "--text", "And the import?"]);
+    assert_eq!(
+        sent.json["summary"],
+        "Sent to the Alpha orchestrator: 'And the import?'."
+    );
+
+    let filed = world.must(&[
+        "card",
+        "create",
+        "alpha",
+        "--kind",
+        "ship",
+        "--title",
+        "Add the export",
+    ]);
+    let card = filed.data()["display_id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        filed.json["summary"],
+        format!("Filed {card} 'Add the export' in Alpha (ship, P2). No run has started.")
+    );
+    let next = filed.json["help"][0].as_str().unwrap();
+    assert!(
+        next.starts_with(&format!("tiller spawn {card} builder: start it now")),
+        "{next}"
+    );
+
+    // The orchestrator files a card too: no sentence, and its own hint.
+    let by_agent = world.must_as(
+        &orchestrator,
+        &[
+            "card",
+            "create",
+            "alpha",
+            "--kind",
+            "scout",
+            "--title",
+            "Look at the import",
+        ],
+    );
+    assert!(by_agent.json.get("summary").is_none(), "{}", by_agent.json);
+    assert!(
+        by_agent.json["help"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("start each line about this card with"),
+        "{}",
+        by_agent.json
+    );
+}

@@ -21,6 +21,7 @@ use tiller_core::state::projects::{HostEdit, Init, NewProject, ProjectEdit};
 use super::clearable;
 use super::review::checkout_head;
 use super::spawn::{Tools, failure};
+use super::summary;
 use crate::app::{App, Done, Failure, Outcome};
 use tiller_core::state::stop_hook::{STOP_HOOK_DAYS, intake_stats};
 
@@ -280,7 +281,13 @@ pub fn init(app: &App, args: InitArgs) -> Done {
             boundary: args.boundary,
         },
     )?;
-    Ok(Outcome::applied(applied).with_help("tiller project add <id> --name <n> --delivery <d>"))
+    let outcome = Outcome::applied(applied);
+    let line = summary::initialized(&outcome.data);
+    Ok(outcome
+        .with_summary(line)
+        .with_help("tiller daemon: start Tiller; it serves the board on http://127.0.0.1:7421")
+        .with_help("tiller project add <id> --name <n> --delivery <d>")
+        .with_help("tiller peer add <label> --ssh <alias>: pair a second machine"))
 }
 
 fn json_arg(text: &str, what: &str) -> Result<Value, Failure> {
@@ -336,10 +343,17 @@ pub fn project(app: &App, cmd: ProjectCmd) -> Done {
                 .ok()
                 .and_then(|table| checkout_of(&table, &new.id).map(PathBuf::from));
             let (numbering, note) = numbering(&store, &new, checkout.as_deref())?;
-            Ok(
+            let outcome =
                 Outcome::applied(store.project_add_numbered(&app.ctx(), new, numbering)?)
-                    .with_warning(note),
-            )
+                    .with_warning(note);
+            if !app.person() {
+                return Ok(outcome);
+            }
+            let line = summary::project_added(&outcome.data);
+            let id = outcome.data["id"].as_str().unwrap_or("<id>").to_owned();
+            Ok(outcome
+                .with_summary(line)
+                .with_help(format!("tiller orchestrator start {id}")))
         }
         ProjectCmd::Edit(args) => {
             let checks = args

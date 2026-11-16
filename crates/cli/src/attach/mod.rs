@@ -725,8 +725,10 @@ fn take_lease(stream: &mut Stream, (cols, rows): (u16, u16)) {
 }
 
 /// The pane `target` names: its pane id, its key (the session), or its
-/// `session`, `run`, `card` or `label` metadata. A running pane comes
-/// before an exited one, then the latest.
+/// `session`, `run`, `card` or `label` metadata. A run's label is
+/// `alpha-42 build`, and its name `alpha-42-build` (`protocol.md` 6.1) names
+/// it too, so the owner needs no quotes. A running pane comes before an
+/// exited one, then the latest.
 fn find<'a>(panes: &'a [Pane], target: &str) -> Option<&'a Pane> {
     let names = |pane: &Pane| {
         pane.pane.as_str() == target
@@ -734,6 +736,10 @@ fn find<'a>(panes: &'a [Pane], target: &str) -> Option<&'a Pane> {
             || ["session", "run", "card", "label"]
                 .iter()
                 .any(|key| pane.meta.get(*key).is_some_and(|value| value == target))
+            || pane
+                .meta
+                .get("label")
+                .is_some_and(|label| label.contains(' ') && label.replace(' ', "-") == target)
     };
     panes
         .iter()
@@ -828,5 +834,18 @@ mod tests {
         assert_eq!(find(&panes, "p3").unwrap().pane.as_str(), "p3");
         assert_eq!(find(&panes, "r1").unwrap().pane.as_str(), "p3");
         assert!(find(&panes, "nope").is_none());
+    }
+
+    #[test]
+    fn a_run_name_names_the_pane_of_its_label() {
+        let mut build = pane("p1", "s1", PaneState::Running, 10);
+        build.meta.insert("label".into(), "alpha-42 build".into());
+        let mut orchestrator = pane("p2", "s2", PaneState::Running, 20);
+        orchestrator.meta.insert("label".into(), "alpha".into());
+        let panes = [build, orchestrator];
+        assert_eq!(find(&panes, "alpha-42 build").unwrap().pane.as_str(), "p1");
+        assert_eq!(find(&panes, "alpha-42-build").unwrap().pane.as_str(), "p1");
+        assert_eq!(find(&panes, "alpha").unwrap().pane.as_str(), "p2");
+        assert!(find(&panes, "alpha-42").is_none());
     }
 }

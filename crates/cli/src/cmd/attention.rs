@@ -6,7 +6,7 @@ use tiller_core::domain::{AnsweredVia, Ask, AskSource, Attention, AttentionKind}
 use tiller_core::state::attention::{NewAttention, stale};
 use tiller_core::state::{get, list, resolve_id};
 
-use super::KeyArg;
+use super::{KeyArg, summary};
 use crate::app::{App, Done, Failure, Outcome, text_input};
 
 #[derive(Subcommand, Debug)]
@@ -152,7 +152,7 @@ fn answer(app: &App, args: Answer) -> Done {
         &args.key.key,
     )?;
     let applied = store.attention_answer(&app.ctx(), Some(&keyed.key), &args.item, &words, via)?;
-    Ok(Outcome::applied_as(applied, |answered| {
+    let outcome = Outcome::applied_as(applied, |answered| {
         json!({
             "attention": answered.attention,
             "still_current": answered.still_current,
@@ -162,7 +162,12 @@ fn answer(app: &App, args: Answer) -> Done {
             "cited_ask": cited,
         })
     })
-    .with_key(&keyed))
+    .with_key(&keyed);
+    if !app.person() {
+        return Ok(outcome);
+    }
+    let line = summary::answered(&outcome.data);
+    Ok(outcome.with_summary(line))
 }
 
 /// The ask that carries the owner's words from chat (`authority.md` G06): a

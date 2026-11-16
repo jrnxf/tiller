@@ -31,8 +31,10 @@ exit: 0
     "<seq>"
   ],
   "help": [
-    "start each line about this card with [alpha-3]"
+    "tiller spawn alpha-3 <role>: start it now; without it the Alpha Project orchestrator decides when it runs",
+    "tiller card show alpha-3"
   ],
   "ok": true,
-  "replayed": false
+  "replayed": false,
+  "summary": "Filed alpha-3 'Rotate the deploy token' in Alpha Project (ops, P2). No run has started."
 }
