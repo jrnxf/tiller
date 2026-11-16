@@ -1996,6 +1996,58 @@ test("a tile shows what its worker last reported, and a stopped worker replaces 
   expect((await within(tile).findByText("Reports done")).className).toContain("ok");
 });
 
+test("on the Agents screen an idle worker that reported blocked says so, not just Idle (UA-59)", async () => {
+  stubApi("default");
+  const { queryClient } = await renderApp("default", "/agents");
+  const key = queryKeyFor(agentsPath());
+  await waitFor(() => expect(queryClient.getQueryState(key)?.status).toBe("success"));
+  const idle = queryClient
+    .getQueryData<AgentsResponse>(key)
+    ?.orchestrators.flatMap((top) => top.workers)
+    .find((worker) => worker.activity === "idle" && !worker.pause);
+  if (!idle?.name) throw new Error("the fixture has no idle worker");
+  const say = (line: string) =>
+    act(() => {
+      queryClient.setQueryData<AgentsResponse>(key, (old) =>
+        old
+          ? {
+              ...old,
+              orchestrators: old.orchestrators.map((top) => ({
+                ...top,
+                workers: top.workers.map((worker) =>
+                  worker.session_id === idle.session_id
+                    ? { ...worker, last_status_line: line }
+                    : worker,
+                ),
+              })),
+            }
+          : old,
+      );
+    });
+  const row = () => document.getElementById(`av-row-${idle.session_id}`) as HTMLElement;
+  const status = () => row().querySelector(".st")?.textContent ?? "";
+
+  // A worker that stopped because it is blocked shows its words on its row.
+  say("blocked: The staging bucket denies list access");
+  await waitFor(() =>
+    expect(status()).toBe("Reports blocked: The staging bucket denies list access"),
+  );
+  expect(row().getAttribute("data-r")).toBe("warn");
+
+  // The stage header says it beside "Idle".
+  fireEvent.click(row());
+  await waitFor(() =>
+    expect(document.querySelector(".av-who-2")?.textContent).toContain(
+      "Idle · Reports blocked: The staging bucket denies list access",
+    ),
+  );
+
+  // A "working" line is older than the idle terminal, so it is not shown.
+  say("working: Reading the bucket policy");
+  await waitFor(() => expect(status()).toBe("Idle"));
+  expect(row().hasAttribute("data-r")).toBe(false);
+});
+
 // ---- A run whose agent died (UA-26) ----
 
 test("a tile whose run has no live agent says that the agent stopped, once the verdict has held", async () => {

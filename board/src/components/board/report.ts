@@ -96,6 +96,17 @@ export function overridesActivity(report: Report): boolean {
   return report.state !== "working";
 }
 
+// What an idle worker's row says on the Agents screen in place of "Idle":
+// the worker's own word when it stopped for a reason ("Reports blocked: The
+// staging bucket denies list access"). Null for an orchestrator, a worker
+// that said nothing, or one whose last word was "working", which an idle
+// terminal has outlived.
+export function idleReport(agent: AgentRow): Report | null {
+  if (agent.role === "orchestrator") return null;
+  const report = parseReport(agent.last_status_line, agent.role);
+  return report && overridesActivity(report) ? report : null;
+}
+
 // The badges that are the terminal activity of a run (state.md, section 6).
 // Every other badge says more than the worker's word does.
 const ACTIVITY_BADGES = new Set(["working", "idle", "stale", "unknown"]);

@@ -22,6 +22,8 @@ import { shortcutsBlocked } from "../../lib/shortcuts";
 import { useStore } from "../../lib/store";
 import { hostAwareActivity } from "../states/degraded";
 import { quietFor } from "./activity";
+import { idleReport, reportLabel, reportTone } from "./report";
+import type { Report } from "./report";
 import { Ago, Lasting, useTick } from "./ago";
 import { agentGroups, findLine, nextNeeding, stepLine } from "./agents-model";
 import type { AgentGroup, AgentLine } from "./agents-model";
@@ -152,6 +154,13 @@ function Roll({ value }: { value: number }) {
   );
 }
 
+// An idle worker that stopped for a reason it reported shows that reason, as
+// its card's tile does: "Idle" alone hides a blocked worker. A paused agent
+// keeps "Paused" and its end.
+function stoppedReport(agent: AgentRow, dot: string): Report | null {
+  return dot === "idle" && !agent.pause ? idleReport(agent) : null;
+}
+
 function promptText(prompt: PermissionPrompt | undefined): string | null {
   if (!prompt) return null;
   return prompt.detail ? `${prompt.tool}: ${prompt.detail}` : `${prompt.tool} asks for permission`;
@@ -203,12 +212,15 @@ function RailRow({
   const standing = useStanding(agent);
   const activity = hostAwareActivity(agent, host);
   const needs = activity.dot === "waiting";
+  const stopped = stoppedReport(agent, activity.dot);
   const status = standing.dim ? (
     <AsOf asOf={standing.asOf} />
   ) : needs ? (
     (promptText(prompt) ?? activity.label)
   ) : activity.dot === "live" ? (
     (agent.last_status_line ?? activity.label)
+  ) : stopped ? (
+    `${reportLabel(stopped)}: ${stopped.text}`
   ) : (
     activity.label
   );
@@ -229,6 +241,7 @@ function RailRow({
       data-testid={`agent-${agent.session_id}`}
       data-session={agent.session_id}
       data-s={needs ? "needs" : activity.dot}
+      data-r={!standing.dim && stopped ? reportTone(stopped) : undefined}
       className={`av-row ${line.orchestrator ? "orch" : "wk"}${last ? " last" : ""}${standing.dim ? " dim" : ""}`}
       onClick={onSelect}
     >
@@ -630,13 +643,16 @@ function Stage({
             : "restart"
           : "relaunch"
         : "open";
+  const stopped = stoppedReport(agent, activity.dot);
   const detail = needs
     ? promptText(prompt)
     : paused
       ? `until ${formatLisbonMoment(paused.until) ?? paused.until}`
       : activity.dot === "live"
         ? agent.last_status_line
-        : null;
+        : stopped
+          ? `${reportLabel(stopped)}: ${stopped.text}`
+          : null;
   const heading = (
     <span className="mir-title">
       {line.label}
@@ -710,7 +726,11 @@ function Stage({
               </span>
             ) : null}
           </div>
-          <div className="av-who-2" data-s={needs ? "needs" : activity.dot}>
+          <div
+            className="av-who-2"
+            data-s={needs ? "needs" : activity.dot}
+            data-r={stopped ? reportTone(stopped) : undefined}
+          >
             <span className="lb">{activity.label}</span>
             {detail ? ` · ${detail}` : null}
             {standing.dim ? (

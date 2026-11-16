@@ -258,6 +258,17 @@
   color: var(--orange-text);
 }
 
+/* An idle worker's own report: blocked or asking is the owner's to see. */
+.av-row[data-r="warn"] .st,
+.av-who-2[data-r="warn"] {
+  color: var(--orange-text);
+}
+
+.av-row[data-r="bad"] .st,
+.av-who-2[data-r="bad"] {
+  color: var(--red-text);
+}
+
 .av-row[data-s="off"] .nm,
 .av-row[data-s="unknown"] .nm,
 .av-row.dim .nm {
