@@ -619,3 +619,80 @@ fn a_direct_land_waits_in_landing() {
         (Column::Landing, "merge", true)
     );
 }
+
+/// R23 (UA-19): a worker's `blocked` report with no open item on its card
+/// becomes one `recovery` item with its words after a few minutes, so the
+/// card is in "Needs you" though no orchestrator asked. One item per
+/// report, and none while another item is open on the card.
+#[test]
+fn a_waiting_worker_with_no_open_item_reaches_the_owner() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let run = w.run_of(&worker);
+    w.store_mut()
+        .run_status(
+            &session_ctx(&worker),
+            &run.id,
+            StatusState::Blocked,
+            "the staging bucket denies list access",
+        )
+        .unwrap();
+    let t0 = now();
+    let early = w.pass(t0.plus_minutes(1));
+    assert!(!early.did("R23"), "{early:?}");
+    assert!(w.open_items(&run.card_id).is_empty());
+
+    let report = w.pass(t0.plus_minutes(6));
+    assert!(report.did("R23"), "{report:?}");
+    let items = w.open_items(&run.card_id);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].kind, AttentionKind::Recovery);
+    assert_eq!(items[0].opened_by_run_id.as_deref(), Some(run.id.as_str()));
+    assert!(
+        items[0].question.contains(
+            "reports blocked for 6 minutes, and nobody has asked you about it: \"the staging bucket denies list access\""
+        ),
+        "{}",
+        items[0].question
+    );
+    assert!(columns::column(w.store(), &run.card_id).unwrap().needs_you);
+
+    // Answered, the same report asks nothing again.
+    w.store_mut()
+        .attention_answer(
+            &owner(),
+            None,
+            &items[0].id,
+            "use the read role",
+            AnsweredVia::Board,
+        )
+        .unwrap();
+    let again = w.pass(t0.plus_minutes(8));
+    assert!(!again.did("R23"), "{again:?}");
+    assert!(w.open_items(&run.card_id).is_empty());
+
+    // A new report while the orchestrator's own item is open asks nothing.
+    w.store_mut()
+        .run_status(
+            &session_ctx(&worker),
+            &run.id,
+            StatusState::NeedsDecision,
+            "keep the old schema or migrate?",
+        )
+        .unwrap();
+    w.store_mut()
+        .attention_open(
+            &owner(),
+            None,
+            NewAttention {
+                card: run.card_id.clone(),
+                question: "Keep the old schema?".into(),
+                ..NewAttention::default()
+            },
+        )
+        .unwrap();
+    let asked = w.pass(t0.plus_minutes(20));
+    assert!(!asked.did("R23"), "{asked:?}");
+    assert_eq!(w.open_items(&run.card_id).len(), 1);
+}

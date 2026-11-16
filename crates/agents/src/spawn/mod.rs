@@ -123,8 +123,8 @@ pub struct Request {
     /// The harness to launch the role on (`claude` unless asked); G35 refuses
     /// one that cannot carry the guards.
     pub harness: String,
-    /// Start past the quota floor on the owner's answered "Start now anyway"
-    /// decision for this card.
+    /// `--past-quota-floor`, kept for old prompts: it changes nothing, since
+    /// every start uses the owner's unused "Start now anyway" (UA-46).
     pub past_quota_floor: bool,
 }
 
@@ -337,10 +337,12 @@ pub(crate) fn hold_for_quota(
     let Ok(Some(until)) = quota_floor_reset(store.conn(), checks, ctx.now) else {
         return error;
     };
-    // The owner's "Start now anyway" that no run has used yet: this refusal
-    // came only because the spawn did not pass the flag that rests on it.
-    let unused_start = !checks.past_quota_floor
-        && quota_start_decision(store.conn(), &card.id, role).is_ok_and(|item| item.is_some());
+    // With the owner's unused "Start now anyway" the start was already past
+    // the standing floor (UA-46), so an away contract's floor refused it,
+    // which no owner answer lifts.
+    if quota_start_decision(store.conn(), &card.id, role).is_ok_and(|item| item.is_some()) {
+        return error;
+    }
     let Ok(item) = store.quota_hold(ctx, &card.id, role, until, &state.to_string()) else {
         return error;
     };
@@ -376,15 +378,7 @@ pub(crate) fn hold_for_quota(
             tiller_core::ids::short(&item.value.id)
         )
     };
-    let start = if unused_start {
-        format!(
-            ". The owner's earlier \"Start now anyway\" still stands: `tiller spawn {} {role} --past-quota-floor` starts the run (with `--promote` when it promotes a scout)",
-            card.display_id
-        )
-    } else {
-        String::new()
-    };
-    SpawnError::Refused(format!("{state}; {held} and {owner}{start}"))
+    SpawnError::Refused(format!("{state}; {held} and {owner}"))
 }
 
 /// Spawns one worker run. `key` is the spawn's idempotency key.

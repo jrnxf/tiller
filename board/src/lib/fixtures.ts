@@ -1061,6 +1061,7 @@ function workerFor(row: BoardRow, now: number, index: number): AgentRow {
     last_status_line: stale
       ? "Reading src/import/dry_run.rs"
       : `Running tests for ${row.display_id}`,
+    last_status_at: minutes(now, stale ? -22 : -(0.1 + index / 10)),
     name: `${row.display_id}-${role}`,
     card_id: row.id,
     host_id: row.host_id ?? HOST_A,
@@ -1147,6 +1148,7 @@ function agentsFor(
         activity: staleTiller && projectIndex === 0 ? "idle" : "working",
         activity_observed_at: minutes(now, quiet ? -41 : -(0.2 + projectIndex)),
         last_status_line: `Waiting on ${live[0]?.display_id ?? "the next ask"}`,
+        last_status_at: minutes(now, quiet ? -41 : -(0.2 + projectIndex)),
         name: `${project.id}-orch`,
         card_id: null,
         host_id: host,

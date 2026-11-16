@@ -46,8 +46,8 @@ pub struct Spawn {
     /// The harness to launch on; G35 refuses one without the guards
     #[arg(long, default_value = "claude")]
     pub harness: String,
-    /// Start below the quota floor, on the owner's answered "Start now
-    /// anyway" decision for the card
+    /// Kept for old prompts; it changes nothing. Every spawn uses the
+    /// owner's unused "Start now anyway" answer for the card and role
     #[arg(long)]
     pub past_quota_floor: bool,
     #[command(flatten)]

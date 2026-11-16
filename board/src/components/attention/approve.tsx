@@ -113,7 +113,7 @@ function ApprovalNotice({ item }: { item: AttentionItem }) {
       </div>
       <p>{text.body}</p>
       <p className="apn-sub">
-        This note leaves the list when the card closes.
+        This note leaves the list when the approval ends, a new request comes or the card closes.
         {ownerOf(item) ? null : (
           <>
             {" "}

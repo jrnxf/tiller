@@ -15,6 +15,9 @@ export interface Report {
   text: string;
   // The worker's short role: `build`, `scout`, `review` or `verify`.
   role: string;
+  // When the worker sent it, so the tile can say how old it is (UA-19).
+  // Absent where the line comes without its time.
+  at?: string | null;
 }
 
 // The most urgent first: with two workers on one card, the one that stopped
@@ -83,8 +86,9 @@ export function cardReport(roster: AgentsResponse | undefined, cardId: string): 
   let best: Report | null = null;
   for (const worker of workers) {
     if (worker.card_id !== cardId) continue;
-    const report = parseReport(worker.last_status_line, worker.role);
-    if (!report) continue;
+    const parsed = parseReport(worker.last_status_line, worker.role);
+    if (!parsed) continue;
+    const report = { ...parsed, at: worker.last_status_at };
     if (!best || URGENCY.indexOf(report.state) < URGENCY.indexOf(best.state)) best = report;
   }
   return best;

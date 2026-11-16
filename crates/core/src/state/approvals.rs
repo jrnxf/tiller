@@ -215,6 +215,31 @@ fn approval_item(conn: &Connection, approval: &Approval) -> Result<Option<Attent
     )
 }
 
+/// Withdraws the open `merge` notes about approvals of the same PR (or, with
+/// no PR, the same branch) on the card that ended: `stale`, `rejected`,
+/// `succeeded` or `failed` (UA-38). A new request or a rejection replaces
+/// them, so the card leaves "Needs you" when nothing is left to decide.
+fn withdraw_ended_notes(tx: &mut Tx<'_>, approval: &Approval, why: &str) -> Result<()> {
+    let Some(card) = &approval.card_id else {
+        return Ok(());
+    };
+    let notes: Vec<Attention> = list(
+        tx.conn(),
+        "card_id = ?1 AND kind = 'merge' AND answered_at IS NULL AND withdrawn_at IS NULL
+         AND json_valid(evidence) AND json_extract(evidence, '$.approval_id') IN (
+             SELECT id FROM approvals
+             WHERE card_id = ?1 AND kind = ?2
+               AND ((?3 IS NOT NULL AND pr_id = ?3) OR (?3 IS NULL AND pr_id IS NULL AND branch IS ?4))
+               AND state IN ('stale', 'rejected', 'succeeded', 'failed'))
+         ORDER BY id",
+        &[card, &approval.kind, &approval.pr_id, &approval.branch],
+    )?;
+    for note in notes {
+        withdraw_attention(tx, &note, why)?;
+    }
+    Ok(())
+}
+
 /// Marks an approval `stale`, with the memory approvals accepted with it,
 /// and withdraws the question it was waiting on.
 pub(crate) fn mark_stale(tx: &mut Tx<'_>, approval: &Approval, why: &str) -> Result<Approval> {
@@ -645,6 +670,7 @@ impl Store {
                     .card(&card.id)
                     .payload(json!({"kind": new.kind, "head_sha": new.head_sha, "action": new.action, "memory_paths": memory_paths})),
             )?;
+            withdraw_ended_notes(tx, &approval, "replaced by a new request")?;
             match &grant {
                 Some(grant) => {
                     tx.event(
@@ -810,6 +836,10 @@ impl Store {
             if let Some(item) = approval_item(tx.conn(), &approval)? {
                 let words = if decision.accept { "approve" } else { "reject" };
                 answer_attention(tx, &item, words, decision.via)?;
+            }
+            if !decision.accept {
+                let rejected: Approval = get(tx.conn(), "approval", &approval.id)?;
+                withdraw_ended_notes(tx, &rejected, "replaced by the owner's rejection")?;
             }
             Ok(Decided {
                 approval: get(tx.conn(), "approval", &approval.id)?,

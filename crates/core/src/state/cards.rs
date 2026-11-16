@@ -19,7 +19,7 @@ use crate::error::{Error, Result};
 use crate::ids::{self, HOST_HEALTH_CARD};
 use crate::limits::{self, COMMENT_MAX_CHARS};
 use crate::store::{Actor, Applied, Ctx, NewEvent, Store, Tx};
-use crate::time::Timestamp;
+use crate::time::{Timestamp, lisbon};
 
 /// A card to create.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -226,6 +226,13 @@ pub(crate) fn new_card_note(card: &Card) -> String {
 /// (`protocol.md`, section 2.2). With no live orchestrator nothing is
 /// enqueued; `session.start` tells the next one.
 fn announce_card(tx: &mut Tx<'_>, card: &Card) -> Result<()> {
+    note_orchestrator(tx, card, new_card_note(card))
+}
+
+/// Enqueues one note about `card` to its project's live orchestrator, in the
+/// caller's transaction, unless that orchestrator is the actor. With no live
+/// orchestrator nothing is enqueued.
+fn note_orchestrator(tx: &mut Tx<'_>, card: &Card, body: String) -> Result<()> {
     if let Some(session) = tx.actor().session_id() {
         let own: bool = tx.conn().query_row(
             "SELECT EXISTS (SELECT 1 FROM sessions WHERE id = ?1 AND role = 'orchestrator' AND project_id = ?2)",
@@ -244,7 +251,7 @@ fn announce_card(tx: &mut Tx<'_>, card: &Card) -> Result<()> {
         &NewMessage {
             target_session_id: orchestrator.id,
             kind: OutboxKind::Note,
-            body: new_card_note(card),
+            body,
             card_id: Some(card.id.clone()),
             reply_to: None,
         },
@@ -901,7 +908,18 @@ impl Store {
                     format!("{until} is not in the future"),
                 ));
             }
-            insert_hold(tx, &card, until, reason)
+            let hold = insert_hold(tx, &card, until, reason)?;
+            // UA-51: the orchestrator learns of a hold it did not set.
+            note_orchestrator(
+                tx,
+                &card,
+                format!(
+                    "[{}] Held until {} (Lisbon): {reason}. tiller spawn refuses the card until then.",
+                    card.display_id,
+                    lisbon::display(until.as_jiff())
+                ),
+            )?;
+            Ok(hold)
         })
     }
 
@@ -938,6 +956,20 @@ impl Store {
                 ));
             }
             release_hold(tx, &hold, reason)?;
+            if card.state == CardState::Open {
+                let body = if reason == HoldReleaseReason::Due {
+                    format!(
+                        "[{}] The hold's date passed, and the owner is asked again: {}",
+                        card.display_id, hold.reason
+                    )
+                } else {
+                    format!(
+                        "[{}] The hold is released: the card may start again.",
+                        card.display_id
+                    )
+                };
+                note_orchestrator(tx, &card, body)?;
+            }
             if reason == HoldReleaseReason::Due {
                 // The reset passed, so the quota question is moot; the
                 // re-ask below is the card's one open item.

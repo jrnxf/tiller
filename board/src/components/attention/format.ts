@@ -155,6 +155,11 @@ export function staleText(stale: StaleInfo | null | undefined): { head: string; 
         head: `The run that asked this has ended${at}.`,
         sub: "Nobody is waiting on this answer.",
       };
+    case "approval_ended":
+      return {
+        head: `The approval this note is about ended${at}.`,
+        sub: "There is nothing left to decide here. A new request shows as its own item.",
+      };
     case "card_closed":
       return {
         head: `The card moved on${at}.`,

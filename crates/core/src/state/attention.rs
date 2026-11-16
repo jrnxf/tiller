@@ -95,13 +95,13 @@ impl OwnerAction {
 
     /// The command the owning session has to run for the action to take
     /// effect, when the answer alone does not finish it. A quota start only
-    /// releases the hold: the run starts when the orchestrator spawns it with
-    /// the flag, and a spawn without the flag asks the owner again.
+    /// releases the hold: the run starts when the orchestrator spawns it,
+    /// and that spawn uses the answer once (UA-46).
     pub fn next_step(&self, card: &str) -> Option<String> {
         match self {
             Self::ProjectCapacity { .. } => None,
             Self::QuotaStart { role } => Some(format!(
-                "run `tiller spawn {card} {role} --past-quota-floor` now (with `--promote` when it promotes a scout). Without that flag the spawn is refused and the owner is asked again"
+                "run `tiller spawn {card} {role}` now (with `--promote` when it promotes a scout). The spawn uses this answer once, past the quota floor"
             )),
         }
     }
@@ -310,6 +310,32 @@ fn quota_role(item: &Attention, answer: Option<&str>) -> Option<RunRole> {
 pub(crate) fn withdraw_quota_items(tx: &mut Tx<'_>, card_id: &str, reason: &str) -> Result<()> {
     for item in open_quota_items(tx.conn(), card_id)? {
         withdraw_attention(tx, &item, reason)?;
+    }
+    Ok(())
+}
+
+/// A `role` run started on the card (UA-46, UA-51): its open quota items for
+/// that role are moot and are withdrawn, and once no quota item of the card
+/// is left open, its quota hold is released. The start passed the floor
+/// check, so the floor no longer holds the card.
+pub(crate) fn settle_quota(tx: &mut Tx<'_>, card_id: &str, role: RunRole) -> Result<()> {
+    let reason = format!("a {role} run started");
+    let mut left = false;
+    for item in open_quota_items(tx.conn(), card_id)? {
+        if quota_role(&item, None) == Some(role) {
+            withdraw_attention(tx, &item, &reason)?;
+        } else {
+            left = true;
+        }
+    }
+    if !left
+        && let Some(hold) = find::<Hold>(
+            tx.conn(),
+            "card_id = ?1 AND released_at IS NULL AND reason = ?2",
+            &[&card_id, &QUOTA_HOLD_REASON],
+        )?
+    {
+        release_hold(tx, &hold, HoldReleaseReason::Removed)?;
     }
     Ok(())
 }
@@ -719,6 +745,9 @@ pub enum StaleReason {
     SessionEnded,
     ProjectDeleted,
     ProjectRetired,
+    /// A `merge` item about an approval that ended: `stale`, `rejected`,
+    /// `succeeded` or `failed` (UA-38).
+    ApprovalEnded,
 }
 
 impl StaleReason {
@@ -729,6 +758,7 @@ impl StaleReason {
             Self::SessionEnded => "session_ended",
             Self::ProjectDeleted => "project_deleted",
             Self::ProjectRetired => "project_retired",
+            Self::ApprovalEnded => "approval_ended",
         }
     }
 }
@@ -743,7 +773,8 @@ pub fn still_current(conn: &rusqlite::Connection, item: &Attention) -> Result<bo
 
 /// Why an open item no longer applies, or `None` while it does: its card is
 /// closed, the run that opened it ended, the live session it is about ended,
-/// or the project it is about was deleted or retired.
+/// or the project it is about was deleted or retired, or a `merge` item's
+/// approval ended.
 pub fn stale(conn: &rusqlite::Connection, item: &Attention) -> Result<Option<Stale>> {
     let (card, state): (String, CardState) = conn.query_row(
         "SELECT display_id, state FROM cards WHERE id = ?1",
@@ -756,6 +787,9 @@ pub fn stale(conn: &rusqlite::Connection, item: &Attention) -> Result<Option<Sta
             subject: Some(card),
             at: None,
         }));
+    }
+    if let Some(approval) = ended_approval(conn, item)? {
+        return Ok(Some(approval));
     }
     if let Some(run) = &item.opened_by_run_id {
         let ended: Option<Timestamp> =
@@ -820,6 +854,44 @@ pub fn stale(conn: &rusqlite::Connection, item: &Attention) -> Result<Option<Sta
         }
     }
     Ok(None)
+}
+
+/// The end of the approval a `merge` item is about, when it ended: `stale`,
+/// `rejected`, `succeeded` or `failed` (UA-38). A note about checks that
+/// failed after the approval is such an item: nothing on it can be decided.
+fn ended_approval(conn: &rusqlite::Connection, item: &Attention) -> Result<Option<Stale>> {
+    if item.kind != AttentionKind::Merge {
+        return Ok(None);
+    }
+    let Some(approval) = item
+        .evidence
+        .as_deref()
+        .and_then(|evidence| serde_json::from_str::<Value>(evidence).ok())
+        .and_then(|evidence| evidence.get("approval_id")?.as_str().map(str::to_owned))
+    else {
+        return Ok(None);
+    };
+    let ended: Option<bool> = conn
+        .query_row(
+            "SELECT state IN ('stale', 'rejected', 'succeeded', 'failed') FROM approvals WHERE id = ?1",
+            [&approval],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if ended != Some(true) {
+        return Ok(None);
+    }
+    let at = conn.query_row(
+        "SELECT max(at) FROM events WHERE entity_id = ?1
+         AND kind IN ('approval.stale', 'approval.decided', 'approval.finished')",
+        [&approval],
+        |row| row.get(0),
+    )?;
+    Ok(Some(Stale {
+        reason: StaleReason::ApprovalEnded,
+        subject: Some(approval),
+        at,
+    }))
 }
 
 /// The session an answer goes to: the live session that opened the item,

@@ -2,7 +2,8 @@
 //! explained session, a known worktree and an open reservation; every pane,
 //! worktree and reservation has an active run or is handled as an orphan
 //! (R15); runs are owned by the project's live orchestrator; a done status
-//! with no merge is noted (R13); a cut the harness recorded ends the run
+//! with no merge is noted (R13); a worker that waits with no open item gets
+//! a `recovery` item (R23); a cut the harness recorded ends the run
 //! (R14); live panes a restore or an owner flip left unbound are adopted
 //! back by their metadata (R10, R20).
 
@@ -31,13 +32,14 @@ impl Reconciler {
         // Each check under its own guard: a refused write in one (a pass key
         // another actor stored first) is reported, and the checks after it
         // still run.
-        let steps: [(&str, Step); 7] = [
+        let steps: [(&str, Step); 8] = [
             ("leaked reservations", Self::leaked_reservations),
             ("run owners", Self::reown_runs),
             ("orphaned messages", Self::retarget_orphaned_messages),
             ("orphan panes", Self::orphan_panes),
             ("run worktrees", Self::run_worktrees),
             ("done without evidence", Self::done_without_evidence),
+            ("waiting workers", Self::waiting_workers),
             ("cuts", Self::cuts),
         ];
         for (what, step) in steps {
@@ -698,6 +700,70 @@ impl Reconciler {
             if self.note(now, &card.project_id, &key, body, Some(card.id.clone()))? {
                 report.repair(format!(
                     "R13 run {} says done without a merge: note to the orchestrator",
+                    run.id
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// R23: a worker whose `blocked` or `needs-decision` report is older than
+    /// `worker_waiting` while no attention item is open on its card gets one
+    /// `recovery` item with its words, so the card is in "Needs you" even
+    /// when its orchestrator is busy, slow or gone. One item per report: the
+    /// key carries the report's time.
+    fn waiting_workers(&mut self, now: Timestamp, report: &mut Report) -> Result<()> {
+        let before = now.plus_minutes(-self.config.thresholds.worker_waiting);
+        let runs: Vec<Run> = list(
+            self.conn(),
+            "ended_at IS NULL
+             AND (last_status_line LIKE 'blocked:%' OR last_status_line LIKE 'needs-decision:%')
+             AND last_status_at IS NOT NULL AND last_status_at <= ?1
+             AND NOT EXISTS (SELECT 1 FROM attention a WHERE a.card_id = runs.card_id
+                             AND a.answered_at IS NULL AND a.withdrawn_at IS NULL)
+             ORDER BY last_status_at",
+            &[&before],
+        )?;
+        for run in runs {
+            let card: Card = get(self.conn(), "card", &run.card_id)?;
+            let Some(at) = run.last_status_at else {
+                continue;
+            };
+            let line = run.last_status_line.as_deref().unwrap_or_default();
+            let (state, words) = line.split_once(": ").unwrap_or((line, ""));
+            let what = if state == "blocked" {
+                "reports blocked"
+            } else {
+                "asks for a decision"
+            };
+            let key = format!("reconcile:R23:{}:{}", run.id, at.as_millis());
+            let opened = self.recovery(
+                now,
+                &key,
+                NewAttention {
+                    card: card.id.clone(),
+                    question: format!(
+                        "The {} on {} {what} for {} minutes, and nobody has asked you about it: \"{words}\". What should it do?",
+                        run.role,
+                        card.display_id,
+                        minutes_since(at, now)
+                    ),
+                    evidence: Self::json_text(json!({
+                        "run_id": run.id,
+                        "status": state,
+                        "words": words,
+                        "reported_at": at.to_string(),
+                    })),
+                    recommendation: Some(
+                        "answer with what the worker needs; your answer goes to the orchestrator, which steers the worker".into(),
+                    ),
+                    run_id: Some(run.id.clone()),
+                    ..NewAttention::default()
+                },
+            )?;
+            if opened {
+                report.repair(format!(
+                    "R23 run {} {state} with no open item: recovery item",
                     run.id
                 ));
             }

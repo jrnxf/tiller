@@ -14569,6 +14569,7 @@ pub(crate) mod tests {
                 activity: "working".to_owned(),
                 activity_observed_at: None,
                 last_status_line: None,
+                last_status_at: None,
                 name: None,
                 card_id: None,
                 host_id: "h-peer".to_owned(),

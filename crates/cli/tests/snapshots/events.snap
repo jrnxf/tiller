@@ -9,9 +9,57 @@ exit: 0
         "actor": "owner",
         "at": "<time>",
         "card_id": "<id11>",
+        "entity": "attention",
+        "entity_id": "<id27>",
+        "id": "<id67>",
+        "idempotency_key": "att-1",
+        "kind": "attention.opened",
+        "payload": {
+          "kind": "decision",
+          "question": "Follow the system theme?",
+          "run_id": null,
+          "via_terminal": {
+            "chain": "<chain>",
+            "mutation": "<id67>",
+            "tty": null
+          }
+        },
+        "rev_after": 1,
+        "seq": "<seq>",
+        "short": "<id67.short>",
+        "txn": "attention.open"
+      },
+      {
+        "actor": "owner",
+        "at": "<time>",
+        "card_id": "<id11>",
+        "entity": "attention",
+        "entity_id": "<id27>",
+        "id": "<id69>",
+        "idempotency_key": "shell:<id29>",
+        "kind": "attention.answered",
+        "payload": {
+          "answer": "yes, follow it",
+          "still_current": true,
+          "via": "cli",
+          "via_terminal": {
+            "chain": "<chain>",
+            "mutation": "<id69>",
+            "tty": null
+          }
+        },
+        "rev_after": 2,
+        "seq": "<seq>",
+        "short": "<id69.short>",
+        "txn": "attention.answer"
+      },
+      {
+        "actor": "owner",
+        "at": "<time>",
+        "card_id": "<id11>",
         "entity": "outbox",
         "entity_id": "<id31>",
-        "id": "<id67>",
+        "id": "<id71>",
         "idempotency_key": "shell:<id29>",
         "kind": "outbox.enqueued",
         "payload": {
@@ -26,7 +74,7 @@ exit: 0
         },
         "rev_after": 1,
         "seq": "<seq>",
-        "short": "<id67.short>",
+        "short": "<id71.short>",
         "txn": "attention.answer"
       },
       {
@@ -35,8 +83,8 @@ exit: 0
         "card_id": "<id11>",
         "entity": "attention",
         "entity_id": "<id33>",
-        "id": "<id71>",
-        "idempotency_key": "shell:<id73>",
+        "id": "<id73>",
+        "idempotency_key": "shell:<id75>",
         "kind": "attention.opened",
         "payload": {
           "kind": "report",
@@ -44,13 +92,13 @@ exit: 0
           "run_id": null,
           "via_terminal": {
             "chain": "<chain>",
-            "mutation": "<id71>",
+            "mutation": "<id73>",
             "tty": null
           }
         },
         "rev_after": 1,
         "seq": "<seq>",
-        "short": "<id71.short>",
+        "short": "<id73.short>",
         "txn": "attention.open"
       },
       {
@@ -59,78 +107,21 @@ exit: 0
         "card_id": "<id11>",
         "entity": "attention",
         "entity_id": "<id33>",
-        "id": "<id75>",
+        "id": "<id77>",
         "idempotency_key": null,
         "kind": "attention.withdrawn",
         "payload": {
           "reason": "answered elsewhere",
           "via_terminal": {
             "chain": "<chain>",
-            "mutation": "<id75>",
+            "mutation": "<id77>",
             "tty": null
           }
         },
         "rev_after": 2,
         "seq": "<seq>",
-        "short": "<id75.short>",
+        "short": "<id77.short>",
         "txn": "attention.withdraw"
-      },
-      {
-        "actor": "owner",
-        "at": "<time>",
-        "card_id": "<id11>",
-        "entity": "reservation",
-        "entity_id": "<id77>",
-        "id": "<id79>",
-        "idempotency_key": null,
-        "kind": "reservation.reserved",
-        "payload": {
-          "host_id": "<id1>",
-          "project_id": "alpha",
-          "run_id": "<id35>"
-        },
-        "rev_after": null,
-        "seq": "<seq>",
-        "short": "<id79.short>",
-        "txn": "run.start"
-      },
-      {
-        "actor": "owner",
-        "at": "<time>",
-        "card_id": "<id11>",
-        "entity": "run",
-        "entity_id": "<id35>",
-        "id": "<id49>",
-        "idempotency_key": null,
-        "kind": "run.started",
-        "payload": {
-          "attempt": 1,
-          "checks": {
-            "disk_floor_mb": null,
-            "disk_free_mb": null,
-            "host_reserved": 0,
-            "host_spawns": 0,
-            "lane_capacity": 3,
-            "project_capacity": 3,
-            "project_reserved": 0,
-            "project_spawns": 0,
-            "quota": [],
-            "quota_floor_percent": null,
-            "ram_floor_mb": null,
-            "ram_free_mb": null
-          },
-          "config_hash": null,
-          "dispatch": null,
-          "effort": "medium",
-          "host_id": "<id1>",
-          "model": "test-model",
-          "role": "builder",
-          "supervisor_session_id": "<id9>"
-        },
-        "rev_after": 1,
-        "seq": "<seq>",
-        "short": "<id49.short>",
-        "txn": "run.start"
       }
     ],
     "last_seq": "<seq>"

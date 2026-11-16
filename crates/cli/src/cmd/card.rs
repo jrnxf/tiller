@@ -305,16 +305,12 @@ fn hold(app: &App, args: Hold_) -> Done {
     if !app.person() {
         return Ok(outcome);
     }
-    // A person held it. No rule refuses a start on a held card (`state.md`,
-    // `run.start`), so the hold works only when the orchestrator knows of it.
+    // A person held it: `run.start` refuses the card until the date, and
+    // the hold's note reached the orchestrator (`state.md`, `card.hold`).
     let card = &args.card;
     Ok(outcome
         .with_summary(format!(
-            "{card} is held until {} (Lisbon). Its orchestrator is not told, and `tiller spawn` does not refuse a held card.",
-            args.until
-        ))
-        .with_help(format!(
-            "tiller card comment {card} --text \"start no run on this card before {}\": tell the orchestrator",
+            "{card} is held until {} (Lisbon). `tiller spawn` refuses it until then, and its orchestrator is told.",
             args.until
         ))
         .with_help(format!("tiller card unhold {card}: release it sooner")))

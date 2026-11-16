@@ -15,13 +15,13 @@ exit: 0
     "until_at": "<time>"
   },
   "events": [
+    "<seq>",
     "<seq>"
   ],
   "help": [
-    "tiller card comment alpha-3 --text \"start no run on this card before 2099-01-05\": tell the orchestrator",
     "tiller card unhold alpha-3: release it sooner"
   ],
   "ok": true,
   "replayed": false,
-  "summary": "alpha-3 is held until 2099-01-05 (Lisbon). Its orchestrator is not told, and `tiller spawn` does not refuse a held card."
+  "summary": "alpha-3 is held until 2099-01-05 (Lisbon). `tiller spawn` refuses it until then, and its orchestrator is told."
 }

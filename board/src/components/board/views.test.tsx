@@ -2024,7 +2024,7 @@ test("a tile shows what its worker last reported, and a stopped worker replaces 
       staffed.has(candidate.id) && candidate.badge === "working" && !candidate.needs_you,
   );
   if (!row) throw new Error("the fixture has no working card");
-  const say = (line: string) =>
+  const say = (line: string, at?: string) =>
     act(() => {
       queryClient.setQueryData<AgentsResponse>(key, (old) =>
         old
@@ -2033,7 +2033,13 @@ test("a tile shows what its worker last reported, and a stopped worker replaces 
               orchestrators: old.orchestrators.map((top) => ({
                 ...top,
                 workers: top.workers.map((worker) =>
-                  worker.card_id === row.id ? { ...worker, last_status_line: line } : worker,
+                  worker.card_id === row.id
+                    ? {
+                        ...worker,
+                        last_status_line: line,
+                        last_status_at: at ?? worker.last_status_at,
+                      }
+                    : worker,
                 ),
               })),
             }
@@ -2054,6 +2060,17 @@ test("a tile shows what its worker last reported, and a stopped worker replaces 
   expect(within(tile).getByText("Reports blocked").className).toContain("warn");
   expect(within(tile).queryByText("Working")).toBeNull();
   expect(tile.getAttribute("title")).toContain("Builder, reports blocked");
+
+  // The tile says how old the report is, amber once the daemon would ask
+  // the owner about it (UA-19).
+  say(
+    "blocked: The staging mail server still refuses the test login",
+    new Date(Date.now() - 7 * 60_000).toISOString(),
+  );
+  await within(tile).findByText("The staging mail server still refuses the test login");
+  const age = within(tile).getByText("7 min ago");
+  expect(age.closest(".c-report")).toBeTruthy();
+  expect(age.className).toContain("old");
 
   // "Done" is the worker's claim, said as one.
   say("done: All 20 tests pass");

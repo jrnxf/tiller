@@ -31,8 +31,8 @@ pub struct Request {
     pub brief: Option<String>,
     /// The harness to launch the builder on; G35 refuses one without the guards.
     pub harness: String,
-    /// Promote past the quota floor on the owner's answered "Start now
-    /// anyway" decision for this card.
+    /// `--past-quota-floor`, kept for old prompts: it changes nothing, since
+    /// every start uses the owner's unused "Start now anyway" (UA-46).
     pub past_quota_floor: bool,
 }
 

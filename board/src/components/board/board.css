@@ -2020,6 +2020,11 @@ a.card:hover {
 .card .c-report {
   color: var(--fg-2);
 }
+.card .c-report .c-report-age {
+  flex: none;
+  margin-left: auto;
+  overflow: visible;
+}
 .props dd.report-dd {
   align-items: flex-start;
   flex-wrap: nowrap;

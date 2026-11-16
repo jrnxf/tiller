@@ -84,6 +84,10 @@ function laneDot(dot: DotKind | null, lane: LaneHealth["kind"]): DotKind | null 
 
 const LANE_PREFIX = { ok: "", stale: "stale, observed", disconnected: "last known" };
 
+// Seconds after which a worker's report reads as old: the daemon's own wait
+// before it asks the owner about a report nobody answered (R23, 5 min).
+const REPORT_OLD_AFTER = 300;
+
 // The card page reads a peer's card from that peer (`?host=` on the read).
 export function ownerSearch(row: BoardRow) {
   const owner = ownerOf(row);
@@ -155,6 +159,13 @@ function CardTile({ row, lane }: { row: BoardRow; lane: LaneHealth["kind"] }) {
       {report ? (
         <div className="c-from c-report">
           <span>{report.text}</span>
+          {report.at ? (
+            // How old the report is, amber once it has waited as long as the
+            // daemon waits before it asks the owner (recovery.md, R23).
+            <span className="c-report-age">
+              <Ago at={report.at} oldAfter={REPORT_OLD_AFTER} />
+            </span>
+          ) : null}
         </div>
       ) : null}
       <div className="c-chips">

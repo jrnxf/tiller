@@ -100,7 +100,13 @@ interface ApprovalBinding {
 }
 
 export interface StaleInfo {
-  reason: "card_closed" | "run_ended" | "session_ended" | "project_deleted" | "project_retired";
+  reason:
+    | "card_closed"
+    | "run_ended"
+    | "session_ended"
+    | "project_deleted"
+    | "project_retired"
+    | "approval_ended";
   subject: string | null;
   at: string | null;
 }
@@ -193,6 +199,8 @@ export interface AgentRow extends Federated {
   activity: string;
   activity_observed_at: string | null;
   last_status_line: string | null;
+  // When the worker sent that line; null when it sent none.
+  last_status_at: string | null;
   // The agent's name, `<card>-<role>` or `<project>-orch`; null when
   // the daemon has none for it (protocol.md section 6.1).
   name: string | null;

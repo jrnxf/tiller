@@ -509,6 +509,7 @@ export function peerAgents(
       activity: "working",
       activity_observed_at: at(now, spec(host).frameMinutes ?? 1),
       last_status_line: `Waiting on ${live[0]?.display_id ?? "the next ask"}`,
+      last_status_at: at(now, spec(host).frameMinutes ?? 1),
       name: `${project.id}-orch`,
       card_id: null,
       workers: live.map((row, workerIndex) => ({
@@ -518,6 +519,7 @@ export function peerAgents(
         activity: workerActivity(row),
         activity_observed_at: at(now, (spec(host).frameMinutes ?? 1) + workerIndex / 10),
         last_status_line: `Running tests for ${row.display_id}`,
+        last_status_at: at(now, (spec(host).frameMinutes ?? 1) + workerIndex / 10),
         name: `${row.display_id}-build`,
         card_id: row.id,
         workers: [],

@@ -17,6 +17,7 @@ exit: 0
     }
   },
   "events": [
+    "<seq>",
     "<seq>"
   ],
   "ok": true,

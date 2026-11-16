@@ -11,8 +11,8 @@ exit: 0
         "at": "<time>",
         "card_id": "<id11>",
         "entity": "outbox",
-        "entity_id": "<id91>",
-        "id": "<id93>",
+        "entity_id": "<id89>",
+        "id": "<id91>",
         "idempotency_key": null,
         "kind": "outbox.enqueued",
         "payload": {
@@ -21,13 +21,13 @@ exit: 0
           "target_session_id": "<id9>",
           "via_terminal": {
             "chain": "<chain>",
-            "mutation": "<id95>",
+            "mutation": "<id93>",
             "tty": null
           }
         },
         "rev_after": 1,
         "seq": "<seq>",
-        "short": "<id93.short>",
+        "short": "<id91.short>",
         "txn": "run.end"
       },
       {
@@ -35,7 +35,7 @@ exit: 0
         "at": "<time>",
         "card_id": "<id11>",
         "entity": "reservation",
-        "entity_id": "<id77>",
+        "entity_id": "<id95>",
         "id": "<id97>",
         "idempotency_key": null,
         "kind": "reservation.released",
@@ -44,7 +44,7 @@ exit: 0
           "run_id": "<id35>",
           "via_terminal": {
             "chain": "<chain>",
-            "mutation": "<id95>",
+            "mutation": "<id93>",
             "tty": null
           }
         },
@@ -59,7 +59,7 @@ exit: 0
         "card_id": "<id11>",
         "entity": "run",
         "entity_id": "<id35>",
-        "id": "<id95>",
+        "id": "<id93>",
         "idempotency_key": null,
         "kind": "run.ended",
         "payload": {
@@ -68,13 +68,13 @@ exit: 0
           "role": "builder",
           "via_terminal": {
             "chain": "<chain>",
-            "mutation": "<id95>",
+            "mutation": "<id93>",
             "tty": null
           }
         },
         "rev_after": 7,
         "seq": "<seq>",
-        "short": "<id95.short>",
+        "short": "<id93.short>",
         "txn": "run.end"
       },
       {
@@ -88,7 +88,7 @@ exit: 0
         "kind": "outbox.enqueued",
         "payload": {
           "kind": "answer",
-          "reply_to": "<id89>",
+          "reply_to": "<id87>",
           "target_session_id": "<id9>",
           "via_terminal": {
             "chain": "<chain>",

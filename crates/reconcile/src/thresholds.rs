@@ -36,6 +36,9 @@ pub struct Thresholds {
     /// A breached floor still breached this long after `host.degraded` goes
     /// to the developer (R16).
     pub floor_breach_developer: i64,
+    /// A worker's `blocked` or `needs-decision` report this old, with no
+    /// open attention item on its card, becomes a `recovery` item (R23).
+    pub worker_waiting: i64,
     /// A tool version skew this old goes to the developer (R01).
     pub version_skew_developer: i64,
     /// An `uncertain` merge execution unreadable this long after
@@ -72,6 +75,7 @@ impl Default for Thresholds {
             orphan_note_developer: 30,
             bind_window: 2,
             floor_breach_developer: 30,
+            worker_waiting: 5,
             version_skew_developer: 60,
             uncertain_merge: 10,
             repeat_window_hours: 24,

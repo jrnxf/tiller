@@ -11,6 +11,7 @@ function agent(over: Partial<AgentRow>): AgentRow {
     activity: "idle",
     activity_observed_at: null,
     last_status_line: null,
+    last_status_at: null,
     name: null,
     card_id: null,
     host_id: "h1",

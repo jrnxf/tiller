@@ -546,6 +546,7 @@ fn agent_row(store: &Store, session: &Session) -> Result<AgentRow> {
         activity: effective.unwrap_or_else(|| session.activity.to_string()),
         activity_observed_at: at_opt(session.activity_observed_at),
         last_status_line: run.as_ref().and_then(|run| run.last_status_line.clone()),
+        last_status_at: at_opt(run.as_ref().and_then(|run| run.last_status_at)),
         name,
         card_id: card.map(|card| card.id),
         host_id: session.host_id.clone(),

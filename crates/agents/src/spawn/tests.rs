@@ -980,14 +980,13 @@ fn a_start_the_quota_floor_refuses_is_held_with_one_open_decision() {
         .collect();
     assert_eq!(labels, ["Start now anyway", "Wait for the reset"]);
 
-    // Past the floor needs the owner's answer first.
-    let mut request = Rig::request(&card, RunRole::Builder);
-    request.past_quota_floor = true;
-    let error = rig.try_spawn(&ctx, request.clone()).unwrap_err();
-    assert!(
-        refusal(&error).contains("no unused owner decision"),
-        "{error}"
-    );
+    // The flag is a no-op (UA-46): with no answer it is the floor's
+    // refusal, and the open decision stays the one item.
+    let error = rig.try_spawn(&ctx, past_floor(&card)).unwrap_err();
+    assert!(refusal(&error).contains("percent floor"), "{error}");
+    assert_eq!(rig.open_items(&card).len(), 1);
+    // A plain spawn, as an orchestrator that never heard of the flag.
+    let request = Rig::request(&card, RunRole::Builder);
 
     // The orchestrator may not pick the owner's option.
     let picked = rig.fleet.store.attention_answer(
@@ -1010,12 +1009,11 @@ fn a_start_the_quota_floor_refuses_is_held_with_one_open_decision() {
         )
         .unwrap();
     // The answer only releases the hold. The note to the orchestrator names
-    // the command that starts the run; without it the plain retry asks the
-    // owner the same question again.
+    // the plain command that starts the run (UA-46).
     let note = answered.value.message.map(|message| message.body);
     assert!(
         note.as_deref().is_some_and(|body| body.contains(&format!(
-            "next: run `tiller spawn {} builder --past-quota-floor` now",
+            "next: run `tiller spawn {} builder` now",
             card.display_id
         ))),
         "{note:?}"
@@ -1050,13 +1048,12 @@ fn a_start_the_quota_floor_refuses_is_held_with_one_open_decision() {
     )
     .unwrap();
     assert!(again.replayed);
-    // One answer starts one run.
+    // One answer starts one run: the next start is the floor's again, and
+    // asks the owner again.
     rig.done(&spawned.run.id, RunOutcome::Failed).unwrap();
     let error = rig.try_spawn(&ctx, request).unwrap_err();
-    assert!(
-        refusal(&error).contains("no unused owner decision"),
-        "{error}"
-    );
+    assert!(refusal(&error).contains("percent floor"), "{error}");
+    assert_eq!(rig.open_items(&card).len(), 1);
 }
 
 #[test]
@@ -1152,27 +1149,73 @@ fn a_newer_wait_answer_shadows_an_older_start_answer() {
         .unwrap_err();
     rig.owner_answers(&card, "Start now anyway");
 
-    // The orchestrator retries without the flag: refused again, a new
-    // decision, and the owner now waits. The refusal names the flag that
-    // the standing answer needs.
-    let error = rig
-        .try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
-        .unwrap_err();
-    assert!(
-        refusal(&error).contains(&format!(
-            "`tiller spawn {} builder --past-quota-floor` starts the run",
-            card.display_id
-        )),
-        "{error}"
-    );
+    // A second refusal asks again (the owner, from a terminal), and the
+    // owner now waits: the newer answer stands.
+    rig.fleet
+        .store
+        .quota_hold(
+            &owner(),
+            &card.id,
+            RunRole::Builder,
+            Timestamp::now().plus_minutes(60),
+            "asked again",
+        )
+        .unwrap();
     rig.owner_answers(&card, "Wait for the reset");
 
-    let error = rig.try_spawn(&ctx, past_floor(&card)).unwrap_err();
-    assert!(
-        refusal(&error).contains("no unused owner decision"),
-        "{error}"
-    );
+    for request in [Rig::request(&card, RunRole::Builder), past_floor(&card)] {
+        let error = rig.try_spawn(&ctx, request).unwrap_err();
+        assert!(refusal(&error).contains("chose to wait"), "{error}");
+    }
     assert!(rig.pool.taken().is_empty());
+}
+
+/// UA-46: a plain spawn uses the owner's standing "Start now anyway", so the
+/// owner is not asked twice, and the run's start settles the card's quota
+/// question and hold.
+#[test]
+fn a_plain_spawn_uses_a_standing_start_answer() {
+    let mut rig = Rig::with_config("account_floor_percent = 3.0\nhost_share_percent = 50.0\n");
+    rig.config.quota.enabled = true;
+    let ctx = rig.orchestrator();
+    let card = rig.card(CardKind::Ship, None);
+    rig.quota_resetting(9.0, Some(Timestamp::now().plus_minutes(60)));
+    rig.try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
+        .unwrap_err();
+    rig.owner_answers(&card, "Start now anyway");
+
+    let Outcome::Spawned(spawned) = rig
+        .try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
+        .unwrap()
+    else {
+        panic!("expected a spawn");
+    };
+    assert_eq!(spawned.run.role, RunRole::Builder);
+    assert!(rig.open_items(&card).is_empty());
+    assert!(rig.open_holds(&card).is_empty());
+}
+
+/// UA-51: a quota hold whose reset has not come does not refuse a start
+/// once the quota is back; the start releases it and withdraws the open
+/// quota question.
+#[test]
+fn a_start_after_the_quota_came_back_settles_the_quota_hold() {
+    let mut rig = Rig::with_config("account_floor_percent = 3.0\nhost_share_percent = 50.0\n");
+    rig.config.quota.enabled = true;
+    let ctx = rig.orchestrator();
+    let card = rig.card(CardKind::Ship, None);
+    let reset = Timestamp::now().plus_minutes(60);
+    rig.quota_resetting(9.0, Some(reset));
+    rig.try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
+        .unwrap_err();
+    assert_eq!(rig.open_holds(&card).len(), 1);
+    assert_eq!(rig.open_items(&card).len(), 1);
+
+    rig.quota_resetting(80.0, Some(reset));
+    let spawned = rig.spawn(&card, RunRole::Builder);
+    assert_eq!(spawned.run.role, RunRole::Builder);
+    assert!(rig.open_holds(&card).is_empty());
+    assert!(rig.open_items(&card).is_empty());
 }
 
 #[test]
@@ -1194,14 +1237,17 @@ fn any_later_run_uses_up_a_start_answer() {
 
     rig.quota_resetting(9.0, Some(reset));
     let error = rig.try_spawn(&ctx, past_floor(&card)).unwrap_err();
+    assert!(refusal(&error).contains("percent floor"), "{error}");
     assert!(
-        refusal(&error).contains("no unused owner decision"),
+        refusal(&error).contains("tiller attention answer "),
         "{error}"
     );
 }
 
+/// UA-51: an open hold refuses a start until its date, before the quota is
+/// read, so a held card asks the owner nothing; a release lets it start.
 #[test]
-fn a_quota_refusal_keeps_an_unrelated_hold() {
+fn a_held_card_refuses_a_start_until_released() {
     let mut rig = Rig::with_config("account_floor_percent = 3.0\nhost_share_percent = 50.0\n");
     rig.config.quota.enabled = true;
     let ctx = rig.orchestrator();
@@ -1213,27 +1259,26 @@ fn a_quota_refusal_keeps_an_unrelated_hold() {
         .unwrap();
     rig.quota_resetting(9.0, Some(Timestamp::now().plus_minutes(60)));
 
-    let error = rig
-        .try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
-        .unwrap_err();
-    assert!(
-        refusal(&error).contains(&format!(
-            "the card already has another hold, until {} (Lisbon) (the vendor ships on Friday)",
-            tiller_core::time::lisbon::display(vendor.as_jiff())
-        )),
-        "{error}"
-    );
-    assert_eq!(rig.open_items(&card).len(), 1);
+    for request in [Rig::request(&card, RunRole::Builder), past_floor(&card)] {
+        let error = rig.try_spawn(&ctx, request).unwrap_err();
+        assert!(
+            refusal(&error).contains(&format!(
+                "held until {} (Lisbon): the vendor ships on Friday. Release it with tiller card unhold {}",
+                tiller_core::time::lisbon::display(vendor.as_jiff()),
+                card.display_id
+            )),
+            "{error}"
+        );
+    }
+    assert!(rig.open_items(&card).is_empty());
+    assert!(rig.pool.taken().is_empty());
 
-    rig.owner_answers(&card, "Start now anyway");
-    let holds = rig.open_holds(&card);
-    assert_eq!(holds.len(), 1);
-    assert_eq!(holds[0].reason, "the vendor ships on Friday");
-    assert_eq!(holds[0].until_at, vendor);
-
-    let Outcome::Spawned(spawned) = rig.try_spawn(&ctx, past_floor(&card)).unwrap() else {
-        panic!("expected a spawn");
-    };
+    rig.fleet
+        .store
+        .hold_release(&owner(), &card.id, HoldReleaseReason::Removed)
+        .unwrap();
+    rig.quota_resetting(80.0, Some(Timestamp::now().plus_minutes(60)));
+    let spawned = rig.spawn(&card, RunRole::Builder);
     assert_eq!(spawned.run.role, RunRole::Builder);
 }
 

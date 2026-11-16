@@ -551,6 +551,36 @@ test("a merge item whose approval ended shows what happened and no buttons", asy
   expect(screen.queryByRole("button", { name: "Reject" })).toBeNull();
 });
 
+// UA-38: the daemon counts a merge note whose approval ended as no longer
+// current, so the board offers Withdraw in place of the terminal command.
+test("a merge note whose approval ended can be withdrawn on the board", async () => {
+  stubDaemon("default");
+  await renderInbox("default", MERGE, (queryClient) =>
+    queryClient.setQueryData<AttentionResponse>(attentionQuery().queryKey, (attention) =>
+      attention
+        ? {
+            ...attention,
+            items: attention.items.map((item) =>
+              item.id === MERGE && item.approval
+                ? {
+                    ...item,
+                    still_current: false,
+                    stale: { reason: "approval_ended", subject: item.approval.id, at: null },
+                    approval: { ...item.approval, state: "stale" },
+                  }
+                : item,
+            ),
+          }
+        : attention,
+    ),
+  );
+
+  const notice = await screen.findByTestId("not-current");
+  expect(notice.textContent).toContain("The approval this note is about ended.");
+  expect(screen.getByRole("button", { name: "Withdraw" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /^Approve/ })).toBeNull();
+});
+
 test("approve sends the head SHA the board shows, once", async () => {
   stubDaemon("default", true);
   replies = [ok({ approval_id: "01JAPPR0000000000000000000" })];

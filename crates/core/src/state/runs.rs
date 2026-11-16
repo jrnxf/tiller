@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::approvals::{AwayContract, active_away};
-use super::attention::{quota_start_decision, withdraw_attention};
+use super::attention::{QUOTA_HOLD_REASON, quota_start_decision, settle_quota, withdraw_attention};
 use super::cards::{landed_evidence, new_card_note};
 use super::outbox::{NewMessage, enqueue, live_orchestrator};
 use super::projects::{local_host_id, require_daemon};
@@ -29,21 +29,15 @@ pub struct SpawnChecks {
     pub quota_floor_percent: Option<f64>,
     /// How old a quota reading may be before the check fails closed.
     pub quota_max_age_minutes: i64,
-    /// Start past the quota floor on the owner's answered decision. The
-    /// decision is looked up and used inside the `run.start` transaction, so
-    /// one answer starts one run; the standing floor is skipped (an away
-    /// contract's still binds) and the item is recorded in the `run.started`
-    /// payload.
+    /// Kept for old prompts and callers; it changes nothing (UA-46). Every
+    /// start uses the owner's unused "Start now anyway" answer for its card
+    /// and role: the decision is looked up and used inside the `run.start`
+    /// transaction, so one answer starts one run; the standing floor is
+    /// skipped (an away contract's still binds) and the item is recorded in
+    /// the `run.started` payload.
     pub past_quota_floor: bool,
     /// The dispatch rule that resolved the model and effort (T4.2).
     pub dispatch: Value,
-}
-
-impl SpawnChecks {
-    /// The standing quota floor, skipped past the owner's decision.
-    fn standing_floor(&self) -> Option<f64> {
-        self.quota_floor_percent.filter(|_| !self.past_quota_floor)
-    }
 }
 
 /// A run to start.
@@ -809,7 +803,7 @@ pub fn quota_floor_reset(
     checks: &SpawnChecks,
     now: Timestamp,
 ) -> Result<Option<Timestamp>> {
-    let Some(floor) = checks.standing_floor() else {
+    let Some(floor) = checks.quota_floor_percent else {
         return Ok(None);
     };
     let windows: Vec<QuotaWindow> = list(conn, "kind = 'weekly' ORDER BY label", &[])?;
@@ -825,25 +819,35 @@ pub fn quota_floor_reset(
         .max())
 }
 
-/// The owner's unused "Start now anyway" decision a start past the quota
-/// floor rests on, when `checks` ask for one. Refuses when there is none.
-fn quota_override(
-    conn: &Connection,
-    card: &Card,
-    role: RunRole,
-    checks: &SpawnChecks,
-) -> Result<Option<String>> {
-    if !checks.past_quota_floor {
-        return Ok(None);
+/// The owner's unused "Start now anyway" decision for a `role` run on the
+/// card, which a start uses to pass the standing quota floor (UA-46). Any
+/// start uses it, with or without `--past-quota-floor`.
+fn quota_override(conn: &Connection, card: &Card, role: RunRole) -> Result<Option<String>> {
+    Ok(quota_start_decision(conn, &card.id, role)?.map(|item| item.id))
+}
+
+/// The card's open hold refuses a start until its date (UA-51). The quota
+/// hold does not: the quota floor check guards it, and a start that passes
+/// the floor (quota came back, or the owner said "Start now anyway") settles
+/// it (`settle_quota`).
+fn check_hold(conn: &Connection, card: &Card, now: Timestamp) -> Result<()> {
+    let Some(hold) = find::<Hold>(conn, "card_id = ?1 AND released_at IS NULL", &[&card.id])?
+    else {
+        return Ok(());
+    };
+    if hold.reason == QUOTA_HOLD_REASON || hold.until_at <= now {
+        return Ok(());
     }
-    let item = quota_start_decision(conn, &card.id, role)?.ok_or_else(|| {
-        Error::refused(
-            "card",
-            &card.display_id,
-            format!("no unused owner decision to start a {role} run past the quota floor"),
-        )
-    })?;
-    Ok(Some(item.id))
+    Err(Error::refused(
+        "card",
+        &card.display_id,
+        format!(
+            "held until {} (Lisbon): {}. Release it with tiller card unhold {}",
+            crate::time::lisbon::display(hold.until_at.as_jiff()),
+            hold.reason,
+            card.display_id
+        ),
+    ))
 }
 
 /// Whether `error` is the quota floor refusing a start, as opposed to a
@@ -966,7 +970,11 @@ fn check_spawn(
         });
     }
 
-    let quota_floor = effective_quota_floor(checks.standing_floor(), away.as_ref());
+    // The owner's unused answer lifts the standing floor (UA-46).
+    let standing = checks
+        .quota_floor_percent
+        .filter(|_| quota_override.is_none());
+    let quota_floor = effective_quota_floor(standing, away.as_ref());
     let mut quota = Vec::new();
     if let Some(floor) = quota_floor {
         let windows: Vec<QuotaWindow> = list(conn, "kind = 'weekly' ORDER BY label", &[])?;
@@ -1078,6 +1086,7 @@ impl Store {
             if card.state != CardState::Open {
                 return Err(Error::refused("card", &card.display_id, "card is closed"));
             }
+            check_hold(tx.conn(), &card, tx.now())?;
             if let Some(active) = find::<Run>(
                 tx.conn(),
                 "card_id = ?1 AND role = ?2 AND ended_at IS NULL",
@@ -1099,7 +1108,7 @@ impl Store {
                 None => local_host_id(tx.conn())?,
             };
             let host: Host = get(tx.conn(), "host", &host_id)?;
-            let quota_override = quota_override(tx.conn(), &card, new.role, &new.checks)?;
+            let quota_override = quota_override(tx.conn(), &card, new.role)?;
             let seen = check_spawn(
                 tx.conn(),
                 &host,
@@ -1153,6 +1162,7 @@ impl Store {
                     })),
             )?;
             let session = insert_run_session(tx, &run, &project.id, new.config_hash.as_deref())?;
+            settle_quota(tx, &card.id, new.role)?;
             Ok(Started {
                 run,
                 session,
@@ -1265,8 +1275,8 @@ impl Store {
             if host.id != local_host_id(tx.conn())? {
                 return Err(Error::refused("host", &host.label, "promote on the host that holds the worktree"));
             }
-            let quota_override =
-                quota_override(tx.conn(), &card, RunRole::Builder, &promote.checks)?;
+            check_hold(tx.conn(), &card, tx.now())?;
+            let quota_override = quota_override(tx.conn(), &card, RunRole::Builder)?;
             let seen = check_spawn(
                 tx.conn(),
                 &host,
@@ -1332,6 +1342,7 @@ impl Store {
                     })),
             )?;
             let session = insert_run_session(tx, &run, &project.id, None)?;
+            settle_quota(tx, &card.id, RunRole::Builder)?;
             Ok(Started {
                 run,
                 session,

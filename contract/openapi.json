@@ -6414,6 +6414,13 @@
             ],
             "description": "When the agent last produced output: a tool call, a subagent or the\nend of a turn, as hooks report them (`protocol.md` 7.3). Null before\nits first, and on a host with hooks blocked."
           },
+          "last_status_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the worker sent `last_status_line`, so the board can say how\nold the report is (UA-19)."
+          },
           "last_status_line": {
             "type": [
               "string",
@@ -12529,7 +12536,7 @@
           },
           "reason": {
             "type": "string",
-            "description": "`card_closed`, `run_ended`, `session_ended`, `project_deleted` or\n`project_retired`."
+            "description": "`card_closed`, `run_ended`, `session_ended`, `project_deleted`,\n`project_retired` or `approval_ended`."
           },
           "subject": {
             "type": [

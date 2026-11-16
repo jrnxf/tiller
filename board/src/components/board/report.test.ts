@@ -18,6 +18,7 @@ function agent(over: Partial<AgentRow>): AgentRow {
     activity: "idle",
     activity_observed_at: null,
     last_status_line: null,
+    last_status_at: null,
     name: null,
     card_id: null,
     host_id: "h1",
@@ -76,12 +77,18 @@ describe("a worker's report", () => {
   it("shows the worker that stopped when two workers of a card reported", () => {
     const data = roster([
       agent({ card_id: "c1", role: "review", last_status_line: "working: Reading the diff" }),
-      agent({ card_id: "c1", last_status_line: "blocked: The build needs a token" }),
+      agent({
+        card_id: "c1",
+        last_status_line: "blocked: The build needs a token",
+        last_status_at: "2026-11-16T14:00:00Z",
+      }),
     ]);
+    // With its time, so the tile can say how old it is (UA-19).
     expect(cardReport(data, "c1")).toEqual({
       state: "blocked",
       text: "The build needs a token",
       role: "build",
+      at: "2026-11-16T14:00:00Z",
     });
   });
 });

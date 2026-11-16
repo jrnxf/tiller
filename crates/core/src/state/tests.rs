@@ -1250,6 +1250,99 @@ pub(crate) fn accept() -> Decision {
     }
 }
 
+/// The daemon's note about `approval`, as the land path opens it.
+fn approval_note(store: &mut Store, card: &Card, approval: &Approval, why: &str) -> Attention {
+    store
+        .attention_open(
+            &daemon(),
+            None,
+            NewAttention {
+                card: card.id.clone(),
+                kind: AttentionKind::Merge,
+                question: why.into(),
+                evidence: Some(json!({"approval_id": approval.id}).to_string()),
+                ..NewAttention::default()
+            },
+        )
+        .unwrap()
+        .value
+}
+
+/// UA-38: a note about an approval that ended is no longer current, so the
+/// owner may withdraw it, and a new request or a rejection withdraws it.
+#[test]
+fn a_note_about_an_ended_approval_leaves_the_list() {
+    use super::attention::{StaleReason, stale, still_current};
+    let (mut store, _) = memory_store();
+    let head = "a".repeat(40);
+    let (card, first) = requested_merge(&mut store, 1, &head);
+    store
+        .approval_decide(&owner(), None, &first.id, accept())
+        .unwrap();
+    store
+        .approval_stale(&daemon(), &first.id, "checks failed")
+        .unwrap();
+    let note = approval_note(&mut store, &card, &first, "the checks failed");
+    let why = stale(store.conn(), &note).unwrap().unwrap();
+    assert_eq!(why.reason, StaleReason::ApprovalEnded);
+    assert_eq!(why.subject.as_deref(), Some(first.id.as_str()));
+    assert!(why.at.is_some());
+    store
+        .attention_withdraw_stale(&owner(), &note.id, "nothing to decide")
+        .unwrap();
+
+    // A new request of the same PR withdraws the note.
+    let note = approval_note(&mut store, &card, &first, "the checks failed");
+    let request = |store: &mut Store| {
+        let pr: Pr = super::get(store.conn(), "pr", first.pr_id.as_deref().unwrap()).unwrap();
+        store
+            .approval_request(
+                &owner(),
+                NewApproval {
+                    kind: ApprovalKind::Merge,
+                    card: card.id.clone(),
+                    run_id: None,
+                    pr_id: Some(pr.id),
+                    branch: None,
+                    head_sha: head.clone(),
+                    action: ApprovalAction::Squash,
+                    memory_paths: None,
+                    grant_id: None,
+                },
+            )
+            .unwrap()
+            .value
+    };
+    let second = request(&mut store);
+    let note: Attention = super::get(store.conn(), "attention", &note.id).unwrap();
+    assert_eq!(
+        note.withdraw_reason.as_deref(),
+        Some("replaced by a new request")
+    );
+
+    // The question of the new request is current; a rejection withdraws a
+    // note about the earlier approval that came in later.
+    let open: Vec<Attention> = super::list(
+        store.conn(),
+        "card_id = ?1 AND answered_at IS NULL AND withdrawn_at IS NULL",
+        &[&card.id],
+    )
+    .unwrap();
+    assert_eq!(open.len(), 1);
+    assert!(still_current(store.conn(), &open[0]).unwrap());
+    let late = approval_note(&mut store, &card, &first, "the checks failed");
+    let mut reject = accept();
+    reject.accept = false;
+    store
+        .approval_decide(&owner(), None, &second.id, reject)
+        .unwrap();
+    let late: Attention = super::get(store.conn(), "attention", &late.id).unwrap();
+    assert_eq!(
+        late.withdraw_reason.as_deref(),
+        Some("replaced by the owner's rejection")
+    );
+}
+
 fn recovery(store: &mut Store, card: &Card) -> Attention {
     store
         .attention_open(
@@ -2381,6 +2474,70 @@ fn a_card_filed_by_another_principal_notes_the_orchestrator() {
         .unwrap();
     assert_eq!(orchestrator_notes(&store, &alpha).len(), 1);
     assert_eq!(orchestrator_notes(&store, &beta).len(), 1);
+}
+
+/// UA-51: a hold refuses `run.start` until its date, and a hold or release
+/// by anyone but the project's own orchestrator notes it in the same write.
+#[test]
+fn a_held_card_refuses_a_start_and_the_orchestrator_is_told() {
+    let (mut store, alpha) = memory_store();
+    let orchestrator = Ctx::new(Actor::Session(alpha.clone()));
+    let held = store
+        .card_create(&orchestrator, None, card(CardKind::Ship, "held"), None)
+        .unwrap()
+        .value;
+    let until = Timestamp::now().plus_minutes(24 * 60);
+    store
+        .card_hold(&owner(), &held.id, until, "the vendor ships on Friday")
+        .unwrap();
+    let lisbon = crate::time::lisbon::display(until.as_jiff());
+    assert_eq!(
+        orchestrator_notes(&store, &alpha),
+        vec![format!(
+            "[{}] Held until {lisbon} (Lisbon): the vendor ships on Friday. tiller spawn refuses the card until then.",
+            held.display_id
+        )]
+    );
+
+    let before = snapshot(store.conn(), &[]);
+    let error = store
+        .run_start(&orchestrator, None, builder_run(&held.id))
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "card {id}: held until {lisbon} (Lisbon): the vendor ships on Friday. Release it with tiller card unhold {id}",
+            id = held.display_id
+        )
+    );
+    assert_eq!(snapshot(store.conn(), &[]), before);
+
+    store
+        .hold_release(&owner(), &held.id, HoldReleaseReason::Removed)
+        .unwrap();
+    assert_eq!(
+        orchestrator_notes(&store, &alpha).last(),
+        Some(&format!(
+            "[{}] The hold is released: the card may start again.",
+            held.display_id
+        ))
+    );
+    store
+        .run_start(&orchestrator, None, builder_run(&held.id))
+        .unwrap();
+
+    // Its own orchestrator's hold and release tell nobody.
+    let own = store
+        .card_create(&orchestrator, None, card(CardKind::Ship, "own"), None)
+        .unwrap()
+        .value;
+    store
+        .card_hold(&orchestrator, &own.id, until, "its own reason")
+        .unwrap();
+    store
+        .hold_release(&orchestrator, &own.id, HoldReleaseReason::Removed)
+        .unwrap();
+    assert_eq!(orchestrator_notes(&store, &alpha).len(), 2);
 }
 
 /// With no live orchestrator the create enqueues nothing and the next

@@ -213,6 +213,7 @@ function orchestrator(minutesAgo: number): AgentRow {
     activity: "working",
     activity_observed_at: new Date(Date.now() - minutesAgo * 60_000).toISOString(),
     last_status_line: null,
+    last_status_at: null,
     name: null,
     card_id: null,
     host_id: "m",

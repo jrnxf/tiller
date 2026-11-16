@@ -114,8 +114,9 @@ Every keyed repair uses a pass key (`reconcile:<row>:...`). Any actor can store 
 | R20 | Owner marker names another system | `~/.tiller/owner` at every store write, board mutation, worker poll and pass | refuse every mutation; the daemon's workers hold; serve reads with a banner; on the flip back, a full pass that rebinds live evidence | nothing | nothing is asked; the flip is the owner's command | `core::owner::mutations_refused_when_marker_names_other_system`, `daemon::owner::board_mutations_refused_while_marker_names_other_system` |
 | R21 | Holder lost [H] | a `welcome` with a new `instance` while the boot id is the same | the ladder's agent probe for every session whose pane is gone; dead sessions resumed as in R04 steps (2) to (4); `meta.holder_instance` written last; event `holder.lost` | a summary note per project, as in R04 | one notification: "the terminal holder on <host> restarted, N of M agents resumed"; the Machines row shows the restart for 24 h | `reconcile::recovery::lost_holder_resumes_sessions_and_notifies_once` (H10) |
 | R22 | Holder upgrade refused [H] | `upgrade_refused {reason}`: a busy holder or requester, or a failed preflight, version check, record, dry run or `execve` | nothing changes: the old holder keeps running and serving every pane | nothing | a Health warning with the reason until an upgrade succeeds or the holder runs the stable binary | `holder_upgrade::every_refused_upgrade_leaves_the_old_holder_serving_its_panes` (H05), `reconcile::holder::a_refused_upgrade_is_a_health_warning` (H10) |
+| R23 | Worker waits with no item | a worker's newest status is `blocked` or `needs-decision`, older than `thresholds.worker_waiting` (5 min), and no attention item is open on its card | one `recovery` item per report with the worker's words, its `run_id` set, so it goes stale when the run ends | nothing; the orchestrator sees the item on the card | the item: "The <role> on <card> reports blocked for N minutes, and nobody has asked you about it" | `reconcile::columns::a_waiting_worker_with_no_open_item_reaches_the_owner` |
 
-R01 to R11 are the scenarios the build plan names. R12 to R20 are seeded from the bundle's `regressions.md` (section 7) and from Firstmate's hold-lifecycle, supervision and agent-control contracts. R21 and R22 come from ADR 0004 (`terminal-holder.md` sections 6.2 and 6.4).
+R01 to R11 are the scenarios the build plan names. R12 to R20 are seeded from the bundle's `regressions.md` (section 7) and from Firstmate's hold-lifecycle, supervision and agent-control contracts. R21 and R22 come from ADR 0004 (`terminal-holder.md` sections 6.2 and 6.4). R23 comes from the usability audit (UA-19), approved by the owner on Monday 2026-11-16.
 
 ## 5. Rows
 
@@ -398,6 +399,18 @@ The host is mid-cutover, or the owner fell back to Firstmate (M6), so `~/.tiller
 - **To the developer.** Nothing is asked. The Health warning "holder upgrade refused: <reason>" stays until an upgrade succeeds, or until the daemon sees the holder run the stable profile path (a new holder instance, or the check at the next start or `config.changed`), and `tiller doctor` warns that the holder runs another version than the daemon (`protocol.md` 6.4).
 - **Tests.** `holder_upgrade::every_refused_upgrade_leaves_the_old_holder_serving_its_panes` (H05, the failure tests of `terminal-holder.md` 9.3); `reconcile::holder::a_refused_upgrade_is_a_health_warning`, `reconcile::holder::a_refused_upgrade_clears_once_the_holder_runs_the_stable_binary` and `reconcile::holder::a_refused_upgrade_clears_when_a_new_instance_runs_the_stable_binary` (H10).
 - **Seeds.** ADR 0004; `terminal-holder.md` 6.2.
+
+### R23 Worker waits with no item
+
+A worker reported `blocked` or `needs-decision` with `tiller status`, and the orchestrator did not open an item for the owner. The card's flag in `state.md` section 6 stays as it is: only an open item puts a card in "Needs you".
+
+- **Detection.** An active run whose `last_status_line` starts with `blocked:` or `needs-decision:`, with `last_status_at` at least `thresholds.worker_waiting` minutes old (default 5), and no open attention item on its card.
+- **Invariants.** One item per report: the key holds the run and the report's time, so a pass after an answer, or after the item is withdrawn, opens nothing for the same report. No item while any item is open on the card, so a question the orchestrator asked is never asked twice. The run, its pane and its worktree are untouched.
+- **Automatic.** A `recovery` item on the card with the worker's words, its `run_id` set, and evidence that holds the run, the state, the words and the report's time. It goes stale when the run ends.
+- **To the orchestrator.** Nothing is sent. The item is on its card, and the owner's answer reaches it as any answer does.
+- **To the developer.** The item: "The <role> on <card> reports blocked for N minutes, and nobody has asked you about it: "<words>". What should it do?" (or "asks for a decision"). The board's tile says how old the report is from `last_status_at` (`protocol.md` 7.3).
+- **Tests.** `reconcile::columns::a_waiting_worker_with_no_open_item_reaches_the_owner`.
+- **Seeds.** The usability audit, UA-19.
 
 ## 6. Unlanded work: the check
 

@@ -194,8 +194,9 @@ fn promote_starts_past_the_quota_floor_on_the_owners_answer() {
         "{error}"
     );
 
+    // A plain promote uses the answer (UA-46); the flag is a no-op.
     rig.owner_answers(&card, "Start now anyway");
-    let Outcome::Spawned(builder) = rig.try_promote_past(&card, true).unwrap() else {
+    let Outcome::Spawned(builder) = rig.try_promote(&card).unwrap() else {
         panic!("expected a new run");
     };
     assert_eq!(builder.run.role, RunRole::Builder);

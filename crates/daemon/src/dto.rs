@@ -135,8 +135,8 @@ pub struct ApprovalBinding {
 /// What made an open attention item stale (`state.md`, Attention).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct StaleItem {
-    /// `card_closed`, `run_ended`, `session_ended`, `project_deleted` or
-    /// `project_retired`.
+    /// `card_closed`, `run_ended`, `session_ended`, `project_deleted`,
+    /// `project_retired` or `approval_ended`.
     pub reason: String,
     /// The card display id, run, session or project the reason is about.
     pub subject: Option<String>,
@@ -229,6 +229,9 @@ pub struct AgentRow {
     pub activity: String,
     pub activity_observed_at: Option<String>,
     pub last_status_line: Option<String>,
+    /// When the worker sent `last_status_line`, so the board can say how
+    /// old the report is (UA-19).
+    pub last_status_at: Option<String>,
     /// The agent's name (`protocol.md` 6.1), such as `alpha-1-build`.
     pub name: Option<String>,
     pub card_id: Option<String>,
