@@ -18,6 +18,8 @@ await loadRouteChunks();
 
 const SHIP = "01JCARD0000000000000000041";
 const DONE = "01JCARD0000000000000000009";
+// beta-8: a scout card in Queued with no run yet.
+const QUEUED = "01JCARD0000000000000000008";
 
 interface Posted {
   path: string;
@@ -124,6 +126,30 @@ test("an open card has Close rightmost and the rest under More", async () => {
     .getAllByRole("menuitem")
     .map((item) => item.textContent);
   expect(items).toEqual(["Hold...", "Edit", "Cancel card..."]);
+});
+
+test("a card that has not started has no Close button, says what it waits for and keeps Close under More", async () => {
+  stubApi({}, QUEUED);
+  const actions = await renderCard(QUEUED);
+  expect(within(actions).queryByRole("button", { name: "Close" })).toBeNull();
+  // Whose move is next, and the way to start it now.
+  const wait = await screen.findByTestId("card-wait");
+  expect(wait.textContent).toContain("The beta orchestrator");
+  expect(screen.getByTestId("card-page").textContent).toContain("tiller spawn beta-8 scout");
+  const menu = await openMenu(actions);
+  const items = within(menu)
+    .getAllByRole("menuitem")
+    .map((item) => item.textContent);
+  expect(items).toEqual(["Hold...", "Close card...", "Edit", "Cancel card..."]);
+  fireEvent.click(within(menu).getByRole("menuitem", { name: "Close card..." }));
+  expect(await screen.findByRole("dialog", { name: "Close beta-8" })).toBeTruthy();
+});
+
+test("a card with a run says nothing about a wait", async () => {
+  stubApi();
+  await renderCard();
+  await screen.findByTestId("card-page");
+  expect(screen.queryByTestId("card-wait")).toBeNull();
 });
 
 test("Close needs an outcome and a reason, then sends both", async () => {

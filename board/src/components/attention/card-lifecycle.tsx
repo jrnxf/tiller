@@ -150,12 +150,15 @@ export function LifecycleMenu({
   off,
   onEdit,
   compact = false,
+  withClose = false,
 }: {
   phase: Phase;
   life: Lifecycle;
   off: string | null;
   onEdit?: () => void;
   compact?: boolean;
+  // The place has no Close button of its own, so the menu carries it.
+  withClose?: boolean;
 }) {
   const edit = onEdit ?? (() => life.open("edit"));
   return (
@@ -201,7 +204,7 @@ export function LifecycleMenu({
                     Hold...
                   </Item>
                 )}
-                {compact || phase === "held" ? (
+                {compact || withClose || phase === "held" ? (
                   <Item icon={<CheckIcon />} onSelect={() => life.open("close")}>
                     Close card...
                   </Item>

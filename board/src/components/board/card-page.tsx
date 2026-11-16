@@ -18,7 +18,9 @@ import {
   HOST_PROJECT,
   VIEW_ONLY_REASON,
   focusReason,
+  hostField,
   hostName,
+  ownerKey,
   ownerOf,
   shownId,
 } from "../../lib/peers";
@@ -87,6 +89,9 @@ import type { RunDialog, RunTarget } from "./run-menu";
 import { reportLabel, reportRole, reportTone, useReport } from "./report";
 import { KindLabel, ModelChip } from "./tile";
 import { BugTriage } from "./triage";
+import { StartOrchestratorButton } from "./orchestrator-start";
+import { laneHealth } from "../states/degraded";
+import { cardWait, spawnCommand } from "./wait";
 import { CheckIcon, CloseIcon } from "../shell/icons";
 import "./board.css";
 
@@ -684,6 +689,32 @@ export function CardPage({
   const blockers = detail.deps
     .filter((dep) => dep.released_at === null)
     .map((dep) => dep.display_id);
+  // What a card that has not started waits for. The agents read is the
+  // board's own; until it arrives a card with no hold or dependency says nothing.
+  const roster = useQuery(agentsQuery()).data;
+  const orchestrator = roster?.orchestrators.find(
+    (agent) =>
+      agent.project_id === card.project_id &&
+      ownerKey(card.project_id, agent) === ownerKey(card.project_id, column),
+  );
+  const projectLabel = project?.name ?? card.project_id;
+  const wait = hostHealth
+    ? null
+    : cardWait({
+        queued: phase !== "closed" && column.column === "queued" && !activeRun,
+        gated: phase === "held" || blockers.length > 0,
+        projectName: projectLabel,
+        peer: standing.peer ? standing.host : null,
+        reachable: !standing.peer || standing.live,
+        orchestrator: roster ? (orchestrator ?? null) : undefined,
+        health: standing.peer
+          ? { kind: "ok" }
+          : laneHealth(
+              orchestrator,
+              machines.find((machine) => machine.id === orchestrator?.host_id),
+            ),
+      });
+  const spawn = wait?.direct ? spawnCommand(card.display_id, card.kind) : null;
   // A peer's card dependency change is forwarded (protocol.md section 7.4).
   const depsOff = standing.canAct ? null : standing.reason;
 
@@ -769,6 +800,28 @@ export function CardPage({
               <span className="meta">blocked by {blockers.join(", ")}</span>
             ) : null}
           </dd>
+          {wait ? (
+            <>
+              <dt className="wait-dt">Waits for</dt>
+              <dd className="wait-dd" data-testid="card-wait">
+                <span className="wait-text">
+                  <span className={wait.stuck ? "wait-title stuck" : "wait-title"}>
+                    {wait.stuck ? <WarnIcon /> : null}
+                    {wait.title}
+                  </span>
+                  <span className="wait-detail">{wait.detail}</span>
+                </span>
+                {wait.startable ? (
+                  <StartOrchestratorButton
+                    projectId={card.project_id}
+                    projectName={projectLabel}
+                    {...hostField(column)}
+                    off={standing.canAct ? null : standing.reason}
+                  />
+                ) : null}
+              </dd>
+            </>
+          ) : null}
           {report ? (
             <>
               <dt>{reportRole(report)} says</dt>
@@ -833,7 +886,7 @@ export function CardPage({
             {card.model ? (
               <ModelChip model={card.model} />
             ) : (
-              <span className="muted">none yet</span>
+              <span className="muted">picked when a run starts</span>
             )}
           </dd>
           <dt>Slug</dt>
@@ -897,6 +950,12 @@ export function CardPage({
                   No runs yet. The orchestrator starts one when the card leaves{" "}
                   {hold ? "its hold" : "the queue"}.
                 </p>
+                {spawn ? (
+                  <p className="run-hint">
+                    To start one now, run <code>{spawn}</code> in a shell
+                    {standing.peer && standing.host ? ` on ${standing.host}` : ""}.
+                  </p>
+                ) : null}
               </div>
             )}
           </div>

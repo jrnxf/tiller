@@ -704,6 +704,53 @@ button.colh:hover {
   overflow-wrap: anywhere;
   flex-wrap: wrap;
 }
+/* What a card that has not started waits for: the answer, one sentence under
+   it, and the way out on the right when the owner has one. */
+.props dt.wait-dt {
+  align-self: start;
+  line-height: 20px;
+}
+.props dd.wait-dd {
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 6px 12px;
+}
+.wait-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 220px;
+  min-width: 0;
+}
+.wait-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 20px;
+}
+.wait-title.stuck {
+  font-weight: var(--w-medium);
+}
+.wait-title svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--yellow-text);
+}
+.wait-detail {
+  color: var(--fg-3);
+  font-size: var(--fs-mini);
+}
+.run .run-hint {
+  margin: 6px 0 0;
+  color: var(--fg-3);
+  font-size: var(--fs-mini);
+}
+.run .run-hint code {
+  font-family: var(--mono);
+  white-space: nowrap;
+  color: var(--fg-2);
+}
 .sect {
   margin: 0 0 22px;
 }

@@ -12,9 +12,9 @@ Status values: `open`, `fixed` (with what was verified), `needs owner`, `to veri
 |---|---|
 | Phase | 1 - audit. Journeys 3 (ask), 4 (start a task) and 5 (trust) are walked on the board and the CLI. Journeys 1, 2 and 6 to 11 are not walked yet. |
 | Open P0 | 0. UA-15 is `needs owner`: the silent part is fixed, the answer itself needs a spec change. |
-| Open P1 | 5 (UA-01, UA-03, UA-09, UA-17, UA-20). UA-20 is open: its "Start" control needs a spec change (see "Needs owner"), and its in-contract part (what a queued card waits for, "Close" out of the main place) is not done. UA-18 is `needs owner`: the wrong status line is fixed, Cancel and the full view need a spec change. UA-19 is `needs owner`: the tile, the card and the timeline show the worker's report, and the "Needs you" rule needs a spec change. |
-| Fixed | UA-02, UA-04, UA-05, UA-06, UA-12, UA-16, UA-21, UA-22, DX-01. UA-15 part 1 (the owner is told where the answer shows). UA-18 part 1 (the ask tile shows an unread answer and opens it). UA-19 part 1 (a worker's report shows on its tile, on the card and in the timeline). |
-| Next step | The in-contract part of UA-20 (a queued card says what it waits for, and "Close" moves into "More"). Then UA-01. Walk journeys 2, 6 and 8 after the stand-in forge of the bench gaps. UA-11 (P2) is not started: check `docs/spec/state.md` section 6 first, because the column of a card is a contract. |
+| Open P1 | 4 (UA-01, UA-03, UA-09, UA-17). UA-20 is `needs owner`: a queued card says what it waits for and "Close" is out of the main place, and its "Start" control needs a spec change (see "Needs owner"). UA-18 is `needs owner`: the wrong status line is fixed, Cancel and the full view need a spec change. UA-19 is `needs owner`: the tile, the card and the timeline show the worker's report, and the "Needs you" rule needs a spec change. |
+| Fixed | UA-02, UA-04, UA-05, UA-06, UA-12, UA-16, UA-21, UA-22, DX-01. UA-15 part 1 (the owner is told where the answer shows). UA-18 part 1 (the ask tile shows an unread answer and opens it). UA-19 part 1 (a worker's report shows on its tile, on the card and in the timeline). UA-20 part 1 (a queued card says what it waits for, and "Close" is under "More" until work starts). |
+| Next step | UA-01 (an honest host verdict). Then the CLI group (UA-17, UA-03, UA-09). Walk journeys 2, 6 and 8 after the stand-in forge of the bench gaps. UA-11 (P2) is not started: check `docs/spec/state.md` section 6 first, because the column of a card is a contract. |
 
 ## The bench
 
@@ -85,7 +85,7 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 | Idea to a filed card | 3 steps: New card on the project's row, the title, Enter | 1 command, after one refusal for a missing `--kind` (UA-23) |
 | Idea to a filed card, from anywhere | 4 steps, about 8 s: `C`, two letters of the project, Enter, the title, Enter. In a one-project view: `C`, the title, Enter (UA-22; before: scroll to the project's row for its button) | the same command |
 | Find one card among 43 | `Cmd+K`, a word of its title or its id, Enter: about 4 s, on both hosts (UA-21; before: scroll the board, "No command matches") | `card list`, then read 43 records (UA-09) |
-| Filed card to a running card | not possible: the orchestrator decides (UA-20) | `tiller spawn <card> builder`, 73 lines of answer (UA-09) |
+| Filed card to a running card | no board control (UA-20, needs owner). The card says who starts it ("Waits for: The Lantern orchestrator") and prints the shell command. With no orchestrator: 1 click on "Start orchestrator" in the card | `tiller spawn <card> builder`, 73 lines of answer (UA-09) |
 | Read what happened on a card | the timeline shows the owner's news only (`harbor-2`: 4 lines in place of 24), with the question, the answer and a comment quoted (UA-04) | `card timeline` prints raw events (UA-09) |
 | Answer a card that says "Decision" | 2 steps: open the card, click an option or press its digit. The question, the recommendation and the answer control are at the top of the card (UA-02; before: leave the card, open the Inbox, find the item, answer: 4 steps) | `attention answer <item>`, after `attention list --open` for the id |
 | Find the most urgent item in the Inbox | it is the first row and the one shown, and its row says "Urgent" (UA-05; before: the last of 7 rows) | `tiller recap` orders by kind, not by the card's priority |
@@ -115,7 +115,7 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
   - A peer's card works the same way: the answer is forwarded to the peer.
   - Verified on the bench: `harbor-2` showed "Rotate keys with a 24 h overlap, or cut over at once?" with both options at the top of the drawer and of the full page; the key `2` recorded "Cut over at once" (`attention.answered`, `via: board`) and the receipt stayed. On the peer's `pylon-2` one click recorded "HMAC-SHA256" on the peer, the timeline said "You answered", and "Needs you" went from 6 to 5. `quill-1` (a scout report with no options) showed the text field. Checked in light at 1440 px (drawer), in dark at 1440 px (full page) and in dark at 390 px.
   - Tests: `board/src/components/board/views.test.tsx` ("a card that needs the owner shows its question and takes the answer in place", "a card with nothing to answer has no question block"). The board fixtures now list a card's own items on its card read, as the daemon does.
-- Not done: the card's main button is still "Close" while a question waits (UA-20).
+- Not done: the card's main button is still "Close" while a question waits. UA-20 removed it only from a card that has not started.
 
 ### UA-03 - The CLI on main cannot see or reach work on the peer (P1, open)
 
@@ -298,7 +298,7 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
   - The report has no age on the tile. The agents read carries the line but not `last_status_at` (`docs/spec/protocol.md` section 7.3). The timeline has the time.
   - The report goes away with the worker's session: the agents read lists live sessions only. The last line of an ended run is still under "Runs" on the card (UA-11).
 
-### UA-20 - On the board a new task stops at "Filed" (P1, open)
+### UA-20 - On the board a new task stops at "Filed" (P1, needs owner; the wait and the "Close" button are fixed)
 
 - Journey: 4.
 - Tried: "New card" on Lantern's row, a title, Enter. Then opened the card to start it.
@@ -306,7 +306,17 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 - Hurts: "from an idea to a running card" ends one step short on the board, and the owner cannot tell whether the next step is theirs. The loudest button does the opposite of what the owner came for.
 - Fix: the new-card dialog gets "File and start" as its main action, which files the card and starts the run the dispatch rule picks, and the card then says what was started ("Builder, sonnet, on main, started 10 s ago"). A queued card says what it waits for ("Waits for the orchestrator's next turn", "Waits for a free slot", "Waits on harbor-1"). On an open card "Close" moves into "More", and the main action is "Start". This adds an owner mutation to the board, so check `docs/spec/authority.md` before the work; if the board may not start a run by contract, it moves to "Needs owner".
 - Checked (Mon 16 Nov 2026, Lisbon): `docs/spec/authority.md` gives the owner the right ("Start a run (the execute decision): yes"), but `docs/spec/protocol.md` section 7 has no board call that starts a run, and `docs/design/cli-board-parity.md` lists run control as "No" for the board. So "File and start" and "Start" need the owner (see "Needs owner").
-- Still open inside the contract: a queued card says what it waits for, and "Close" is not the one filled button on a new card.
+- Fixed inside the contract (Mon 16 Nov 2026, Lisbon), in the board only (`board/src/components/board/wait.ts`, `card-page.tsx`, `card-header.tsx`):
+  - A card in "Queued" with no hold and no dependency has a "Waits for" row under Status. It names the project's orchestrator and says when a run starts ("on its next turn, when a slot is free", or "It is working now ..."). It reads the agents list the board already loads, so it adds no request and works for a peer's card.
+  - A project with no orchestrator: the row warns "Meadow has no orchestrator. Nothing starts this card until the orchestrator runs", with "Start orchestrator" on the right. A silent orchestrator, a terminal holder that does not answer and a peer whose link is down each get their own warning.
+  - The Runs box of such a card prints the command that starts it now (`tiller spawn lantern-4 builder`, with "on peer" for a peer's card). A held or blocked card shows no command and no row: its hold note or its "Blocked by" status already says what it waits for.
+  - A card with no run and no pull request has no "Close" button. "Close card..." is in "More". The button comes back once a run exists.
+  - Model reads "picked when a run starts" in place of "none yet".
+  - Verified on the bench: `lantern-4` and the peer's `pylon-3` name their orchestrator; after `agent stop` of Meadow's orchestrator `meadow-1` showed the warning, one click on "Start orchestrator" started it and the row changed within 5 s; after `tiller spawn lantern-4 builder` the row left and "Close" returned. Checked in light and dark at 1440 px and 390 px.
+  - Tests: `board/src/components/board/wait.test.ts` (7 cases) and 2 card page tests in `card-lifecycle.test.tsx`.
+- Not done, by choice: the row does not say that the orchestrator received the card's note. The delivery state is in the timeline's system events only, and a claim built from the agents list could be wrong.
+- Not done: the row does not know that a host refuses every new run (UA-01). On the bench the peer's row says "when a slot is free" while the peer's disk floor refuses each start. The fix of UA-01 must feed this row.
+- Still needs the owner: "File and start" and "Start".
 
 ### UA-21 - "Search or run" finds no card and runs no job (P1, fixed)
 
@@ -357,6 +367,7 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 - To verify: the Ask box said "will start orchestrator" for Lantern, whose orchestrator was running, right after a page load. The label may read "not running" while the agents list still loads (`board/src/components/shell/ask-dialog.tsx`, `statusOf`).
 - The Inbox counts unread replies in "Needs you 8". A reply is news, not a job for the owner. Since UA-05 the replies have their own group under the rows that wait, but the count and the sidebar badge still include them.
 - The board has two names for priority 4: "Someday" in the card's priority picker (`attention/format.ts`, `PRIORITIES`) and "Lowest" in the card's details (`board/icons.tsx`, `PRIORITY_NAMES`).
+- A card with a live run has "Close" as its one filled button, but the daemon refuses a close while a run is active (`docs/spec/state.md`, `card.close`). Seen after UA-20's fix; not checked what the dialog says on the refusal.
 - To verify: the `A` key that opens the Ask box may also type "a" into its field. Seen once with a scripted key press (`chrome-devtools-axi press a`); not checked with a real keyboard.
 - To verify: `board/src/components/shell/ask-settings.test.tsx` (line 181, the folder field's value) failed once in a full `bun run test` while the bench ran, and passed 3 times alone and in the next full run. It has a `waitFor` deadline, so the cause is probably the machine's load.
 
@@ -394,7 +405,7 @@ Order of work, highest owner value first. Fixes that share a cause are grouped.
 1. Done as far as the contract allows: UA-16, UA-15 part 1, UA-18 part 1 and UA-19 part 1. The rest of UA-15, UA-18 and UA-19 waits under "Needs owner".
 2. Done: UA-04 (a timeline without plumbing lines). UA-11 (no ended run in "Working") moves to the polish step: it is P2, and the column is a contract of `docs/spec/state.md` section 6.
 3. Done: UA-02, UA-05, UA-06 and UA-12 (the "needs you" path). The question is on the card, the Inbox is ordered by urgency, and the kind is named.
-4. Done: UA-21 and UA-22 (find a card and start a job from anywhere on the board). Next: the in-contract part of UA-20. Its "Start" control waits under "Needs owner".
+4. Done: UA-21 and UA-22 (find a card and start a job from anywhere on the board). Done as far as the contract allows: UA-20 part 1 (a queued card says what it waits for). Its "Start" control waits under "Needs owner".
 5. UA-01: an honest host verdict in every place that shows a host.
 6. UA-17 with UA-03, UA-09, UA-10 and UA-23: the CLI as an owner surface.
 7. Finish the audit in parallel with the fixes: close the bench gaps (the stand-in forge), then walk journeys 1, 2, 6, 8, 9, 10 and 11 and the rest of 5 and 7.

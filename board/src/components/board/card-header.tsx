@@ -91,6 +91,9 @@ export function CardHeader({
   const [editing, setEditing] = useState(false);
   const phase = phaseOf(column);
   const hold = detail.holds[0];
+  // Nothing has started on the card, so there is no work to close as done:
+  // Close is in the menu, and no button of a new card says "end it".
+  const unstarted = phase === "open" && detail.runs.length === 0 && detail.prs.length === 0;
 
   if (editing) {
     return (
@@ -122,9 +125,10 @@ export function CardHeader({
                   life={life}
                   off={off}
                   onEdit={() => setEditing(true)}
+                  withClose={unstarted}
                 />
               )}
-              <LifecyclePrimary phase={phase} life={life} off={off} />
+              {unstarted ? null : <LifecyclePrimary phase={phase} life={life} off={off} />}
             </div>
           ) : null}
           <h4>{card.title}</h4>
