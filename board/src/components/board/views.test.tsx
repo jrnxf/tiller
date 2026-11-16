@@ -11,6 +11,8 @@ import type {
   ProjectRetirePreview,
   ProjectsResponse,
   PromptDialog,
+  RepliesResponse,
+  ReplyItem,
 } from "../../lib/api-types";
 import { hydrateFromSnapshot } from "../../lib/boot";
 import { connectionStore } from "../../lib/connection";
@@ -19,7 +21,7 @@ import type { Scenario } from "../../lib/fixtures";
 import { standingOf } from "../../lib/peers";
 import { loadPrefs, prefsStore, updatePrefs } from "../../lib/prefs";
 import { receiptsStore } from "../../lib/receipts";
-import { boardPath, projectsPath, queryKeyFor } from "../../lib/queries";
+import { boardPath, projectsPath, queryKeyFor, repliesPath } from "../../lib/queries";
 import { createAppRouter } from "../../lib/router";
 import { applyChange } from "../../lib/sse";
 import { CHECK_DELAY_MS } from "../shell/project-add";
@@ -187,24 +189,85 @@ test("every project is a lane and every card sits in the column its state puts i
   expect(cellOf("Can the card fade on exit instead of sliding?")?.dataset.column).toBe("asked");
 });
 
-test("an untagged ask shows its source and its first line, and says it waits to be tagged", async () => {
+test("an ask with no answer shows its source and its first line, and says what it waits for", async () => {
   stubApi("default");
   await renderApp();
 
   const chat = tileOf("Can the card fade on exit instead of sliding?");
   expect(within(chat).getByText("chat")).toBeTruthy();
-  expect(within(chat).getByText("Waiting for the orchestrator to tag it")).toBeTruthy();
+  expect(within(chat).getByText("Waiting for the orchestrator")).toBeTruthy();
+  // It has nothing to open yet, so it is not a link.
+  expect(chat.tagName).toBe("DIV");
   const board = tileOf(
     "Move the export settings into their own page, keep the old links working, and say in the release notes where each one went",
   );
   expect(within(board).getByText("board")).toBeTruthy();
   const script = tileOf("Nightly check: the staging certificate expires in 6 days");
   expect(within(script).getByText("script")).toBeTruthy();
-  // No ask is shown without its text any more.
-  expect(screen.queryByText("Waiting for the orchestrator to tag this ask")).toBeNull();
+  // "Tag" is the orchestrator's word, not the owner's.
+  expect(screen.queryByText(/to tag/)).toBeNull();
 });
 
-test("a peer's ask, which carries no text, still says it waits to be tagged", async () => {
+test("an answered ask says so, shows the answer's first line and opens it in the Inbox", async () => {
+  stubApi("default");
+  const { queryClient } = await renderApp();
+  // The Inbox's notice of a new reply repeats the question, so find the tile.
+  const QUESTION = "Can the card fade on exit instead of sliding?";
+  const askTile = () => {
+    const tile = screen
+      .getAllByText(QUESTION)
+      .map((node) => node.closest<HTMLElement>(".card"))
+      .find((node) => node !== null);
+    if (!tile) throw new Error("no ask tile");
+    return tile;
+  };
+  const reply: ReplyItem = {
+    id: "01JREPLY0000000000000000A1",
+    project: "alpha",
+    to: "ask",
+    ask_id: "01JASK000000000000000000A1",
+    message_id: null,
+    question: QUESTION,
+    asked_at: new Date(Date.now() - 120_000).toISOString(),
+    body: "\nYes: a 120 ms fade is in the motion tokens already.\nI did not file a card.",
+    replied_at: new Date(Date.now() - 30_000).toISOString(),
+    read_at: null,
+    rev: 1,
+    card: null,
+  };
+  // The first read of the replies must land first, or it replaces the answer.
+  await waitFor(() =>
+    expect(queryClient.getQueryState(queryKeyFor(repliesPath("alpha")))?.status).toBe("success"),
+  );
+  act(() => {
+    queryClient.setQueryData<RepliesResponse>(queryKeyFor(repliesPath("alpha")), {
+      replies: [reply],
+    });
+  });
+  const tile = await waitFor(() => {
+    const found = askTile();
+    expect(found.tagName).toBe("A");
+    return found;
+  });
+  expect(
+    within(tile).getByText("Yes: a 120 ms fade is in the motion tokens already."),
+  ).toBeTruthy();
+  expect(within(tile).getByText(/^Answered /)).toBeTruthy();
+  expect(within(tile).queryByText("Waiting for the orchestrator")).toBeNull();
+  expect(tile.getAttribute("href")).toContain("/inbox");
+  expect(tile.getAttribute("href")).toContain(reply.id);
+  // Another ask is not marked by that answer.
+  const other = tileOf("Nightly check: the staging certificate expires in 6 days");
+  expect(other.tagName).toBe("DIV");
+
+  // Mark read takes the reply off the list, and the tile waits again.
+  act(() => {
+    queryClient.setQueryData<RepliesResponse>(queryKeyFor(repliesPath("alpha")), { replies: [] });
+  });
+  await waitFor(() => expect(askTile().tagName).toBe("DIV"));
+});
+
+test("an ask with no text says it waits, once", async () => {
   stubApi("default");
   const { queryClient } = await renderApp();
   const board = queryClient.getQueryData<BoardResponse>(queryKeyFor(boardPath()));
@@ -221,8 +284,8 @@ test("a peer's ask, which carries no text, still says it waits to be tagged", as
       ],
     });
   });
-  await screen.findByText("Waiting for the orchestrator to tag this ask");
-  const tile = tileOf("Waiting for the orchestrator to tag this ask");
+  await screen.findByText("Waiting for the orchestrator");
+  const tile = tileOf("Waiting for the orchestrator");
   expect(tile.querySelector(".c-from")).toBeNull();
   expect(within(tile).queryByText("chat")).toBeNull();
 });

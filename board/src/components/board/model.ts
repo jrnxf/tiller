@@ -24,7 +24,15 @@ export interface Tile {
   // Set for asks.
   ask: Pick<
     AskedRow,
-    "id" | "age_seconds" | "received_at" | "source" | "summary" | "host" | "as_of" | "link"
+    | "id"
+    | "project_id"
+    | "age_seconds"
+    | "received_at"
+    | "source"
+    | "summary"
+    | "host"
+    | "as_of"
+    | "link"
   > | null;
 }
 

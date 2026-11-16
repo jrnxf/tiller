@@ -12,9 +12,9 @@ Status values: `open`, `fixed` (with what was verified), `needs owner`, `to veri
 |---|---|
 | Phase | 1 - audit. Journeys 3 (ask), 4 (start a task) and 5 (trust) are walked on the board and the CLI. Journeys 1, 2 and 6 to 11 are not walked yet. |
 | Open P0 | 0. UA-15 is `needs owner`: the silent part is fixed, the answer itself needs a spec change. |
-| Open P1 | 11 (UA-01, UA-02, UA-03, UA-04, UA-05, UA-09, UA-17, UA-18, UA-19, UA-20, UA-21) |
-| Fixed | UA-16, DX-01. UA-15 part 1 (the owner is told where the answer shows). |
-| Next step | Fix UA-18 (the ask tile opens, shows "Answered", and can be cancelled). Then UA-19 with UA-04 and UA-11. Walk journeys 2, 6 and 8 after the stand-in forge of the bench gaps. |
+| Open P1 | 10 (UA-01, UA-02, UA-03, UA-04, UA-05, UA-09, UA-17, UA-19, UA-20, UA-21). UA-18 is `needs owner`: the wrong status line is fixed, Cancel and the full view need a spec change. |
+| Fixed | UA-16, DX-01. UA-15 part 1 (the owner is told where the answer shows). UA-18 part 1 (the ask tile shows an unread answer and opens it). |
+| Next step | Fix UA-19 with UA-04 and UA-11 (what a card says about its own progress). Walk journeys 2, 6 and 8 after the stand-in forge of the bench gaps. |
 
 ## The bench
 
@@ -79,9 +79,9 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 |---|---|---|
 | Ask a project | 4 steps, about 10 s: `A`, `@` and two letters, Enter, the text, Enter. Good. | 1 command, 36 lines of answer |
 | See that the ask arrived | main project: the tile shows at once. Peer project: the tile shows in about 1 s (UA-16, fixed; it was never without a reload) | `ask show` has no delivery state (UA-17) |
-| Read the answer | main project: Inbox, 2 clicks. Peer project: only on the peer's board; the Ask box, the toast and the tile now say so (UA-15) | not possible (UA-17) |
+| Read the answer | main project: 1 click on the ask's tile, which shows "Answered" and the first line within 2 s (UA-18), or Inbox, 2 clicks. Peer project: only on the peer's board; the Ask box, the toast and the tile now say so (UA-15) | not possible (UA-17) |
 | Ask again | 1 click on "Ask again" in the reply | type the command again |
-| Recover from the wrong project | not possible: the ask tile has no action (UA-18) | `ask resolve <ask> cancelled`, which the help calls an orchestrator's tool |
+| Recover from the wrong project | not possible: the ask tile has no Cancel (UA-18, needs owner) | `ask resolve <ask> cancelled`, which the help calls an orchestrator's tool |
 | Idea to a filed card | 3 steps: New card on the project's row, the title, Enter | 1 command, after one refusal for a missing `--kind` (UA-23) |
 | Filed card to a running card | not possible: the orchestrator decides (UA-20) | `tiller spawn <card> builder`, 73 lines of answer (UA-09) |
 | Learn that a run is blocked or done | only when the orchestrator raises an item; the worker's own report stays under "Runs" (UA-19) | `tiller agents`, in a CSV row |
@@ -225,13 +225,22 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 - Hurts: a job that starts in the CLI cannot end there. The owner must open the board's Inbox to read the answer to a question typed in a shell.
 - Fix: `ask show` prints the note's delivery state and every reply. `ask list` gets an `answered` column. `tiller recap` lists unread replies beside the decisions, and `tiller reply read <reply>` (or `ask show --mark-read`) marks one read, so the parity row "Mark a reply read" becomes Full on both sides.
 
-### UA-18 - An ask tile is a dead end, and its status line can be wrong (P1, open)
+### UA-18 - An ask tile is a dead end, and its status line can be wrong (P1, needs owner; the status line is fixed)
 
 - Journey: 3.
 - Tried: clicked my ask's tile in the "Asked" column, before and after the answer came.
 - Happened: the tile is not a link or a button. It cannot be opened, cancelled or moved to another project. After the orchestrator answered, the tile still says "Waiting for the orchestrator to tag it", because the ask keeps the disposition `unresolved` until the orchestrator runs `ask resolve`. The delivery state of the note (pending, delivered, read by the agent) is not shown.
 - Hurts: an ask sent to the wrong project stays on the board with no way out. The CLI has one (`ask resolve <ask> cancelled`). An answered question reads as unanswered. "Tag it" is an internal word.
 - Fix: the tile opens the ask: the full text, when it was delivered, the answer when there is one, "Ask again" and "Cancel". The tile's line follows the facts: "Sent", "Delivered", "Answered" (with the first line of the answer), and never "tag".
+- Part 1, done on Mon 16 Nov 2026 (Lisbon), inside the contract (board only, no new read or field):
+  - An ask of this host with an unread answer shows the answer's first line and a green "Answered 2 s ago" chip. The tile is then a link that opens that answer in the Inbox, where "Mark read" and "Ask again" are. The answer comes from the unread replies that the Inbox and the sidebar already read, so the tile adds no request.
+  - An ask with no answer says "Waiting for the orchestrator". No tile says "tag" any more.
+  - Verified on the bench with the board open and no reload: an ask to Lantern said "Waiting for the orchestrator"; within 2 s of the orchestrator's `tiller reply` the tile showed the first line and "Answered 1 s ago"; one click opened the answer in the Inbox. Checked in light at 1440 px and in dark at 390 px.
+  - Tests: `board/src/components/board/views.test.tsx` ("an answered ask says so, shows the answer's first line and opens it in the Inbox", and the two wording tests).
+- Not done, and why (see "Needs owner"):
+  - After "Mark read", an ask that the orchestrator answered but did not resolve says "Waiting for the orchestrator" again. The board knows only unread replies, so it cannot tell an answered ask from a new one. A mark that lasts needs `answered_at` on the `asked` row, the same field as UA-15 part 2. An orchestrator that follows its instructions resolves the ask in the same turn, so the ask then leaves "Asked"; the bench's `fake-agent` never resolves.
+  - "Cancel" on the board. `docs/spec/state.md` section 8 lists the actors of `ask.resolve` as the orchestrator, the board "implicit on add" and the prompt hook, and `docs/spec/protocol.md` section 7 has no call for it.
+  - The full text and the delivery state of an ask with no answer. The board row has the first line only (200 characters), and no read returns one ask.
 
 ### UA-19 - A worker's own report does not change what the card says (P1, open)
 
@@ -312,7 +321,7 @@ Next step for these: find out whether they fail on a quiet machine and on Linux.
 
 Order of work, highest owner value first. Fixes that share a cause are grouped.
 
-1. UA-18 (UA-16 and UA-15 part 1 are done): the ask tile opens, an answer shows as "Answered", and the wrong ask can be cancelled. For this host's asks no spec change is needed if the answered state comes from the replies read; check `docs/spec/protocol.md` section 7 before a field is added to the `asked` rows.
+1. Done as far as the contract allows: UA-16, UA-15 part 1 and UA-18 part 1. The rest of UA-15 and UA-18 waits under "Needs owner".
 2. UA-19 with UA-04 and UA-11: what a card says about its own progress. The worker's report on the tile, a readable timeline, no ended run in "Working".
 3. UA-02 with UA-05 and UA-06: the "needs you" path. The question is on the card, the Inbox is ordered by urgency, and the kind is named.
 4. UA-20 with UA-21 and UA-22: start a task from anywhere on the board.
@@ -327,6 +336,8 @@ Order of work, highest owner value first. Fixes that share a cause are grouped.
 - The test failures in "Gates on the bench machine": six tests fail on this machine without any change of this audit. Recommendation: one iteration finds the cause of the four holder failures (they may be real macOS bugs of the terminal holder); the two 10 ms budgets are judged against a quiet machine.
 
 - UA-15 part 2 (the last P0): `docs/spec/protocol.md` section 10 says that ask text stays on the peer, and replies are not federated. With that rule the owner can never read, on one board, the answer to a question that the same board sent. Today the board says so in the Ask box, the toast and the tile (part 1, done), but the owner must still open the peer's board to read the answer. Recommendation: for a paired host with an `act` key, let the link carry the first line of each ask, an `answered_at` on each `asked` row, and the unread replies, and forward "Mark read". The owner's words already cross the link when the ask is sent. The work after a yes is about one iteration: the snapshot rows, a federated replies read, the forwarded "Mark read", and the tile and Inbox on the board.
+
+- UA-18, the rest: let the owner cancel an ask on the board, and open one. Today a wrong ask leaves the board only when the orchestrator resolves it, or when the owner runs `tiller ask resolve <ask> cancelled` in a terminal. `docs/spec/authority.md` (the matrix row "Resolve an ask, create or edit a card") already gives the owner this right, but `docs/spec/state.md` names the board as an actor of `ask.resolve` only "implicit on add", and `docs/spec/protocol.md` section 7 lists no call. Recommendation: add `POST /api/v1/asks/{id}/cancel` (owner only, forwarded to a peer like the other mutations, `ask.resolve cancelled` with the reason "cancelled by the owner on the board") and `GET /api/v1/asks/{id}` (the full text, the note's delivery state, the replies), and add `answered_at` to the `asked` row (shared with UA-15 part 2). The board work after a yes is about one iteration: a panel that the tile opens, with the text, "Delivered", the answer, "Ask again" and "Cancel".
 
 Two more candidates, to settle when their fix starts:
 

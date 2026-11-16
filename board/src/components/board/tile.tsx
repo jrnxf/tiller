@@ -1,6 +1,8 @@
+import { useQuery } from "@tanstack/react-query";
 import { Link, useSearch } from "@tanstack/react-router";
 
-import type { AskSource, BoardRow } from "../../lib/api-types";
+import type { AskSource, BoardRow, ReplyItem } from "../../lib/api-types";
+import { repliesQuery } from "../../lib/queries";
 import { cardDot } from "./activity";
 import type { DotKind } from "./activity";
 import { HOST_PROJECT, hostName, ownerOf, shownId } from "../../lib/peers";
@@ -142,28 +144,58 @@ const ASK_SOURCE: Record<AskSource, string> = {
   import: "import",
 };
 
-const UNTAGGED = "Waiting for the orchestrator to tag this ask";
+// What an ask's tile says while no answer is here. An ask stays in Asked
+// until the orchestrator files it or answers it (state.md, section 6).
+const WAITING = "Waiting for the orchestrator";
 
-// An ask that is not a card yet: what was asked, and why it is not a card. A
-// peer's ask carries no text and its answer stays on the peer, so its tile
-// says where both are read. Like a card, it dims with its lane or its link.
+// The first line of an answer that has text, as the tile's one line shows it.
+function firstLine(text: string): string {
+  return (
+    text
+      .split("\n")
+      .map((line) => line.trim())
+      .find((line) => line !== "") ?? ""
+  );
+}
+
+// The unread answer to one of this host's asks, when the orchestrator sent
+// one. The Inbox and the sidebar read the same list, so this adds no request.
+// A peer's replies are never federated, so a peer's ask has none here.
+function useAnswer(ask: NonNullable<Tile["ask"]>, peer: boolean): ReplyItem | undefined {
+  const { data } = useQuery({ ...repliesQuery(ask.project_id), enabled: !peer });
+  return peer ? undefined : data?.replies.find((reply) => reply.ask_id === ask.id);
+}
+
+// An ask that is not a card yet: what was asked, and what became of it. An
+// ask with an unread answer says so, shows the answer's first line, and opens
+// that answer in the Inbox. A peer's ask carries no text and its answer stays
+// on the peer, so its tile says where both are read. Like a card, it dims
+// with its lane or its link.
 function AskTile({ ask, lane }: { ask: NonNullable<Tile["ask"]>; lane: LaneHealth["kind"] }) {
   const source = ask.source ? ASK_SOURCE[ask.source] : null;
   const summary = ask.summary || null;
   const standing = useStanding(ask);
   const owner = ownerOf(ask);
+  const answer = useAnswer(ask, owner !== undefined);
   // Short, since the tile cuts this line at its width; the tooltip has room.
-  const waits = owner ? `Text and answer are on ${owner}` : UNTAGGED;
-  const title = summary ?? (owner ? `Ask kept on ${owner}` : UNTAGGED);
-  const tip = owner
-    ? `This ask's text and its answer show on the board of ${owner}, not here`
-    : waits;
-  return (
-    <div
-      className={`card${lane === "disconnected" || standing.dim ? " dim" : ""}`}
-      data-peer-state={standing.peer ? (standing.dim ? "stale" : "live") : undefined}
-      title={title === tip ? title : `${title}\n${tip}`}
-    >
+  const state = answer
+    ? firstLine(answer.body)
+    : owner
+      ? `Text and answer are on ${owner}`
+      : summary
+        ? WAITING
+        : null;
+  const title = summary ?? (owner ? `Ask kept on ${owner}` : answer ? answer.question : WAITING);
+  const tip = answer
+    ? `Answered: ${firstLine(answer.body)}\nOpen the answer in the Inbox`
+    : owner
+      ? `This ask's text and its answer show on the board of ${owner}, not here`
+      : WAITING;
+  const className = `card${lane === "disconnected" || standing.dim ? " dim" : ""}`;
+  const peerState = standing.peer ? (standing.dim ? "stale" : "live") : undefined;
+  const hover = title === tip ? title : `${title}\n${tip}`;
+  const body = (
+    <>
       <div className="c-top">
         <Status mark="asked" />
         <span className="id">ask</span>
@@ -177,21 +209,42 @@ function AskTile({ ask, lane }: { ask: NonNullable<Tile["ask"]>; lane: LaneHealt
       <div className="c-title">
         <span>{title}</span>
       </div>
-      {summary ? (
+      {state ? (
         <div className="c-from">
-          <span>Waiting for the orchestrator to tag it</span>
-        </div>
-      ) : owner ? (
-        <div className="c-from">
-          <span>{waits}</span>
+          <span>{state}</span>
         </div>
       ) : null}
       <div className="c-chips">
         <HostChip entity={ask} />
-        <span className="lab sm">
-          <Ago at={ask.received_at} prefix="asked" />
-        </span>
+        {answer ? (
+          <span className="lab sm ok">
+            <Ago at={answer.replied_at} prefix="Answered" />
+          </span>
+        ) : (
+          <span className="lab sm">
+            <Ago at={ask.received_at} prefix="asked" />
+          </span>
+        )}
       </div>
+    </>
+  );
+  if (answer) {
+    return (
+      <Link
+        to="/inbox"
+        search={({ host }) => ({ host, item: answer.id })}
+        className={className}
+        data-peer-state={peerState}
+        data-answered="true"
+        title={hover}
+      >
+        {body}
+      </Link>
+    );
+  }
+  return (
+    <div className={className} data-peer-state={peerState} title={hover}>
+      {body}
     </div>
   );
 }
