@@ -533,8 +533,9 @@ fn place(
         },
     )?;
     made.events.extend(placed.events);
-    let base_sha =
-        pool::start_from_origin(&worktree, &project.default_branch).map_err(SpawnError::Git)?;
+    let local_checkout = (project.delivery == Delivery::LocalOnly).then_some(checkout);
+    let base_sha = pool::start_from_origin(&worktree, &project.default_branch, local_checkout)
+        .map_err(SpawnError::Git)?;
     let scan = scan_and_record(store, ctx, world.scanner, run, project, &worktree)?;
     made.events.extend(scan.1);
     let scan = scan.0;

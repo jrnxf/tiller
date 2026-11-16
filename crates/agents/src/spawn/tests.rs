@@ -1316,6 +1316,56 @@ fn spawn_starts_from_current_origin_default_branch() {
     assert!(worktree.join("second.md").exists());
 }
 
+/// Commits `file` on the checkout's own `main`, as a `local-only` landing
+/// does, without a push; returns it.
+fn land_in_checkout(rig: &Rig, file: &str) -> String {
+    let checkout = &rig.repo.checkout;
+    std::fs::write(checkout.join(file), "landed\n").unwrap();
+    git(checkout, &["add", file]);
+    git(checkout, &["commit", "--quiet", "-m", file]);
+    git(checkout, &["rev-parse", "HEAD"])
+}
+
+/// UA-57: a `local-only` landing moves only the checkout's `main`, so the
+/// next run starts from it, not from the older `origin/main`. When
+/// `origin` is the newer of the two, the run starts from `origin`.
+#[test]
+fn a_local_only_spawn_starts_from_the_newer_of_the_checkout_and_origin() {
+    let mut rig = Rig::new();
+    rig.sql("UPDATE projects SET delivery = 'local-only'");
+    let landed = land_in_checkout(&rig, "landed.md");
+    let card = rig.card(CardKind::Ship, None);
+    let spawned = rig.spawn(&card, RunRole::Builder);
+    assert_eq!(spawned.base_sha, landed);
+    let worktree = Path::new(&spawned.worktree);
+    assert_eq!(git(worktree, &["rev-parse", "HEAD"]), landed);
+    assert!(worktree.join("landed.md").exists());
+
+    // Someone pushed the landing and more on top: origin is newer now.
+    git(&rig.repo.checkout, &["push", "--quiet", "origin", "main"]);
+    git(&rig.repo.upstream, &["pull", "--quiet", "origin", "main"]);
+    let head = rig.repo.advance("second.md");
+    let card = rig.card(CardKind::Ship, None);
+    let spawned = rig.spawn(&card, RunRole::Builder);
+    assert_eq!(spawned.base_sha, head);
+}
+
+/// UA-57: two heads that have diverged are a refusal that names both.
+#[test]
+fn a_local_only_spawn_refuses_a_checkout_that_diverged_from_origin() {
+    let mut rig = Rig::new();
+    rig.sql("UPDATE projects SET delivery = 'local-only'");
+    let landed = land_in_checkout(&rig, "landed.md");
+    let pushed = rig.repo.advance("second.md");
+    let card = rig.card(CardKind::Ship, None);
+    let error = rig
+        .try_spawn(&rig.orchestrator(), Rig::request(&card, RunRole::Builder))
+        .unwrap_err();
+    let text = refusal(&error);
+    assert!(text.contains("have diverged"), "{text}");
+    assert!(text.contains(&landed) && text.contains(&pushed), "{text}");
+}
+
 #[test]
 fn spawn_takes_treehouse_worktree_and_returns_it_on_cleanup() {
     let mut rig = Rig::new();

@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use tiller_core::domain::Project;
+use tiller_core::domain::{Delivery, Project};
 
 use crate::sources::{Scanner, WorktreeScan};
 
@@ -130,15 +130,42 @@ fn default_ref(path: &Path, project: &Project) -> Option<String> {
     None
 }
 
+/// For a `local-only` project, the local default branch: a `local-only`
+/// landing moves only that branch and never pushes, so what it holds is
+/// landed even when `origin` has not seen it.
+fn local_landed_ref(path: &Path, project: &Project) -> Option<String> {
+    if project.delivery != Delivery::LocalOnly {
+        return None;
+    }
+    let local = format!("refs/heads/{}", project.default_branch);
+    git(
+        path,
+        &[
+            "rev-parse",
+            "--verify",
+            "-q",
+            &format!("{local}^{{commit}}"),
+        ],
+    )
+    .is_ok()
+    .then_some(local)
+}
+
 /// Commits reachable from HEAD and the stash entries, not reachable from
 /// the default branch or any merged PR head known here, whose patch is not
 /// on the default branch either.
-fn unlanded(path: &Path, default_ref: &str, merged_heads: &[String]) -> Result<i64, String> {
+fn unlanded(
+    path: &Path,
+    default_ref: &str,
+    also_landed: Option<&str>,
+    merged_heads: &[String],
+) -> Result<i64, String> {
     let stashes = git(path, &["stash", "list", "--format=%H"]).map(|s| lines(&s))?;
     let mut args: Vec<String> = vec!["rev-list".into(), "HEAD".into()];
     args.extend(stashes);
     args.push("--not".into());
     args.push(default_ref.to_owned());
+    args.extend(also_landed.map(str::to_owned));
     for head in merged_heads {
         if git(path, &["cat-file", "-e", &format!("{head}^{{commit}}")]).is_ok() {
             args.push(head.clone());
@@ -224,8 +251,9 @@ impl Scanner for GitScanner {
         )
         .ok()
         .map(|s| !s.trim().is_empty());
+        let local = local_landed_ref(path, project);
         scan.unlanded_commits = default_ref(path, project).and_then(|default| {
-            unlanded(path, &default, merged_heads)
+            unlanded(path, &default, local.as_deref(), merged_heads)
                 .map_err(
                     |error| tracing::warn!(%error, path = %path.display(), "unlanded count failed"),
                 )
@@ -286,6 +314,72 @@ mod tests {
             .arg("--version")
             .output()
             .is_ok_and(|o| o.status.success())
+    }
+
+    /// UA-57: for a `local-only` project, a commit on the local default
+    /// branch is landed even while `origin` has not seen it. For any other
+    /// delivery it is still unlanded.
+    #[test]
+    fn a_local_only_scan_counts_the_local_default_branch_as_landed() {
+        if !git_available() {
+            eprintln!("git is not on PATH; skipping");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let origin = dir.path().join("origin.git");
+        sh(
+            dir.path(),
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                origin.to_str().unwrap(),
+            ],
+        );
+        let repo = dir.path().join("repo");
+        sh(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                repo.to_str().unwrap(),
+            ],
+        );
+        sh(&repo, &["config", "user.email", "dev@example.com"]);
+        sh(&repo, &["config", "user.name", "Dev"]);
+        sh(&repo, &["checkout", "-q", "-b", "main"]);
+        commit(&repo, "base.txt", "base");
+        sh(&repo, &["push", "-q", "origin", "main"]);
+        // A local-only landing: on the checkout's main, never pushed.
+        commit(&repo, "landed.txt", "landed");
+
+        let worktree = dir.path().join("wt");
+        sh(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "fm/next",
+                worktree.to_str().unwrap(),
+                "main",
+            ],
+        );
+        let scanner = GitScanner::new();
+        let mut local_only = project();
+        local_only.delivery = Delivery::LocalOnly;
+        assert_eq!(
+            scanner.scan(&worktree, &local_only, &[]).unlanded_commits,
+            Some(0)
+        );
+        assert_eq!(
+            scanner.scan(&worktree, &project(), &[]).unlanded_commits,
+            Some(1)
+        );
     }
 
     /// The unlanded count follows the spec's three ways to land: on the

@@ -6,7 +6,7 @@ Started Monday 2026-11-16, Lisbon time.
 
 ## Owner decisions (spec changes)
 
-- [ ] UA-57 (P0): a `local-only` project starts its runs from the checkout's default branch when it is ahead of `origin` (`docs/spec/state.md` section 3, `base_sha`)
+- [x] UA-57 (P0): a `local-only` project starts its runs from the checkout's default branch when it is ahead of `origin` (`docs/spec/state.md` section 3, `base_sha`)
 - [ ] UA-15 part 2 (P0): the answer to an ask sent to a peer project shows on the board that sent it
 - [ ] UA-18: cancel and open an ask on the board (`POST /api/v1/asks/{id}/cancel`, `GET /api/v1/asks/{id}`)
 - [ ] UA-19: a worker's `blocked` or `needs-decision` report puts its card in "Needs you" (a `recovery` item)
@@ -27,6 +27,7 @@ Started Monday 2026-11-16, Lisbon time.
 
 - [ ] Build each decision that gets a yes, with a test that fails without it
 - [ ] Walk a seventh full pass on a new bench: all 11 journeys, on the board with one page left open and on the CLI, with the work on main and on the peer
+- [ ] Walk UA-57 again on the bench: land a card in a `local-only` project, then start the next run
 - [ ] Stop the passes when one full pass finds no new P0 or P1
 
 ## Test failures on the macOS machine

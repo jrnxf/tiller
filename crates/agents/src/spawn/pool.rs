@@ -107,12 +107,22 @@ fn git(path: &Path, args: &[&str]) -> Result<String, String> {
 /// Brings a fresh worktree to the head of `origin/<default>` as a fetch made
 /// now sees it (P05), and returns that head as the run's `base_sha`.
 ///
+/// For a `local-only` project, `local_checkout` names its checkout. A
+/// `local-only` landing moves only the checkout's default branch and never
+/// pushes, so the base is the newer of that branch and `origin/<default>`
+/// when one descends from the other. Two heads that have diverged are a
+/// refusal that names both.
+///
 /// A worktree cut from a stale local ref is fast-forwarded first, never
-/// worked on. One that holds anything not on the default branch is not a
-/// fresh worktree, so spawn refuses it rather than build on it.
-pub fn start_from_origin(worktree: &Path, default_branch: &str) -> Result<String, String> {
+/// worked on. One that holds anything not on the base is not a fresh
+/// worktree, so spawn refuses it rather than build on it.
+pub fn start_from_origin(
+    worktree: &Path,
+    default_branch: &str,
+    local_checkout: Option<&Path>,
+) -> Result<String, String> {
     git(worktree, &["fetch", "--quiet", "origin", default_branch])?;
-    let base = git(
+    let origin = git(
         worktree,
         &[
             "rev-parse",
@@ -120,17 +130,58 @@ pub fn start_from_origin(worktree: &Path, default_branch: &str) -> Result<String
             &format!("refs/remotes/origin/{default_branch}^{{commit}}"),
         ],
     )?;
+    let (base, base_name) = match local_checkout {
+        None => (origin, format!("origin/{default_branch}")),
+        Some(checkout) => {
+            let checkout_text = checkout.to_string_lossy();
+            git(
+                worktree,
+                &[
+                    "fetch",
+                    "--quiet",
+                    &checkout_text,
+                    &format!("refs/heads/{default_branch}"),
+                ],
+            )?;
+            let local = git(worktree, &["rev-parse", "--verify", "FETCH_HEAD^{commit}"])?;
+            newer_of(worktree, default_branch, local, origin)?
+        }
+    };
     let head = git(worktree, &["rev-parse", "--verify", "HEAD^{commit}"])?;
     if head == base {
         return Ok(base);
     }
-    if git(worktree, &["merge-base", "--is-ancestor", "HEAD", &base]).is_err() {
+    if !is_ancestor(worktree, &head, &base) {
         return Err(format!(
-            "the new worktree's HEAD {head} is not on origin/{default_branch}; it is not a fresh worktree"
+            "the new worktree's HEAD {head} is not on {base_name}; it is not a fresh worktree"
         ));
     }
     git(worktree, &["merge", "--ff-only", "--quiet", &base])?;
     Ok(base)
+}
+
+fn is_ancestor(repo: &Path, older: &str, newer: &str) -> bool {
+    git(repo, &["merge-base", "--is-ancestor", older, newer]).is_ok()
+}
+
+/// The newer of the checkout's default branch and `origin/<default>`, with
+/// the name a refusal uses for it.
+fn newer_of(
+    worktree: &Path,
+    default_branch: &str,
+    local: String,
+    origin: String,
+) -> Result<(String, String), String> {
+    if is_ancestor(worktree, &origin, &local) {
+        return Ok((local, format!("the checkout's {default_branch}")));
+    }
+    if is_ancestor(worktree, &local, &origin) {
+        return Ok((origin, format!("origin/{default_branch}")));
+    }
+    Err(format!(
+        "the checkout's {default_branch} ({local}) and origin/{default_branch} ({origin}) have diverged; \
+         bring them together in the checkout, then start the run again"
+    ))
 }
 
 #[cfg(test)]

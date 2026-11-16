@@ -172,7 +172,7 @@ Rules:
 `runs`: one attempt by one worker role on one card.
 
 - `id`, `card_id`, `role` (`scout`, `builder`, `reviewer`, `verifier`), `attempt` (1, 2, ... per card and role), `predecessor_run_id` (set by a relaunch that keeps the worktree, P24), `model`, `effort`, `host_id`.
-- `worktree_path`, `branch`, `base_branch`, `base_sha`: what the run works in. Treehouse owns the worktree; these are the values recorded at spawn. `base_sha` is the remote default branch's head after a fetch made by the spawn, so every run starts from current origin (P05); a stale checkout is fast-forwarded first, never worked on.
+- `worktree_path`, `branch`, `base_branch`, `base_sha`: what the run works in. Treehouse owns the worktree; these are the values recorded at spawn. `base_sha` is the remote default branch's head after a fetch made by the spawn, so every run starts from current origin (P05); a stale checkout is fast-forwarded first, never worked on. For a `local-only` project it is the newer of that head and the checkout's own default branch, when one descends from the other, because a `local-only` landing moves only the checkout's branch and never pushes. Two heads that have diverged refuse the spawn, and the refusal names both.
 - `supervisor_session_id`: the orchestrator session that owns this run. Exactly one at a time (P21). Reconcile reassigns it to the project's live orchestrator after a restart, with an event.
 - `started_at`, `ended_at`, `outcome` (`landed`, `reported`, `failed`, `abandoned`, `relaunched`, `cancelled`, `cut`), `outcome_note` (for example the partial-work note a 30-minute cut leaves, P55).
 - `pause_until`: a worker's dated pause (`paused ... until`), which silences alarms until then (P19).
