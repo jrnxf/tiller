@@ -212,7 +212,7 @@ The record is current for a head when that head is pushed, `pr_id` is set, `erro
 - Binding, by kind:
   - `merge`: `card_id`, `repo`, `pr_id`, `head_sha`, `action` (`merge`, `squash`, `rebase`).
   - `land_direct`: `card_id`, `repo`, `branch`, `head_sha`, `action = push`.
-  - `repo` is a snapshot of what was approved; it stays even if the project's repo is renamed later.
+  - `repo` is a snapshot of what was approved; it stays even if the project's repo is renamed later. For a `local-only` project that names no repo, `repo` holds the project's id.
   - `memory`: `diff_sha256`, `base_rev` (the memory file's git revision), `action = apply`.
   - `away`: `scope` JSON (the standing orders and spend cap), `action = away`; T1.4 owns the shape.
 - `state`: `requested` (a decision was asked for), `accepted` (the owner approved, or a standing grant matched), `rejected`, `executing` (the daemon has started the action), `succeeded`, `failed`, `uncertain` (the action was sent and its result could not be read; reconcile resolves it from the forge), `stale` (the binding no longer matches reality: the head SHA moved, the PR closed, the base revision changed).
