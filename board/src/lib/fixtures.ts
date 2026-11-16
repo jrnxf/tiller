@@ -1420,11 +1420,10 @@ function cardDetailFor(
       ...(RELEASED_DEPS[row.display_id] ?? []).flatMap((dep) => depOf(board, dep.on, dep.reason)),
     ],
     waiting_on_this: waitingOn(board, row.display_id),
-    attention: waiting
-      ? attentionFor("default", board, now).items.filter(
-          (item) => item.card_id === row.id && item.approval,
-        )
-      : [],
+    // The card's own open items, as the daemon's card read lists them.
+    attention: attentionFor("default", board, now).items.filter(
+      (item) => item.card_id === row.id && (waiting || !item.approval),
+    ),
     runs,
     prs,
     approvals,

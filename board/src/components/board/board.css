@@ -1976,3 +1976,66 @@ a.card:hover {
 .props dd .report-text {
   min-width: 0;
 }
+
+/* What the card asks of the owner now: the question and its answer control,
+   above the card's details. */
+.cq {
+  display: grid;
+  gap: 10px;
+  margin: 14px 0 4px;
+}
+.cq-item {
+  padding: 12px 14px 14px;
+  border-radius: var(--r8);
+  border: 1px solid color-mix(in srgb, var(--orange) 45%, var(--line-2));
+  background: color-mix(in srgb, var(--orange) 6%, var(--bg-card));
+  min-width: 0;
+}
+/* Answered from here: the block stays for its receipt, and no longer calls. */
+.cq-item.done {
+  border-color: var(--line-2);
+  background: var(--bg-card);
+}
+.cq-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+.cq-meta b {
+  color: var(--fg-1);
+  font-weight: var(--w-semibold);
+}
+.cq-open {
+  margin-left: auto;
+  color: var(--accent-text);
+}
+.cq-open:hover {
+  text-decoration: underline;
+}
+.cq-q {
+  margin: 8px 0 6px;
+  font-size: 15px;
+  line-height: 1.4;
+  font-weight: var(--w-semibold);
+  color: var(--fg-1);
+  overflow-wrap: anywhere;
+}
+.cq-ctx {
+  margin: 0 0 10px;
+  font-size: var(--fs-small);
+  line-height: 1.5;
+  color: var(--fg-2);
+}
+.cq .rec {
+  margin: 0 0 12px;
+}
+.cq-answer {
+  margin-top: 10px;
+}
+/* The drawer is narrow: one option per line. */
+.card-page.in-drawer .cq .opts {
+  grid-template-columns: minmax(0, 1fr);
+}

@@ -107,7 +107,8 @@
   color: var(--fg-3);
 }
 
-.inbox .av {
+.inbox .av,
+.cq .rec .av {
   width: 28px;
   height: 28px;
   border-radius: 50%;
@@ -1424,4 +1425,32 @@ button.chip:active {
   .card-det > summary .icon {
     transition: none;
   }
+}
+
+/* A row's place (host, project and card) and its kind and age are two
+   pieces. Each stays on one line, so a wrap never leaves a separator or an
+   age alone, and the wider gap between the pieces parts them on one line. */
+.irow .s.grp {
+  gap: 4px 12px;
+}
+
+.irow .s .nw {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+/* An urgent or high card says so on its row. */
+.irow .s .ipri {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--fg-2);
+  font-weight: var(--w-medium);
+  white-space: nowrap;
+}
+
+.irow .s .ipri .icon {
+  display: block;
 }

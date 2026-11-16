@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import type {
+  CardDetail,
   AgentsResponse,
   BoardResponse,
   BoardRow,
@@ -22,13 +23,21 @@ import type { Scenario } from "../../lib/fixtures";
 import { standingOf } from "../../lib/peers";
 import { loadPrefs, prefsStore, updatePrefs } from "../../lib/prefs";
 import { receiptsStore } from "../../lib/receipts";
-import { agentsPath, boardPath, projectsPath, queryKeyFor, repliesPath } from "../../lib/queries";
+import {
+  agentsPath,
+  boardPath,
+  cardQuery,
+  projectsPath,
+  queryKeyFor,
+  repliesPath,
+} from "../../lib/queries";
 import { createAppRouter } from "../../lib/router";
 import { applyChange } from "../../lib/sse";
 import { CHECK_DELAY_MS } from "../shell/project-add";
 import { ArchiveProject } from "../shell/project-archive";
 import { ProjectDetail } from "../shell/project-stage";
 import { DeleteProject } from "../shell/project-delete";
+import { answeredStore } from "../attention/answered";
 import { resetBoardLook } from "./board-prefs";
 import { createTestQueryClient, loadRouteChunks } from "../../test-app";
 
@@ -145,6 +154,7 @@ beforeEach(() => {
   prefsStore.set(loadPrefs());
   resetBoardLook();
   receiptsStore.set({ byKey: {}, progress: {} });
+  answeredStore.set({});
   connectionStore.set("live");
   stubMedia();
   window.scrollTo = () => {};
@@ -1201,6 +1211,68 @@ test("a refused remove shows in the dialog, which stays open", async () => {
   expect((await within(dialog).findByRole("alert")).textContent).toBe(
     "the terminal holder is down",
   );
+});
+
+test("a card that needs the owner shows its question and takes the answer in place", async () => {
+  const posted = stubApi("default");
+  const { queryClient } = await renderApp("default", `/cards/${CARD_41}`);
+  const page = await screen.findByTestId("card-page");
+  const questions = within(page).getByTestId("card-questions");
+  // The question, its kind, what follows and the recommendation, above the details.
+  expect(within(questions).getByRole("heading").textContent).toBe(
+    "Which retry policy should the export job use?",
+  );
+  expect(questions.textContent).toContain("Needs you");
+  expect(questions.querySelector(".lab")?.textContent).toBe("Decision");
+  expect(questions.textContent).toContain("The builder implements the policy you pick");
+  expect(questions.textContent).toContain("It covers every failure seen this month");
+  const props = page.querySelector("dl.props");
+  if (!props) throw new Error("no details");
+  expect(questions.compareDocumentPosition(props) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  // The way to the evidence: the same item in the Inbox.
+  expect(
+    within(questions).getByRole("link", { name: "Open in the Inbox" }).getAttribute("href"),
+  ).toContain("item=01JATTN0000000000000000000");
+
+  // The Inbox's own answer control: one click sends the owner's pick.
+  const options = within(questions).getAllByRole("button");
+  expect(options.map((option) => option.querySelector(".o-name")?.textContent)).toEqual([
+    "Exponential backoff, three attempts",
+    "Fixed delay, five attempts",
+    "No automatic retry",
+  ]);
+  fireEvent.click(options[1] as HTMLElement);
+  await waitFor(() =>
+    expect(posted.filter((call) => call.path.endsWith("/answer"))).toHaveLength(1),
+  );
+  const sent = posted.find((call) => call.path.endsWith("/answer"));
+  expect(sent?.path).toBe("/api/v1/attention/01JATTN0000000000000000000/answer");
+  expect(sent?.body.answer).toBe("Fixed delay, five attempts");
+  // The receipt stays on the card,
+  await waitFor(() =>
+    expect(within(questions).getByText(/Answered Fixed delay, five attempts/)).toBeTruthy(),
+  );
+  // also after the card's next read, which no longer lists the answered item.
+  await act(async () => {
+    queryClient.setQueryData<CardDetail>(cardQuery(CARD_41).queryKey, (detail) =>
+      detail ? { ...detail, attention: [] } : detail,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(within(page).getByTestId("card-questions").textContent).toContain(
+    "Answered Fixed delay, five attempts",
+  );
+  expect(within(page).getByTestId("card-questions").querySelectorAll(".opt")).toHaveLength(0);
+  expect(within(page).getByTestId("card-questions").querySelector(".cq-meta b")?.textContent).toBe(
+    "Answered",
+  );
+});
+
+test("a card with nothing to answer has no question block", async () => {
+  stubApi("default");
+  await renderApp("default", `/cards/${CARD_43}`);
+  const page = await screen.findByTestId("card-page");
+  expect(within(page).queryByTestId("card-questions")).toBeNull();
 });
 
 test("the card page's Board link is a bordered button, not a ghost", async () => {

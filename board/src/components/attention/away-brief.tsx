@@ -6,7 +6,7 @@ import { AWAY_BRIEF_ID, markBriefRead, mergeLabel } from "../../lib/away";
 import { formatLisbonDay } from "../../lib/clock";
 import { projectIndex } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
-import { formatWhen } from "./format";
+import { KIND_LABELS, formatWhen } from "./format";
 import { BackIcon, NeedsIcon } from "./icons";
 import "./away-brief.css";
 
@@ -207,7 +207,7 @@ export function AwayBriefDetail({ brief, ctx }: { brief: AwayBrief; ctx: Context
               key={item.attention_id}
               card={item.card}
               title={item.question}
-              note="Decision"
+              note={KIND_LABELS[item.kind] ?? "Decision"}
               ctx={ctx}
             />
           ))}

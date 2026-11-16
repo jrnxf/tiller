@@ -107,10 +107,14 @@ const flush = () => act(async () => {});
 
 test("the Replies filter lists each project's unread replies, newest first, each marked unread", async () => {
   await renderAt("/inbox");
-  const list = screen.getByRole("region", { name: "Needs you" });
+  const needs = screen.getByRole("region", { name: "Needs you" });
+  const list = await screen.findByRole("region", { name: "Replies" });
   await within(list).findByTestId(`inbox-row-${ALPHA_REPLY}`);
-  // All mixes the replies in with the rest.
-  expect(within(list).getAllByRole("link").length).toBeGreaterThan(3);
+  // All lists the replies after what waits on the owner, under their own heading.
+  expect(within(needs).getAllByRole("link").length).toBeGreaterThan(0);
+  expect(within(needs).queryByTestId(`inbox-row-${ALPHA_REPLY}`)).toBeNull();
+  expect(list.querySelector(".lsub")?.textContent).toBe("Replies 3");
+  expect(needs.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   const replies = screen.getByRole("button", { name: /^Replies/ });
   expect(replies.textContent).toBe("Replies 3");
   fireEvent.click(replies);
@@ -129,8 +133,13 @@ test("the Replies filter lists each project's unread replies, newest first, each
   // Nothing that is no longer current shows under Replies.
   expect(screen.queryByRole("region", { name: "No longer current" })).toBeNull();
 
+  // The filter shows replies only, and needs no second heading.
+  expect(within(needs).queryAllByRole("link")).toHaveLength(0);
+  expect(list.querySelector(".lsub")).toBeNull();
+
   fireEvent.click(screen.getByRole("button", { name: "All" }));
-  expect(within(list).getAllByRole("link").length).toBeGreaterThan(3);
+  expect(within(needs).getAllByRole("link").length).toBeGreaterThan(0);
+  expect(within(list).getAllByRole("link")).toHaveLength(3);
 });
 
 test("the Inbox badge counts the unread replies too", async () => {
@@ -223,9 +232,11 @@ test("Mark read sends one keyed mark and takes the reply off the list", async ()
   fireEvent.click(mark);
   fireEvent.click(mark);
   await flush();
-  expect(calls).toHaveLength(1);
-  expect(calls[0]).toMatchObject({ method: "POST", path: `/api/v1/replies/${ALPHA_REPLY}/read` });
-  expect(Object.keys(calls[0]?.body ?? {})).toEqual(["idempotency_key"]);
+  // The row shown next may read its agent's prompt, which is not a mark.
+  const marks = calls.filter((call) => call.path.startsWith("/api/v1/replies/"));
+  expect(marks).toHaveLength(1);
+  expect(marks[0]).toMatchObject({ method: "POST", path: `/api/v1/replies/${ALPHA_REPLY}/read` });
+  expect(Object.keys(marks[0]?.body ?? {})).toEqual(["idempotency_key"]);
   expect(screen.queryByTestId(`inbox-row-${ALPHA_REPLY}`)).toBeNull();
   expect(router.state.location.search).not.toHaveProperty("item");
 });

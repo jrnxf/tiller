@@ -29,7 +29,14 @@ function applies(action: OwnerAction): string {
   return `${action.project} capacity from ${action.from} to ${action.to}`;
 }
 
-export function AnswerForm({ item }: { item: AttentionItem }) {
+export function AnswerForm({
+  item,
+  keys = true,
+}: {
+  item: AttentionItem;
+  // False where another form on the screen owns the keys 1-9.
+  keys?: boolean;
+}) {
   const options = useMemo(() => item.options ?? [], [item.options]);
   const sent = useStore(answeredStore)[item.id];
   const [pick, setPick] = useState<string | null>(sent ? sent.option : null);
@@ -99,7 +106,7 @@ export function AnswerForm({ item }: { item: AttentionItem }) {
   );
 
   useEffect(() => {
-    if (locked || options.length === 0) return;
+    if (locked || !keys || options.length === 0) return;
     // Keys 1-9 answer, unless the owner is typing, holds a modifier or has a
     // dialog open.
     const onKey = (event: KeyboardEvent) => {
@@ -110,7 +117,7 @@ export function AnswerForm({ item }: { item: AttentionItem }) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [locked, options, choose, host]);
+  }, [locked, keys, options, choose, host]);
 
   const receipt = (
     <ReceiptPanel
@@ -149,7 +156,9 @@ export function AnswerForm({ item }: { item: AttentionItem }) {
       <div className="blk-h">
         Your answer
         {options.length && !locked ? (
-          <span className="hint">click to send, or press 1-{Math.min(options.length, 9)}</span>
+          <span className="hint">
+            click to send{keys ? `, or press 1-${Math.min(options.length, 9)}` : ""}
+          </span>
         ) : null}
       </div>
       <PeerNote standing={standing} />
@@ -175,13 +184,13 @@ export function AnswerForm({ item }: { item: AttentionItem }) {
                   !sendable(option.label) ||
                   (host !== undefined && option.action !== undefined)
                 }
-                aria-keyshortcuts={index < 9 ? String(index + 1) : undefined}
+                aria-keyshortcuts={keys && index < 9 ? String(index + 1) : undefined}
                 onClick={() => choose(option.label)}
               >
                 <span className="o-top">
                   <span className="o-name">{option.label}</span>
                   {option.recommended ? <span className="rec-tag">Recommended</span> : null}
-                  {index < 9 ? <kbd>{index + 1}</kbd> : null}
+                  {keys && index < 9 ? <kbd>{index + 1}</kbd> : null}
                 </span>
                 {option.consequence ? <span className="what">{option.consequence}</span> : null}
                 {option.action ? (

@@ -25,6 +25,14 @@ export const LockIcon = () => (
   </Glyph>
 );
 
+// A key: a credential the owner issues somewhere else.
+export const KeyIcon = () => (
+  <Glyph>
+    <circle cx="5.2" cy="10.8" r="2.7" {...stroke} />
+    <path d="M7.2 8.8 13 3M10.6 5.4l1.8 1.8" strokeLinecap="round" {...stroke} />
+  </Glyph>
+);
+
 export const SendIcon = () => (
   <Glyph>
     <path d="M2.5 8 13.5 2.5 9 13.5 7.5 9z" strokeLinejoin="round" {...stroke} />

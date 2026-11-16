@@ -30,7 +30,7 @@ import { CheckIcon } from "../shell/icons";
 import { Ago } from "../board/ago";
 import { AnswerStrip, useAnswerOpen } from "../board/answer-strip";
 import { HostChip } from "../board/host-chip";
-import { ShieldIcon } from "../board/icons";
+import { PRIORITY_NAMES, Priority, ShieldIcon } from "../board/icons";
 import { useAmbiguousIds, useStanding, useNamedProjects } from "../board/peer-state";
 import { readPane, terminalTailPath } from "../board/terminal-stream";
 import type { Tail } from "../board/terminal-stream";
@@ -61,7 +61,19 @@ import {
   staleText,
 } from "./format";
 import type { ParsedEvidence } from "./format";
-import { BackIcon, ChevronIcon, DecisionIcon, FileIcon, InfoIcon, LockIcon, OkIcon } from "./icons";
+import {
+  BackIcon,
+  ChevronIcon,
+  DecisionIcon,
+  FileIcon,
+  GitIcon,
+  InfoIcon,
+  KeyIcon,
+  LockIcon,
+  OkIcon,
+  ReopenIcon,
+} from "./icons";
+import { NO_CARD_PRIORITY, UNKNOWN_PRIORITY, mostUrgentFirst } from "./order";
 import { Terminal } from "./terminal";
 import { ViewLive } from "./view-live";
 import { agentName, useSessionAgent } from "./agent-name";
@@ -656,6 +668,16 @@ function DialogDetail({ agent, ctx }: { agent: AgentRow; ctx: Context }) {
   );
 }
 
+// A decision row's icon says what the item asks of the owner: a choice, a
+// credential to issue elsewhere, a merge, a recovery or a report to read.
+function KindIcon({ kind }: { kind: string }) {
+  if (kind === "credential") return <KeyIcon />;
+  if (kind === "merge") return <GitIcon />;
+  if (kind === "recovery") return <ReopenIcon />;
+  if (kind === "report" || kind === "review") return <FileIcon />;
+  return <DecisionIcon />;
+}
+
 function Row({ entry, selected, ctx }: { entry: Entry; selected: boolean; ctx: Context }) {
   const cardId = cardOfEntry(entry);
   const card = cardId === null ? undefined : ctx.cards.get(cardId);
@@ -669,6 +691,10 @@ function Row({ entry, selected, ctx }: { entry: Entry; selected: boolean; ctx: C
   const answered = entry.type === "decision" && entry.answered !== null;
   const withdrawn = entry.type === "decision" && entry.withdrawn !== null;
   const gone = entry.type === "decision" && !entry.item.still_current && !answered;
+  // The item's kind, in the words the CLI uses for it.
+  const kind = entry.type === "decision" ? (KIND_LABELS[entry.item.kind] ?? "Decision") : null;
+  // Only an urgent or high card says so: the rest would be noise.
+  const pressing = card && card.priority <= 1 && !answered && !withdrawn && !gone;
   const title =
     entry.type === "decision"
       ? entry.item.question
@@ -694,35 +720,40 @@ function Row({ entry, selected, ctx }: { entry: Entry; selected: boolean; ctx: C
           <ShieldIcon />
         </span>
       ) : (
-        <span className="ii kind decision" title="Decision">
-          {answered ? <OkIcon /> : <DecisionIcon />}
+        <span className="ii kind decision" title={kind ?? undefined}>
+          {answered ? <OkIcon /> : <KindIcon kind={entry.item.kind} />}
         </span>
       )}
       <span className="bd">
         <span className={`t${entry.type === "permission" ? " mono" : ""}`}>{title}</span>
-        <span className="s">
-          <HostChip entity={owner} />
-          {project ? (
-            <>
-              <span className="pdot" style={{ "--pc": projectColor(index) } as CSSProperties} />
-              {project.name}
-              <span className="sl">/</span>
-            </>
+        <span className="s grp">
+          {/* Where: the host, the project and its card, as one piece. */}
+          <span className="nw">
+            <HostChip entity={owner} />
+            {project ? (
+              <>
+                <span className="pdot" style={{ "--pc": projectColor(index) } as CSSProperties} />
+                {project.name}
+              </>
+            ) : null}
+            {project && label !== null ? <span className="sl">/</span> : null}
+            {label}
+          </span>
+          {/* What and how long: they wrap as one, so no separator or age hangs
+              on a line of its own. */}
+          <span className="nw">
+            {kind === null ? "keypress in a pane" : kind.toLowerCase()}
+            <span className="sl">/</span>
+            {formatAge(since)}
+          </span>
+          {pressing ? (
+            <span className="ipri" data-testid="row-priority">
+              <Priority level={card.priority} />
+              {PRIORITY_NAMES[card.priority]}
+            </span>
           ) : null}
-          {label === null ? null : (
-            <>
-              {label}
-              <span className="sl">/</span>
-            </>
-          )}
-          {entry.type === "decision" ? "decision" : "keypress in a pane"}
-          <span className="sl">/</span>
-          {formatAge(since)}
           {answered ? <span className="lab sm ok">answered</span> : null}
           {withdrawn ? <span className="lab sm">withdrawn</span> : null}
-          {entry.type === "decision" && entry.item.kind === "merge" && !answered ? (
-            <span className="lab sm">merge</span>
-          ) : null}
         </span>
       </span>
     </Link>
@@ -740,11 +771,6 @@ function Row({ entry, selected, ctx }: { entry: Entry; selected: boolean; ctx: C
 
 // What the list shows: every row, or the orchestrators' replies only.
 type Show = "all" | "replies";
-
-// The newest first. `at` is when the row began to wait, or when it arrived.
-function newestFirst(a: { at: string }, b: { at: string }): number {
-  return b.at.localeCompare(a.at);
-}
 
 export function Inbox({
   selected,
@@ -818,25 +844,29 @@ export function Inbox({
       .map((agent) => ({ type: "dialog" as const, id: dialogId(agent), agent })),
   ];
 
-  // One list, the newest first: decisions, prompts and replies. What is no
-  // longer current follows, faded. The Replies filter shows replies only.
+  // What waits on the owner leads, the most urgent card first and then the
+  // longest wait. Replies follow, the newest first. What is no longer current
+  // is last, faded. The Replies filter shows replies only.
   const [show, setShow] = useState<Show>("all");
-  const live: (Shown & { at: string })[] = [
-    ...[...current, ...prompts].map((entry) => ({
-      type: "entry" as const,
-      id: entry.id,
-      entry,
-      at: sinceOfEntry(entry) ?? "",
-    })),
-    ...replies.map((reply) => ({
-      type: "reply" as const,
-      id: reply.id,
-      reply,
-      at: reply.replied_at,
-    })),
-  ];
-  live.sort(newestFirst);
-  const shownLive = show === "all" ? live : live.filter((row) => row.type === "reply");
+  const priorityOf = (entry: Entry): number => {
+    const cardId = cardOfEntry(entry);
+    if (cardId === null) return NO_CARD_PRIORITY;
+    return cards.get(cardId)?.priority ?? UNKNOWN_PRIORITY;
+  };
+  const waitingRows = [...current, ...prompts].map((entry) => ({
+    type: "entry" as const,
+    id: entry.id,
+    entry,
+    priority: priorityOf(entry),
+    since: sinceOfEntry(entry) ?? "",
+    answered: entry.type === "decision" && entry.answered !== null,
+  }));
+  waitingRows.sort(mostUrgentFirst);
+  // Replies are news, not a job. They come the newest first, as the read lists them.
+  const replyRows = replies.map((reply) => ({ type: "reply" as const, id: reply.id, reply }));
+  const live: Shown[] = [...waitingRows, ...replyRows];
+  const shownWaiting = show === "all" ? waitingRows : [];
+  const shownLive: Shown[] = [...shownWaiting, ...replyRows];
   const shownStale = show === "all" ? stale : [];
   // Open rows only: an answered decision stays listed but no longer counts.
   const open = live.filter(
@@ -901,24 +931,31 @@ export function Inbox({
           </span>
         </div>
         <section aria-label="Needs you">
-          {shownLive.map((row) =>
-            row.type === "reply" ? (
+          {shownWaiting.map((row) => (
+            <Row key={row.id} entry={row.entry} selected={row.id === chosen?.id} ctx={ctx} />
+          ))}
+          {show === "all" && shownWaiting.length === 0 && replyRows.length === 0 ? (
+            <div className="irow empty">Nothing waits on you.</div>
+          ) : null}
+        </section>
+        {replyRows.length > 0 || show === "replies" ? (
+          <section aria-label="Replies">
+            {show === "all" ? (
+              <div className="lsub">
+                Replies <span className="c">{replyRows.length}</span>
+              </div>
+            ) : null}
+            {replyRows.map((row) => (
               <ReplyRow
                 key={row.id}
                 reply={row.reply}
                 selected={row.id === picked?.id}
                 projects={ctx.projects}
               />
-            ) : (
-              <Row key={row.id} entry={row.entry} selected={row.id === chosen?.id} ctx={ctx} />
-            ),
-          )}
-          {shownLive.length === 0 ? (
-            <div className="irow empty">
-              {show === "replies" ? "No unread replies." : "Nothing waits on you."}
-            </div>
-          ) : null}
-        </section>
+            ))}
+            {replyRows.length === 0 ? <div className="irow empty">No unread replies.</div> : null}
+          </section>
+        ) : null}
         {shownStale.length ? (
           <section aria-label="No longer current" className="in-stale">
             <div className="lsub">

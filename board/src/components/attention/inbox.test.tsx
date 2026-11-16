@@ -234,7 +234,11 @@ test("decisions and permission prompts share one list, each with its kind's icon
   const needs = screen.getByRole("region", { name: "Needs you" });
   const gone = screen.getByRole("region", { name: "No longer current" });
   expect(kind(within(needs).getByTestId(`inbox-row-${RETRY}`))).toBe("Decision");
-  expect(kind(within(needs).getByTestId(`inbox-row-${MERGE}`))).toBe("Decision");
+  // A merge approval is named as one, in the icon's title and in the row.
+  const merge = within(needs).getByTestId(`inbox-row-${MERGE}`);
+  expect(kind(merge)).toBe("Merge approval");
+  expect(merge.textContent).toContain("merge approval");
+  expect(within(needs).getByTestId(`inbox-row-${RETRY}`).textContent).toContain("decision");
   const prompt = within(needs)
     .getByText(/rm -rf target\/debug\/incremental/)
     .closest("a");
@@ -245,6 +249,41 @@ test("decisions and permission prompts share one list, each with its kind's icon
   expect(within(needs).queryByTestId(`inbox-row-${QUIET}`)).toBeNull();
   // No group headings, and nothing orange.
   expect(document.querySelector(".ghead, .permic")).toBeNull();
+});
+
+test("the most urgent card leads the list, then the longest wait, and an urgent row says so", async () => {
+  stubDaemon("default");
+  // The newest of the three decisions is on a card the owner marked urgent.
+  await renderInbox("default", undefined, (queryClient) => {
+    const key = queryKeyFor(boardPath());
+    const board = queryClient.getQueryData<BoardResponse>(key);
+    const capacity = queryClient
+      .getQueryData<AttentionResponse>(attentionQuery().queryKey)
+      ?.items.find((item) => item.id === CAPACITY);
+    if (!board || !capacity) throw new Error("no fixture board");
+    queryClient.setQueryData<BoardResponse>(key, {
+      ...board,
+      rows: board.rows.map((row) => (row.id === capacity.card_id ? { ...row, priority: 0 } : row)),
+    });
+  });
+
+  const needs = screen.getByRole("region", { name: "Needs you" });
+  const ids = within(needs)
+    .getAllByRole("link")
+    .map((row) => row.getAttribute("data-testid"));
+  const at = (id: string) => ids.indexOf(`inbox-row-${id}`);
+  // Asked last, on the urgent card: first. Then the older of the two others.
+  expect(at(CAPACITY)).toBe(0);
+  expect(at(RETRY)).toBeGreaterThan(at(CAPACITY));
+  expect(at(MERGE)).toBeGreaterThan(at(RETRY));
+  const urgent = within(needs).getByTestId(`inbox-row-${CAPACITY}`);
+  expect(within(urgent).getByTestId("row-priority").textContent).toBe("Urgent");
+  // A card of ordinary priority carries no mark.
+  expect(
+    within(within(needs).getByTestId(`inbox-row-${RETRY}`)).queryByTestId("row-priority"),
+  ).toBeNull();
+  // With nothing chosen, the detail shows the first row.
+  expect(urgent.getAttribute("data-selected")).toBe("true");
 });
 
 test("an item shows its question, evidence, recommendation, consequence and that it is current", async () => {

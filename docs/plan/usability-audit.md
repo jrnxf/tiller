@@ -12,9 +12,9 @@ Status values: `open`, `fixed` (with what was verified), `needs owner`, `to veri
 |---|---|
 | Phase | 1 - audit. Journeys 3 (ask), 4 (start a task) and 5 (trust) are walked on the board and the CLI. Journeys 1, 2 and 6 to 11 are not walked yet. |
 | Open P0 | 0. UA-15 is `needs owner`: the silent part is fixed, the answer itself needs a spec change. |
-| Open P1 | 8 (UA-01, UA-02, UA-03, UA-05, UA-09, UA-17, UA-20, UA-21). UA-18 is `needs owner`: the wrong status line is fixed, Cancel and the full view need a spec change. UA-19 is `needs owner`: the tile, the card and the timeline show the worker's report, and the "Needs you" rule needs a spec change. |
-| Fixed | UA-04, UA-16, DX-01. UA-15 part 1 (the owner is told where the answer shows). UA-18 part 1 (the ask tile shows an unread answer and opens it). UA-19 part 1 (a worker's report shows on its tile, on the card and in the timeline). |
-| Next step | UA-02 with UA-05 and UA-06 (the "needs you" path). Then UA-20 with UA-21 and UA-22. Walk journeys 2, 6 and 8 after the stand-in forge of the bench gaps. UA-11 (P2) is not started: check `docs/spec/state.md` section 6 first, because the column of a card is a contract. |
+| Open P1 | 6 (UA-01, UA-03, UA-09, UA-17, UA-20, UA-21). UA-18 is `needs owner`: the wrong status line is fixed, Cancel and the full view need a spec change. UA-19 is `needs owner`: the tile, the card and the timeline show the worker's report, and the "Needs you" rule needs a spec change. |
+| Fixed | UA-02, UA-04, UA-05, UA-06, UA-12, UA-16, DX-01. UA-15 part 1 (the owner is told where the answer shows). UA-18 part 1 (the ask tile shows an unread answer and opens it). UA-19 part 1 (a worker's report shows on its tile, on the card and in the timeline). |
+| Next step | UA-20 with UA-21 and UA-22 (start a task from anywhere on the board). Check `docs/spec/authority.md` first: a board "Start" may need the owner. Then UA-01. Walk journeys 2, 6 and 8 after the stand-in forge of the bench gaps. UA-11 (P2) is not started: check `docs/spec/state.md` section 6 first, because the column of a card is a contract. |
 
 ## The bench
 
@@ -85,6 +85,8 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 | Idea to a filed card | 3 steps: New card on the project's row, the title, Enter | 1 command, after one refusal for a missing `--kind` (UA-23) |
 | Filed card to a running card | not possible: the orchestrator decides (UA-20) | `tiller spawn <card> builder`, 73 lines of answer (UA-09) |
 | Read what happened on a card | the timeline shows the owner's news only (`harbor-2`: 4 lines in place of 24), with the question, the answer and a comment quoted (UA-04) | `card timeline` prints raw events (UA-09) |
+| Answer a card that says "Decision" | 2 steps: open the card, click an option or press its digit. The question, the recommendation and the answer control are at the top of the card (UA-02; before: leave the card, open the Inbox, find the item, answer: 4 steps) | `attention answer <item>`, after `attention list --open` for the id |
+| Find the most urgent item in the Inbox | it is the first row and the one shown, and its row says "Urgent" (UA-05; before: the last of 7 rows) | `tiller recap` orders by kind, not by the card's priority |
 | Learn that a run is blocked or done | the tile shows the worker's words and "Reports blocked" or "Reports done" within 2 s, on both hosts (UA-19; before, only when the orchestrator raised an item). The card enters "Needs you" only when the orchestrator raises an item | `tiller agents`, in a CSV row |
 
 ## Findings
@@ -97,13 +99,21 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 - Hurts: the owner starts a task and leaves. The task never starts, and the only message is the refusal of a command the owner did not run. "8 free" is false.
 - Fix: one "can this host start a run now" verdict from the floors (RAM, disk) and quota, in the host's health. Show it in `tiller machines`, the sidebar's machine row, the Health screen and `tiller doctor`, with the reason and the step ("free disk, or lower the floor in Settings > Hosts"). Free slots read 0 while the host refuses.
 
-### UA-02 - A card that needs you does not show its question (P1, open)
+### UA-02 - A card that needs you does not show its question (P1, fixed)
 
 - Journey: 5, 6.
 - Tried: on the board I opened `harbor-2`, whose status is "Decision", to answer it.
 - Happened: the card panel shows Status "Decision", then Slug, Branch, the worktree's absolute path, a 24-line timeline and the runs. The question, the options, the recommendation and an answer control are not on the card. They are only in the Inbox.
 - Hurts: the board says "this card needs you", the owner clicks it, and has to leave the card and find the same item in a list of others.
 - Fix: show the card's open questions at the top of the card panel with the Inbox's own answer control (options, keys 1-9, the note field). One component, two places.
+- Fixed on Mon 16 Nov 2026 (Lisbon), in the board only (the card read already carries the card's items):
+  - A card with an open item shows a "Needs you" block under its title and above its details: the item's kind, its age, the question, what follows from it, the recommendation and who made it, and the Inbox's own answer control (`AnswerForm`: the options with keys 1-9 and the note, or the text field). "Open in the Inbox" goes to the same item for its evidence.
+  - With two open items on one card, the keys 1-9 answer the first only, and the others take a click. A merge approval says that it is approved in the card's pull request section.
+  - After the answer the block stays with its receipt (Recorded, Delivered, Done) and reads "Answered" until a reload, as an answered row does in the Inbox.
+  - A peer's card works the same way: the answer is forwarded to the peer.
+  - Verified on the bench: `harbor-2` showed "Rotate keys with a 24 h overlap, or cut over at once?" with both options at the top of the drawer and of the full page; the key `2` recorded "Cut over at once" (`attention.answered`, `via: board`) and the receipt stayed. On the peer's `pylon-2` one click recorded "HMAC-SHA256" on the peer, the timeline said "You answered", and "Needs you" went from 6 to 5. `quill-1` (a scout report with no options) showed the text field. Checked in light at 1440 px (drawer), in dark at 1440 px (full page) and in dark at 390 px.
+  - Tests: `board/src/components/board/views.test.tsx` ("a card that needs the owner shows its question and takes the answer in place", "a card with nothing to answer has no question block"). The board fixtures now list a card's own items on its card read, as the daemon does.
+- Not done: the card's main button is still "Close" while a question waits (UA-20).
 
 ### UA-03 - The CLI on main cannot see or reach work on the peer (P1, open)
 
@@ -134,20 +144,29 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
   - `tiller card timeline` in the CLI still prints the raw events. That belongs to UA-09 (CLI answers are raw records).
   - When the newest 50 events are all system events, the timeline says so and offers "Show earlier". It does not load further pages by itself.
 
-### UA-05 - The Inbox ignores priority (P1, open)
+### UA-05 - The Inbox ignores priority (P1, fixed)
 
 - Journey: 2, 6.
 - Tried: opened the Inbox to learn what needs me first.
 - Happened: 7 items, newest first. The only P0 Urgent card (`harbor-2`) is last. A reply to a question I asked sits in the middle.
 - Hurts: with 14 projects the list is long. The owner answers what is on top and the urgent item waits.
 - Fix: order by card priority, then by how long the item has waited (oldest first). Show the priority on the row when it is P0 or P1.
+- Fixed on Mon 16 Nov 2026 (Lisbon), in the board (`board/src/components/attention/order.ts`). No spec fixes the order of the Inbox's items; only the replies read is "newest first" (`docs/spec/state.md` and the replies read of `docs/spec/protocol.md`), and replies keep that order.
+  - Rows that wait on the owner (decisions, permission prompts, dialogs) come first: the most urgent card, then the longest wait. An orchestrator stopped on a dialog has no card and counts as urgent, because it holds up its whole project. A row answered from this tab moves under the rows that still wait.
+  - A row of a P0 or P1 card says "Urgent" or "High" with the board's priority mark.
+  - Replies follow under their own "Replies N" heading. They are news, not a job. The "Replies" filter is unchanged.
+  - With nothing chosen, the detail shows the first row, so the most urgent item is what the Inbox opens on.
+  - Verified on the bench: `harbor-2` (P0) is the first row with "Urgent" (before: the last of 7), and the one reply is last under "Replies 1". Checked in light at 1440 px and in dark at 390 px.
+  - Tests: `order.test.ts`, `inbox.test.tsx` ("the most urgent card leads the list, then the longest wait, and an urgent row says so"), `replies.test.tsx` (the replies group).
+- Not done: `tiller recap` orders by the item's kind and then the age (`crates/cli/src/cmd/recap.rs`, a contract of `docs/spec/protocol.md`: "most blocking first"). The two orders differ. The "Needs you" count still includes unread replies (UA-24).
 
-### UA-06 - Every Inbox row says "decision" (P2, open)
+### UA-06 - Every Inbox row says "decision" (P2, fixed)
 
 - Journey: 2, 6.
 - Happened: a credential request, a recovery question and a scout report all show "decision" in the row and "Decision" in the away brief. `tiller board` and `tiller recap` name the real kind.
 - Hurts: "issue a new key" (I must do something elsewhere) and "pick A or B" (one key press) look the same.
 - Fix: show the item's kind with the words the CLI uses, and a distinct icon for credential and recovery.
+- Fixed on Mon 16 Nov 2026 (Lisbon): an Inbox row names its kind ("decision", "credential", "merge approval", "recovery", "scout report", "review") and has an icon for it (a fork, a key, a merge mark, a retry arrow, a page). The away brief's "Still waiting for you" names the kind too. The separate "merge" chip is gone, because the row says "merge approval". Verified on the bench in both themes; test: `inbox.test.tsx` (the kinds of the shared list).
 
 ### UA-07 - The host is on every card (P2, open)
 
@@ -183,11 +202,12 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 - Hurts: "Working 11" overstates what is in progress. A failed run looks like work.
 - Fix: a card whose runs all ended and that waits for the owner belongs in a "Needs you" lane or carries a clear "stopped" state in the column.
 
-### UA-12 - The Inbox row's age wraps to its own line (P2, open)
+### UA-12 - The Inbox row's age wraps to its own line (P2, fixed)
 
 - Journey: 2.
 - Happened: at 1440 px, rows with a longer project and card name ("Lantern / lantern-1 / decision /") push the age ("3m") to a second line, after a hanging "/".
 - Fix: keep the age on the right edge of the row, outside the wrapping text.
+- Fixed on Mon 16 Nov 2026 (Lisbon), another way: the row's second line is two pieces that never break inside, the place (host, project, card) and "kind / age". A narrow row wraps between the pieces, so no "/" hangs and no age stands alone. Verified at 1440 px and 390 px.
 
 ### UA-13 - The away brief counts runs outside the away scope (P2, to verify in journey 11)
 
@@ -312,7 +332,8 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 - A new card's panel shows the worktree's absolute path and the slug before anything the owner needs.
 - At 390 px the "x" that removes a project in the Ask box wraps to a line of its own.
 - To verify: the Ask box said "will start orchestrator" for Lantern, whose orchestrator was running, right after a page load. The label may read "not running" while the agents list still loads (`board/src/components/shell/ask-dialog.tsx`, `statusOf`).
-- The Inbox counts unread replies in "Needs you 8". A reply is news, not a job for the owner.
+- The Inbox counts unread replies in "Needs you 8". A reply is news, not a job for the owner. Since UA-05 the replies have their own group under the rows that wait, but the count and the sidebar badge still include them.
+- The board has two names for priority 4: "Someday" in the card's priority picker (`attention/format.ts`, `PRIORITIES`) and "Lowest" in the card's details (`board/icons.tsx`, `PRIORITY_NAMES`).
 - To verify: the `A` key that opens the Ask box may also type "a" into its field. Seen once with a scripted key press (`chrome-devtools-axi press a`); not checked with a real keyboard.
 - To verify: `board/src/components/shell/ask-settings.test.tsx` (line 181, the folder field's value) failed once in a full `bun run test` while the bench ran, and passed 3 times alone and in the next full run. It has a `waitFor` deadline, so the cause is probably the machine's load.
 
@@ -349,13 +370,13 @@ Order of work, highest owner value first. Fixes that share a cause are grouped.
 
 1. Done as far as the contract allows: UA-16, UA-15 part 1, UA-18 part 1 and UA-19 part 1. The rest of UA-15, UA-18 and UA-19 waits under "Needs owner".
 2. Done: UA-04 (a timeline without plumbing lines). UA-11 (no ended run in "Working") moves to the polish step: it is P2, and the column is a contract of `docs/spec/state.md` section 6.
-3. UA-02 with UA-05 and UA-06: the "needs you" path. The question is on the card, the Inbox is ordered by urgency, and the kind is named.
+3. Done: UA-02, UA-05, UA-06 and UA-12 (the "needs you" path). The question is on the card, the Inbox is ordered by urgency, and the kind is named.
 4. UA-20 with UA-21 and UA-22: start a task from anywhere on the board.
 5. UA-01: an honest host verdict in every place that shows a host.
 6. UA-17 with UA-03, UA-09, UA-10 and UA-23: the CLI as an owner surface.
 7. Finish the audit in parallel with the fixes: close the bench gaps (the stand-in forge), then walk journeys 1, 2, 6, 8, 9, 10 and 11 and the rest of 5 and 7.
 8. UA-07 with UA-08: the host out of the owner's way.
-9. UA-11, UA-12, UA-13, UA-14, UA-22, UA-24: polish.
+9. UA-11, UA-13, UA-14, UA-22, UA-24: polish.
 
 ## Needs owner
 

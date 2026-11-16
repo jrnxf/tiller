@@ -37,6 +37,7 @@ import { Ago } from "./ago";
 import { stateText, statusMark } from "./badge";
 import { DependsOn } from "./card-deps";
 import { CardHeader } from "./card-header";
+import { CardQuestions } from "./card-questions";
 import { bugProjectOf, isTillerBug, isUntriaged, machineOf } from "./bugs";
 import { HostChip, PeerNote } from "./host-chip";
 import { ApproveActions } from "../attention/approve";
@@ -747,6 +748,9 @@ export function CardPage({
         off={standing.canAct ? null : standing.reason}
         actions={!hostHealth}
       >
+        {hostHealth ? null : (
+          <CardQuestions cardId={card.id} attention={detail.attention} owner={column} />
+        )}
         {untriaged ? (
           <BugTriage
             row={column}
