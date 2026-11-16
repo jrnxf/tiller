@@ -12,9 +12,9 @@ Status values: `open`, `fixed` (with what was verified), `needs owner`, `to veri
 |---|---|
 | Phase | 1 - audit. Journeys 3 (ask), 4 (start a task) and 5 (trust) are walked on the board and the CLI. Journeys 1, 2 and 6 to 11 are not walked yet. |
 | Open P0 | 0. UA-15 is `needs owner`: the silent part is fixed, the answer itself needs a spec change. |
-| Open P1 | 10 (UA-01, UA-02, UA-03, UA-04, UA-05, UA-09, UA-17, UA-19, UA-20, UA-21). UA-18 is `needs owner`: the wrong status line is fixed, Cancel and the full view need a spec change. |
-| Fixed | UA-16, DX-01. UA-15 part 1 (the owner is told where the answer shows). UA-18 part 1 (the ask tile shows an unread answer and opens it). |
-| Next step | Fix UA-19 with UA-04 and UA-11 (what a card says about its own progress). Walk journeys 2, 6 and 8 after the stand-in forge of the bench gaps. |
+| Open P1 | 9 (UA-01, UA-02, UA-03, UA-04, UA-05, UA-09, UA-17, UA-20, UA-21). UA-18 is `needs owner`: the wrong status line is fixed, Cancel and the full view need a spec change. UA-19 is `needs owner`: the tile, the card and the timeline show the worker's report, and the "Needs you" rule needs a spec change. |
+| Fixed | UA-16, DX-01. UA-15 part 1 (the owner is told where the answer shows). UA-18 part 1 (the ask tile shows an unread answer and opens it). UA-19 part 1 (a worker's report shows on its tile, on the card and in the timeline). |
+| Next step | Finish UA-04 (hide the system events of the timeline behind a switch, fold "queued a message" lines) with UA-11. Then UA-02 with UA-05 and UA-06. Walk journeys 2, 6 and 8 after the stand-in forge of the bench gaps. |
 
 ## The bench
 
@@ -84,7 +84,7 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 | Recover from the wrong project | not possible: the ask tile has no Cancel (UA-18, needs owner) | `ask resolve <ask> cancelled`, which the help calls an orchestrator's tool |
 | Idea to a filed card | 3 steps: New card on the project's row, the title, Enter | 1 command, after one refusal for a missing `--kind` (UA-23) |
 | Filed card to a running card | not possible: the orchestrator decides (UA-20) | `tiller spawn <card> builder`, 73 lines of answer (UA-09) |
-| Learn that a run is blocked or done | only when the orchestrator raises an item; the worker's own report stays under "Runs" (UA-19) | `tiller agents`, in a CSV row |
+| Learn that a run is blocked or done | the tile shows the worker's words and "Reports blocked" or "Reports done" within 2 s, on both hosts (UA-19; before, only when the orchestrator raised an item). The card enters "Needs you" only when the orchestrator raises an item | `tiller agents`, in a CSV row |
 
 ## Findings
 
@@ -112,13 +112,15 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 - Hurts: the owner must know which machine owns a project, and open a shell on it, to use the CLI. The board hides the host; the CLI makes it the first question. `tiller recap` gives an incomplete morning list without saying so.
 - Fix: owner reads and writes in the CLI go through the local daemon when it runs, as the board's do, so a peer's project, card and question resolve by name. Until then, a `not_found` on a name the peer owns says "pylon is on peer" and `tiller recap` says how many items the peer holds. Check `docs/spec` before the fix: if the CLI is host-local by contract, this moves to "Needs owner".
 
-### UA-04 - The card timeline is plumbing (P1, open)
+### UA-04 - The card timeline is plumbing (P1, open; a worker's report is now readable)
 
 - Journey: 5.
 - Tried: read `harbor-2`'s timeline to learn what happened.
 - Happened: 24 lines, among them "Tiller deferred a message: not idle" four times, "Tiller delivered a message" five times, "You stamped the session", "You recorded a reservation reserved", "Hook bound a session to the run", "You placed the run on a machine" three times. The two lines that matter ("Orchestrator raised an item for you", "Orchestrator reported the run status") do not say what the item or the status was.
 - Hurts: the timeline is the proof behind "done" and "blocked". The owner cannot read it. "You stamped the session" credits the owner with steps the system took.
 - Fix: the default timeline shows owner events with their content (the status line, the question, the answer, the PR, the landing). A "Show system events" switch shows the rest. Events a command made in one step fold into one line.
+- Done with UA-19 on Mon 16 Nov 2026 (Lisbon): a worker's report reads "Worker reported blocked" with its words quoted under it, and a worker's lines no longer say "Orchestrator".
+- Still open: the plumbing lines stay. Each report is followed by "Worker queued a message" and "Tiller deferred a message: busy" (the wake of the orchestrator). "You stamped the session" and "You placed the run on a machine" still credit the owner. A raised item does not quote its question.
 
 ### UA-05 - The Inbox ignores priority (P1, open)
 
@@ -242,13 +244,25 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
   - "Cancel" on the board. `docs/spec/state.md` section 8 lists the actors of `ask.resolve` as the orchestrator, the board "implicit on add" and the prompt hook, and `docs/spec/protocol.md` section 7 has no call for it.
   - The full text and the delivery state of an ask with no answer. The board row has the first line only (200 characters), and no read returns one ask.
 
-### UA-19 - A worker's own report does not change what the card says (P1, open)
+### UA-19 - A worker's own report does not change what the card says (P1, needs owner; the tile, the card and the timeline are fixed)
 
 - Journey: 5.
 - Tried: started a builder on `lantern-5`. As the worker, reported `working: Wrote the header builder; 14 of 20 tests pass`, then `blocked: The staging mail server refuses the test login`, then `done: All 20 tests pass`.
 - Happened: after each report the tile and the card's Status say "Idle". The Inbox count and "Needs you" do not move. The status line is on the card, but in the "Runs" section under a timeline of 14 to 26 lines, off the first screen at both widths. The timeline says "Orchestrator reported the run status" for the worker's report, without the text. A card shows "blocked" or "needs you" only when the orchestrator raises an item (the seeded `lantern-1` shows "Credential").
 - Hurts: this is the "start a task and leave" job. The worker says it is blocked, and the board says "Idle". If the orchestrator is busy, slow or gone, the owner never learns it. "Idle" is the agent's terminal state, not the state of the work.
 - Fix: the tile and the Status row show the newest report of the run: its state as the badge ("Working", "Blocked", "Reports done") and its line as the tile's second line, with its age. A `blocked` or `needs-decision` report puts the card in "Needs you" even before the orchestrator acts. The timeline names the worker and quotes the line. Check `docs/spec/state.md` first: if the column and the "needs you" rule are a contract, the badge and the line are still free to change.
+- Part 1, done on Mon 16 Nov 2026 (Lisbon), inside the contract (no new read and no new field: the report is the `last_status_line` of the agents read that the board already loads, for both hosts):
+  - A tile shows the words of its live worker's newest report as one line under the title. The tooltip has the role, the state and the full line.
+  - A report that the work stopped or ended replaces a badge that only says what the terminal does ("Idle", "Working", "Stale", "Unknown"): "Reports blocked" and "Asks for a decision" in the "needs you" colour, "Reports failed" in red, "Reports done" in green, "Reports paused". "Reports done" is the worker's claim, said as one: the card still lands only through its checks. A report of progress keeps the activity badge and adds its words. A card that the orchestrator flagged keeps its item's badge ("Credential", "Decision") and shows the words too.
+  - The card's details have a row "Builder says" (or Scout, Reviewer, Verifier) with the same chip and the full line, right under Status, on the first screen at both widths.
+  - The timeline says "Worker reported blocked" and quotes the line under it. Before, it said "Orchestrator reported the run status" with no text. Every line of a worker session now says "Worker" (new actor value `worker` in `GET /api/v1/cards/{id}/timeline`; `contract/openapi.json` is regenerated). The board shows an actor it does not know as "Tiller".
+  - With two live workers on one card the most urgent report shows: blocked, then needs-decision, failed, paused, done, working.
+  - Verified on the bench with the board open and no reload: a new builder on `lantern-4` showed "Idle" and no line; 2 s after `status working ...` the tile showed the words and kept "Idle"; 2 s after `status blocked ...` it showed the words and "Reports blocked". The card showed "Builder says / Reports blocked / The staging mail server refuses the test login", and the timeline "Worker reported blocked" with the quote. The peer's cards show their reports the same way (`pylon-1`, `tundra-1`, `orbit-1` on the board, `pylon-1` on its card page with "Builder says" and the quoted timeline line). Checked in light at 1440 px and in dark at 390 px.
+  - Tests: `board/src/components/board/report.test.ts`, `views.test.tsx` ("a tile shows what its worker last reported, and a stopped worker replaces the activity badge"), `crates/daemon/tests/status_timeline.rs`.
+- Not done, and why (see "Needs owner"):
+  - A `blocked` or `needs-decision` report does not put the card in "Needs you", and the Inbox count does not move. `docs/spec/state.md` section 6 defines the flag (an open attention item, or a session that waits on a prompt) and says that the Needs you tab keeps exactly the flagged cards.
+  - The report has no age on the tile. The agents read carries the line but not `last_status_at` (`docs/spec/protocol.md` section 7.3). The timeline has the time.
+  - The report goes away with the worker's session: the agents read lists live sessions only. The last line of an ended run is still under "Runs" on the card (UA-11).
 
 ### UA-20 - On the board a new task stops at "Filed" (P1, open)
 
@@ -321,8 +335,8 @@ Next step for these: find out whether they fail on a quiet machine and on Linux.
 
 Order of work, highest owner value first. Fixes that share a cause are grouped.
 
-1. Done as far as the contract allows: UA-16, UA-15 part 1 and UA-18 part 1. The rest of UA-15 and UA-18 waits under "Needs owner".
-2. UA-19 with UA-04 and UA-11: what a card says about its own progress. The worker's report on the tile, a readable timeline, no ended run in "Working".
+1. Done as far as the contract allows: UA-16, UA-15 part 1, UA-18 part 1 and UA-19 part 1. The rest of UA-15, UA-18 and UA-19 waits under "Needs owner".
+2. The rest of UA-04 with UA-11: a timeline without plumbing lines (a "Show system events" switch, folded lines, the question of a raised item quoted), and no ended run in "Working".
 3. UA-02 with UA-05 and UA-06: the "needs you" path. The question is on the card, the Inbox is ordered by urgency, and the kind is named.
 4. UA-20 with UA-21 and UA-22: start a task from anywhere on the board.
 5. UA-01: an honest host verdict in every place that shows a host.
@@ -338,6 +352,8 @@ Order of work, highest owner value first. Fixes that share a cause are grouped.
 - UA-15 part 2 (the last P0): `docs/spec/protocol.md` section 10 says that ask text stays on the peer, and replies are not federated. With that rule the owner can never read, on one board, the answer to a question that the same board sent. Today the board says so in the Ask box, the toast and the tile (part 1, done), but the owner must still open the peer's board to read the answer. Recommendation: for a paired host with an `act` key, let the link carry the first line of each ask, an `answered_at` on each `asked` row, and the unread replies, and forward "Mark read". The owner's words already cross the link when the ask is sent. The work after a yes is about one iteration: the snapshot rows, a federated replies read, the forwarded "Mark read", and the tile and Inbox on the board.
 
 - UA-18, the rest: let the owner cancel an ask on the board, and open one. Today a wrong ask leaves the board only when the orchestrator resolves it, or when the owner runs `tiller ask resolve <ask> cancelled` in a terminal. `docs/spec/authority.md` (the matrix row "Resolve an ask, create or edit a card") already gives the owner this right, but `docs/spec/state.md` names the board as an actor of `ask.resolve` only "implicit on add", and `docs/spec/protocol.md` section 7 lists no call. Recommendation: add `POST /api/v1/asks/{id}/cancel` (owner only, forwarded to a peer like the other mutations, `ask.resolve cancelled` with the reason "cancelled by the owner on the board") and `GET /api/v1/asks/{id}` (the full text, the note's delivery state, the replies), and add `answered_at` to the `asked` row (shared with UA-15 part 2). The board work after a yes is about one iteration: a panel that the tile opens, with the text, "Delivered", the answer, "Ask again" and "Cancel".
+
+- UA-19, the rest: let a worker's `blocked` or `needs-decision` report flag its card. Today the card enters "Needs you" only when the orchestrator opens an item, so a worker that stops while its orchestrator is busy, slow or gone shows "Reports blocked" on its tile but is in no count and no Inbox. `docs/spec/state.md` section 6 fixes the flag. Recommendation: do not change the flag. Have the daemon open a `recovery` item when a `blocked` or `needs-decision` report is older than a few minutes and no open item exists for the card (a reconcile rule, so `docs/spec/recovery.md` gets a row). The owner then gets one Inbox item with the worker's words, and the existing flag, counts and notification apply unchanged. Also add `last_status_at` to the agents rows (`docs/spec/protocol.md` section 7.3), so the tile can say how old the report is. The work after a yes is about one iteration.
 
 Two more candidates, to settle when their fix starts:
 

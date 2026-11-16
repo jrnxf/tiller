@@ -80,17 +80,24 @@ import {
   useResumeSession,
 } from "./run-menu";
 import type { RunDialog, RunTarget } from "./run-menu";
+import { reportLabel, reportRole, reportTone, useReport } from "./report";
 import { KindLabel, ModelChip } from "./tile";
 import { BugTriage } from "./triage";
 import { CheckIcon, CloseIcon } from "../shell/icons";
 import "./board.css";
 
-const ACTOR_LABEL = { you: "You", orchestrator: "Orchestrator", hook: "Hook", system: "Tiller" };
+const ACTOR_LABEL = {
+  you: "You",
+  orchestrator: "Orchestrator",
+  worker: "Worker",
+  hook: "Hook",
+  system: "Tiller",
+};
 
 function ActorIcon({ actor }: { actor: TimelineEntry["actor"] }) {
   if (actor === "you") return <UserIcon />;
   if (actor === "hook") return <BoltIcon />;
-  if (actor === "orchestrator") return <SendIcon />;
+  if (actor === "orchestrator" || actor === "worker") return <SendIcon />;
   return <PaneIcon />;
 }
 
@@ -159,7 +166,8 @@ function Timeline({
                 <ActorIcon actor={entry.actor} />
               </span>
               <span className="tx">
-                <b>{ACTOR_LABEL[entry.actor]}</b> <span className="q">{entry.text}</span>
+                <b>{ACTOR_LABEL[entry.actor] ?? ACTOR_LABEL.system}</b>{" "}
+                <span className="q">{entry.text}</span>
                 {entry.quote ? <span className="quote">{entry.quote}</span> : null}
               </span>
               <span className="when">{formatLisbonMoment(entry.at)}</span>
@@ -607,6 +615,8 @@ export function CardPage({
 
   const hold = detail.holds[0];
   const phase = phaseOf(column);
+  // What the card's live worker last said about its own work.
+  const report = useReport(column.id);
   const blockers = detail.deps
     .filter((dep) => dep.released_at === null)
     .map((dep) => dep.display_id);
@@ -692,6 +702,15 @@ export function CardPage({
               <span className="meta">blocked by {blockers.join(", ")}</span>
             ) : null}
           </dd>
+          {report ? (
+            <>
+              <dt>{reportRole(report)} says</dt>
+              <dd data-testid="card-report">
+                <span className={`lab sm ${reportTone(report)}`}>{reportLabel(report)}</span>
+                <span className="report-text">{report.text}</span>
+              </dd>
+            </>
+          ) : null}
           {hostHealth ? null : (
             <DependsOn
               detail={detail}

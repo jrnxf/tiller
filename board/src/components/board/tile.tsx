@@ -14,6 +14,14 @@ import { AsOf, HostChip } from "./host-chip";
 import { isTillerBug, isUntriaged } from "./bugs";
 import { HelpIcon, PrIcon, RouteIcon, Status } from "./icons";
 import { useAmbiguousIds, useHostLabel, useStanding } from "./peer-state";
+import {
+  isActivityBadge,
+  overridesActivity,
+  reportLabel,
+  reportRole,
+  reportTone,
+  useReport,
+} from "./report";
 import type { Tile } from "./model";
 import type { LaneHealth } from "../states/degraded";
 
@@ -87,6 +95,13 @@ function CardTile({ row, lane }: { row: BoardRow; lane: LaneHealth["kind"] }) {
   const owner = ownerOf(row);
   const { card: openId, owner: openOwner } = useSearch({ strict: false });
   const selected = openId === row.id && (openOwner ?? undefined) === owner;
+  // What the card's worker last said. A report that the work stopped, or that
+  // it is done, replaces a badge that only says what the terminal does.
+  const report = useReport(row.id);
+  const said =
+    report && !row.needs_you && isActivityBadge(row.badge) && overridesActivity(report)
+      ? report
+      : null;
   return (
     <Link
       to="/"
@@ -96,7 +111,12 @@ function CardTile({ row, lane }: { row: BoardRow; lane: LaneHealth["kind"] }) {
       data-pending={isPending(row)}
       aria-current={selected ? "true" : undefined}
       data-peer-state={standing.peer ? (standing.dim ? "stale" : "live") : undefined}
-      title={`${id}: ${row.title}`}
+      title={
+        report
+          ? `${id}: ${row.title}\n${reportRole(report)}, ${reportLabel(report).toLowerCase()}: ${report.text}`
+          : `${id}: ${row.title}`
+      }
+      data-report={report?.state}
     >
       <div className="c-top">
         <Status mark={statusMark(row)} />
@@ -119,12 +139,19 @@ function CardTile({ row, lane }: { row: BoardRow; lane: LaneHealth["kind"] }) {
         <span>{row.title}</span>
       </div>
       <FiledFrom row={row} />
+      {report ? (
+        <div className="c-from c-report">
+          <span>{report.text}</span>
+        </div>
+      ) : null}
       <div className="c-chips">
         <HostChip entity={row} />
         {row.pr_number ? <PrChip number={row.pr_number} /> : null}
         {untriaged ? <span className="lab sm yel">Untriaged</span> : null}
         {isTillerBug(row) ? <span className="lab sm bad">Bug</span> : null}
-        {untriaged && row.badge === "filed" ? null : (
+        {said ? (
+          <span className={`lab sm ${reportTone(said)}`}>{reportLabel(said)}</span>
+        ) : untriaged && row.badge === "filed" ? null : (
           <span className={`lab sm ${tone}`}>
             {dot === "unknown" ? <HelpIcon /> : null}
             {badgeText(row)}

@@ -1961,3 +1961,12 @@ a.card:hover {
   font-size: var(--fs-mini);
   color: var(--fg-3);
 }
+
+/* A worker's own report: on a tile, one line under the title; on the card
+   page, the chip and the words in the details. */
+.card .c-report {
+  color: var(--fg-2);
+}
+.props dd .report-text {
+  min-width: 0;
+}

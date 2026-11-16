@@ -1389,6 +1389,14 @@ pub fn timeline(store: &Store, reference: &str, before: Option<i64>) -> Result<T
         None
     };
     let quote = |event: &Event| -> Result<Option<String>> {
+        // A worker's report is quoted in its own words.
+        if event.kind == "run.status" {
+            return Ok(event
+                .payload
+                .get("line")
+                .and_then(Value::as_str)
+                .map(str::to_owned));
+        }
         if event.kind != "ask.replied" {
             return Ok(None);
         }
@@ -1401,22 +1409,43 @@ pub fn timeline(store: &Store, reference: &str, before: Option<i64>) -> Result<T
             )
             .optional()?)
     };
+    // A session that is not an orchestrator is a worker: its lines must not
+    // read as the orchestrator's.
+    let actor = |event: &Event| -> Result<&'static str> {
+        Ok(match event.actor.as_str() {
+            "owner" | "board" => "you",
+            // The owner on a paired board host (a forwarded mutation).
+            actor if actor.starts_with("board@") => "you",
+            "hook" => "hook",
+            actor => match actor.strip_prefix("session:") {
+                Some(session) => {
+                    let role: Option<String> = store
+                        .conn()
+                        .query_row(
+                            "SELECT role FROM sessions WHERE id = ?1",
+                            [session],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    match role.as_deref() {
+                        Some("orchestrator") | None => "orchestrator",
+                        Some(_) => "worker",
+                    }
+                }
+                None => "system",
+            },
+        })
+    };
+    let actors = events.iter().map(actor).collect::<Result<Vec<_>>>()?;
     let quotes = events.iter().map(quote).collect::<Result<Vec<_>>>()?;
     let entries = events
         .into_iter()
         .zip(quotes)
-        .map(|(event, quote)| TimelineEntry {
+        .zip(actors)
+        .map(|((event, quote), actor)| TimelineEntry {
             seq: event.seq,
             at: at(event.at),
-            actor: match event.actor.as_str() {
-                "owner" | "board" => "you",
-                // The owner on a paired board host (a forwarded mutation).
-                actor if actor.starts_with("board@") => "you",
-                "hook" => "hook",
-                actor if actor.starts_with("session:") => "orchestrator",
-                _ => "system",
-            }
-            .to_owned(),
+            actor: actor.to_owned(),
             text: timeline_text(&event),
             quote,
         })
@@ -1455,7 +1484,10 @@ fn timeline_text(event: &Event) -> String {
         },
         "run.started" => "started a run".to_owned(),
         "run.placed" => "placed the run on a machine".to_owned(),
-        "run.status" => "reported the run status".to_owned(),
+        "run.status" => match field("state") {
+            Some(state) => format!("reported {}", state.replace('-', " ")),
+            None => "reported the run status".to_owned(),
+        },
         "run.paused" => "paused the run".to_owned(),
         "run.unpaused" => "cleared the pause".to_owned(),
         "run.ended" => "ended the run".to_owned(),

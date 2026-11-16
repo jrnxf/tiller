@@ -12875,7 +12875,7 @@
         "properties": {
           "actor": {
             "type": "string",
-            "description": "`you`, `orchestrator`, `hook` or `system`."
+            "description": "`you`, `orchestrator`, `worker`, `hook` or `system`."
           },
           "at": {
             "type": "string"
@@ -12885,7 +12885,7 @@
               "string",
               "null"
             ],
-            "description": "The words the line quotes: a reply's body on `ask.replied`. Absent\nfrom a peer that predates replies."
+            "description": "The words the line quotes: a reply's body on `ask.replied`, a worker's\nstatus line on `run.status`. Absent from a peer that predates replies."
           },
           "seq": {
             "type": "integer",

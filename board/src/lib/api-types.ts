@@ -419,9 +419,11 @@ export interface CardDetail {
 export interface TimelineEntry {
   seq: number;
   at: string;
-  actor: "you" | "orchestrator" | "hook" | "system";
+  // `worker` is a scout, builder, reviewer or verifier session.
+  actor: "you" | "orchestrator" | "worker" | "hook" | "system";
   text: string;
-  // The words the line quotes under it: the orchestrator's reply.
+  // The words the line quotes under it: the orchestrator's reply, or a
+  // worker's status line.
   quote?: string | null;
 }
 

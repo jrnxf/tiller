@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import type {
+  AgentsResponse,
   BoardResponse,
   BoardRow,
   ChangeEvent,
@@ -21,7 +22,7 @@ import type { Scenario } from "../../lib/fixtures";
 import { standingOf } from "../../lib/peers";
 import { loadPrefs, prefsStore, updatePrefs } from "../../lib/prefs";
 import { receiptsStore } from "../../lib/receipts";
-import { boardPath, projectsPath, queryKeyFor, repliesPath } from "../../lib/queries";
+import { agentsPath, boardPath, projectsPath, queryKeyFor, repliesPath } from "../../lib/queries";
 import { createAppRouter } from "../../lib/router";
 import { applyChange } from "../../lib/sse";
 import { CHECK_DELAY_MS } from "../shell/project-add";
@@ -1743,4 +1744,58 @@ test("a card page chunk that fails to load leaves no unhandled rejection", async
   } finally {
     process.off("unhandledRejection", unhandled);
   }
+});
+
+// ---- A worker's own report (UA-19) ----
+
+test("a tile shows what its worker last reported, and a stopped worker replaces the activity badge", async () => {
+  stubApi("default");
+  const { queryClient } = await renderApp();
+  const key = queryKeyFor(agentsPath());
+  await waitFor(() => expect(queryClient.getQueryState(key)?.status).toBe("success"));
+  const board = queryClient.getQueryData<BoardResponse>(queryKeyFor(boardPath()));
+  const staffed = new Set(
+    queryClient
+      .getQueryData<AgentsResponse>(key)
+      ?.orchestrators.flatMap((top) => top.workers.map((worker) => worker.card_id)),
+  );
+  const row = board?.rows.find(
+    (candidate) =>
+      staffed.has(candidate.id) && candidate.badge === "working" && !candidate.needs_you,
+  );
+  if (!row) throw new Error("the fixture has no working card");
+  const say = (line: string) =>
+    act(() => {
+      queryClient.setQueryData<AgentsResponse>(key, (old) =>
+        old
+          ? {
+              ...old,
+              orchestrators: old.orchestrators.map((top) => ({
+                ...top,
+                workers: top.workers.map((worker) =>
+                  worker.card_id === row.id ? { ...worker, last_status_line: line } : worker,
+                ),
+              })),
+            }
+          : old,
+      );
+    });
+
+  // A report of progress adds its words and keeps the badge.
+  say("working: Wrote the header builder; 14 of 20 tests pass");
+  const tile = tileOf(row.title);
+  await within(tile).findByText("Wrote the header builder; 14 of 20 tests pass");
+  expect(within(tile).getByText("Working")).toBeTruthy();
+  expect(tile.getAttribute("data-report")).toBe("working");
+
+  // A worker that says it is blocked no longer reads as plain activity.
+  say("blocked: The staging mail server refuses the test login");
+  await within(tile).findByText("The staging mail server refuses the test login");
+  expect(within(tile).getByText("Reports blocked").className).toContain("warn");
+  expect(within(tile).queryByText("Working")).toBeNull();
+  expect(tile.getAttribute("title")).toContain("Builder, reports blocked");
+
+  // "Done" is the worker's claim, said as one.
+  say("done: All 20 tests pass");
+  expect((await within(tile).findByText("Reports done")).className).toContain("ok");
 });

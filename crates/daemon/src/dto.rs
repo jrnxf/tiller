@@ -493,11 +493,11 @@ pub struct CardDetail {
 pub struct TimelineEntry {
     pub seq: i64,
     pub at: String,
-    /// `you`, `orchestrator`, `hook` or `system`.
+    /// `you`, `orchestrator`, `worker`, `hook` or `system`.
     pub actor: String,
     pub text: String,
-    /// The words the line quotes: a reply's body on `ask.replied`. Absent
-    /// from a peer that predates replies.
+    /// The words the line quotes: a reply's body on `ask.replied`, a worker's
+    /// status line on `run.status`. Absent from a peer that predates replies.
     #[serde(default)]
     pub quote: Option<String>,
 }
