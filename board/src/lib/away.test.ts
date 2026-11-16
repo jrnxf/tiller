@@ -1,34 +1,84 @@
 import { expect, test } from "vitest";
 
-import type { Project } from "./api-types";
-import { ownBoards, uncoveredHosts, uncoveredNames } from "./away";
+import type { AwayBriefResponse } from "./api-types";
+import {
+  contractKeys,
+  contractsOf,
+  earliestUntil,
+  readKey,
+  runningOf,
+  unreadBriefs,
+  unreadHosts,
+} from "./away";
+import { awayBrief } from "./fixtures-away";
 
-function project(id: string, host?: string): Project {
-  return {
-    id,
-    name: id,
-    ...(host ? { host, link: "live", as_of: "2026-11-02T12:00:00.000Z" } : {}),
-  } as Project;
+function brief(running: boolean, until: string, id = "01JAWAY0000000000000000000") {
+  return { ...awayBrief(running), approval_id: id, until_at: until };
 }
 
-test("only a paired host's own projects are left out, counted per host", () => {
-  const hosts = uncoveredHosts([
-    project("alpha"),
-    project("fleet"),
-    project("pylon", "host-b"),
-    project("orbit", "host-b"),
-    project("fleet", "host-b"),
-    project("delta", "host-c"),
+const both: AwayBriefResponse = {
+  brief: brief(true, "2026-11-12T18:00:00.000Z"),
+  hosts: [
+    {
+      host: "host-d",
+      brief: brief(true, "2026-11-11T09:00:00.000Z", "01JAWAYD000000000000000000"),
+    },
+    { host: "host-g", brief: null },
+    {
+      host: "host-e",
+      brief: null,
+      error: { code: "peer_unreachable", message: "host-e is unreachable", host: "host-e" },
+    },
+  ],
+};
+
+test("one status covers this host's contract and each paired host's", () => {
+  expect(contractsOf(both).map((contract) => contract.host)).toEqual([undefined, "host-d"]);
+  const running = runningOf(both);
+  expect(running).toHaveLength(2);
+  // The header says when the first host is back.
+  expect(earliestUntil(running)).toBe("2026-11-11T09:00:00.000Z");
+  expect(unreadHosts(both)).toEqual([
+    { host: "host-e", message: "host-e is unreachable, so its away mode is not known" },
   ]);
-  expect(hosts).toEqual([
-    { host: "host-b", projects: 2 },
-    { host: "host-c", projects: 1 },
-  ]);
-  expect(uncoveredNames(hosts)).toBe("host-b's 2 projects and host-c's 1 project");
-  expect(ownBoards(hosts)).toBe("the own boards of host-b and host-c");
-  expect(ownBoards(hosts.slice(0, 1))).toBe("host-b's own board");
+  expect(contractKeys(running[1]!)).toEqual(["host-d/alpha", "host-d/beta"]);
 });
 
-test("a host with no paired host leaves nothing out", () => {
-  expect(uncoveredHosts([project("alpha"), project("fleet")])).toEqual([]);
+test("a peer's brief is read under its label, and this host's as before", () => {
+  const back: AwayBriefResponse = {
+    brief: brief(false, "2026-11-03T18:00:00.000Z"),
+    hosts: [
+      {
+        host: "host-d",
+        brief: brief(false, "2026-11-03T18:00:00.000Z", "01JAWAYD000000000000000000"),
+      },
+    ],
+  };
+  const [here, there] = contractsOf(back);
+  expect(readKey(here!)).toBe("01JAWAY0000000000000000000");
+  expect(readKey(there!)).toBe("host-d:01JAWAYD000000000000000000");
+  expect(unreadBriefs(back, [])).toHaveLength(2);
+  expect(unreadBriefs(back, ["host-d:01JAWAYD000000000000000000"])).toEqual([here]);
+  // A running contract has no brief to read yet.
+  expect(unreadBriefs(both, [])).toEqual([]);
+});
+
+test("an answer with no peers reads as this host's alone", () => {
+  expect(contractsOf({ brief: null })).toEqual([]);
+  expect(runningOf({ brief: brief(true, "2026-11-12T18:00:00.000Z") })).toHaveLength(1);
+  expect(earliestUntil([])).toBeNull();
+  // Another refusal keeps the peer's own words, after its label.
+  const refused: AwayBriefResponse = {
+    brief: null,
+    hosts: [
+      {
+        host: "host-d",
+        brief: null,
+        error: { code: "peer_refused", message: "the key was revoked.", host: "host-d" },
+      },
+    ],
+  };
+  expect(unreadHosts(refused)).toEqual([
+    { host: "host-d", message: "host-d: the key was revoked" },
+  ]);
 });

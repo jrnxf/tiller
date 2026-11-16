@@ -187,3 +187,31 @@
 .away-pop .away-props dt.away-out {
   align-self: start;
 }
+
+/* With paired hosts the form groups the projects by host (UA-30). */
+.away-host + .away-host {
+  margin-top: 12px;
+}
+
+.away-host-h {
+  display: block;
+  margin-bottom: 6px;
+  font-size: var(--fs-small);
+  color: var(--fg-2);
+}
+
+.away-host .chip-check:has(input[disabled]) {
+  opacity: 0.55;
+}
+
+/* Each host's contract in the popover, after a rule. */
+.away-pop .away-props + .away-props {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-1);
+}
+
+.away-pop .away-host-n {
+  color: var(--fg-1);
+  font-weight: var(--w-medium);
+}

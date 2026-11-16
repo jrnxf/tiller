@@ -428,9 +428,9 @@ export function applyChange(
         refetchSoon(queryClient, "machines", (path) => path === machinesPath);
       }
       // The away status counts the runs that started under the contract
-      // ("Runs 1 of 6"), and the brief lists them. The contract is this
-      // host's own, so a peer's run does not move it.
-      if (!peer && event.entity === "run") {
+      // ("Runs 1 of 6"), and the brief lists them. The read carries each
+      // paired host's contract too (UA-30), so a peer's run moves it.
+      if (event.entity === "run") {
         queryClient.invalidateQueries({
           queryKey: queryKeyFor(awayBriefPath),
           refetchType: "active",

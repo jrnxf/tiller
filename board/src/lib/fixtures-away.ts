@@ -108,7 +108,25 @@ export function awayBrief(running: boolean): AwayBrief {
 }
 
 // `idle`: the owner has never been away. `running`: away now. `back`: the
-// contract ended and the brief waits.
-export function awayFor(scenario: "idle" | "running" | "back"): AwayBriefResponse {
-  return { brief: scenario === "idle" ? null : awayBrief(scenario === "running") };
+// contract ended and the brief waits. With `peers`, the read lists the act
+// pairings of the federated scenario: host-d was never away, and host-e's
+// link is down (host-f only reads, so it is not listed).
+export function awayFor(scenario: "idle" | "running" | "back", peers = false): AwayBriefResponse {
+  return {
+    brief: scenario === "idle" ? null : awayBrief(scenario === "running"),
+    hosts: peers
+      ? [
+          { host: "host-d", brief: null },
+          {
+            host: "host-e",
+            brief: null,
+            error: {
+              code: "peer_unreachable",
+              message: "host-e is unreachable since the link went down",
+              host: "host-e",
+            },
+          },
+        ]
+      : [],
+  };
 }

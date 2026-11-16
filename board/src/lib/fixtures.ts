@@ -1584,6 +1584,7 @@ export function fixtureResponses(scenario: Scenario = "default", now: number = D
     ),
     [awayBriefPath]: awayFor(
       scenario === "away" ? "running" : scenario === "away-back" ? "back" : "idle",
+      scenario === "federated",
     ),
   } satisfies Record<string, unknown>;
 }

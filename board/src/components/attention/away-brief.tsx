@@ -2,16 +2,10 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import type { CSSProperties } from "react";
 
 import type { AwayBrief, BoardRow, Project } from "../../lib/api-types";
-import {
-  AWAY_BRIEF_ID,
-  markBriefRead,
-  mergeLabel,
-  ownBoards,
-  uncoveredHosts,
-  uncoveredNames,
-} from "../../lib/away";
+import { AWAY_BRIEF_ID, markBriefRead, mergeLabel, projectName, readKey } from "../../lib/away";
+import type { HostAwayRead, HostContract } from "../../lib/away";
 import { formatLisbonDay } from "../../lib/clock";
-import { ownerOf, projectIndex } from "../../lib/peers";
+import { projectIndex } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import { KIND_LABELS, formatWhen } from "./format";
 import { BackIcon, NeedsIcon } from "./icons";
@@ -29,14 +23,23 @@ const MoonIcon = () => (
   </svg>
 );
 
-// "Mon 9 Nov, 22:40 - Tue 10 Nov, 08:15 (Lisbon)".
-function range(brief: AwayBrief): string {
-  const from = formatLisbonDay(brief.started_at);
-  const to = formatLisbonDay(brief.ended_at ?? brief.until_at);
-  return `${from} - ${to} (Lisbon)`;
+// "Mon 9 Nov, 22:40 - Tue 10 Nov, 08:15 (Lisbon)": from the first start to
+// the last end, across every host's contract.
+function range(briefs: AwayBrief[]): string {
+  const starts = briefs.map((brief) => brief.started_at);
+  const ends = briefs.map((brief) => brief.ended_at ?? brief.until_at);
+  const first = starts.reduce((a, b) => (Date.parse(b) < Date.parse(a) ? b : a));
+  const last = ends.reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a));
+  return `${formatLisbonDay(first)} - ${formatLisbonDay(last)} (Lisbon)`;
 }
 
-export function AwayBriefRow({ brief, selected }: { brief: AwayBrief; selected: boolean }) {
+export function AwayBriefRow({
+  contracts,
+  selected,
+}: {
+  contracts: HostContract[];
+  selected: boolean;
+}) {
   return (
     <section aria-label="Away brief">
       <Link
@@ -51,7 +54,7 @@ export function AwayBriefRow({ brief, selected }: { brief: AwayBrief; selected: 
         </span>
         <span className="bd">
           <span className="t">While you were away</span>
-          <span className="s">{range(brief)}</span>
+          <span className="s">{range(contracts.map((contract) => contract.brief))}</span>
         </span>
       </Link>
     </section>
@@ -126,8 +129,17 @@ function plural(count: number, one: string): string {
   return `${count} ${one}${count === 1 ? "" : "s"}`;
 }
 
-export function AwayBriefDetail({ brief, ctx }: { brief: AwayBrief; ctx: Context }) {
-  const navigate = useNavigate();
+// One host's part of the brief: its scope, and what happened under it.
+function HostBrief({
+  contract,
+  label,
+  ctx,
+}: {
+  contract: HostContract;
+  label: string | null;
+  ctx: Context;
+}) {
+  const { brief } = contract;
   const { spend } = brief;
   const byCard = new Map<string, { title: string; runs: number; failed: boolean }>();
   for (const run of brief.runs) {
@@ -146,15 +158,105 @@ export function AwayBriefDetail({ brief, ctx }: { brief: AwayBrief; ctx: Context
       ? "no quota floor"
       : `quota floor ${spend.quota_floor_percent} %`;
   const merges = brief.merged_by_grant.length;
-  const uncovered = uncoveredHosts(ctx.projects);
   const covered = brief.projects
-    .map(
-      (id) =>
-        ctx.projects.find((project) => project.id === id && ownerOf(project) === undefined)?.name ??
-        id,
-    )
+    .map((id) => projectName(id, contract.host, ctx.projects))
     .join(", ");
 
+  return (
+    <div
+      className="ab-host"
+      role={label ? "group" : undefined}
+      aria-label={label ?? undefined}
+      data-testid="away-brief-host"
+    >
+      {label ? <div className="ab-hn">{label}</div> : null}
+      <div className="ab-s">
+        {brief.orders ? <p className="ab-quote">&ldquo;{brief.orders}&rdquo;</p> : null}
+        <dl className="props ab-props">
+          <dt>Projects</dt>
+          <dd>{covered}</dd>
+          <dt>Spend</dt>
+          <dd>
+            {spend.max_new_runs === null
+              ? `${plural(spend.new_runs, "new run")}`
+              : `${spend.new_runs} of ${plural(spend.max_new_runs, "new run")}`}
+            {` · ${quota}`}
+          </dd>
+          <dt>Merges</dt>
+          <dd>
+            {mergeLabel(brief.merge)}
+            {` · ${plural(merges, "merge")}`}
+          </dd>
+        </dl>
+      </div>
+      <Section title="Landed" count={brief.landed.length}>
+        {brief.landed.map((card) => (
+          <Line
+            key={card.card}
+            card={card.card}
+            title={card.title}
+            note={
+              grantOf(card.card) ? `grant ${grantOf(card.card)?.grant_id?.slice(-4)}` : "landed"
+            }
+            ctx={ctx}
+          />
+        ))}
+      </Section>
+      <Section title="Runs started" count={brief.runs.length}>
+        {[...byCard].map(([card, seen]) => (
+          <Line
+            key={card}
+            card={card}
+            title={seen.title}
+            note={`${plural(seen.runs, "run")}${seen.failed ? ", failed" : ""}`}
+            ctx={ctx}
+          />
+        ))}
+      </Section>
+      <Section title="Still waiting for you" count={waiting} tone="warn">
+        {brief.waiting_decisions.map((item) => (
+          <Line
+            key={item.attention_id}
+            card={item.card}
+            title={item.question}
+            note={KIND_LABELS[item.kind] ?? "Decision"}
+            ctx={ctx}
+          />
+        ))}
+        {brief.waiting_approvals.map((item) => (
+          <Line
+            key={item.approval_id}
+            card={item.card}
+            title={`Approve ${item.action}`}
+            note={formatWhen(item.requested_at)}
+            ctx={ctx}
+          />
+        ))}
+      </Section>
+    </div>
+  );
+}
+
+// One brief for every host's ended contract (UA-30). With paired hosts each
+// part names its host, and a peer the board could not read is named too.
+export function AwayBriefDetail({
+  contracts,
+  unread,
+  grouped,
+  local,
+  ctx,
+}: {
+  contracts: HostContract[];
+  unread: HostAwayRead[];
+  grouped: boolean;
+  local: string | null;
+  ctx: Context;
+}) {
+  const navigate = useNavigate();
+  const briefs = contracts.map((contract) => contract.brief);
+  const waiting = briefs.some(
+    (brief) => brief.waiting_decisions.length + brief.waiting_approvals.length > 0,
+  );
   return (
     <>
       <Link
@@ -171,88 +273,33 @@ export function AwayBriefDetail({ brief, ctx }: { brief: AwayBrief; ctx: Context
           <MoonIcon />
           Away brief
         </span>
-        <span>{range(brief)}</span>
+        <span>{range(briefs)}</span>
       </div>
       <h2 className="d-q">While you were away</h2>
       <div className="ab-card" data-testid="away-brief">
-        <div className="ab-s">
-          {brief.orders ? <p className="ab-quote">&ldquo;{brief.orders}&rdquo;</p> : null}
-          <dl className="props ab-props">
-            <dt>Projects</dt>
-            <dd>{covered}</dd>
-            <dt>Spend</dt>
-            <dd>
-              {spend.max_new_runs === null
-                ? `${plural(spend.new_runs, "new run")}`
-                : `${spend.new_runs} of ${plural(spend.max_new_runs, "new run")}`}
-              {` · ${quota}`}
-            </dd>
-            <dt>Merges</dt>
-            <dd>
-              {mergeLabel(brief.merge)}
-              {` · ${plural(merges, "merge")}`}
-            </dd>
-            {uncovered.length > 0 ? (
-              <>
-                <dt>Not covered</dt>
-                <dd data-testid="away-brief-uncovered">
-                  {uncoveredNames(uncovered)}. This brief does not count them: see{" "}
-                  {ownBoards(uncovered)}.
-                </dd>
-              </>
-            ) : null}
-          </dl>
-        </div>
-        <Section title="Landed" count={brief.landed.length}>
-          {brief.landed.map((card) => (
-            <Line
-              key={card.card}
-              card={card.card}
-              title={card.title}
-              note={
-                grantOf(card.card) ? `grant ${grantOf(card.card)?.grant_id?.slice(-4)}` : "landed"
-              }
-              ctx={ctx}
-            />
-          ))}
-        </Section>
-        <Section title="Runs started" count={brief.runs.length}>
-          {[...byCard].map(([card, seen]) => (
-            <Line
-              key={card}
-              card={card}
-              title={seen.title}
-              note={`${plural(seen.runs, "run")}${seen.failed ? ", failed" : ""}`}
-              ctx={ctx}
-            />
-          ))}
-        </Section>
-        <Section title="Still waiting for you" count={waiting} tone="warn">
-          {brief.waiting_decisions.map((item) => (
-            <Line
-              key={item.attention_id}
-              card={item.card}
-              title={item.question}
-              note={KIND_LABELS[item.kind] ?? "Decision"}
-              ctx={ctx}
-            />
-          ))}
-          {brief.waiting_approvals.map((item) => (
-            <Line
-              key={item.approval_id}
-              card={item.card}
-              title={`Approve ${item.action}`}
-              note={formatWhen(item.requested_at)}
-              ctx={ctx}
-            />
-          ))}
-        </Section>
+        {contracts.map((contract) => (
+          <HostBrief
+            key={readKey(contract)}
+            contract={contract}
+            label={grouped ? (contract.host ?? local ?? "This host") : null}
+            ctx={ctx}
+          />
+        ))}
+        {unread.length > 0 ? (
+          <div className="ab-s" data-testid="away-brief-unread">
+            <dl className="props ab-props">
+              {unread.map((entry) => (
+                <UnreadLine key={entry.host} entry={entry} />
+              ))}
+            </dl>
+          </div>
+        ) : null}
         <div className="ab-f">
           <span className="sp" />
-          {waiting > 0 ? (
+          {waiting ? (
             <Link
               to="/inbox"
-              search={({ host }) => ({ host, item: firstWaiting(brief) })}
+              search={({ host }) => ({ host, item: firstWaiting(briefs) })}
               className="btn"
             >
               Open waiting items
@@ -262,7 +309,7 @@ export function AwayBriefDetail({ brief, ctx }: { brief: AwayBrief; ctx: Context
             type="button"
             className="btn primary"
             onClick={() => {
-              markBriefRead(brief.approval_id);
+              markBriefRead(contracts.map(readKey));
               void navigate({ to: "/inbox", search: ({ host }) => ({ host }) });
             }}
           >
@@ -274,8 +321,17 @@ export function AwayBriefDetail({ brief, ctx }: { brief: AwayBrief; ctx: Context
   );
 }
 
+function UnreadLine({ entry }: { entry: HostAwayRead }) {
+  return (
+    <>
+      <dt>Not read</dt>
+      <dd>{entry.message}. Its part shows here once it can be read.</dd>
+    </>
+  );
+}
+
 // The first waiting decision opens in the inbox; with only approvals waiting,
 // the inbox's own default shows the oldest item.
-function firstWaiting(brief: AwayBrief): string | undefined {
-  return brief.waiting_decisions[0]?.attention_id;
+function firstWaiting(briefs: AwayBrief[]): string | undefined {
+  return briefs.flatMap((brief) => brief.waiting_decisions)[0]?.attention_id;
 }

@@ -3,26 +3,36 @@ import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 
-import type { AwayBrief, AwayBriefResponse, AwayMerge, Project } from "../../lib/api-types";
+import type {
+  AwayBrief,
+  AwayBriefResponse,
+  AwayMerge,
+  MutationResponse,
+  Project,
+} from "../../lib/api-types";
 import {
   AWAY_BRIEF_ID,
   MERGE_ACTIONS,
+  awayProjects,
+  contractKeys,
+  earliestUntil,
   mergeLabel,
-  ownBoards,
-  uncoveredHosts,
-  uncoveredNames,
+  projectName,
+  runningOf,
+  unreadHosts,
 } from "../../lib/away";
-import type { Uncovered } from "../../lib/away";
+import type { HostAwayRead, HostContract } from "../../lib/away";
 import { formatLisbon, formatLisbonDay, lisbonField16, serverNow } from "../../lib/clock";
-import { ownerOf } from "../../lib/peers";
+import { projectGroups, projectKey } from "../../lib/peers";
+import type { ProjectGroup } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import { awayBriefPath, awayBriefQuery, projectsQuery, queryKeyFor } from "../../lib/queries";
 import { shortcutsBlocked } from "../../lib/shortcuts";
 import { createStore } from "../../lib/store";
-import { sendMutation } from "../attention/api";
+import { ActionError, sendMutation } from "../attention/api";
 import { useAction } from "../attention/use-action";
 import { useMachineRows, useNamedProjects } from "../board/peer-state";
-import { FLEET_PROJECT, ProjectDialog } from "./project-dialog";
+import { ProjectDialog } from "./project-dialog";
 import "./away.css";
 
 export const MoonIcon = () => (
@@ -120,13 +130,15 @@ function problemOf(form: Form): string | null {
   return null;
 }
 
-function bodyOf(form: Form) {
+// The scope a host's contract takes: the shared limits and that host's own
+// projects. Each host counts its own runs and checks its own quota.
+function bodyOf(form: Form, projects: string[]) {
   const orders = form.orders.trim();
   const maxRuns = wholeNumber(form.maxRuns, 1, 10_000);
   const floor = wholeNumber(form.floor, 0, 100);
   return {
     until: form.until,
-    projects: form.projects,
+    projects,
     ...(orders ? { orders } : {}),
     ...(maxRuns ? { max_new_runs: maxRuns } : {}),
     ...(floor !== null && floor !== undefined ? { quota_floor_percent: floor } : {}),
@@ -138,45 +150,110 @@ function toggled(list: string[], value: string): string[] {
   return list.includes(value) ? list.filter((item) => item !== value) : [...list, value];
 }
 
+// One host's part of the away form: its label, whether the board may act on
+// it, and its contract when one binds.
+interface HostPart {
+  // The peer's label; undefined for this host.
+  host?: string;
+  group: ProjectGroup<Project>;
+  running: AwayBrief | null;
+}
+
+function partsOf(groups: ProjectGroup<Project>[], running: HostContract[]): HostPart[] {
+  return groups.map((group) => {
+    const host = group.peer ? (group.host ?? undefined) : undefined;
+    const contract = running.find((item) => item.host === host);
+    return { ...(host ? { host } : {}), group, running: contract?.brief ?? null };
+  });
+}
+
+// One request of the form: a start, an edit or an end on one host.
+interface Order {
+  host?: string;
+  method: "POST" | "PUT" | "DELETE";
+  body: Record<string, unknown>;
+}
+
+// What the form sends, one request per host the board may act on. A host with
+// projects chosen starts away mode, or edits its running contract. A host
+// with none chosen whose contract binds ends it.
+function ordersOf(form: Form, parts: HostPart[]): Order[] {
+  return parts.flatMap(({ host, group, running }): Order[] => {
+    if (!group.standing.canAct) return [];
+    const target = host ? { host } : {};
+    const chosen = group.projects
+      .filter((project) => form.projects.includes(projectKey(project)))
+      .map((project) => project.id);
+    if (chosen.length > 0) {
+      const body = { ...bodyOf(form, chosen), ...target };
+      return [{ ...target, method: running ? "PUT" : "POST", body }];
+    }
+    return running ? [{ ...target, method: "DELETE", body: target }] : [];
+  });
+}
+
+// Sends each order in turn. A peer's request takes the click's key with its
+// label, so a retry after one host refused replays the hosts that applied.
+async function sendOrders<T>(orders: Order[], key: string) {
+  const answers: { host?: string; response: MutationResponse<T> }[] = [];
+  for (const order of orders) {
+    const idempotency_key = order.host ? `${key}:${order.host}` : key;
+    // oxlint-disable-next-line no-await-in-loop -- one host at a time, in order
+    const response = await sendMutation<T>(order.method, "/api/v1/away", {
+      ...order.body,
+      idempotency_key,
+    });
+    answers.push({ ...(order.host ? { host: order.host } : {}), response });
+  }
+  const last = answers.at(-1)?.response;
+  if (!last) throw new ActionError(0, "invalid", "Choose at least one project.");
+  return { answers, last };
+}
+
 function AwayDialog({
-  projects,
-  uncovered,
-  local,
-  editing,
+  parts,
+  grouped,
+  running,
   onClose,
 }: {
-  projects: Project[];
-  uncovered: Uncovered[];
-  local: string | null;
-  editing: AwayBrief | null;
+  parts: HostPart[];
+  grouped: boolean;
+  running: HostContract[];
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
   const id = useId();
+  const editing = running[0]?.brief ?? null;
   const [form, setForm] = useState<Form>(() =>
-    editing ? formOf(editing) : freshForm(projects.map((project) => project.id)),
+    editing
+      ? { ...formOf(editing), projects: running.flatMap(contractKeys) }
+      : freshForm(
+          parts
+            .filter((part) => part.group.standing.canAct)
+            .flatMap((part) => part.group.projects.map(projectKey)),
+        ),
   );
   const [shown, setShown] = useState(false);
   const until = useRef<HTMLInputElement>(null);
   const set = (change: Partial<Form>) => setForm((current) => ({ ...current, ...change }));
-  const problem = problemOf(form);
-  // The body is a pure function of the form, so its text keys a retry.
-  const bodyText = JSON.stringify(bodyOf(form));
+  const orders = ordersOf(form, parts);
+  const problem =
+    problemOf(form) ??
+    (orders.some((order) => order.method !== "DELETE") ? null : "Choose at least one project.");
+  // The orders are a pure function of the form, so their text keys a retry.
+  const ordersText = JSON.stringify(orders);
+  const hosts = parts.filter((part) => part.group.standing.canAct).length;
 
   const send = useCallback(
-    (idempotency_key: string) =>
-      sendMutation(editing ? "PUT" : "POST", "/api/v1/away", {
-        ...(JSON.parse(bodyText) as Record<string, unknown>),
-        idempotency_key,
-      }),
-    [editing, bodyText],
+    async (key: string) => (await sendOrders(JSON.parse(ordersText) as Order[], key)).last,
+    [ordersText],
   );
   const recorded = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: queryKeyFor(awayBriefPath) });
     onClose();
   }, [onClose, queryClient]);
   const action = useAction({
-    binding: `away:${editing ? "edit" : "start"}:${bodyText}`,
+    binding: `away:${editing ? "edit" : "start"}:${ordersText}`,
     send,
     onRecorded: recorded,
   });
@@ -211,28 +288,49 @@ function AwayDialog({
         </div>
         <fieldset className="pa-f away-fieldset">
           <legend className="pa-l">Projects</legend>
-          <div className="chips">
-            {projects.map((project, index) => (
-              <label key={project.id} className="chip-check">
-                <input
-                  type="checkbox"
-                  checked={form.projects.includes(project.id)}
-                  onChange={() => set({ projects: toggled(form.projects, project.id) })}
-                />
-                <span className="pdot" style={{ "--pc": projectColor(index) } as CSSProperties} />
-                {project.name}
-              </label>
-            ))}
-          </div>
-          {uncovered.length > 0 ? (
-            <p className="pa-help away-out" data-testid="away-uncovered">
-              <b>
-                Away mode covers {local ?? "this host"} only, not {uncoveredNames(uncovered)}.
-              </b>{" "}
-              They keep running with no away limit, and their grants still merge. To cover them,
-              start away mode on {ownBoards(uncovered)}.
-            </p>
-          ) : null}
+          {parts.map(({ group, host }) => (
+            <div
+              key={host ?? ""}
+              className="away-host"
+              role={grouped ? "group" : undefined}
+              aria-label={grouped ? (group.host ?? "This host") : undefined}
+            >
+              {grouped ? <span className="away-host-h">{group.host ?? "This host"}</span> : null}
+              <div className="chips">
+                {group.projects.map((project) => (
+                  <label
+                    key={projectKey(project)}
+                    className="chip-check"
+                    title={group.standing.reason ?? undefined}
+                  >
+                    <input
+                      type="checkbox"
+                      disabled={!group.standing.canAct}
+                      checked={group.standing.canAct && form.projects.includes(projectKey(project))}
+                      onChange={() =>
+                        set({ projects: toggled(form.projects, projectKey(project)) })
+                      }
+                    />
+                    <span
+                      className="pdot"
+                      style={
+                        {
+                          "--pc": projectColor(projectIndexOf(parts, project)),
+                        } as CSSProperties
+                      }
+                    />
+                    {project.name}
+                  </label>
+                ))}
+              </div>
+              {group.standing.canAct ? null : (
+                <p className="pa-help away-out" data-testid="away-uncovered">
+                  <b>Not covered: {group.standing.reason}.</b> These projects keep running with no
+                  away limit, and their grants still merge.
+                </p>
+              )}
+            </div>
+          ))}
         </fieldset>
         <div className="pa-f">
           <label className="pa-l" htmlFor={`${id}-orders`}>
@@ -274,6 +372,12 @@ function AwayDialog({
             />
           </div>
         </div>
+        {hosts > 1 ? (
+          <p className="pa-help away-each">
+            Each host keeps these limits on its own: it counts its own new runs and checks its own
+            quota.
+          </p>
+        ) : null}
         <div className="pa-f">
           <span className="pa-l" id={`${id}-merges`}>
             Merges
@@ -374,53 +478,85 @@ function AwayDialog({
   );
 }
 
-// "Alpha, Beta", by the project names the contract covers.
-function namesOf(ids: string[], projects: Project[]): string {
-  return ids.map((id) => projects.find((project) => project.id === id)?.name ?? id).join(", ");
+// Where a project sits in the form's whole list, for its dot's color.
+function projectIndexOf(parts: HostPart[], project: Project): number {
+  return parts
+    .flatMap((part) => part.group.projects)
+    .findIndex((item) => projectKey(item) === projectKey(project));
+}
+
+// "Alpha, Beta", by the project names the contract covers on its host.
+function namesOf(contract: HostContract, projects: Project[]): string {
+  return contract.brief.projects.map((id) => projectName(id, contract.host, projects)).join(", ");
 }
 
 function AwayPopover({
-  brief,
+  running,
+  unread,
+  grouped,
+  local,
   projects,
-  uncovered,
   onEdit,
   onEnd,
   ending,
   error,
 }: {
-  brief: AwayBrief;
+  running: HostContract[];
+  unread: HostAwayRead[];
+  grouped: boolean;
+  local: string | null;
   projects: Project[];
-  uncovered: Uncovered[];
   onEdit: () => void;
   onEnd: () => void;
   ending: boolean;
   error: string | null;
 }) {
-  const { spend } = brief;
+  const until = earliestUntil(running);
   return (
     <div className="away-pop" role="dialog" aria-label="Away mode">
       <div className="away-pop-b">
-        <b>Away until {formatLisbonDay(brief.until_at)}</b>
-        <dl className="props away-props">
-          <dt>Projects</dt>
-          <dd>{namesOf(brief.projects, projects)}</dd>
-          <dt>Runs</dt>
-          <dd>
-            {spend.max_new_runs === null
-              ? `${spend.new_runs} started`
-              : `${spend.new_runs} of ${spend.max_new_runs}`}
-          </dd>
-          <dt>Merges</dt>
-          <dd>{mergeLabel(brief.merge)}</dd>
-          {uncovered.length > 0 ? (
-            <>
-              <dt className="away-out">Not covered</dt>
-              <dd className="away-out" data-testid="away-uncovered">
-                {uncoveredNames(uncovered)}. Start away mode on {ownBoards(uncovered)}.
+        <b>Away until {formatLisbonDay(until)}</b>
+        {running.map((contract) => {
+          const { brief } = contract;
+          const { spend } = brief;
+          return (
+            <dl
+              key={contract.host ?? ""}
+              className="props away-props"
+              aria-label={grouped ? (contract.host ?? local ?? "This host") : undefined}
+            >
+              {grouped ? (
+                <>
+                  <dt>Host</dt>
+                  <dd className="away-host-n">{contract.host ?? local ?? "This host"}</dd>
+                </>
+              ) : null}
+              <dt>Projects</dt>
+              <dd>{namesOf(contract, projects)}</dd>
+              {grouped && brief.until_at !== until ? (
+                <>
+                  <dt>Until</dt>
+                  <dd>{formatLisbonDay(brief.until_at)}</dd>
+                </>
+              ) : null}
+              <dt>Runs</dt>
+              <dd>
+                {spend.max_new_runs === null
+                  ? `${spend.new_runs} started`
+                  : `${spend.new_runs} of ${spend.max_new_runs}`}
               </dd>
-            </>
-          ) : null}
-        </dl>
+              <dt>Merges</dt>
+              <dd>{mergeLabel(brief.merge)}</dd>
+            </dl>
+          );
+        })}
+        {unread.length > 0 ? (
+          <dl className="props away-props">
+            {unread.map((entry) => (
+              <Unread key={entry.host} entry={entry} />
+            ))}
+          </dl>
+        ) : null}
         {error ? (
           <p className="refusal" role="alert">
             {error}
@@ -439,6 +575,18 @@ function AwayPopover({
   );
 }
 
+// A peer whose contract the board could not read: its status is not known.
+function Unread({ entry }: { entry: HostAwayRead }) {
+  return (
+    <>
+      <dt className="away-out">Not read</dt>
+      <dd className="away-out" data-testid="away-unread">
+        {entry.message}
+      </dd>
+    </>
+  );
+}
+
 // The Away control in the header, left of Ask. Idle it is a button that opens
 // the Start dialog. While away it is a status, and a popover holds the limits
 // with Edit and End. End asks nothing: it only gives control back, and opens
@@ -450,22 +598,24 @@ export const awayRequestStore = createStore(0);
 export function AwayControl() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  const brief = useQuery(awayBriefQuery()).data?.brief ?? null;
+  const response = useQuery(awayBriefQuery()).data;
   const projects = useNamedProjects(useQuery(projectsQuery()).data)?.projects ?? [];
-  // Away covers this host's projects; `fleet` is not one an owner is away from.
-  const mine = projects.filter(
-    (project) => ownerOf(project) === undefined && project.id !== FLEET_PROJECT,
-  );
-  const uncovered = uncoveredHosts(projects);
-  const local = useMachineRows().find((machine) => machine.kind === "local")?.label ?? null;
+  const machines = useMachineRows();
+  const local = machines.find((machine) => machine.kind === "local")?.label ?? null;
+  // Away covers each host's projects but its built-in one (UA-30).
+  const groups = projectGroups(awayProjects(projects), machines, local);
+  const grouped = groups.some((group) => group.peer);
+  const running = runningOf(response);
+  const unread = unreadHosts(response);
+  const parts = partsOf(groups, running);
   const [dialog, setDialog] = useState<"start" | "edit" | null>(null);
   const [open, setOpen] = useState(false);
   const wrap = useRef<HTMLSpanElement>(null);
-  const away = brief?.away ? brief : null;
+  const until = earliestUntil(running);
 
-  const closeDialog = useCallback(() => setDialog(null), []);
-  const isAway = away !== null;
-  const canStart = mine.length > 0;
+  const closeDialog = () => setDialog(null);
+  const isAway = running.length > 0;
+  const canStart = parts.some((part) => part.group.standing.canAct && part.group.projects.length);
   useEffect(
     () =>
       awayRequestStore.subscribe(() => {
@@ -474,26 +624,33 @@ export function AwayControl() {
       }),
     [isAway, canStart],
   );
+  // End sends a DELETE to each host whose contract binds.
+  const ends = JSON.stringify(
+    running.map(({ host }): Order => ({
+      ...(host ? { host } : {}),
+      method: "DELETE",
+      body: host ? { host } : {},
+    })),
+  );
   const end = useAction<{ brief: AwayBrief | null }>({
-    binding: `away:end:${away?.approval_id ?? ""}`,
-    send: useCallback(
-      (idempotency_key: string) =>
-        sendMutation<{ brief: AwayBrief | null }>("DELETE", "/api/v1/away", { idempotency_key }),
-      [],
-    ),
-    onRecorded: useCallback(
-      (response: { data: { brief: AwayBrief | null } }) => {
-        queryClient.setQueryData<AwayBriefResponse>(queryKeyFor(awayBriefPath), {
-          brief: response.data.brief,
-        });
-        void queryClient.invalidateQueries({ queryKey: queryKeyFor(awayBriefPath) });
-        setOpen(false);
-        void navigate({ to: "/inbox", search: { item: AWAY_BRIEF_ID } });
-      },
-      [navigate, queryClient],
-    ),
+    binding: `away:end:${running.map(({ host, brief }) => `${host ?? ""}/${brief.approval_id}`).join(",")}`,
+    send: async (key: string) => {
+      const { answers, last } = await sendOrders<{ brief: AwayBrief | null }>(
+        JSON.parse(ends) as Order[],
+        key,
+      );
+      // Each ended brief shows at once, before the read comes back.
+      queryClient.setQueryData<AwayBriefResponse>(queryKeyFor(awayBriefPath), (current) =>
+        endedIn(current, answers),
+      );
+      return last;
+    },
+    onRecorded: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeyFor(awayBriefPath) });
+      setOpen(false);
+      void navigate({ to: "/inbox", search: { item: AWAY_BRIEF_ID } });
+    },
   });
-
   // The popover closes on a click elsewhere and on Escape.
   useEffect(() => {
     if (!open) return;
@@ -513,17 +670,17 @@ export function AwayControl() {
 
   return (
     <span className="away-wrap" ref={wrap}>
-      {away ? (
+      {until ? (
         <button
           type="button"
           className="btn away-pill"
           aria-haspopup="dialog"
           aria-expanded={open}
-          aria-label={`Away until ${formatLisbonDay(away.until_at)}`}
+          aria-label={`Away until ${formatLisbonDay(until)}`}
           onClick={() => setOpen((current) => !current)}
         >
           <i className="ld live" />
-          <span className="away-when">Away until {formatLisbon(away.until_at)}</span>
+          <span className="away-when">Away until {formatLisbon(until)}</span>
         </button>
       ) : (
         <button
@@ -531,18 +688,20 @@ export function AwayControl() {
           className="btn away-open"
           // On a phone, beside New card, only the moon shows.
           aria-label="Away"
-          disabled={mine.length === 0}
+          disabled={!canStart}
           onClick={() => setDialog("start")}
         >
           <MoonIcon />
           <span className="away-label">Away</span>
         </button>
       )}
-      {away && open ? (
+      {isAway && open ? (
         <AwayPopover
-          brief={away}
+          running={running}
+          unread={unread}
+          grouped={grouped}
+          local={local}
           projects={projects}
-          uncovered={uncovered}
           ending={end.pending}
           error={end.error?.message ?? null}
           onEdit={() => {
@@ -554,13 +713,29 @@ export function AwayControl() {
       ) : null}
       {dialog ? (
         <AwayDialog
-          projects={mine}
-          uncovered={uncovered}
-          local={local}
-          editing={dialog === "edit" ? away : null}
+          parts={parts}
+          grouped={grouped}
+          running={dialog === "edit" ? running : []}
           onClose={closeDialog}
         />
       ) : null}
     </span>
   );
+}
+
+// The away read with each ended contract in place of the running one.
+function endedIn(
+  current: AwayBriefResponse | undefined,
+  answers: { host?: string; response: MutationResponse<{ brief: AwayBrief | null }> }[],
+): AwayBriefResponse | undefined {
+  if (!current) return current;
+  const ended = (host: string | undefined) =>
+    answers.find((answer) => answer.host === host)?.response.data.brief;
+  return {
+    brief: ended(undefined) ?? current.brief,
+    hosts: (current.hosts ?? []).map((entry) => ({
+      ...entry,
+      brief: ended(entry.host) ?? entry.brief,
+    })),
+  };
 }

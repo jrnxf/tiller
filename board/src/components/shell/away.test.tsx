@@ -3,6 +3,7 @@ import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
+import type { AwayBriefResponse } from "../../lib/api-types";
 import { briefReadStore } from "../../lib/away";
 import { hydrateFromSnapshot } from "../../lib/boot";
 import { connectionStore } from "../../lib/connection";
@@ -10,6 +11,7 @@ import { awayBrief } from "../../lib/fixtures-away";
 import { fixtureSnapshot } from "../../lib/fixtures";
 import type { Scenario } from "../../lib/fixtures";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
+import { awayBriefPath, queryKeyFor } from "../../lib/queries";
 import { receiptsStore } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
 import { createTestQueryClient, loadRouteChunks } from "../../test-app";
@@ -25,11 +27,12 @@ interface Call {
 let calls: Call[] = [];
 let refusal: { code: string; message: string } | null = null;
 
-function stubDaemon(ended = awayBrief(false)) {
+// `read` is what every GET answers; `{ brief: ended }` when absent.
+function stubDaemon(ended = awayBrief(false), read?: AwayBriefResponse) {
   vi.stubGlobal("fetch", async (path: string, init?: RequestInit) => {
     const method = init?.method ?? "GET";
     if (method === "GET") {
-      return new Response(JSON.stringify({ brief: ended }), { status: 200 });
+      return new Response(JSON.stringify(read ?? { brief: ended }), { status: 200 });
     }
     calls.push({ method, path, body: JSON.parse(String(init?.body)) as Record<string, unknown> });
     if (refusal) {
@@ -48,9 +51,10 @@ function stubDaemon(ended = awayBrief(false)) {
   });
 }
 
-async function renderApp(scenario: Scenario, path = "/") {
+async function renderApp(scenario: Scenario, path = "/", away?: AwayBriefResponse) {
   const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot(scenario, Date.parse("2026-11-02T12:00:00Z")));
+  if (away) queryClient.setQueryData(queryKeyFor(awayBriefPath), away);
   const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: [path] }));
   await router.load();
   render(
@@ -104,19 +108,123 @@ test("idle, the Away button sits left of Ask and opens the Start dialog", async 
   expect(within(dialog).getByRole("radio", { name: "Existing grants" }).ariaChecked).toBe("true");
 });
 
-test("with a paired host the dialog says whose projects away mode leaves out", async () => {
+// The federated read: this host and host-d are away, host-e's link is down.
+function federatedAway(): AwayBriefResponse {
+  return {
+    brief: awayBrief(true),
+    hosts: [
+      {
+        host: "host-d",
+        brief: {
+          ...awayBrief(true),
+          approval_id: "01JAWAYD000000000000000000",
+          until_at: "2026-11-10T09:00:00.000Z",
+          projects: ["gamma"],
+          spend: { max_new_runs: 6, new_runs: 1, quota_floor_percent: 20, cap_reached: false },
+        },
+      },
+      {
+        host: "host-e",
+        brief: null,
+        error: { code: "peer_unreachable", message: "host-e is unreachable", host: "host-e" },
+      },
+    ],
+  };
+}
+
+const chosen = (group: HTMLElement) =>
+  within(group)
+    .getAllByRole("checkbox")
+    .map((box) => [box.closest("label")?.textContent ?? "", (box as HTMLInputElement).checked]);
+
+test("with paired hosts the form lists each host's projects and the hosts it cannot cover", async () => {
   await renderApp("federated");
   fireEvent.click(screen.getByRole("button", { name: "Away" }));
   const dialog = await screen.findByRole("dialog", { name: "Start away mode" });
-  const note = within(dialog).getByTestId("away-uncovered").textContent ?? "";
-  expect(note).toMatch(/^Away mode covers \S+ only, not host-\w+'s \d+ projects?/);
-  expect(note).toContain("They keep running with no away limit, and their grants still merge.");
-  expect(note).toMatch(/start away mode on .*own boards?/);
-  // No paired host's project is offered: the contract could not hold it.
+  // An act pairing's projects are offered and chosen, as this host's are.
+  expect(chosen(within(dialog).getByRole("group", { name: "host-d" }))).toEqual([["gamma", true]]);
+  // A host the board cannot act on is shown, turned off, with why.
+  for (const [host, reason] of [
+    ["host-e", /unreachable/],
+    ["host-f", /view only pairing/],
+  ] as const) {
+    const group = within(dialog).getByRole("group", { name: host });
+    const box = within(group).getByRole("checkbox") as HTMLInputElement;
+    expect(box.disabled).toBe(true);
+    expect(within(group).getByTestId("away-uncovered").textContent).toMatch(reason);
+  }
+  // No host's built-in project is offered.
   const offered = within(dialog)
     .getAllByRole("checkbox")
     .map((box) => box.closest("label")?.textContent ?? "");
   expect(offered.some((name) => name.startsWith("host /"))).toBe(false);
+  expect(dialog.textContent).toContain("Each host keeps these limits on its own");
+});
+
+test("Start sends one scope to each host, with the host's own projects", async () => {
+  stubDaemon();
+  await renderApp("federated");
+  fireEvent.click(screen.getByRole("button", { name: "Away" }));
+  await screen.findByRole("dialog", { name: "Start away mode" });
+  fireEvent.change(field("Until"), { target: { value: "2099-01-02T18:00" } });
+  fireEvent.change(field("New runs, at most"), { target: { value: "3" } });
+  fireEvent.click(screen.getByRole("button", { name: "Start away mode" }));
+
+  await waitFor(() => expect(posts("POST")).toHaveLength(2));
+  const [here, there] = posts("POST");
+  expect(here?.body.host).toBeUndefined();
+  // This host has a gamma of its own; the peer's goes only to the peer.
+  expect(here?.body.projects).not.toContain("host-d/gamma");
+  expect(there?.body).toMatchObject({
+    host: "host-d",
+    projects: ["gamma"],
+    until: "2099-01-02T18:00",
+    max_new_runs: 3,
+  });
+  // One click: a retry replays each host by its own key.
+  expect(there?.body.idempotency_key).toBe(`${String(here?.body.idempotency_key)}:host-d`);
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Start away mode" })).toBeNull());
+});
+
+test("one status covers every host, and the popover lists each host's contract", async () => {
+  stubDaemon(awayBrief(true), federatedAway());
+  await renderApp("federated", "/", federatedAway());
+  // The header says when the first host is back.
+  const pill = screen.getByRole("button", { name: /^Away until Tue 10 Nov, 09:00/ });
+  fireEvent.click(pill);
+  const pop = screen.getByRole("dialog", { name: "Away mode" });
+  expect(pop.textContent).toContain("host-d");
+  expect(pop.textContent).toContain("gamma");
+  expect(pop.textContent).toContain("1 of 6");
+  expect(within(pop).getByTestId("away-unread").textContent).toBe(
+    "host-e is unreachable, so its away mode is not known",
+  );
+});
+
+test("Edit saves with PUT on each away host, and a host left empty ends", async () => {
+  stubDaemon(awayBrief(true), federatedAway());
+  await renderApp("federated", "/", federatedAway());
+  fireEvent.click(screen.getByRole("button", { name: /^Away until/ }));
+  fireEvent.click(within(screen.getByRole("dialog", { name: "Away mode" })).getByText("Edit"));
+  const dialog = await screen.findByRole("dialog", { name: "Edit away mode" });
+  const peer = within(dialog).getByRole("group", { name: "host-d" });
+  expect(chosen(peer)).toEqual([["gamma", true]]);
+  fireEvent.click(within(peer).getByRole("checkbox"));
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+  await waitFor(() => expect(calls).toHaveLength(2));
+  expect(posts("PUT")).toHaveLength(1);
+  expect(posts("PUT")[0]?.body.host).toBeUndefined();
+  expect(posts("DELETE")[0]?.body).toMatchObject({ host: "host-d" });
+});
+
+test("End sends DELETE to each away host", async () => {
+  stubDaemon(awayBrief(false), federatedAway());
+  await renderApp("federated", "/", federatedAway());
+  fireEvent.click(screen.getByRole("button", { name: /^Away until/ }));
+  fireEvent.click(within(screen.getByRole("dialog", { name: "Away mode" })).getByText("End"));
+  await waitFor(() => expect(posts("DELETE")).toHaveLength(2));
+  expect(posts("DELETE").map((call) => call.body.host)).toEqual([undefined, "host-d"]);
 });
 
 test("with no paired host the dialog has no such note", async () => {

@@ -1503,4 +1503,13 @@ export interface AwayBrief {
 
 export interface AwayBriefResponse {
   brief: AwayBrief | null;
+  // Each peer paired with the `act` scope, with its own newest contract, or
+  // why the board could not read it (UA-30). Absent before UA-30.
+  hosts?: HostAwayBrief[];
+}
+
+interface HostAwayBrief {
+  host: string;
+  brief: AwayBrief | null;
+  error?: ApiErrorBody["error"];
 }

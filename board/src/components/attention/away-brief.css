@@ -118,3 +118,13 @@ a.ab-r:hover {
   font-size: var(--fs-small);
   text-decoration: none;
 }
+
+/* With paired hosts each host's part opens with its name (UA-30). */
+.ab-hn {
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line-1);
+  background: var(--bg-1);
+  color: var(--fg-1);
+  font-size: var(--fs-small);
+  font-weight: var(--w-semibold);
+}

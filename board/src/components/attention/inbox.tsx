@@ -12,9 +12,16 @@ import type {
   PromptDialog,
   ReplyItem,
 } from "../../lib/api-types";
-import { focusReason, ownerKey, ownerOf, projectIndex, shownId } from "../../lib/peers";
+import {
+  focusReason,
+  isFederated,
+  ownerKey,
+  ownerOf,
+  projectIndex,
+  shownId,
+} from "../../lib/peers";
 import type { Owned } from "../../lib/peers";
-import { AWAY_BRIEF_ID, briefIsUnread, briefReadStore } from "../../lib/away";
+import { AWAY_BRIEF_ID, briefReadStore, unreadBriefs, unreadHosts } from "../../lib/away";
 import { prefsStore } from "../../lib/prefs";
 import { projectColor } from "../../lib/project-color";
 import {
@@ -31,7 +38,12 @@ import { Ago } from "../board/ago";
 import { AnswerStrip, useAnswerOpen } from "../board/answer-strip";
 import { HostChip } from "../board/host-chip";
 import { PRIORITY_NAMES, Priority, ShieldIcon } from "../board/icons";
-import { useAmbiguousIds, useStanding, useNamedProjects } from "../board/peer-state";
+import {
+  useAmbiguousIds,
+  useMachineRows,
+  useStanding,
+  useNamedProjects,
+} from "../board/peer-state";
 import { readPane, terminalTailPath } from "../board/terminal-stream";
 import type { Tail } from "../board/terminal-stream";
 import { AwayBriefDetail, AwayBriefRow } from "./away-brief";
@@ -797,9 +809,15 @@ export function Inbox({
   const answered = useStore(answeredStore);
   const withdrawn = useStore(withdrawnStore);
   // The away brief is a read of its own: a failed one leaves the rest working.
-  const awayBrief = useQuery(awayBriefQuery()).data?.brief;
+  // It holds every host's contract the board may act on (UA-30).
+  const away = useQuery(awayBriefQuery()).data;
   const briefRead = useStore(briefReadStore);
-  const brief = briefIsUnread(awayBrief, briefRead) ? awayBrief : null;
+  const unreadContracts = unreadBriefs(away, briefRead);
+  const brief = unreadContracts.length > 0 ? unreadContracts : null;
+  const awayUnread = unreadHosts(away);
+  const machines = useMachineRows();
+  const localLabel = machines.find((machine) => machine.kind === "local")?.label ?? null;
+  const federated = isFederated(machines);
 
   const cards = new Map(board.rows.map((row) => [row.id, row]));
   const scoped = scopedProjects(prefs, projects.projects, board.rows, host);
@@ -917,7 +935,7 @@ export function Inbox({
   return (
     <div className="inbox" data-pane={selected ? "detail" : "list"} data-testid="inbox">
       <div className="in-list">
-        {brief ? <AwayBriefRow brief={brief} selected={briefChosen} /> : null}
+        {brief ? <AwayBriefRow contracts={brief} selected={briefChosen} /> : null}
         <div className="lhead">
           Needs you <span className="c">{open}</span>
           <span className="lchips" role="group" aria-label="Show">
@@ -979,7 +997,13 @@ export function Inbox({
       <div className="in-detail">
         {brief && briefChosen ? (
           <div className="inner" key={AWAY_BRIEF_ID}>
-            <AwayBriefDetail brief={brief} ctx={ctx} />
+            <AwayBriefDetail
+              contracts={brief}
+              unread={awayUnread}
+              grouped={federated}
+              local={localLabel}
+              ctx={ctx}
+            />
           </div>
         ) : chosenReply ? (
           <div className="inner" key={chosenReply.id}>

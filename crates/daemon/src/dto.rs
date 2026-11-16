@@ -2032,6 +2032,11 @@ pub struct WithdrawBody {
 #[serde(deny_unknown_fields)]
 pub struct AwayScopeBody {
     pub idempotency_key: String,
+    /// A paired peer's label: forward the mutation to it (`protocol.md`
+    /// 7.4, 10.3). Absent means this host. The
+    /// board sends one body per host, each with that host's projects (UA-30).
+    #[serde(default)]
+    pub host: Option<String>,
     /// When away mode ends by itself: RFC 3339 with an offset, a date (09:00
     /// Lisbon) or a date and time without an offset (Lisbon).
     pub until: String,
@@ -2056,6 +2061,10 @@ pub struct AwayScopeBody {
 #[serde(deny_unknown_fields)]
 pub struct AwayEndBody {
     pub idempotency_key: String,
+    /// A paired peer's label: forward the mutation to it (`protocol.md`
+    /// 7.4, 10.3). Absent means this host.
+    #[serde(default)]
+    pub host: Option<String>,
     /// Why away mode ended; "ended by the owner" when absent.
     #[serde(default)]
     pub reason: Option<String>,
@@ -2066,8 +2075,26 @@ pub struct AwayEndBody {
 /// the contract still binds.
 #[derive(Clone, Debug, PartialEq, Serialize, ToSchema)]
 pub struct AwayBriefResponse {
+    /// This host's newest contract and its brief.
     #[schema(value_type = Option<Object>)]
     pub brief: Option<tiller_agents::handoff::ReturnBrief>,
+    /// Each peer paired with the `act` scope, with its own newest contract
+    /// (UA-30); empty on a peer's own answer over the link.
+    pub hosts: Vec<HostAwayBrief>,
+}
+
+/// One paired host's away contract, read over its link (`protocol.md` 10.2).
+#[derive(Clone, Debug, PartialEq, Serialize, ToSchema)]
+pub struct HostAwayBrief {
+    /// The peer's label.
+    pub host: String,
+    /// The peer's newest contract and its brief, as its own
+    /// `GET /api/v1/away/brief` gives `brief`.
+    #[schema(value_type = Option<Object>)]
+    pub brief: Option<Value>,
+    /// Why the brief could not be read, such as `peer_unreachable`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ErrorDetail>,
 }
 
 /// `POST /api/v1/approvals/{id}/decide`.

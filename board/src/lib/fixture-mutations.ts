@@ -1,7 +1,16 @@
 // Stands in for the daemon's mutations (protocol.md section 7.4) on the dev and
 // preview servers until T2.8 lands: a keyed replay table, the stale-head
 // refusal, and the later receipt stages as change events.
-import type { BoardRow, ChangeEvent, Machine, Project, PromptDialog } from "./api-types.ts";
+import type {
+  AwayBrief,
+  AwayBriefResponse,
+  AwayMerge,
+  BoardRow,
+  ChangeEvent,
+  Machine,
+  Project,
+  PromptDialog,
+} from "./api-types.ts";
 import type {
   AgentsResponse,
   AttentionResponse,
@@ -50,6 +59,7 @@ import { markReplyRead } from "./fixtures-replies.ts";
 import {
   agentsPath,
   attentionPath,
+  awayBriefPath,
   boardPath,
   machinesPath,
   projectsPath,
@@ -395,6 +405,7 @@ export function withoutDeleted(path: string, body: unknown, scenario: Scenario):
   if (pathname === recapPath && recapMarkedAt !== null) {
     return recapFor(scenario, Date.now(), recapMarkedAt);
   }
+  if (pathname === awayBriefPath) return withAway(body);
   if (pathname === "/api/v1/start-settings") return startSettingsFor(scenario);
   if (pathname === "/api/v1/host-config") return hostConfigFor();
   if (pathname === "/api/v1/host") return hostFieldsFor(scenario);
@@ -1497,12 +1508,67 @@ function pickBugProject(body: Record<string, unknown>, scenario: Scenario): Muta
   return { reply: recorded(host, null, null), followUps: [hostEdited(scenario, machine.id)] };
 }
 
-// Starting, editing or ending away mode in the fixtures only records: the
-// stand-in server does not keep a contract.
-function awayMutation(method: string): MutationResult {
-  const brief = awayBrief(false);
-  const data = method === "DELETE" ? { away: null, brief } : { id: brief.approval_id };
-  return { reply: recorded(data, null, brief.approval_id), followUps: [] };
+// The away contracts started or edited on the stand-in server, by host ("" is
+// this host), so the header, the popover and the brief follow a walk through
+// the form (UA-30).
+const awayKept = new Map<string, AwayBrief>();
+
+// The `until` the form sends is a Lisbon wall time. The stand-in server reads
+// it as UTC, which Lisbon is in winter: the fixtures need no more.
+function awayContract(body: Record<string, unknown>, kept: AwayBrief | undefined): AwayBrief {
+  const fresh = awayBrief(true);
+  const until = typeof body.until === "string" ? `${body.until}:00.000Z` : fresh.until_at;
+  const max = typeof body.max_new_runs === "number" ? body.max_new_runs : null;
+  const floor = typeof body.quota_floor_percent === "number" ? body.quota_floor_percent : null;
+  return {
+    ...fresh,
+    approval_id: kept?.approval_id ?? fakeId("01JAWAY"),
+    started_at: kept?.started_at ?? new Date().toISOString(),
+    until_at: until,
+    orders: typeof body.orders === "string" ? body.orders : null,
+    projects: Array.isArray(body.projects) ? (body.projects as string[]) : fresh.projects,
+    merge: (body.merge ?? "grants") as AwayMerge,
+    spend: {
+      max_new_runs: max,
+      new_runs: kept?.spend.new_runs ?? 0,
+      quota_floor_percent: floor,
+      cap_reached: false,
+    },
+  };
+}
+
+function awayMutation(method: string, body: Record<string, unknown>): MutationResult {
+  const host = typeof body.host === "string" ? body.host : "";
+  const kept = awayKept.get(host);
+  if (method === "DELETE") {
+    const brief: AwayBrief = kept
+      ? {
+          ...awayBrief(false),
+          ...kept,
+          away: false,
+          ended_at: new Date().toISOString(),
+          ended_reason: "ended by the owner",
+        }
+      : awayBrief(false);
+    if (kept) awayKept.set(host, brief);
+    return { reply: recorded({ away: null, brief }, null, brief.approval_id), followUps: [] };
+  }
+  const brief = awayContract(body, method === "PUT" && kept?.away ? kept : undefined);
+  awayKept.set(host, brief);
+  return { reply: recorded({ id: brief.approval_id }, null, brief.approval_id), followUps: [] };
+}
+
+// The away read with the contracts the stand-in server keeps.
+function withAway(body: unknown): unknown {
+  if (awayKept.size === 0 || !body) return body;
+  const read = body as AwayBriefResponse;
+  return {
+    brief: awayKept.get("") ?? read.brief,
+    hosts: (read.hosts ?? []).map((entry) => {
+      const kept = awayKept.get(entry.host);
+      return kept ? { host: entry.host, brief: kept } : entry;
+    }),
+  } satisfies AwayBriefResponse;
 }
 
 function handle(
@@ -1523,7 +1589,7 @@ function handle(
   if (method === "POST" && path === "/api/v1/cards" && body.category === "tiller-bug") {
     return createBug(body);
   }
-  if (path === "/api/v1/away") return awayMutation(method);
+  if (path === "/api/v1/away") return awayMutation(method, body);
   const close = /^\/api\/v1\/cards\/([^/]+)\/close$/.exec(path);
   if (method === "POST" && close?.[1]) return closeCard(close[1], body);
   const cancel = /^\/api\/v1\/cards\/([^/]+)\/cancel$/.exec(path);

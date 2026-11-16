@@ -27,8 +27,8 @@ use crate::mirror::Mirrors;
 
 /// A mutation the board may forward to a peer: exactly the 7.4 list, with
 /// the agent verbs of `authority.md` G46, the project add, edit, retire
-/// and delete of D22, and the stage switch and grants of UA-43. `focus`,
-/// config and memory decisions are not on it.
+/// and delete of D22, the stage switch and grants of UA-43, and away mode
+/// of UA-30. `focus`, config and memory decisions are not on it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
     CreateCard,
@@ -63,6 +63,9 @@ pub enum Op {
     ProjectStage,
     GrantCreate,
     GrantRevoke,
+    AwayStart,
+    AwayEdit,
+    AwayEnd,
 }
 
 /// Where the peer runs a forwarded op, which also sets how long the board
@@ -79,7 +82,7 @@ pub enum Lane {
 }
 
 impl Op {
-    pub const ALL: [Op; 32] = [
+    pub const ALL: [Op; 35] = [
         Op::CreateCard,
         Op::EditCard,
         Op::Comment,
@@ -112,6 +115,9 @@ impl Op {
         Op::ProjectStage,
         Op::GrantCreate,
         Op::GrantRevoke,
+        Op::AwayStart,
+        Op::AwayEdit,
+        Op::AwayEnd,
     ];
 
     /// The 7.4 endpoint, as a `mutate` frame's `op` names it.
@@ -149,6 +155,9 @@ impl Op {
             Op::ProjectStage => "POST /api/v1/projects/{id}/stage",
             Op::GrantCreate => "POST /api/v1/projects/{id}/grants",
             Op::GrantRevoke => "DELETE /api/v1/grants/{id}",
+            Op::AwayStart => "POST /api/v1/away",
+            Op::AwayEdit => "PUT /api/v1/away",
+            Op::AwayEnd => "DELETE /api/v1/away",
         }
     }
 
@@ -343,7 +352,42 @@ pub(super) fn verify(
             format!("project {} is not owned by {}", project.id, host.label),
         );
     }
+    if let Some(project) = foreign_away_project(store, op, frame, &host.id)? {
+        return refused(
+            "foreign_project",
+            format!("project {project} is not owned by {}", host.label),
+        );
+    }
     Ok(op)
+}
+
+/// The first project of an away scope that another host owns: each host's
+/// away contract covers its own projects only (UA-30). A project this host
+/// does not know is the core's own refusal.
+fn foreign_away_project(
+    store: &Store,
+    op: Op,
+    frame: &Mutate,
+    host_id: &str,
+) -> tiller_core::Result<Option<String>> {
+    if !matches!(op, Op::AwayStart | Op::AwayEdit) {
+        return Ok(None);
+    }
+    let named = frame
+        .body
+        .get("projects")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str);
+    for id in named {
+        if let Some(project) = found(get::<Project>(store.conn(), "project", id))?
+            && project.owner_host_id != host_id
+        {
+            return Ok(Some(project.id));
+        }
+    }
+    Ok(None)
 }
 
 /// The owner marker (`authority.md` G26): `<home>/owner` absent, empty or
@@ -402,8 +446,9 @@ fn target_project(store: &Store, op: Op, frame: &Mutate) -> tiller_core::Result<
             }
             None => None,
         },
-        // Every stale session on this host: no project to own.
-        Op::RestartStale => None,
+        // Every stale session on this host: no project to own. An away
+        // scope names its projects in the body (`foreign_away_project`).
+        Op::RestartStale | Op::AwayStart | Op::AwayEdit | Op::AwayEnd => None,
         Op::EditCard
         | Op::Comment
         | Op::Hold

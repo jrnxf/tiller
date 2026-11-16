@@ -55,7 +55,7 @@ The owner approved the ADR on Tuesday 2026-11-03 (Lisbon time) and took the reco
 - **Date:** Friday 2026-11-13 (Lisbon time)
 - **Decision:** the owner's decision D20: from the board, the owner can interrupt, answer prompts for, steer, stop, or do anything else for any peer's agent, not just the board host's own.
 - **What changes:** the forwarded owner keeps the board's full row for agents and their records. The tail and the prompt read go as a `query` on the peer link. The prompt answer, interrupt, steer, stop, pause, unpause, resume, relaunch and an attention item's withdraw go as a forwarded `mutate`. Keys and Fit stay on the pane link (HR1). The routes, frames and error codes are in `protocol.md` 7.4 (Agent verbs on a peer) and 10.7, and the rows in `authority.md` section 3, section 4 and G46.
-- **What stays:** the owner only, on the board host, with the `act` scope (the tail excepted), each action signed and checked again by the owning host. A `read` pairing and every fleet role stay refused. No host forwards to a third (G42). The owner-CLI-only powers (grants, away mode, pairing, landing, `tiller spawn`) and the host and project admin (config, projects, host edit, backups, pollers, memory decisions) stay local.
+- **What stays:** the owner only, on the board host, with the `act` scope (the tail excepted), each action signed and checked again by the owning host. A `read` pairing and every fleet role stay refused. No host forwards to a third (G42). The owner-CLI-only powers (grants and away mode, until the UA-43 and UA-30 amendments; pairing, landing, `tiller spawn`) and the host and project admin (config, projects, host edit, backups, pollers, memory decisions) stay local.
 - **Build task:** HR2 in `docs/design/terminal-holder.md` section 13, after H11 and before H12.
 
 ## Amendment: grants and stage from one board (UA-43)
@@ -64,3 +64,10 @@ The owner approved the ADR on Tuesday 2026-11-03 (Lisbon time) and took the reco
 - **Decision:** the owner visits one board. "Grants and settings" and the stage switch work the same for a peer's project as for the board host's own.
 - **What changes:** `grant.create`, `grant.revoke` and `project.stage` join the forwarding allowlist (`protocol.md` 7.4). The board host reads a peer's grants with a `projects/{id}/grants` `query` on the link, with the `act` scope (10.2). A stage switch runs on the peer off the link's thread, as a project add does, since the switch to pre-launch may fetch. Grants leave the owner-CLI-only list of the D20 amendment.
 - **What stays:** a grant is the owning host's record, checked and matched there alone, and recorded as `board@<label>`. A `read` pairing and every fleet role stay refused. No host forwards to a third (G42). Config, host edit, bug project and pairing stay local.
+
+## Amendment: away mode from one board (UA-30)
+
+- **Date:** Monday 2026-11-16 (Lisbon time)
+- **Decision:** the owner visits one board, and one Away covers every paired host.
+- **What changes:** `away.start`, `away.edit` and `away.end` (`POST`, `PUT` and `DELETE /api/v1/away`) join the forwarding allowlist (`protocol.md` 7.4). The board host reads each peer's newest contract with an `away/brief` `query` on the link, with the `act` scope (10.2), and serves them in `hosts` of `GET /api/v1/away/brief`, so one header status and one brief cover every host. The board's one form sends one request per host. Away mode leaves the owner-CLI-only list of the D20 amendment.
+- **What stays:** each host keeps its own contract, over its own projects only, and its spend limits and the temporary grants of "Conditions" stay its own records. A `read` pairing and every fleet role stay refused. No host forwards to a third (G42).

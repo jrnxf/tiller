@@ -5488,3 +5488,251 @@ fn a_grant_revoke_for_another_hosts_project_is_refused() {
     );
     assert_refused(&pair, link.mutate(frame), "foreign_project", before);
 }
+
+// -- peer away mode (UA-30) ----------------------------------------------------
+
+/// The away contract on `fleet`: its state and its scope's `max_new_runs`,
+/// newest first.
+fn away_on(fleet: &Fleet) -> Vec<(String, Option<i64>)> {
+    let store = fleet.open();
+    let mut statement = store
+        .conn()
+        .prepare(
+            "SELECT state, json_extract(scope, '$.spend.max_new_runs') FROM approvals \
+             WHERE kind = 'away' ORDER BY requested_at DESC, id DESC",
+        )
+        .unwrap();
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// `GET /api/v1/away/brief` on the board host, parsed.
+async fn away_brief_of(app: &Router) -> Value {
+    let read = get(app, "/api/v1/away/brief").await;
+    assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+    serde_json::from_str(&read.body).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_board_starts_edits_and_ends_away_mode_on_a_peer() {
+    let pair = pair();
+    add_project(&pair.peer, "gamma");
+    let (peers, _stop) = start(pair.board.dir.path(), Wire::new(pair.peer.dir.path()));
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    let board_before = last_seq(&pair.board);
+    let peer_before = last_seq(&pair.peer);
+    let act = |method: &str, body: Value| {
+        mutation(method, "/api/v1/away", body, &[("cookie", cookie.as_str())])
+    };
+
+    // Start, with "Conditions": the temporary grant is the peer's record.
+    let start_body = json!({"idempotency_key": "k-a-1", "host": "peer", "until": "2099-01-01",
+        "projects": ["gamma"], "max_new_runs": 3, "merge": merge_conditions()});
+    let started = applied(&send(&app, act("POST", start_body.clone())).await);
+    assert_eq!(started.host.as_deref(), Some("peer"));
+    assert!(applied(&send(&app, act("POST", start_body)).await).replayed);
+    assert_eq!(away_on(&pair.peer), vec![("accepted".to_owned(), Some(3))]);
+    assert!(away_on(&pair.board).is_empty());
+    let grants = grants_on(&pair.peer, "gamma");
+    assert_eq!(grants.len(), 1, "{grants:?}");
+    assert!(grants_on(&pair.board, "gamma").is_empty());
+
+    // One read on the board host carries the peer's status and brief.
+    let brief = away_brief_of(&app).await;
+    assert!(brief["brief"].is_null(), "{brief}");
+    let host = &brief["hosts"][0];
+    assert_eq!(host["host"], "peer", "{brief}");
+    assert_eq!(host["brief"]["away"], true, "{brief}");
+    assert_eq!(host["brief"]["projects"], json!(["gamma"]), "{brief}");
+    assert!(host.get("error").is_none(), "{brief}");
+
+    // Edit in place on the peer.
+    let edit = json!({"idempotency_key": "k-a-2", "host": "peer", "until": "2099-01-01",
+        "projects": ["gamma"], "max_new_runs": 2, "merge": "grants"});
+    assert_eq!(
+        applied(&send(&app, act("PUT", edit)).await).host.as_deref(),
+        Some("peer")
+    );
+    assert_eq!(away_on(&pair.peer), vec![("accepted".to_owned(), Some(2))]);
+    assert!(
+        grants_on(&pair.peer, "gamma")[0].2,
+        "the old scope's grant is live"
+    );
+
+    // End: the peer's brief comes back, and its contract ends there.
+    let end = send(
+        &app,
+        act(
+            "DELETE",
+            json!({"idempotency_key": "k-a-3", "host": "peer"}),
+        ),
+    )
+    .await;
+    let ended = applied(&end);
+    assert_eq!(ended.host.as_deref(), Some("peer"));
+    let body: Value = serde_json::from_str(&end.body).unwrap();
+    assert_eq!(body["data"]["brief"]["away"], false, "{body}");
+    assert_eq!(away_on(&pair.peer)[0].0, "succeeded");
+    let brief = away_brief_of(&app).await;
+    assert_eq!(brief["hosts"][0]["brief"]["away"], false, "{brief}");
+
+    // Nothing on the board host; on the peer, the forwarded owner did it.
+    assert_eq!(last_seq(&pair.board), board_before);
+    let events = events_since(&pair.peer, peer_before);
+    assert!(!events.is_empty());
+    assert!(
+        events
+            .iter()
+            .any(|event| event.contains(" board@test-host ")),
+        "{events:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_away_brief_names_a_peer_it_cannot_read() {
+    let pair = pair();
+    let up = Arc::new(AtomicBool::new(false));
+    let switch = Switch {
+        home: pair.peer.dir.path().to_owned(),
+        up: up.clone(),
+    };
+    let (peers, _stop) = start(pair.board.dir.path(), switch);
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    until("the down view", || {
+        peers.federation().peer("peer").map(|_| ())
+    })
+    .await;
+    let brief = away_brief_of(&app).await;
+    let host = &brief["hosts"][0];
+    assert_eq!(host["host"], "peer", "{brief}");
+    assert!(host["brief"].is_null(), "{brief}");
+    assert_eq!(host["error"]["code"], "peer_unreachable", "{brief}");
+    assert_eq!(host["error"]["host"], "peer", "{brief}");
+
+    // A start for that host is refused at once, and nothing is queued.
+    let cookie = owner_cookie(pair.board.dir.path());
+    let before = (last_seq(&pair.board), last_seq(&pair.peer));
+    let answer = send(
+        &app,
+        mutation(
+            "POST",
+            "/api/v1/away",
+            json!({"idempotency_key": "k-ad-1", "host": "peer", "until": "2099-01-01",
+                "projects": ["alpha"], "merge": "none"}),
+            &[("cookie", cookie.as_str())],
+        ),
+    )
+    .await;
+    let error = refusal(&answer, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error.code, "peer_unreachable");
+    assert!(away_on(&pair.peer).is_empty());
+    assert_eq!((last_seq(&pair.board), last_seq(&pair.peer)), before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_pairing_cannot_start_away_mode_on_a_peer_or_read_its_brief() {
+    let pair = pair();
+    read_scope(&pair.board);
+    read_scope(&pair.peer);
+    let wire = Wire::new(pair.peer.dir.path());
+    let sent = wire.sent.clone();
+    let (peers, _stop) = start(pair.board.dir.path(), wire);
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    let before = (last_seq(&pair.board), last_seq(&pair.peer));
+    for (method, body) in [
+        (
+            "POST",
+            json!({"idempotency_key": "k-ra-1", "host": "peer", "until": "2099-01-01",
+                "projects": ["alpha"], "merge": "none"}),
+        ),
+        (
+            "PUT",
+            json!({"idempotency_key": "k-ra-2", "host": "peer", "until": "2099-01-01",
+                "projects": ["alpha"], "merge": "none"}),
+        ),
+        (
+            "DELETE",
+            json!({"idempotency_key": "k-ra-3", "host": "peer"}),
+        ),
+    ] {
+        let answer = send(
+            &app,
+            mutation(method, "/api/v1/away", body, &[("cookie", cookie.as_str())]),
+        )
+        .await;
+        let error = refusal(&answer, StatusCode::BAD_GATEWAY);
+        assert_eq!(error.reason.as_deref(), Some("read_scope"), "{method}");
+        assert_eq!(error.host.as_deref(), Some("peer"), "{method}");
+    }
+    // The brief lists only the peers the board may act on.
+    let brief = away_brief_of(&app).await;
+    assert_eq!(brief["hosts"], json!([]), "{brief}");
+    assert!(!wire_text(&sent).contains(r#""type":"mutate""#));
+
+    // On the peer: a signed start under the read key is refused there too.
+    let mut link = linked(&pair);
+    let frame = Mutate::signed(
+        &signer(&pair),
+        &pair.peer.host,
+        Order {
+            op: Op::AwayStart,
+            target: None,
+            body: json!({"idempotency_key": "k-ra-f", "until": "2099-01-01",
+                "projects": ["alpha"], "merge": "none"}),
+            idempotency_key: "k-ra-f".to_owned(),
+        },
+        Timestamp::now(),
+    );
+    assert_refused(&pair, link.mutate(frame), "read_scope", before.1);
+    assert!(away_on(&pair.peer).is_empty());
+    assert_eq!((last_seq(&pair.board), last_seq(&pair.peer)), before);
+}
+
+#[test]
+fn an_away_scope_with_another_hosts_project_is_refused() {
+    let pair = pair();
+    add_project(&pair.peer, "gamma");
+    {
+        let store = pair.peer.open();
+        let other = "01JHOSTC0000000000000000000";
+        store
+            .conn()
+            .execute(
+                "INSERT INTO hosts (id, label, kind) VALUES (?1, 'host-c', 'remote')",
+                [other],
+            )
+            .unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE projects SET owner_host_id = ?1 WHERE id = 'alpha'",
+                [other],
+            )
+            .unwrap();
+    }
+    let mut link = linked(&pair);
+    let before = last_seq(&pair.peer);
+    for op in [Op::AwayStart, Op::AwayEdit] {
+        let frame = Mutate::signed(
+            &signer(&pair),
+            &pair.peer.host,
+            Order {
+                op,
+                target: None,
+                body: json!({"idempotency_key": "k-fa", "until": "2099-01-01",
+                    "projects": ["gamma", "alpha"], "merge": "none"}),
+                idempotency_key: "k-fa".to_owned(),
+            },
+            Timestamp::now(),
+        );
+        assert_refused(&pair, link.mutate(frame), "foreign_project", before);
+    }
+    assert!(away_on(&pair.peer).is_empty());
+}

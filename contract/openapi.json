@@ -7011,12 +7011,23 @@
       "AwayBriefResponse": {
         "type": "object",
         "description": "`GET /api/v1/away/brief`: the return brief of the newest away contract,\nor `null` when the owner has never been away. `brief.away` says whether\nthe contract still binds.",
+        "required": [
+          "hosts"
+        ],
         "properties": {
           "brief": {
             "type": [
               "object",
               "null"
-            ]
+            ],
+            "description": "This host's newest contract and its brief."
+          },
+          "hosts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HostAwayBrief"
+            },
+            "description": "Each peer paired with the `act` scope, with its own newest contract\n(UA-30); empty on a peer's own answer over the link."
           }
         }
       },
@@ -7027,6 +7038,13 @@
           "idempotency_key"
         ],
         "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label: forward the mutation to it (`protocol.md`\n7.4, 10.3). Absent means this host."
+          },
           "idempotency_key": {
             "type": "string"
           },
@@ -7049,6 +7067,13 @@
           "projects"
         ],
         "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label: forward the mutation to it (`protocol.md`\n7.4, 10.3). Absent means this host. The\nboard sends one body per host, each with that host's projects (UA-30)."
+          },
           "idempotency_key": {
             "type": "string"
           },
@@ -8851,6 +8876,37 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "HostAwayBrief": {
+        "type": "object",
+        "description": "One paired host's away contract, read over its link (`protocol.md` 10.2).",
+        "required": [
+          "host"
+        ],
+        "properties": {
+          "brief": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The peer's newest contract and its brief, as its own\n`GET /api/v1/away/brief` gives `brief`."
+          },
+          "error": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ErrorDetail",
+                "description": "Why the brief could not be read, such as `peer_unreachable`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "host": {
+            "type": "string",
+            "description": "The peer's label."
           }
         }
       },

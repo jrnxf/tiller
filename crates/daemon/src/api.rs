@@ -2096,6 +2096,12 @@ enum Parsed {
     GrantCreate(NewGrant),
     /// Why the grant ends.
     GrantRevoke(String),
+    /// The away scope, as `tiller away start` builds it.
+    AwayStart(Value),
+    /// The scope that replaces the running contract's.
+    AwayEdit(Value),
+    /// Why away mode ended.
+    AwayEnd(String),
 }
 
 impl Mutation {
@@ -2417,6 +2423,27 @@ impl Mutation {
                     Parsed::GrantRevoke(reason),
                 )
             }
+            Op::AwayStart | Op::AwayEdit => {
+                let request: AwayScopeBody = body(bytes)?;
+                let scope = away_scope(&request)?;
+                let parsed = if op == Op::AwayStart {
+                    Parsed::AwayStart(scope)
+                } else {
+                    Parsed::AwayEdit(scope)
+                };
+                (request.idempotency_key, request.host, parsed)
+            }
+            Op::AwayEnd => {
+                let request: AwayEndBody = body(bytes)?;
+                let reason = request
+                    .reason
+                    .unwrap_or_else(|| "ended by the owner".into());
+                (
+                    request.idempotency_key,
+                    request.host,
+                    Parsed::AwayEnd(reason),
+                )
+            }
         };
         Ok(Self {
             op,
@@ -2573,6 +2600,27 @@ impl Mutation {
             Parsed::ProjectEdit(rev, edit) => Done::of(store.project_edit(ctx, id, rev, *edit)?),
             Parsed::GrantCreate(new) => Done::of(store.grant_create(ctx, new)?),
             Parsed::GrantRevoke(reason) => Done::of(store.grant_revoke(ctx, id, &reason)?),
+            Parsed::AwayStart(scope) => Done::of(store.away_start(ctx, scope)?),
+            Parsed::AwayEdit(scope) => Done::of(store.away_edit(ctx, scope)?),
+            Parsed::AwayEnd(reason) => {
+                let applied = store.away_end(ctx, &reason)?;
+                let brief = match &applied.value {
+                    Some(away) => tiller_agents::handoff::ReturnBrief::load(
+                        store.conn(),
+                        Some(&away.id),
+                        Timestamp::now(),
+                    )?,
+                    None => None,
+                };
+                Ok(Done {
+                    data: json!({"away": applied.value, "brief": brief}),
+                    events: applied.events,
+                    replayed: applied.replayed,
+                    outbox_id: None,
+                    approval_id: None,
+                    warning: None,
+                })
+            }
             // Need the daemon's starter, the agent's pane or this host's
             // home, so they never reach the store alone.
             Parsed::StartOrchestrator(_)
@@ -5139,17 +5187,7 @@ async fn away_start(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers).await?;
-    let request: AwayScopeBody = body(&bytes)?;
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, _| {
-            let scope = away_scope(&request)?;
-            Done::of(store.away_start(ctx, scope)?)
-        },
-    )
-    .await
+    submit(&state, &headers, Op::AwayStart, None, &bytes).await
 }
 
 #[utoipa::path(put, path = "/api/v1/away", tag = "mutations", request_body = AwayScopeBody,
@@ -5160,17 +5198,7 @@ async fn away_edit(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers).await?;
-    let request: AwayScopeBody = body(&bytes)?;
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, _| {
-            let scope = away_scope(&request)?;
-            Done::of(store.away_edit(ctx, scope)?)
-        },
-    )
-    .await
+    submit(&state, &headers, Op::AwayEdit, None, &bytes).await
 }
 
 #[utoipa::path(delete, path = "/api/v1/away", tag = "mutations", request_body = AwayEndBody,
@@ -5181,48 +5209,58 @@ async fn away_end(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers).await?;
-    let request: AwayEndBody = body(&bytes)?;
-    let reason = request
-        .reason
-        .clone()
-        .unwrap_or_else(|| "ended by the owner".into());
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, _| {
-            let applied = store.away_end(ctx, &reason)?;
-            let brief = match &applied.value {
-                Some(away) => tiller_agents::handoff::ReturnBrief::load(
-                    store.conn(),
-                    Some(&away.id),
-                    Timestamp::now(),
-                )?,
-                None => None,
-            };
-            Ok(Done {
-                data: json!({"away": applied.value, "brief": brief}),
-                events: applied.events,
-                replayed: applied.replayed,
-                outbox_id: None,
-                approval_id: None,
-                warning: None,
-            })
-        },
-    )
-    .await
+    submit(&state, &headers, Op::AwayEnd, None, &bytes).await
+}
+
+/// This host's newest away contract and its return brief.
+pub(crate) fn away_brief_here(store: &Store) -> tiller_core::Result<AwayBriefResponse> {
+    Ok(AwayBriefResponse {
+        brief: tiller_agents::handoff::ReturnBrief::load(store.conn(), None, Timestamp::now())?,
+        hosts: Vec::new(),
+    })
 }
 
 #[utoipa::path(get, path = "/api/v1/away/brief", tag = "reads",
     responses((status = 200, body = AwayBriefResponse)))]
 async fn away_brief(State(state): State<AppState>) -> ApiResult<AwayBriefResponse> {
-    read(&state, |store| {
-        Ok(AwayBriefResponse {
-            brief: tiller_agents::handoff::ReturnBrief::load(store.conn(), None, Timestamp::now())?,
-        })
-    })
-    .await
-    .map(Json)
+    let mut answer = read(&state, away_brief_here).await?;
+    // Each peer the board may act on keeps its own contract (UA-30): read
+    // them all at once, so one slow link does not hold the others.
+    let peers = state.0.peers.federation().peers;
+    let reads = peers
+        .iter()
+        .filter(|view| view.scope == PeerScope::Act)
+        .map(|view| peer_away_brief(&state, view));
+    answer.hosts = futures_util::future::join_all(reads).await;
+    Ok(Json(answer))
+}
+
+/// A peer's away contract and brief, read as a `query` on its link, or
+/// why it could not be read.
+async fn peer_away_brief(state: &AppState, view: &PeerView) -> HostAwayBrief {
+    let label = view.label.clone();
+    let read = if view.link == LinkState::Live {
+        peer_query::<Value>(state, view, "away/brief".into(), || None)
+            .await
+            .map_err(|error| error.host(&label))
+    } else {
+        Err(ApiError::unreachable(&label))
+    };
+    match read {
+        Ok(answer) => HostAwayBrief {
+            host: label,
+            brief: answer
+                .get("brief")
+                .filter(|brief| !brief.is_null())
+                .cloned(),
+            error: None,
+        },
+        Err(error) => HostAwayBrief {
+            host: label,
+            brief: None,
+            error: Some(error.body.error),
+        },
+    }
 }
 
 /// An agent's session id, its pane, and the label of the remote host it

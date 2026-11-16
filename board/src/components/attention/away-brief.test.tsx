@@ -1,9 +1,10 @@
 import { QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { briefReadStore } from "../../lib/away";
+import { awayBrief } from "../../lib/fixtures-away";
 import { hydrateFromSnapshot } from "../../lib/boot";
 import { fixtureSnapshot } from "../../lib/fixtures";
 import type { Scenario } from "../../lib/fixtures";
@@ -125,4 +126,43 @@ test("the brief's back link is a bordered button, not a ghost", async () => {
   const back = screen.getByRole("link", { name: "Back to the inbox" });
   expect([...back.classList]).toContain("btn");
   expect([...back.classList]).not.toContain("ghost");
+});
+
+test("one brief covers each host's ended contract, and names a host it could not read", async () => {
+  const { queryClient } = await renderInbox("federated");
+  act(() => {
+    queryClient.setQueryData(queryKeyFor(awayBriefPath), {
+      brief: awayBrief(false),
+      hosts: [
+        {
+          host: "host-d",
+          brief: {
+            ...awayBrief(false),
+            approval_id: "01JAWAYD000000000000000000",
+            orders: "Finish gamma's import",
+            projects: ["gamma"],
+          },
+        },
+        {
+          host: "host-e",
+          brief: null,
+          error: { code: "peer_unreachable", message: "host-e is unreachable", host: "host-e" },
+        },
+      ],
+    });
+  });
+  fireEvent.click(await screen.findByTestId("inbox-row-away-brief"));
+  const card = await screen.findByTestId("away-brief");
+  const peer = within(card).getByRole("group", { name: "host-d" });
+  expect(peer.textContent).toContain("Finish gamma's import");
+  expect(within(card).getAllByTestId("away-brief-host")).toHaveLength(2);
+  expect(within(card).getByTestId("away-brief-unread").textContent).toContain(
+    "host-e is unreachable, so its away mode is not known. Its part shows here once it can be read.",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Mark read" }));
+  await vi.waitFor(() => expect(screen.queryByTestId("away-brief")).toBeNull());
+  expect(briefReadStore.get()).toEqual([
+    "01JAWAY0000000000000000000",
+    "host-d:01JAWAYD000000000000000000",
+  ]);
 });
