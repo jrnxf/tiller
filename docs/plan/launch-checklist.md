@@ -6,6 +6,8 @@ Started Monday 2026-11-16, Lisbon time.
 
 ## Owner decisions (spec changes)
 
+On Monday 2026-11-16 at about 15:30 Lisbon time, the owner said yes to every item below. Build each one as its recommendation in `usability-audit.md` ("Needs owner") says. For UA-15 part 2 the owner added the model: a person visits one board, and that board listens to its peers and shows their work in its own view. So every reply, read state and action on a peer's ask goes through the board the owner is on.
+
 - [x] UA-57 (P0): a `local-only` project starts its runs from the checkout's default branch when it is ahead of `origin` (`docs/spec/state.md` section 3, `base_sha`)
 - [ ] UA-15 part 2 (P0): the answer to an ask sent to a peer project shows on the board that sent it
 - [ ] UA-18: cancel and open an ask on the board (`POST /api/v1/asks/{id}/cancel`, `GET /api/v1/asks/{id}`)
@@ -29,6 +31,14 @@ Started Monday 2026-11-16, Lisbon time.
 - [ ] Walk a seventh full pass on a new bench: all 11 journeys, on the board with one page left open and on the CLI, with the work on main and on the peer
 - [ ] Walk UA-57 again on the bench: land a card in a `local-only` project, then start the next run
 - [ ] Stop the passes when one full pass finds no new P0 or P1
+
+## Untested
+
+The owner skipped the full test passes on Monday 2026-11-16 to get a release out. These shipped with unit and integration tests only, and no walk on the bench:
+
+- [ ] UA-57: the `local-only` start from the newer of the checkout and `origin` (f89bd22)
+- [ ] UA-63 and UA-64 from iteration 33: no seventh pass confirmed that the sixth pass found every P1
+- [ ] Every owner decision above, as each one lands
 
 ## Test failures on the macOS machine
 
