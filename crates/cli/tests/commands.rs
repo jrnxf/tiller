@@ -1595,6 +1595,31 @@ fn a_paired_host_is_named_when_this_host_lacks_the_answer() {
         let out = world.must(args);
         assert!(out.json.get("warning").is_none(), "{args:?}: {}", out.json);
     }
+    // A list of a project this host does not have is refused, not answered
+    // empty: the project may be the paired host's.
+    for args in [
+        &["board", "--project", "pylon"][..],
+        &["card", "list", "--project", "pylon"],
+        &["recap", "--project", "pylon"],
+        &["ask", "list", "--project", "pylon"],
+    ] {
+        let out = world.run(args);
+        assert_eq!(out.code, 3, "{args:?}: {}", out.json);
+        assert_eq!(out.json["error"]["entity"], "project", "{args:?}");
+        assert_eq!(
+            out.json["error"]["message"],
+            format!(
+                "no project pylon on {host}. This command reads {host} only, and host-b may \
+                 have it: the board shows every host"
+            ),
+            "{args:?}"
+        );
+        assert_eq!(
+            out.json["error"]["hint"],
+            format!("ssh -t host-b.example.com tiller --json {}", args.join(" ")),
+            "{args:?}"
+        );
+    }
 
     // Away mode binds this host only: turning it on says that the paired
     // host is not covered, and how to cover it.

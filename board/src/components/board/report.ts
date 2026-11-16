@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 
-import type { AgentRow, AgentsResponse } from "../../lib/api-types";
-import { agentsQuery } from "../../lib/queries";
+import type { AgentRow, AgentsResponse, AttentionItem, TimelineEntry } from "../../lib/api-types";
+import { agentsQuery, cardQuery, timelineQuery } from "../../lib/queries";
 import type { BadgeTone } from "./badge";
 
 // What a worker last said about its own work with `tiller status`: the state
@@ -118,4 +118,68 @@ export function isActivityBadge(badge: string): boolean {
 // The agents read is the board's own, so this adds no request.
 export function useReport(cardId: string): Report | null {
   return cardReport(useQuery(agentsQuery()).data, cardId);
+}
+
+// A worker that reported a stop ("blocked", "needs-decision") waits for an
+// answer that reaches it through the orchestrator. Once the owner has answered
+// a question on the card after that report, "Asks for a decision" in the
+// needs-you colour is no longer true: the owner already did their part. This
+// gives the time of that answer, or null while the report still stands.
+//
+// The report's own time is not on the agents read, so it is bounded by the
+// card's timeline (newest first): the report is a worker line, and it is no
+// newer than the newest worker line on the first page. With no worker line on
+// a full page, it is older than every line there. Any worker line after the
+// answer means the worker spoke again, so the report stands.
+export function answeredSince(
+  report: Report | null,
+  attention: AttentionItem[] | undefined,
+  timeline: { entries: TimelineEntry[]; next_before: number | null } | undefined,
+): string | null {
+  if (!report || !STOPS.has(report.state) || !attention || !timeline) return null;
+  // An open question means the card still waits on the owner.
+  if (attention.some((item) => item.answered_at === null && item.withdrawn_at === null)) {
+    return null;
+  }
+  const answered = attention.reduce<string | null>(
+    (newest, item) =>
+      item.answered_at !== null &&
+      (newest === null || Date.parse(item.answered_at) > Date.parse(newest))
+        ? item.answered_at
+        : newest,
+    null,
+  );
+  if (!answered) return null;
+  const worker = timeline.entries.find((entry) => entry.actor === "worker");
+  const bound = worker
+    ? worker.at
+    : timeline.next_before !== null
+      ? timeline.entries.at(-1)?.at
+      : undefined;
+  if (!bound) return null;
+  return Date.parse(answered) > Date.parse(bound) ? answered : null;
+}
+
+// The stops that ask something of someone; a "failed", "paused" or "done"
+// report is not a question an answer settles.
+const STOPS = new Set<ReportState>(["blocked", "needs-decision"]);
+
+// The words and tone for a stop report that the owner has answered since.
+export const ANSWERED_LABEL = "Answered";
+export const ANSWERED_TONE: BadgeTone = "ghost";
+
+// The same, read for one card. The two reads run only for a card whose worker
+// reported a stop and that waits on no one: a handful at most. A card page has
+// both reads already, and the event stream marks both stale on an answer.
+export function useAnsweredSince(
+  cardId: string,
+  owner: string | undefined,
+  report: Report | null,
+  needsYou: boolean,
+): string | null {
+  const enabled = Boolean(report && STOPS.has(report.state) && !needsYou);
+  const card = useQuery({ ...cardQuery(cardId, owner), enabled });
+  const timeline = useQuery({ ...timelineQuery(cardId, owner), enabled });
+  if (!enabled) return null;
+  return answeredSince(report, card.data?.attention, timeline.data);
 }

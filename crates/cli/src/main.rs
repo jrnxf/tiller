@@ -259,6 +259,19 @@ fn lists_this_host(command: &Command) -> bool {
     }
 }
 
+/// The project a list of this host is narrowed to. A name this host does not
+/// have is refused as `not_found`, not answered with an empty list, so that a
+/// person who names a paired host's project is told where it lives.
+fn narrowed_to(command: &Command) -> Option<&str> {
+    match command {
+        Command::Recap(args) => args.project.as_deref(),
+        Command::Board(args) if args.host.is_none() && !args.login => args.project.as_deref(),
+        Command::Ask(ask::Cmd::List(args)) => args.project.as_deref(),
+        Command::Card(card::Cmd::List(args)) => args.project.as_deref(),
+        _ => None,
+    }
+}
+
 /// An away command: `Some(true)` when it turns away mode on. Away mode binds
 /// this host only, so a person with a paired host is told what it leaves out.
 fn away_command(command: &Command) -> Option<bool> {
@@ -417,7 +430,11 @@ fn main() -> ExitCode {
     let app = App::from_env(cli.db);
     let whole_host = lists_this_host(&cli.command);
     let away = away_command(&cli.command);
-    match dispatch(&app, cli.command) {
+    let known = narrowed_to(&cli.command).map_or(Ok(()), |project| -> Result<(), Failure> {
+        app.read()?.project(project)?;
+        Ok(())
+    });
+    match known.and_then(|()| dispatch(&app, cli.command)) {
         Ok(mut outcome) => {
             // A list of this host is part of the whole on a board host with
             // a paired peer: a person is told so, not left to count.

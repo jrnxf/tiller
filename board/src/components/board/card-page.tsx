@@ -95,7 +95,15 @@ import {
   useResumeSession,
 } from "./run-menu";
 import type { RunDialog, RunTarget } from "./run-menu";
-import { reportLabel, reportRole, reportTone, useReport } from "./report";
+import {
+  ANSWERED_LABEL,
+  ANSWERED_TONE,
+  answeredSince,
+  reportLabel,
+  reportRole,
+  reportTone,
+  useReport,
+} from "./report";
 import { KindLabel, ModelChip } from "./tile";
 import { BugTriage } from "./triage";
 import { StartOrchestratorButton } from "./orchestrator-start";
@@ -677,6 +685,8 @@ export function CardPage({
   variant?: "page" | "drawer";
 }) {
   const { data: read } = useSuspenseQuery(cardQuery(cardId, owner));
+  // The route loads it with the card; the Timeline below waits on it.
+  const { data: timelineFirst } = useQuery(timelineQuery(cardId, owner));
   const projects = useNamedProjects(useSuspenseQuery(projectsQuery()).data);
   const { card } = read;
   const column = useOwnedBy(read.column, owner);
@@ -738,6 +748,9 @@ export function CardPage({
   const phase = phaseOf(column);
   // What the card's live worker last said about its own work.
   const report = useReport(column.id);
+  // The owner answered after the worker stopped to ask. The page has both
+  // reads already: the card's questions and the first page of its timeline.
+  const answered = column.needs_you ? null : answeredSince(report, detail.attention, timelineFirst);
   const blockers = detail.deps
     .filter((dep) => dep.released_at === null)
     .map((dep) => dep.display_id);
@@ -939,9 +952,21 @@ export function CardPage({
           {report ? (
             <>
               <dt>{reportRole(report)} says</dt>
-              <dd data-testid="card-report">
-                <span className={`lab sm ${reportTone(report)}`}>{reportLabel(report)}</span>
-                <span className="report-text">{report.text}</span>
+              <dd data-testid="card-report" className="report-dd">
+                {answered ? (
+                  <span className={`lab sm ${ANSWERED_TONE}`}>{ANSWERED_LABEL}</span>
+                ) : (
+                  <span className={`lab sm ${reportTone(report)}`}>{reportLabel(report)}</span>
+                )}
+                <span className="report-text">
+                  <span>{report.text}</span>
+                  {answered ? (
+                    <span className="report-note">
+                      You answered at {formatLisbonMoment(answered)}. The{" "}
+                      {reportRole(report).toLowerCase()} has not reported since.
+                    </span>
+                  ) : null}
+                </span>
               </dd>
             </>
           ) : null}

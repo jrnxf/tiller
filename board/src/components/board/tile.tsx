@@ -8,18 +8,21 @@ import type { DotKind } from "./activity";
 import { HOST_PROJECT, hostName, ownerOf, shownId } from "../../lib/peers";
 import { Ago } from "./ago";
 import { badgeText, badgeTone, isPending, statusMark } from "./badge";
-import { cardNumber } from "./format";
+import { cardNumber, formatLisbonMoment } from "./format";
 import { Glide } from "./glide";
 import { AsOf, HostChip } from "./host-chip";
 import { isTillerBug, isUntriaged } from "./bugs";
 import { HelpIcon, PrIcon, RouteIcon, Status } from "./icons";
 import { useAmbiguousIds, useHostLabel, useStanding } from "./peer-state";
 import {
+  ANSWERED_LABEL,
+  ANSWERED_TONE,
   isActivityBadge,
   overridesActivity,
   reportLabel,
   reportRole,
   reportTone,
+  useAnsweredSince,
   useReport,
 } from "./report";
 import { STOPPED_LABEL, useAgentStopped } from "./stopped";
@@ -103,6 +106,9 @@ function CardTile({ row, lane }: { row: BoardRow; lane: LaneHealth["kind"] }) {
     report && !row.needs_you && isActivityBadge(row.badge) && overridesActivity(report)
       ? report
       : null;
+  // The owner answered after the worker stopped to ask: the ask is no longer
+  // the owner's to act on, whatever the worker last said.
+  const answered = useAnsweredSince(row.id, owner, said, row.needs_you);
   // An active run with no live agent: "Unknown" would hide that it stopped.
   const stopped = useAgentStopped(row, lane !== "disconnected" && !standing.dim);
   return (
@@ -116,12 +122,13 @@ function CardTile({ row, lane }: { row: BoardRow; lane: LaneHealth["kind"] }) {
       data-peer-state={standing.peer ? (standing.dim ? "stale" : "live") : undefined}
       title={
         report
-          ? `${id}: ${row.title}\n${reportRole(report)}, ${reportLabel(report).toLowerCase()}: ${report.text}`
+          ? `${id}: ${row.title}\n${reportRole(report)}, ${reportLabel(report).toLowerCase()}: ${report.text}${answered ? `\nYou answered at ${formatLisbonMoment(answered)}. The ${reportRole(report).toLowerCase()} has not reported since.` : ""}`
           : stopped
             ? `${id}: ${row.title}\nNo agent works on this card: its agent stopped before the work ended.`
             : `${id}: ${row.title}`
       }
       data-report={report?.state}
+      data-answered={answered ? "true" : undefined}
       data-stopped={stopped || undefined}
     >
       <div className="c-top">
@@ -157,6 +164,8 @@ function CardTile({ row, lane }: { row: BoardRow; lane: LaneHealth["kind"] }) {
         {isTillerBug(row) ? <span className="lab sm bad">Bug</span> : null}
         {stopped ? (
           <span className="lab sm bad">{STOPPED_LABEL}</span>
+        ) : said && answered ? (
+          <span className={`lab sm ${ANSWERED_TONE}`}>{ANSWERED_LABEL}</span>
         ) : said ? (
           <span className={`lab sm ${reportTone(said)}`}>{reportLabel(said)}</span>
         ) : untriaged && row.badge === "filed" ? null : (

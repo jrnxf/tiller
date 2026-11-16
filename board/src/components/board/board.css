@@ -2020,8 +2020,22 @@ a.card:hover {
 .card .c-report {
   color: var(--fg-2);
 }
+.props dd.report-dd {
+  align-items: flex-start;
+  flex-wrap: nowrap;
+}
+.props dd.report-dd .lab {
+  flex: none;
+}
 .props dd .report-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   min-width: 0;
+}
+.props dd .report-note {
+  color: var(--fg-3);
+  font-size: var(--fs-mini);
 }
 
 /* What the card asks of the owner now: the question and its answer control,
