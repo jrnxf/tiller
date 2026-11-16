@@ -3116,6 +3116,105 @@
         }
       }
     },
+    "/api/v1/cards/{id}/runs": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "summary": "Start the run of the card's kind, as `tiller spawn` does (`protocol.md`\n7.4).",
+        "operationId": "start_card_run",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartRunBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`data` is the spawn: `run`, `session`, `reservation`, `worktree`, `branch`, `pane_id`, `name` and `dispatch`; a replayed key returns the run it started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`refused`: a card with no run to start (a question or ops card), a run already active, capacity, the RAM or disk floor or the quota floor; nothing was started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: a read-scope pairing, or the peer refused it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "the terminal holder or the peer is unreachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`forward_uncertain`: the peer link dropped before the peer answered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/cards/{id}/timeline": {
       "get": {
         "tags": [
@@ -12461,6 +12560,26 @@
           "restart": {
             "type": "boolean",
             "description": "Stop the live orchestrator first and start a new one, as `tiller\norchestrator start --restart` does: only on the owner's explicit\nRestart, and never for a peer's (its forwarded owner may not)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "StartRunBody": {
+        "type": "object",
+        "description": "`POST /api/v1/cards/{id}/runs`: `tiller spawn` for the card, as the board.",
+        "required": [
+          "idempotency_key"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label: the start is forwarded to it, and the run\nstarts on that host."
+          },
+          "idempotency_key": {
+            "type": "string"
           }
         },
         "additionalProperties": false
