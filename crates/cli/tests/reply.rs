@@ -190,4 +190,17 @@ fn the_owner_reads_the_answer_in_the_cli() {
     let answered = world.must(&["ask", "show", short]);
     assert!(answered.data()["replies"][0]["read_at"].is_string());
     assert_eq!(answered.data()["ask"]["unread_replies"], 1);
+
+    // UA-17: the owner marks the rest read in the CLI, as on the board. A
+    // session may not.
+    let refused = world.run_as(&orchestrator, &["ask", "show", short, "--mark-read"]);
+    assert_eq!(refused.error_code(), "forbidden", "{}", refused.json);
+    let read = world.must(&["ask", "show", short, "--mark-read"]);
+    assert_eq!(read.data()["ask"]["unread_replies"], 0, "{}", read.json);
+    assert!(read.data()["replies"][1]["read_at"].is_string());
+    let recap = world.must(&["recap"]);
+    assert_eq!(recap.data()["replies"], serde_json::json!([]));
+    // Again: nothing is unread, and nothing is written.
+    let again = world.must(&["ask", "show", short, "--mark-read"]);
+    assert_eq!(again.data()["replies"], read.data()["replies"]);
 }

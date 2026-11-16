@@ -26,6 +26,10 @@ pub enum Cmd {
     Show {
         /// The ask: a ULID or its short form
         ask: String,
+        /// Mark every unread answer read, as Mark read on the board does
+        /// (owner only)
+        #[arg(long)]
+        mark_read: bool,
     },
 }
 
@@ -87,7 +91,12 @@ pub fn run(app: &App, cmd: Cmd) -> Done {
         Cmd::Resolve(args) => resolve(app, args),
         Cmd::Link(args) => link(app, args),
         Cmd::List(args) => list_asks(app, args),
-        Cmd::Show { ask } => show(app, &ask),
+        Cmd::Show { ask, mark_read } => {
+            if mark_read {
+                mark_read_all(app, &ask)?;
+            }
+            show(app, &ask)
+        }
     }
 }
 
@@ -281,6 +290,23 @@ fn list_asks(app: &App, args: List) -> Done {
         rows.push(with_answer(&store, ask)?);
     }
     Ok(Outcome::read(json!({"asks": rows})))
+}
+
+/// `reply.read` for each unread answer to the ask: the owner read them in
+/// the CLI (`state.md`, the `reply.read` row).
+fn mark_read_all(app: &App, reference: &str) -> Result<(), Failure> {
+    app.require_owner("tiller ask show --mark-read")?;
+    let mut store = app.write()?;
+    let id = resolve_id(store.conn(), "asks", "ask", reference)?;
+    let unread: Vec<String> = replies::for_ask(store.conn(), &id)?
+        .into_iter()
+        .filter(|reply| reply.read_at.is_none())
+        .map(|reply| reply.id)
+        .collect();
+    for reply in unread {
+        store.reply_read(&app.ctx(), &reply)?;
+    }
+    Ok(())
 }
 
 fn show(app: &App, reference: &str) -> Done {
