@@ -50,7 +50,7 @@ use tiller_core::domain::{
     Artifact, Card, CardKind, CheckPlan, Delivery, Effort, Hold, Pr, Project, Reservation, Run,
     RunOutcome, RunRole, Session, Worktree,
 };
-use tiller_core::state::attention::QUOTA_HOLD_REASON;
+use tiller_core::state::attention::{QUOTA_HOLD_REASON, quota_start_decision};
 use tiller_core::state::caches::{WorktreeReading, landed_heads};
 use tiller_core::state::projects::meta;
 use tiller_core::state::publishes::published_head;
@@ -335,6 +335,10 @@ pub(crate) fn hold_for_quota(
     let Ok(Some(until)) = quota_floor_reset(store.conn(), checks, ctx.now) else {
         return error;
     };
+    // The owner's "Start now anyway" that no run has used yet: this refusal
+    // came only because the spawn did not pass the flag that rests on it.
+    let unused_start = !checks.past_quota_floor
+        && quota_start_decision(store.conn(), &card.id, role).is_ok_and(|item| item.is_some());
     let Ok(item) = store.quota_hold(ctx, &card.id, role, until, &state.to_string()) else {
         return error;
     };
@@ -359,7 +363,15 @@ pub(crate) fn hold_for_quota(
     } else {
         "the owner has a decision to make"
     };
-    SpawnError::Refused(format!("{state}; {held} and {owner}"))
+    let start = if unused_start {
+        format!(
+            ". The owner's earlier \"Start now anyway\" still stands: `tiller spawn {} {role} --past-quota-floor` starts the run (with `--promote` when it promotes a scout)",
+            card.display_id
+        )
+    } else {
+        String::new()
+    };
+    SpawnError::Refused(format!("{state}; {held} and {owner}{start}"))
 }
 
 /// Spawns one worker run. `key` is the spawn's idempotency key.

@@ -988,7 +988,8 @@ fn a_start_the_quota_floor_refuses_is_held_with_one_open_decision() {
         AnsweredVia::Cli,
     );
     assert!(picked.is_err());
-    rig.fleet
+    let answered = rig
+        .fleet
         .store
         .attention_answer(
             &owner(),
@@ -998,6 +999,17 @@ fn a_start_the_quota_floor_refuses_is_held_with_one_open_decision() {
             AnsweredVia::Board,
         )
         .unwrap();
+    // The answer only releases the hold. The note to the orchestrator names
+    // the command that starts the run; without it the plain retry asks the
+    // owner the same question again.
+    let note = answered.value.message.map(|message| message.body);
+    assert!(
+        note.as_deref().is_some_and(|body| body.contains(&format!(
+            "next: run `tiller spawn {} builder --past-quota-floor` now",
+            card.display_id
+        ))),
+        "{note:?}"
+    );
     let holds: Vec<Hold> = list(
         rig.fleet.store.conn(),
         "card_id = ?1 AND released_at IS NULL",
@@ -1131,9 +1143,18 @@ fn a_newer_wait_answer_shadows_an_older_start_answer() {
     rig.owner_answers(&card, "Start now anyway");
 
     // The orchestrator retries without the flag: refused again, a new
-    // decision, and the owner now waits.
-    rig.try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
+    // decision, and the owner now waits. The refusal names the flag that
+    // the standing answer needs.
+    let error = rig
+        .try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
         .unwrap_err();
+    assert!(
+        refusal(&error).contains(&format!(
+            "`tiller spawn {} builder --past-quota-floor` starts the run",
+            card.display_id
+        )),
+        "{error}"
+    );
     rig.owner_answers(&card, "Wait for the reset");
 
     let error = rig.try_spawn(&ctx, past_floor(&card)).unwrap_err();

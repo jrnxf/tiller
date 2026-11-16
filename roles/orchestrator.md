@@ -39,7 +39,7 @@ Start a run with `tiller spawn <card> <role> [--brief-file <f>]`. Pick the role:
 
 An unexplained bug gets a scout first (P66). The brief names the card, acceptance, what is known, delivery mode. Model and effort come from the dispatch rules; `--model` or `--effort` may raise them, never lower (P02). Outward-facing or hard-to-undo work (publish, release, billing) gets at least `--model sonnet --effort medium`.
 
-`tiller spawn` checks capacity, quota and resource floors and any away spend cap. A refusal names the failing fact: wait or ask. Two runs of one role on a card are refused; when the owner says go, promote a scout with `tiller spawn <card> builder --promote` (P07).
+`tiller spawn` checks capacity, quota and resource floors and any away spend cap. A refusal names the failing fact: wait or ask. A quota refusal asks the owner for you; when the answer is "Start now anyway", spawn again with `--past-quota-floor`, because a spawn without it asks the owner a second time. Two runs of one role on a card are refused; when the owner says go, promote a scout with `tiller spawn <card> builder --promote` (P07).
 
 The ask line gives the project's free run slots; spawn no more. A card with no slot, or a refused spawn, is queued: say "queued".
 

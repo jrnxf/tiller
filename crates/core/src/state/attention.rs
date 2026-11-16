@@ -93,6 +93,19 @@ impl OwnerAction {
         }
     }
 
+    /// The command the owning session has to run for the action to take
+    /// effect, when the answer alone does not finish it. A quota start only
+    /// releases the hold: the run starts when the orchestrator spawns it with
+    /// the flag, and a spawn without the flag asks the owner again.
+    pub fn next_step(&self, card: &str) -> Option<String> {
+        match self {
+            Self::ProjectCapacity { .. } => None,
+            Self::QuotaStart { role } => Some(format!(
+                "run `tiller spawn {card} {role} --past-quota-floor` now (with `--promote` when it promotes a scout). Without that flag the spawn is refused and the owner is asked again"
+            )),
+        }
+    }
+
     /// The action an option carries. Lenient, because `attention.open`
     /// refused a malformed one and an item opened before actions existed may
     /// hold any `action` value: that option applies nothing.
@@ -621,14 +634,24 @@ pub(crate) fn answer_attention(
                 kind: OutboxKind::Answer,
                 body: match &picked {
                     None => format!("[{}] {}\nanswer: {answer}", card.display_id, item.question),
-                    Some(applied) => format!(
-                        "[{}] {}\nanswer: {answer}\napplied: {}",
-                        card.display_id,
-                        item.question,
-                        applied
+                    Some(applied) => {
+                        let mut body = format!(
+                            "[{}] {}\nanswer: {answer}\napplied: {}",
+                            card.display_id,
+                            item.question,
+                            applied
+                                .as_ref()
+                                .map_or_else(|| "nothing".into(), OwnerAction::describe)
+                        );
+                        if let Some(next) = applied
                             .as_ref()
-                            .map_or_else(|| "nothing".into(), OwnerAction::describe)
-                    ),
+                            .and_then(|action| action.next_step(&card.display_id))
+                        {
+                            body.push_str("\nnext: ");
+                            body.push_str(&next);
+                        }
+                        body
+                    }
                 },
                 card_id: Some(card.id.clone()),
                 reply_to: Some(item.id.clone()),
