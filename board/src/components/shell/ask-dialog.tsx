@@ -215,8 +215,10 @@ function AskBody({
   });
   const targets: AskTarget[] = picked.map(({ project }) => ({
     project,
+    // With a paired host this host's rows carry its label too, so the owner
+    // is compared, not the label: only a peer's row has one.
     running: (orchestrators ?? []).some(
-      (agent) => agent.project_id === project.id && (agent.host ?? undefined) === ownerOf(project),
+      (agent) => agent.project_id === project.id && ownerOf(agent) === ownerOf(project),
     ),
     text: askFor(
       message,

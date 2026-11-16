@@ -280,6 +280,16 @@ test("a peer's project shows no grants: its own host keeps them", async () => {
   expect(await screen.findByRole("button", { name: "Edit" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Grants and settings" })).toBeNull();
   expect(screen.queryByText("Grants")).toBeNull();
+  // The panel says where they are, so the missing control is not a dead end.
+  expect(screen.getByTestId("peer-only").textContent).toBe(
+    "Grants and the stage switch of this project are on host-b's own board.",
+  );
+});
+
+test("a project of this host has no such note", async () => {
+  renderDetail(alpha);
+  expect(await screen.findByRole("button", { name: "Grants and settings" })).toBeTruthy();
+  expect(screen.queryByTestId("peer-only")).toBeNull();
 });
 
 // The stand-in daemon refuses what `tiller grant create` and

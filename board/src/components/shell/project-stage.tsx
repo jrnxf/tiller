@@ -323,6 +323,14 @@ export function ProjectDetail({ project, id }: { project: Project; id: string })
   return (
     <div className="pdetail" id={id} role="group" aria-label={`${project.name} stage`}>
       <Facts project={project} />
+      {/* What this board cannot do for a peer's project, and where it is done:
+          without it the grants are missing with no word, and the stage switch
+          is off with its reason in a tooltip alone. */}
+      {owner ? (
+        <p className="pdetail-off" data-testid="peer-only">
+          Grants and the stage switch of this project are on {owner}'s own board.
+        </p>
+      ) : null}
       {/* A tooltip does not show on a touch screen, so the reason is in view. */}
       {editOff ? (
         <p className="pdetail-off">

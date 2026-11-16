@@ -11,6 +11,7 @@ import type {
   CardReview,
   CardRun,
   EventLine,
+  Project,
   TimelineEntry,
   TimelineResponse,
 } from "../../lib/api-types";
@@ -673,8 +674,9 @@ export function CardPage({
   const standing = useStanding(column);
   const id = shownId(column.host ? { ...card, host: column.host } : card, useAmbiguousIds());
   // A peer's project is the one that host owns, whatever slug this host uses.
-  const owned = (p: { id: string; host?: string }) =>
-    p.id === card.project_id && (p.host ?? null) === (ownerOf(column) ?? null);
+  // Owners are compared, not labels: with a paired host this host's rows carry
+  // its label too.
+  const owned = (p: Project) => p.id === card.project_id && ownerOf(p) === ownerOf(column);
   const project =
     projects.projects.find(owned) ?? projects.projects.find((p) => p.id === card.project_id);
   const color = projectColor(project ? projects.projects.indexOf(project) : -1);
@@ -714,9 +716,8 @@ export function CardPage({
   const projectName = (projectId: string) =>
     projectId === HOST_PROJECT
       ? hostName(hostLabel)
-      : (projects.projects.find(
-          (p) => p.id === projectId && (p.host ?? null) === (ownerOf(column) ?? null),
-        )?.name ?? projectId);
+      : (projects.projects.find((p) => p.id === projectId && ownerOf(p) === ownerOf(column))
+          ?.name ?? projectId);
   const bugProject = bugProjectOf(machineOf(column, machines), projects.projects);
 
   const hold = detail.holds[0];

@@ -72,11 +72,12 @@ function stub() {
 }
 
 // Which orchestrators run: alpha and beta here, fleet on host-d. gamma and the
-// peers' other projects have none.
+// peers' other projects have none. The rows are as a paired host reads them:
+// each carries its host's label, and only a peer's row has a link.
 const RUNNING = [
-  { project_id: "alpha" },
-  { project_id: "beta" },
-  { project_id: "fleet", host: "host-d" },
+  { project_id: "alpha", host: "host-a" },
+  { project_id: "beta", host: "host-a" },
+  { project_id: "fleet", host: "host-d", link: "live" },
 ] as AgentRow[];
 
 function renderDialog(onClose = vi.fn(), running: AgentRow[] = RUNNING) {
