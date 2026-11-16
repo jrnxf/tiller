@@ -391,7 +391,7 @@ up() {
 # shots DIR [PATH...]: DIR/<page>-<width>-<theme>.png for each page of the
 # main board. chrome-devtools-axi is the owner's own tool, not the dev shell's.
 shots() {
-  local dir=${1:?a directory outside the repository} base page name spec theme
+  local dir=${1:?a directory outside the repository} base page name spec theme last
   shift
   command -v chrome-devtools-axi >/dev/null || { echo "chrome-devtools-axi is not on PATH" >&2; exit 1; }
   case "$(cd "$(dirname "$dir")" && pwd)/" in
@@ -402,7 +402,13 @@ shots() {
   base=$(url main)
   [ $# -gt 0 ] || set -- / /inbox /agents /contributions /memory /health /settings
   # Sign this browser in once; the session cookie covers every later page.
-  chrome-devtools-axi open "$(login_link main)" >/dev/null
+  # A browser with no selected tab makes the tab and then fails the `open`:
+  # select the newest tab and open again.
+  if ! chrome-devtools-axi open "$(login_link main)" >/dev/null 2>&1; then
+    last=$(chrome-devtools-axi pages | awk -F, '/^ *[0-9]+,/ { id = $1 } END { gsub(/ /, "", id); print id }')
+    chrome-devtools-axi selectpage "$last" >/dev/null
+    chrome-devtools-axi open "$(login_link main)" >/dev/null
+  fi
   for page in "$@"; do
     name=$(echo "${page#/}" | tr -c 'a-zA-Z0-9\n' '-')
     [ -n "${name%-}" ] || name=board

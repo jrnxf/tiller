@@ -138,6 +138,56 @@ test("a host whose terminal holder is down shows last seen with its reason in th
   expect(row.textContent).toContain("The terminal holder on this host does not answer");
 });
 
+test("a host under a floor says on every screen that it refuses new runs, with the step", async () => {
+  const { queryClient } = await renderApp("default");
+  expect(screen.queryByTestId("refusal-banner-host-a")).toBeNull();
+  const machines = fixtureResource("/api/v1/machines", "default") as MachinesResponse;
+  const local = machines.machines.find((entry) => entry.kind === "local");
+  if (!local) throw new Error("no local fixture machine");
+  act(() =>
+    queryClient.setQueryData<MachinesResponse>(machinesQuery().queryKey, {
+      machines: machines.machines.map((entry) =>
+        entry.kind === "local"
+          ? { ...entry, refuses_runs: ["disk: 31744 MB free, floor 40960 MB"] }
+          : entry,
+      ),
+    }),
+  );
+  const banner = await screen.findByTestId(`refusal-banner-${local.label}`);
+  expect(banner.textContent).toBe(
+    `${local.label} refuses new runs. 31 GB of disk free, under the 40 GB floor. Make room on this machine, or lower the floor in Settings > Hosts.Settings`,
+  );
+  // The sidebar's row says it in place of the free lanes.
+  const row = screen.getByTestId(`refuses-${local.label}`);
+  expect(row.textContent).toContain("refuses new runs");
+  expect(row.textContent).not.toContain("free");
+  // The floor clears: the banner goes.
+  act(() => queryClient.setQueryData<MachinesResponse>(machinesQuery().queryKey, machines));
+  await waitFor(() => expect(screen.queryByTestId(`refusal-banner-${local.label}`)).toBeNull());
+});
+
+test("Health lists a machine that refuses new runs, and nothing while every machine can start one", async () => {
+  const { queryClient } = await renderApp("default", "/health");
+  await screen.findByTestId("health");
+  const machines = fixtureResource("/api/v1/machines", "default") as MachinesResponse;
+  const local = machines.machines.find((entry) => entry.kind === "local");
+  if (!local) throw new Error("no local fixture machine");
+  expect(screen.queryByTestId(`health-refuses-${local.label}`)).toBeNull();
+  act(() =>
+    queryClient.setQueryData<MachinesResponse>(machinesQuery().queryKey, {
+      machines: machines.machines.map((entry) =>
+        entry.kind === "local"
+          ? { ...entry, refuses_runs: ["RAM: 512 MB free, floor 4096 MB"] }
+          : entry,
+      ),
+    }),
+  );
+  const row = await screen.findByTestId(`health-refuses-${local.label}`);
+  expect(row.textContent).toContain(`${local.label} refuses new runs`);
+  expect(row.textContent).toContain("0.5 GB of RAM free, under the 4.0 GB floor");
+  expect(within(row).getByRole("link", { name: "Open Settings" })).toBeTruthy();
+});
+
 function machine(over: Partial<Machine>): Machine {
   return {
     id: "m",

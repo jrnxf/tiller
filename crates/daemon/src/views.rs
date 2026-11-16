@@ -725,6 +725,7 @@ pub fn machines(store: &Store, local: &LocalHealth, now: Timestamp) -> Result<Ma
             link_reason: None,
             bug_project: open_bug_project(store, host.bug_project_id)?,
             holder_restarted_at: at_opt(holder_restarted),
+            refuses_runs: store.refused_starts()?,
             rev: host.rev,
         });
     }
@@ -2265,6 +2266,13 @@ fn peer_machine(host: &tiller_core::domain::Host, view: &PeerView) -> Machine {
         link_reason: view.link_reason.clone(),
         bug_project: cached.and_then(|row| row.bug_project.clone()),
         holder_restarted_at: cached.and_then(|row| row.holder_restarted_at.clone()),
+        // Only a live link's row is current: an old refusal is not repeated.
+        refuses_runs: match view.link {
+            LinkState::Live => cached
+                .map(|row| row.refuses_runs.clone())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        },
         rev: host.rev,
     }
 }

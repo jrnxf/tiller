@@ -1641,6 +1641,61 @@ fn breached_floor_for_30_minutes_opens_recovery_item() {
     );
 }
 
+/// R16: an edit of the floors is checked on the next pass, not at the next
+/// five-minute host check, so a floor the owner lowers stops refusing at once.
+#[test]
+fn a_host_edit_runs_the_floor_check_on_the_next_pass() {
+    let mut w = World::new();
+    let host = w.fleet.host.clone();
+    let floor = |w: &mut World, floor: i64| {
+        let rev: i64 = w.count(&format!("SELECT rev FROM hosts WHERE id = '{host}'"));
+        w.store_mut()
+            .host_edit(
+                &owner(),
+                &host,
+                rev,
+                HostEdit {
+                    disk_floor_mb: Some(Some(floor)),
+                    ..HostEdit::default()
+                },
+            )
+            .unwrap();
+    };
+    let events = |w: &World, kind: &str| {
+        w.count(&format!(
+            "SELECT count(*) FROM events WHERE kind = '{kind}' AND json_extract(payload, '$.check') = 'disk'"
+        ))
+    };
+    floor(&mut w, 40_000);
+    w.readings.set(HostReadings {
+        disk_free_mb: Some(31_000),
+        ..HostReadings::default()
+    });
+    let t0 = now();
+    w.pass(t0);
+    assert_eq!(events(&w, "host.degraded"), 1);
+    assert_eq!(
+        w.store().refused_starts().unwrap(),
+        vec!["disk: 31000 MB free, floor 40000 MB"]
+    );
+    // No edit: the next pass inside the cadence checks nothing.
+    w.readings.set(HostReadings {
+        disk_free_mb: Some(50_000),
+        ..HostReadings::default()
+    });
+    w.pass(t0.plus_minutes(1));
+    assert_eq!(events(&w, "host.recovered"), 0);
+    w.readings.set(HostReadings {
+        disk_free_mb: Some(31_000),
+        ..HostReadings::default()
+    });
+    // The owner lowers the floor under the free disk: one pass later it holds.
+    floor(&mut w, 20_000);
+    w.pass(t0.plus_minutes(2));
+    assert_eq!(events(&w, "host.recovered"), 1);
+    assert!(w.store().refused_starts().unwrap().is_empty());
+}
+
 /// R20: while the owner marker names another system a pass writes nothing;
 /// the flip back runs a full pass that rebinds live evidence.
 #[test]

@@ -41,6 +41,7 @@ import { DependsOn } from "./card-deps";
 import { CardHeader } from "./card-header";
 import { CardQuestions } from "./card-questions";
 import { bugProjectOf, isTillerBug, isUntriaged, machineOf } from "./bugs";
+import { runRefusal, runRefusalStep } from "../../lib/machines";
 import { HostChip, PeerNote } from "./host-chip";
 import { ApproveActions } from "../attention/approve";
 import { phaseOf } from "../attention/card-lifecycle";
@@ -698,6 +699,8 @@ export function CardPage({
       ownerKey(card.project_id, agent) === ownerKey(card.project_id, column),
   );
   const projectLabel = project?.name ?? card.project_id;
+  const cardMachine = machineOf(column, machines);
+  const refusal = runRefusal(cardMachine);
   const wait = hostHealth
     ? null
     : cardWait({
@@ -706,6 +709,10 @@ export function CardPage({
         projectName: projectLabel,
         peer: standing.peer ? standing.host : null,
         reachable: !standing.peer || standing.live,
+        refusal:
+          cardMachine && refusal
+            ? { host: cardMachine.label, why: refusal, step: runRefusalStep(cardMachine) }
+            : null,
         orchestrator: roster ? (orchestrator ?? null) : undefined,
         health: standing.peer
           ? { kind: "ok" }

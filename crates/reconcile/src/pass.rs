@@ -129,6 +129,9 @@ pub struct Reconciler {
     pub(crate) sources: Sources,
     pub(crate) started_at: Option<Timestamp>,
     pub(crate) last_host_check: Option<Timestamp>,
+    /// The host row's `rev` at the last host check: an edit of the floors
+    /// (`host.edit`) is checked on the next pass, not five minutes later.
+    pub(crate) last_host_rev: Option<i64>,
     pub(crate) last_scan: Option<Timestamp>,
     pub(crate) last_launch: Option<Timestamp>,
     /// Passes refused by the owner marker since the last full pass, so the
@@ -156,6 +159,7 @@ impl Reconciler {
             sources,
             started_at: None,
             last_host_check: None,
+            last_host_rev: None,
             last_scan: None,
             last_launch: None,
             was_read_only: false,
@@ -246,11 +250,14 @@ impl Reconciler {
         }
 
         // Step 2: host checks, every five minutes.
+        let host_rev = self.store.local_host().ok().map(|host| host.rev);
         if self
             .last_host_check
             .is_none_or(|at| at.plus_minutes(self.config.thresholds.host_check) <= now)
+            || host_rev != self.last_host_rev
         {
             self.last_host_check = Some(now);
+            self.last_host_rev = host_rev;
             if let Err(error) = self.host_checks(now, report) {
                 report.error("host checks", &error);
             }

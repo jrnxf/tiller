@@ -64,6 +64,39 @@ export const VERSION_MARK_WORD: Record<VersionMark, string> = {
   different: "Differs from this host",
 };
 
+// A floor line as the host check writes it: "disk: 31000 MB free, floor 40000 MB".
+const FLOOR_LINE = /^(RAM|disk): (\d+) MB free, floor (\d+) MB$/;
+
+// Settings > Hosts sets the floors in GB (1 GB is 1024 MB), so the owner
+// reads them in GB here too.
+function gigabytes(megabytes: number): string {
+  const gb = megabytes / 1024;
+  return `${gb < 10 ? gb.toFixed(1) : Math.round(gb).toLocaleString("en-US")} GB`;
+}
+
+function floorWords(line: string): string {
+  const parts = FLOOR_LINE.exec(line);
+  if (!parts) return line;
+  const [, name, free, floor] = parts;
+  return `${gigabytes(Number(free))} of ${name} free, under the ${gigabytes(Number(floor))} floor`;
+}
+
+// Why a host refuses every new run, in one phrase, or null while it can
+// start one. A host that does not answer says nothing current, so it has none.
+export function runRefusal(machine: Machine | undefined): string | null {
+  const reasons = machine?.refuses_runs ?? [];
+  if (!machine || reasons.length === 0 || machine.health === "stale") return null;
+  return reasons.map(floorWords).join("; ");
+}
+
+// What the owner can do about it. Each host edits its own floors
+// (protocol.md 7.4, PATCH /api/v1/host is not forwarded).
+export function runRefusalStep(machine: Machine): string {
+  return machine.kind === "local"
+    ? "Make room on this machine, or lower the floor in Settings > Hosts."
+    : `Make room on ${machine.label}, or lower the floor in Settings > Hosts on its own board.`;
+}
+
 export interface MachineRowView {
   tone: DotTone;
   summary: string | null;
@@ -76,6 +109,8 @@ export interface MachineRowView {
   linkReason: string | null;
   // Set when the host runs another version than the board host.
   versionMark: VersionMark | null;
+  // Why the host refuses every new run, when it does.
+  refusal: string | null;
 }
 
 function peerStaleText(machine: Machine, link: "lagging" | "down" | "refused" | "never"): string {
@@ -94,10 +129,13 @@ export function machineRowView(
   boardVersion?: string | null,
 ): MachineRowView {
   const stale = machine.health === "stale";
+  const refusal = runRefusal(machine);
   let summary: string | null = null;
   if (!stale && machine.running_agents !== null) {
     summary = `${machine.running_agents} running`;
-    if (machine.free_slots !== null) summary += `, ${machine.free_slots} free`;
+    // Free lanes mean nothing while a floor refuses every start.
+    if (refusal) summary += ", refuses new runs";
+    else if (machine.free_slots !== null) summary += `, ${machine.free_slots} free`;
   }
   const peer = peerMachines([machine]).length > 0;
   const link = machine.link ?? null;
@@ -109,7 +147,12 @@ export function machineRowView(
     staleText = minutes === null ? "never seen" : `last seen ${minutes} min ago`;
   }
   return {
-    tone: link === "refused" ? "red" : HEALTH_TONE[machine.health],
+    tone:
+      link === "refused"
+        ? "red"
+        : refusal && machine.health === "ok"
+          ? "amber"
+          : HEALTH_TONE[machine.health],
     summary,
     stale: stale || staleText !== null,
     staleText,
@@ -126,5 +169,6 @@ export function machineRowView(
           : linkReason(machine.label, link, machine.last_seen_at, machine.link_reason)
         : null,
     versionMark: versionMark(machine.version, boardVersion),
+    refusal,
   };
 }

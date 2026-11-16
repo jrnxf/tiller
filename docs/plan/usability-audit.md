@@ -12,9 +12,9 @@ Status values: `open`, `fixed` (with what was verified), `needs owner`, `to veri
 |---|---|
 | Phase | 1 - audit. Journeys 3 (ask), 4 (start a task) and 5 (trust) are walked on the board and the CLI. Journeys 1, 2 and 6 to 11 are not walked yet. |
 | Open P0 | 0. UA-15 is `needs owner`: the silent part is fixed, the answer itself needs a spec change. |
-| Open P1 | 4 (UA-01, UA-03, UA-09, UA-17). UA-20 is `needs owner`: a queued card says what it waits for and "Close" is out of the main place, and its "Start" control needs a spec change (see "Needs owner"). UA-18 is `needs owner`: the wrong status line is fixed, Cancel and the full view need a spec change. UA-19 is `needs owner`: the tile, the card and the timeline show the worker's report, and the "Needs you" rule needs a spec change. |
-| Fixed | UA-02, UA-04, UA-05, UA-06, UA-12, UA-16, UA-21, UA-22, DX-01. UA-15 part 1 (the owner is told where the answer shows). UA-18 part 1 (the ask tile shows an unread answer and opens it). UA-19 part 1 (a worker's report shows on its tile, on the card and in the timeline). UA-20 part 1 (a queued card says what it waits for, and "Close" is under "More" until work starts). |
-| Next step | UA-01 (an honest host verdict). Then the CLI group (UA-17, UA-03, UA-09). Walk journeys 2, 6 and 8 after the stand-in forge of the bench gaps. UA-11 (P2) is not started: check `docs/spec/state.md` section 6 first, because the column of a card is a contract. |
+| Open P1 | 4 (UA-03, UA-09, UA-17, UA-25). UA-20 is `needs owner`: a queued card says what it waits for and "Close" is out of the main place, and its "Start" control needs a spec change (see "Needs owner"). UA-18 is `needs owner`: the wrong status line is fixed, Cancel and the full view need a spec change. UA-19 is `needs owner`: the tile, the card and the timeline show the worker's report, and the "Needs you" rule needs a spec change. |
+| Fixed | UA-01, UA-02, UA-04, UA-05, UA-06, UA-12, UA-16, UA-21, UA-22, DX-01. UA-15 part 1 (the owner is told where the answer shows). UA-18 part 1 (the ask tile shows an unread answer and opens it). UA-19 part 1 (a worker's report shows on its tile, on the card and in the timeline). UA-20 part 1 (a queued card says what it waits for, and "Close" is under "More" until work starts). |
+| Next step | UA-25 (Health counts a live peer as not live; small, and it shares its cause with the `stale` peer row of UA-03). Then the CLI group (UA-17, UA-03, UA-09). Walk journeys 2, 6 and 8 after the stand-in forge of the bench gaps. UA-11 (P2) is not started: check `docs/spec/state.md` section 6 first, because the column of a card is a contract. |
 
 ## The bench
 
@@ -37,7 +37,7 @@ scripts/usability-bench.sh down      # stop every process, delete the homes
 | `link freeze\|thaw` | the peer stops answering, then answers again |
 | `quota HOST PERCENT` | the weekly quota the next poll reads |
 | `kill-agent HOST SESSION` | a run that dies |
-| `shots DIR [PATH...]` | screenshots of the main board's screens, both themes, 1440 px and 390 px (needs `chrome-devtools-axi`; `DIR` must be outside the repository) |
+| `shots DIR [PATH...]` | screenshots of the main board's screens, both themes, 1440 px and 390 px (needs `chrome-devtools-axi`; `DIR` must be outside the repository). A path may be a card page: `"/cards/<ulid>?owner=peer"` |
 
 What it builds:
 
@@ -89,17 +89,35 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 | Read what happened on a card | the timeline shows the owner's news only (`harbor-2`: 4 lines in place of 24), with the question, the answer and a comment quoted (UA-04) | `card timeline` prints raw events (UA-09) |
 | Answer a card that says "Decision" | 2 steps: open the card, click an option or press its digit. The question, the recommendation and the answer control are at the top of the card (UA-02; before: leave the card, open the Inbox, find the item, answer: 4 steps) | `attention answer <item>`, after `attention list --open` for the id |
 | Find the most urgent item in the Inbox | it is the first row and the one shown, and its row says "Urgent" (UA-05; before: the last of 7 rows) | `tiller recap` orders by kind, not by the card's priority |
+| Learn that a host starts no new run | a banner on every screen names the host, the numbers and the step ("peer refuses new runs. 4.6 GB of disk free, under the 878,906 GB floor. ..."); the sidebar row, Health and a queued card say it too, and all clear by themselves within 30 s of a fix (UA-01; before: nothing, until a `tiller spawn` was refused) | `tiller machines` has `refuses_runs` on this host's row, and `tiller doctor` has a `floors` line. Main's CLI does not show the peer's (UA-03) |
 | Learn that a run is blocked or done | the tile shows the worker's words and "Reports blocked" or "Reports done" within 2 s, on both hosts (UA-19; before, only when the orchestrator raised an item). The card enters "Needs you" only when the orchestrator raises an item | `tiller agents`, in a CSV row |
 
 ## Findings
 
-### UA-01 - A host that refuses every new run looks healthy (P1, open)
+### UA-01 - A host that refuses every new run looks healthy (P1, fixed)
 
 - Journey: 2, 4, 7, 8.
 - Tried: the peer has a disk floor far above its free disk. I looked for any sign of it before starting work there.
 - Happened: `tiller spawn` on the peer answers `host peer: disk free is 12862 MB, under the 900000000 MB floor`. Before that, nothing warns. `tiller machines` says `health: ok` and 8 free slots. The board's sidebar says "peer, 10 running, 8 free". The Health screen says Safety "Good" and "Both machines are live". `tiller doctor` does not check the floors.
 - Hurts: the owner starts a task and leaves. The task never starts, and the only message is the refusal of a command the owner did not run. "8 free" is false.
 - Fix: one "can this host start a run now" verdict from the floors (RAM, disk) and quota, in the host's health. Show it in `tiller machines`, the sidebar's machine row, the Health screen and `tiller doctor`, with the reason and the step ("free disk, or lower the floor in Settings > Hosts"). Free slots read 0 while the host refuses.
+- Fixed on Mon 16 Nov 2026 (Lisbon), for the RAM and disk floors. `docs/spec/recovery.md` R16 already says "The Machines row shows the breached floor"; no code did it.
+  - The verdict: a host's Machines row (`GET /api/v1/machines`, and `tiller machines` for this host) has a new field `refuses_runs`, one line per breached floor with the measured value and the floor. It is absent while the host can start a run. It reads the `host.degraded` events that the host check already writes, so it costs no reading of its own, and a peer's row carries it over the link. `health` and `free_slots` keep their contract values (`docs/spec/protocol.md` section 9); the board words them. `contract/openapi.json` is regenerated.
+  - It follows a fix fast: a floor that the owner clears leaves the row at once, and a `host edit` runs the floor check on the next reconcile pass (30 s) in place of the next five-minute check.
+  - The board, in four places, each with the numbers in GB (as Settings > Hosts sets them) and the step ("Make room on peer, or lower the floor in Settings > Hosts on its own board"):
+    - a banner under the header on every screen, "peer refuses new runs. ...". The sidebar's row alone is not enough: with 16 projects in the list the Machines section is under the fold at 1440 x 900, and at 390 px it is in the drawer;
+    - the sidebar's machine row: an amber dot and "10 running, refuses new runs" in place of "10 running, 8 free", with the reason in its tooltip;
+    - Health: a "Machines" panel that lists each such host (it shows only then);
+    - a queued card on that host: "Waits for: peer to accept new runs", with the reason, and no `tiller spawn` command (this was the open point of UA-20).
+  - `tiller doctor` has a `floors` line, read live as a spawn reads it: "RAM and disk are above their floors, so a run can start", or a warning "no new run starts on this host: disk free is 4703 MB, under the 900000000 MB floor; free the resource, or lower the floor with `tiller host edit` or in Settings > Hosts". Settings > Hosts shows the doctor's lines, so the host's card counts it as a problem, for a peer too.
+  - Verified on the bench: the main board showed the banner, the row, the Health panel and the wait row of the peer's `pylon-3`; `tiller machines` and `tiller doctor` on the peer named the floor. After `host edit --disk-floor-mb 1000` on the peer, the banner left and the row read "10 running, 8 free" with no reload, within one pass. Checked in light and dark at 1440 px and 390 px.
+  - Tests: `crates/daemon/src/api.rs` (`the_machines_row_shows_a_breached_floor_until_it_clears`), `crates/reconcile/tests/recovery.rs` (`a_host_edit_runs_the_floor_check_on_the_next_pass`), `crates/cli/tests/commands.rs` (`machines_names_a_breached_floor_until_it_goes`), `doctor::tests::a_breached_floor_warns_with_the_numbers_and_the_step`, `board/src/lib/machines.test.ts` (2 tests), `wait.test.ts` (the refusing host), `states.test.tsx` (the banner with the sidebar row, and the Health panel).
+- Not done:
+  - Quota is not part of the verdict. The quota floor lives in `config.toml`, which the Machines read does not load, and a start that the quota floor refuses already opens a decision in the Inbox by contract (`docs/spec/protocol.md` section 8). To verify in journey 8 with `scripts/usability-bench.sh quota HOST PERCENT`.
+  - A first breach shows up to 5 minutes late (the host check's cadence), and the numbers are those of the first breach, not live ones. `tiller doctor` reads live.
+  - `tiller machines` on main does not show the peer's refusal: the CLI reads only this host's database (UA-03).
+  - The banner has no dismiss. After 30 minutes the daemon also opens a recovery item on the host's health card (R16), so the Inbox then says it a second time.
+  - The spec's field table (`docs/spec/protocol.md` section 9) and its list of doctor checks (6.4) do not name the new field and the new line. See "Needs owner".
 
 ### UA-02 - A card that needs you does not show its question (P1, fixed)
 
@@ -315,7 +333,7 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
   - Verified on the bench: `lantern-4` and the peer's `pylon-3` name their orchestrator; after `agent stop` of Meadow's orchestrator `meadow-1` showed the warning, one click on "Start orchestrator" started it and the row changed within 5 s; after `tiller spawn lantern-4 builder` the row left and "Close" returned. Checked in light and dark at 1440 px and 390 px.
   - Tests: `board/src/components/board/wait.test.ts` (7 cases) and 2 card page tests in `card-lifecycle.test.tsx`.
 - Not done, by choice: the row does not say that the orchestrator received the card's note. The delivery state is in the timeline's system events only, and a claim built from the agents list could be wrong.
-- Not done: the row does not know that a host refuses every new run (UA-01). On the bench the peer's row says "when a slot is free" while the peer's disk floor refuses each start. The fix of UA-01 must feed this row.
+- Done with UA-01: a queued card on a host that refuses every new run says "Waits for: peer to accept new runs" with the reason and the step, and prints no spawn command.
 - Still needs the owner: "File and start" and "Start".
 
 ### UA-21 - "Search or run" finds no card and runs no job (P1, fixed)
@@ -371,6 +389,14 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 - To verify: the `A` key that opens the Ask box may also type "a" into its field. Seen once with a scripted key press (`chrome-devtools-axi press a`); not checked with a real keyboard.
 - To verify: `board/src/components/shell/ask-settings.test.tsx` (line 181, the folder field's value) failed once in a full `bun run test` while the bench ran, and passed 3 times alone and in the next full run. It has a `waitFor` deadline, so the cause is probably the machine's load.
 
+### UA-25 - Health says "Only 1 of 2 machines are live" while the peer is live (P1, open)
+
+- Journey: 2, 7, 8.
+- Tried: opened Health on the main board during the walk of UA-01, with the peer's link live.
+- Happened: the Safety card reads "Watch", "Only 1 of 2 machines are live" and "machines live 1 of 2". The sidebar shows the peer with a green dot and its counts, and the peer's cards are live on the board. The count comes from `hosts.last_seen_at` in the last two minutes (`crates/core/src/state/signals.rs`, `machines_live`), and a live peer link does not keep that column fresh on the bench. `tiller machines` on main shows the same peer as `stale` for the same reason (UA-03).
+- Hurts: Safety is the card that says whether to worry. It says "Watch" every day for a state that is fine, so the owner learns to ignore it, and a real outage then looks the same.
+- Fix: count a paired peer as live from its link state (as the Machines read does), or have the link's frames refresh `last_seen_at`. Check which of the two `docs/spec/protocol.md` section 9 means by "`last_seen_at`: the last frame from the peer link" before the fix; the signals read and `tiller machines` should then agree with the board.
+
 ### DX-01 - A debug build made before the board was built never served the board (fixed)
 
 - Found while building the bench: a debug `tiller` compiled while `board/dist` was missing answered "board assets are not built" forever, even after the board was built and the crate was rebuilt. rust-embed keeps the folder's path with its `..` parts in that case and then refuses every file, and the compiler cache returns the same artifact.
@@ -396,6 +422,8 @@ Two more failed in the one full run and were not run again alone: `tiller-cli::h
 
 Do not run the bench and the test suite at the same time: the bench starts about 30 processes.
 
+The machine's disk had 4 to 5 GB free during iteration 10 (the bench's seeded "disk floor" case showed the real number). A full workspace build or a Nix build may not fit; check `df -h /` before one.
+
 Next step for these: find out whether they fail on a quiet machine and on Linux. If they fail only here, the cause is outside the repository and it goes to "Needs owner".
 
 ## Plan
@@ -406,8 +434,8 @@ Order of work, highest owner value first. Fixes that share a cause are grouped.
 2. Done: UA-04 (a timeline without plumbing lines). UA-11 (no ended run in "Working") moves to the polish step: it is P2, and the column is a contract of `docs/spec/state.md` section 6.
 3. Done: UA-02, UA-05, UA-06 and UA-12 (the "needs you" path). The question is on the card, the Inbox is ordered by urgency, and the kind is named.
 4. Done: UA-21 and UA-22 (find a card and start a job from anywhere on the board). Done as far as the contract allows: UA-20 part 1 (a queued card says what it waits for). Its "Start" control waits under "Needs owner".
-5. UA-01: an honest host verdict in every place that shows a host.
-6. UA-17 with UA-03, UA-09, UA-10 and UA-23: the CLI as an owner surface.
+5. Done: UA-01 (a host that refuses every new run says so on the board, in `tiller machines` and in `tiller doctor`).
+6. UA-25 (a live peer counts as live on Health), then UA-17 with UA-03, UA-09, UA-10 and UA-23: the CLI as an owner surface.
 7. Finish the audit in parallel with the fixes: close the bench gaps (the stand-in forge), then walk journeys 1, 2, 6, 8, 9, 10 and 11 and the rest of 5 and 7.
 8. UA-07 with UA-08: the host out of the owner's way.
 9. UA-11, UA-13, UA-14, UA-22, UA-24: polish.
@@ -423,6 +451,8 @@ Order of work, highest owner value first. Fixes that share a cause are grouped.
 - UA-19, the rest: let a worker's `blocked` or `needs-decision` report flag its card. Today the card enters "Needs you" only when the orchestrator opens an item, so a worker that stops while its orchestrator is busy, slow or gone shows "Reports blocked" on its tile but is in no count and no Inbox. `docs/spec/state.md` section 6 fixes the flag. Recommendation: do not change the flag. Have the daemon open a `recovery` item when a `blocked` or `needs-decision` report is older than a few minutes and no open item exists for the card (a reconcile rule, so `docs/spec/recovery.md` gets a row). The owner then gets one Inbox item with the worker's words, and the existing flag, counts and notification apply unchanged. Also add `last_status_at` to the agents rows (`docs/spec/protocol.md` section 7.3), so the tile can say how old the report is. The work after a yes is about one iteration.
 
 - UA-20, the "Start" control: let the owner start a run on the board. Today the board files a card and the orchestrator decides when it runs; the owner's own start is `tiller spawn <card> <role>` in a terminal. `docs/spec/authority.md` already gives the owner the right. `docs/spec/protocol.md` section 7 has no call for it. Recommendation: add `POST /api/v1/cards/{id}/runs` (owner only, forwarded to a peer like the other mutations, the same `run.start` as `tiller spawn` with the role from the card's kind and the model and effort from the dispatch table, and the same refusals for capacity, the floors and quota). The board then gets "File and start" in the new-card dialog and "Start" on a queued card, and shows a refusal with its reason. The work after a yes is about one iteration.
+
+- UA-01, the spec text: the fix added the field `refuses_runs` to the Machines row and a `floors` line to `tiller doctor`. `docs/spec/recovery.md` R16 asks for the first ("The Machines row shows the breached floor"), but the field table of `docs/spec/protocol.md` section 9 and the list of checks in its section 6.4 do not name them, and this audit may not edit a spec. Recommendation: add one row to the table (`refuses_runs`: one line per breached RAM or disk floor, absent while the host can start a run; a peer's from its own row while the link is live) and "the floors" to the list of doctor checks. No code changes with a yes.
 
 Two more candidates, to settle when their fix starts:
 

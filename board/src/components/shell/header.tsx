@@ -11,6 +11,7 @@ import { scopedProjects } from "../../lib/scope";
 import { useStore } from "../../lib/store";
 import { SendIcon } from "../attention/icons";
 import { StaleBanner } from "../board/stale-sessions";
+import { HostRefusalBanner } from "../states/host-refusal-banner";
 import { ReconnectingBanner } from "../states/reconnecting-banner";
 import { ReloadBanner } from "../states/reload-banner";
 import { Section } from "../states/section";
@@ -168,6 +169,7 @@ export function Header({
         </button>
       </header>
       <ReconnectingBanner />
+      <HostRefusalBanner />
       <ReloadBanner />
       <StaleBanner />
       {pathname === "/" ? (

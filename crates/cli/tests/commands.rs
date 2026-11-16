@@ -1298,3 +1298,30 @@ fn toon_is_the_default_and_shows_lisbon_time() {
         "{text}"
     );
 }
+
+/// R16: `tiller machines` says that this host refuses every new run while a
+/// floor is breached, and drops the line when the owner clears the floor.
+#[test]
+fn machines_names_a_breached_floor_until_it_goes() {
+    let world = World::initialized();
+    let local = |world: &World| world.must(&["machines", "--local"]).data()["machines"][0].clone();
+    assert!(local(&world).get("refuses_runs").is_none());
+
+    world.must(&["host", "edit", "--rev", "1", "--disk-floor-mb", "40000"]);
+    let problem = "disk: 31000 MB free, floor 40000 MB";
+    world
+        .store()
+        .host_health(
+            &tiller_core::Ctx::new(tiller_core::Actor::Daemon),
+            "disk",
+            Some(problem),
+        )
+        .unwrap();
+    let row = local(&world);
+    assert_eq!(row["refuses_runs"], serde_json::json!([problem]), "{row}");
+    // Lanes are counted as before: the line is what says no run starts.
+    assert_eq!(row["health"], "ok");
+
+    world.must(&["host", "edit", "--rev", "2", "--no-disk-floor"]);
+    assert!(local(&world).get("refuses_runs").is_none());
+}

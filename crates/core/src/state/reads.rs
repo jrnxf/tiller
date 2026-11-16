@@ -168,6 +168,26 @@ impl Store {
         Ok(last.and_then(|(kind, problem)| (kind == "host.degraded").then_some(problem).flatten()))
     }
 
+    /// Why this host refuses every new run now: one line per breached RAM or
+    /// disk floor, with the numbers the host check measured (`recovery.md`
+    /// R16, "The Machines row shows the breached floor"). Empty while the
+    /// host can start a run. It reads the host check's `host.degraded`
+    /// events, so it costs no reading of its own; a floor the owner cleared
+    /// is dropped at once, before the next check.
+    pub fn refused_starts(&self) -> Result<Vec<String>> {
+        let host = self.local_host()?;
+        let mut reasons = Vec::new();
+        for (check, floor) in [("ram", host.ram_floor_mb), ("disk", host.disk_floor_mb)] {
+            if floor.is_none() {
+                continue;
+            }
+            if let Some(problem) = self.host_degraded(check)? {
+                reasons.push(problem);
+            }
+        }
+        Ok(reasons)
+    }
+
     /// The newest event `seq`, or 0 on an empty log.
     pub fn last_seq(&self) -> Result<i64> {
         Ok(self.conn().query_row(

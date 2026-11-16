@@ -1,7 +1,7 @@
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 
-import { machineRowView, VERSION_MARK_WORD } from "../../lib/machines";
+import { machineRowView, runRefusalStep, VERSION_MARK_WORD } from "../../lib/machines";
 import { machinesQuery, quotaQuery } from "../../lib/queries";
 import { quotaFooterView } from "../../lib/quota";
 import type { Machine } from "../../lib/api-types";
@@ -86,7 +86,10 @@ export function MachinesSection({ activeHost }: { activeHost: string | undefined
                   {view.staleText}
                 </span>
               ) : view.summary ? (
-                <span className="mh2">
+                <span
+                  className={view.refusal ? "mh2 refuses" : "mh2"}
+                  data-testid={view.refusal ? `refuses-${machine.label}` : undefined}
+                >
                   <Pips machine={machine} />
                   <span>{view.summary}</span>
                 </span>
@@ -102,6 +105,11 @@ export function MachinesSection({ activeHost }: { activeHost: string | undefined
                     : view.stale
                       ? `${view.staleText}. ${view.tooltip ? `${view.tooltip}.` : ""} Cards on this machine show their last known state.`
                       : "runs agents for this board."}
+                {view.refusal ? (
+                  <span className="tq">
+                    {`It refuses every new run: ${view.refusal}. ${runRefusalStep(machine)}`}
+                  </span>
+                ) : null}
                 {view.versionMark ? (
                   <span className="tq">
                     {`${VERSION_MARK_WORD[view.versionMark]}: runs ${machine.version}, this host runs ${boardVersion}.`}

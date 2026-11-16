@@ -2,7 +2,7 @@ import { expect, test } from "vitest";
 
 import type { Machine, MachinesResponse } from "./api-types";
 import { fixtureSnapshot } from "./fixtures";
-import { machineRowView, versionMark } from "./machines";
+import { machineRowView, runRefusal, runRefusalStep, versionMark } from "./machines";
 import { machinesPath } from "./queries";
 
 const NOW = Date.parse("2026-11-02T12:00:00.000Z");
@@ -108,4 +108,36 @@ test("a peer's row carries its reported version and the mark against the board h
   // A peer that reports none shows no mark.
   expect(peer("host-g").version).toBeUndefined();
   expect(machineRowView(peer("host-g"), NOW, board.version).versionMark).toBeNull();
+});
+
+test("a host under a floor reads 'refuses new runs' in amber, never 'N free'", () => {
+  const local = machines("default")[0] as Machine;
+  const refusing: Machine = {
+    ...local,
+    refuses_runs: ["disk: 4703 MB free, floor 40960 MB"],
+  };
+  const view = machineRowView(refusing, NOW);
+  expect(view.summary).toBe("3 running, refuses new runs");
+  expect(view.tone).toBe("amber");
+  expect(view.refusal).toBe("4.6 GB of disk free, under the 40 GB floor");
+  expect(runRefusalStep(refusing)).toBe(
+    "Make room on this machine, or lower the floor in Settings > Hosts.",
+  );
+  // A line in another shape is shown as it came, and two floors both show.
+  expect(
+    runRefusal({ ...local, refuses_runs: ["RAM: 512 MB free, floor 4096 MB", "odd line"] }),
+  ).toBe("0.5 GB of RAM free, under the 4.0 GB floor; odd line");
+});
+
+test("a peer under a floor names its own board for the fix, and a stale one says nothing", () => {
+  const refusing: Machine = {
+    ...peer("host-d"),
+    refuses_runs: ["RAM: 512 MB free, floor 4096 MB"],
+  };
+  expect(machineRowView(refusing, NOW).summary).toBe("2 running, refuses new runs");
+  expect(runRefusalStep(refusing)).toBe(
+    "Make room on host-d, or lower the floor in Settings > Hosts on its own board.",
+  );
+  expect(runRefusal({ ...refusing, health: "stale" })).toBeNull();
+  expect(runRefusal(peer("host-d"))).toBeNull();
 });

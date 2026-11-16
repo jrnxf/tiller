@@ -25,7 +25,9 @@ use serde_json::{Value, json};
 use tiller_agents::land::app::{APP_DIR, AppKey, KEY_FILE, KeyError};
 use tiller_agents::roles::Role;
 use tiller_agents::spawn::config::SpawnConfig;
+use tiller_agents::spawn::readings;
 use tiller_core::Timestamp;
+use tiller_core::state::runs::floor_refusal;
 use tiller_daemon::dto::{CheckStatus, DoctorCheck, DoctorGate, DoctorReport};
 use tiller_holder::lock::{live_pid, lock_path};
 use tiller_observe::hooks::{EVENTS, Handler};
@@ -574,7 +576,52 @@ fn stored(app: &App, checks: &mut Vec<Check>) -> Vec<Gate> {
     if let Some(check) = config_drift(app, &store) {
         checks.push(check);
     }
+    if let Some(check) = floors(app, &store) {
+        checks.push(check);
+    }
     gates
+}
+
+/// Whether the RAM and disk floors let a run start on this host now, read
+/// live as a spawn reads them (P03, `recovery.md` R16). `None` with no floor
+/// set. A breached floor is a warning: the host works, but it refuses every
+/// new run, and nothing else says so before a spawn is refused.
+fn floors(app: &App, store: &tiller_core::Store) -> Option<Check> {
+    let host = store.local_host().ok()?;
+    if host.ram_floor_mb.is_none() && host.disk_floor_mb.is_none() {
+        return None;
+    }
+    let ram = host.ram_floor_mb.and_then(|_| readings::ram_free_mb());
+    let disk = host
+        .disk_floor_mb
+        .and_then(|_| readings::disk_free_mb(&app.home));
+    Some(floors_check(&[
+        floor_refusal("RAM", host.ram_floor_mb, ram),
+        floor_refusal("disk", host.disk_floor_mb, disk),
+    ]))
+}
+
+/// The `floors` line for the refusals a spawn would give now.
+fn floors_check(refusals: &[Option<String>]) -> Check {
+    const NAME: &str = "floors";
+    let refusals: Vec<&str> = refusals.iter().flatten().map(String::as_str).collect();
+    if refusals.is_empty() {
+        return Check::new(
+            NAME,
+            false,
+            Status::Ok,
+            "RAM and disk are above their floors, so a run can start",
+        );
+    }
+    Check::new(
+        NAME,
+        false,
+        Status::Warn,
+        format!(
+            "no new run starts on this host: {}; free the resource, or lower the floor with `tiller host edit` or in Settings > Hosts",
+            refusals.join("; ")
+        ),
+    )
 }
 
 fn config_drift(app: &App, store: &tiller_core::Store) -> Option<Check> {
@@ -961,8 +1008,8 @@ pub fn run(app: &App) -> Done {
 #[cfg(test)]
 mod tests {
     use super::{
-        Status, firstmate, firstmate_scripts, herdr_config, herdr_keys, no_mistakes_skew,
-        owner_marker,
+        Status, firstmate, firstmate_scripts, floor_refusal, floors_check, herdr_config,
+        herdr_keys, no_mistakes_skew, owner_marker,
     };
 
     fn keys(text: &str) -> Vec<&'static str> {
@@ -1001,6 +1048,22 @@ mod tests {
 
     /// A peer's report goes out well inside the time its board host waits
     /// for it, with room for the checks around the probes and the link.
+    #[test]
+    fn a_breached_floor_warns_with_the_numbers_and_the_step() {
+        assert_eq!(floors_check(&[None, None]).status, Status::Ok);
+        let breached = floors_check(&[None, floor_refusal("disk", Some(40_000), Some(31_000))]);
+        assert_eq!(breached.status, Status::Warn);
+        assert!(!breached.required);
+        assert!(
+            breached
+                .detail
+                .contains("disk free is 31000 MB, under the 40000 MB floor"),
+            "{}",
+            breached.detail
+        );
+        assert!(breached.detail.contains("tiller host edit"));
+    }
+
     #[test]
     fn the_report_deadline_fits_inside_a_peer_query() {
         let query = tiller_daemon::peer::Timing::default().query;

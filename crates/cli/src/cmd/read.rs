@@ -395,7 +395,7 @@ fn machines_data(store: &Store, local_only: bool) -> Result<Value, Failure> {
                 Some(_) => ("ok", None),
             }
         };
-        rows.push(json!({
+        let mut row = json!({
             "id": host.id,
             "label": host.label,
             "kind": host.kind,
@@ -407,7 +407,18 @@ fn machines_data(store: &Store, local_only: bool) -> Result<Value, Failure> {
             "last_seen_at": host.last_seen_at,
             "stale_reason": stale_reason,
             "version": local.then_some(env!("CARGO_PKG_VERSION")),
-        }));
+        });
+        // Why this host refuses every new run (a breached floor, R16), as the
+        // daemon's Machines row has it: absent while it can start one.
+        let refuses = if local {
+            store.refused_starts()?
+        } else {
+            Vec::new()
+        };
+        if !refuses.is_empty() {
+            row["refuses_runs"] = json!(refuses);
+        }
+        rows.push(row);
     }
     Ok(json!({"machines": rows}))
 }

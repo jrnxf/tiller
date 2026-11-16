@@ -562,6 +562,13 @@ pub struct Machine {
     /// is what its own row reports.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub holder_restarted_at: Option<String>,
+    /// Why this host refuses every new run now: one line per breached RAM
+    /// or disk floor, with the measured value and the floor (`recovery.md`
+    /// R16). Absent while the host can start a run, and from a peer that
+    /// predates it. `free_slots` still counts lanes only. A peer's is what
+    /// its own row reports.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refuses_runs: Vec<String>,
     pub rev: i64,
 }
 

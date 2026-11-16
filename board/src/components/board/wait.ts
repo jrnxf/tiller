@@ -27,6 +27,9 @@ export interface WaitInput {
   peer: string | null;
   // False while a peer's link is down: nothing about it is fresh.
   reachable: boolean;
+  // Set while the card's host refuses every new run (a breached RAM or disk
+  // floor): the host's name, why, and what the owner can do.
+  refusal: { host: string; why: string; step: string } | null;
   // Undefined until the agents read arrives.
   orchestrator: { activity: string } | null | undefined;
   health: LaneHealth;
@@ -42,6 +45,17 @@ export function cardWait(input: WaitInput): CardWait | null {
     return {
       title: `${input.peer ?? "Its host"} to answer`,
       detail: `Nothing here is fresh while ${input.peer ?? "the host"} does not answer, so the card may have started already.`,
+      stuck: true,
+      startable: false,
+      direct: false,
+    };
+  }
+  // No orchestrator and no `tiller spawn` gets past a floor, so this comes
+  // before whose turn it is.
+  if (input.refusal) {
+    return {
+      title: `${input.refusal.host} to accept new runs`,
+      detail: `${input.refusal.host} refuses every new run: ${input.refusal.why}. ${input.refusal.step}`,
       stuck: true,
       startable: false,
       direct: false,

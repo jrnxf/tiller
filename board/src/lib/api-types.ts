@@ -472,6 +472,9 @@ export interface Machine {
   // The project that takes Tiller bugs on this host (`bugs.project`), when one
   // is set and still open.
   bug_project?: string | null;
+  // Why the host refuses every new run now: one line per breached RAM or
+  // disk floor (recovery.md R16). Absent or empty while it can start one.
+  refuses_runs?: string[];
   rev: number;
 }
 

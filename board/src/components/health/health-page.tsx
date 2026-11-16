@@ -20,6 +20,7 @@ import { Select } from "../ui/select";
 import { BarChart, LineChart, Spark, StackedBarChart } from "./charts";
 import type { Point } from "./charts";
 import { Learning } from "./learning";
+import { HostRefusals } from "./host-refusals";
 import { MemorySkips } from "./memory-skips";
 import { lisbonShortDay, lisbonWeekLabel } from "./lisbon";
 import { accepted, projectRows, quotaBlockOf, sampleLines, signalsOf } from "./model";
@@ -450,6 +451,7 @@ export function HealthPage() {
             ))}
           </div>
         ) : null}
+        <HostRefusals />
         <Quota block={quotaBlockOf(quota)} />
         <MemorySkips />
         <Learning />

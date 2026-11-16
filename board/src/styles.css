@@ -709,7 +709,8 @@ kbd {
   min-width: 0;
 }
 
-.mh2.stale {
+.mh2.stale,
+.mh2.refuses {
   color: var(--yellow-text);
 }
 

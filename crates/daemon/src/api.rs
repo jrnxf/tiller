@@ -7604,6 +7604,59 @@ pub(crate) mod tests {
         );
     }
 
+    /// R16: this host's Machines row says that it refuses every new run
+    /// while a floor is breached, and stops when the floor clears or goes.
+    #[tokio::test]
+    async fn the_machines_row_shows_a_breached_floor_until_it_clears() {
+        let mut fleet = Fleet::new();
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let refuses = async |app: &Router| {
+            let machines: Value =
+                serde_json::from_str(&get(app, "/api/v1/machines").await.body).unwrap();
+            let local = machines["machines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["kind"] == "local")
+                .cloned()
+                .unwrap();
+            local.get("refuses_runs").cloned()
+        };
+        let owner = Ctx::new(Actor::Owner);
+        let daemon = Ctx::new(Actor::Daemon);
+        let floor = |fleet: &mut Fleet, floor: Option<i64>| {
+            let host = fleet.store.local_host().unwrap();
+            let edit = tiller_core::state::projects::HostEdit {
+                disk_floor_mb: Some(floor),
+                ..Default::default()
+            };
+            fleet
+                .store
+                .host_edit(&owner, &host.id, host.rev, edit)
+                .unwrap();
+        };
+        floor(&mut fleet, Some(40_000));
+        assert_eq!(refuses(&app).await, None, "no breach, no field");
+
+        let problem = "disk: 31000 MB free, floor 40000 MB";
+        fleet
+            .store
+            .host_health(&daemon, "disk", Some(problem))
+            .unwrap();
+        assert_eq!(refuses(&app).await, Some(serde_json::json!([problem])));
+        // Lanes are still counted as the capacity view has them.
+        assert_eq!(fleet.store.refused_starts().unwrap(), vec![problem]);
+
+        // The owner clears the floor: the row is right before the next check.
+        floor(&mut fleet, None);
+        assert_eq!(refuses(&app).await, None);
+        floor(&mut fleet, Some(40_000));
+        assert_eq!(refuses(&app).await, Some(serde_json::json!([problem])));
+
+        fleet.store.host_health(&daemon, "disk", None).unwrap();
+        assert_eq!(refuses(&app).await, None);
+    }
+
     #[tokio::test]
     async fn foreign_host_header_is_refused() {
         let fleet = Fleet::new();

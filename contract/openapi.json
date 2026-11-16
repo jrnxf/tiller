@@ -9007,6 +9007,13 @@
             ],
             "description": "`read` or `act`, for a paired peer."
           },
+          "refuses_runs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Why this host refuses every new run now: one line per breached RAM\nor disk floor, with the measured value and the floor (`recovery.md`\nR16). Absent while the host can start a run, and from a peer that\npredates it. `free_slots` still counts lanes only. A peer's is what\nits own row reports."
+          },
           "rev": {
             "type": "integer",
             "format": "int64"
