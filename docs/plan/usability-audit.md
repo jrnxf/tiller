@@ -10,11 +10,11 @@ Status values: `open`, `fixed` (with what was verified), `needs owner`, `to veri
 
 | | |
 |---|---|
-| Phase | 1 - audit. Journeys 3 (ask), 4 (start a task) and 5 (trust) are walked on the board and the CLI. Journeys 1, 2 and 6 to 11 are not walked yet. |
+| Phase | 3 - the full walk. Journeys 2 (morning check) and 8 (failure) are walked on the board and the CLI in this phase (Mon 16 Nov 2026, Lisbon). Journeys 1, 6, 9, 10 and 11, and the rest of 5 and 7, are not walked yet. |
 | Open P0 | 0. UA-15 is `needs owner`: the silent part is fixed, the answer itself needs a spec change. |
-| Open P1 | 0. UA-03 is `needs owner`: the CLI on main now says that it reads main only and prints the command for the peer, and reads and writes of a peer's work through the local daemon need a spec change. UA-09 is `needs owner`: seven owner commands end with a sentence and the next step, and a short answer in place of the record needs a spec change. UA-17 is fixed but for "Mark read" in the CLI, which is `needs owner`. UA-20 is `needs owner`: a queued card says what it waits for and "Close" is out of the main place, and its "Start" control needs a spec change (see "Needs owner"). UA-18 is `needs owner`: the wrong status line is fixed, Cancel and the full view need a spec change. UA-19 is `needs owner`: the tile, the card and the timeline show the worker's report, and the "Needs you" rule needs a spec change. |
-| Fixed | UA-01, UA-02, UA-04, UA-05, UA-06, UA-12, UA-16, UA-21, UA-22, UA-25, DX-01. UA-17 (read an answer in the CLI; "Mark read" in the CLI needs a spec change). UA-15 part 1 (the owner is told where the answer shows). UA-18 part 1 (the ask tile shows an unread answer and opens it). UA-19 part 1 (a worker's report shows on its tile, on the card and in the timeline). UA-20 part 1 (a queued card says what it waits for, and "Close" is under "More" until work starts). UA-09 part 1 (a `summary` sentence and the owner's next step at the end of `init`, `project add`, `orchestrator start`, `card create`, `spawn`, `ask note` and `attention answer`). UA-03 part 1 (a `not_found` and every host-wide list in main's CLI name the paired host and print the `ssh -t` command for it). |
-| Next step | Phase 3: no P0 or P1 is `open`, so walk all 11 journeys again with fresh eyes, on the board and the CLI, and add what the walk finds. Journeys 1, 2, 6 and 8 to 11 were never walked in full: start with them. Close the bench gap of the stand-in forge before journey 6. UA-11 (P2) is not started: check `docs/spec/state.md` section 6 first, because the column of a card is a contract. |
+| Open P1 | 0. UA-26 (a run whose agent died read "Unknown" and "running") was found in the phase 3 walk and is fixed on the board. UA-03 is `needs owner`: the CLI on main now says that it reads main only and prints the command for the peer, and reads and writes of a peer's work through the local daemon need a spec change. UA-09 is `needs owner`: seven owner commands end with a sentence and the next step, and a short answer in place of the record needs a spec change. UA-17 is fixed but for "Mark read" in the CLI, which is `needs owner`. UA-20 is `needs owner`: a queued card says what it waits for and "Close" is out of the main place, and its "Start" control needs a spec change (see "Needs owner"). UA-18 is `needs owner`: the wrong status line is fixed, Cancel and the full view need a spec change. UA-19 is `needs owner`: the tile, the card and the timeline show the worker's report, and the "Needs you" rule needs a spec change. |
+| Fixed | UA-01, UA-02, UA-04, UA-05, UA-06, UA-12, UA-16, UA-21, UA-22, UA-25, UA-26 (on the board), DX-01. UA-17 (read an answer in the CLI; "Mark read" in the CLI needs a spec change). UA-15 part 1 (the owner is told where the answer shows). UA-18 part 1 (the ask tile shows an unread answer and opens it). UA-19 part 1 (a worker's report shows on its tile, on the card and in the timeline). UA-20 part 1 (a queued card says what it waits for, and "Close" is under "More" until work starts). UA-09 part 1 (a `summary` sentence and the owner's next step at the end of `init`, `project add`, `orchestrator start`, `card create`, `spawn`, `ask note` and `attention answer`). UA-03 part 1 (a `not_found` and every host-wide list in main's CLI name the paired host and print the `ssh -t` command for it). |
+| Next step | Phase 3 goes on: walk journeys 1 (first run), 9 (scale), 10 (watch and steer) and 11 (away mode) next; they need no new bench part. Then close the bench gap of the stand-in forge and walk journey 6 and the rest of 5 and 7. The loop ends only when one full pass of all 11 journeys finds no new P0 or P1; this pass has found one (UA-26), so one more pass of journeys 5 and 8 follows the rest. P2 work after that: UA-27 to UA-29, then UA-07 with UA-08, UA-10, UA-11, UA-13, UA-14, UA-23, UA-24. |
 
 ## The bench
 
@@ -56,19 +56,21 @@ Bench gaps (fix before the journeys that need them):
 | Every agent shows Idle. `fake-agent` does no work, so "progress" is only what the bench reports with `tiller status`. | 5, 10 | Type into two panes during the walk (`fake-agent` turns run 4 s), or add a looping driver. |
 | No answer comes back to an ask by itself. | 3 | Answer as the orchestrator with `as HOST SESSION reply`. Use a real model at most once per iteration, only to judge the answer's quality. |
 | The away period on main lasts under a second. | 11 | Walk away mode by hand during journey 11. |
+| `fake-agent` shows no permission prompt, so "an agent that waits on a prompt" cannot be walked. | 8 | Give `fake-agent` a command that paints Claude Code's permission dialog and waits, and seed one such pane. |
+| `quota HOST PERCENT` takes up to 5 minutes: the daemon polls quota every 300 s. | 8 | Run `daemon HOST restart` after it; the daemon polls at its start. |
 
 ## Journeys
 
 | # | Journey | Walked on the board | Walked on the CLI |
 |---|---|---|---|
 | 1 | First run | no | partly (the bench script is a first run by script) |
-| 2 | Morning check | first look only | first look only |
+| 2 | Morning check | yes, phase 3 (UA-28; the Inbox does the job in one click) | yes, phase 3 (UA-27) |
 | 3 | Ask | yes (UA-15 to UA-18, UA-21, UA-24) | yes (UA-17, UA-23) |
 | 4 | Start a task | yes (UA-20, UA-21, UA-22) | yes (UA-09, UA-23) |
 | 5 | Trust | partly: progress, blocked and done reports (UA-19). Not walked: a pull request, a landing, a run that dies | partly: the same |
 | 6 | Decide | first look only | no |
 | 7 | Peer transparency | partly: an ask to a peer project (UA-15, UA-16) | first look only |
-| 8 | Failure | no | no |
+| 8 | Failure | yes, phase 3: a daemon restart, the peer offline, a run that dies (UA-26), quota out (UA-29). Not walked: an agent that waits on a prompt (bench gap) | yes, phase 3: the same cases (UA-26, UA-29) |
 | 9 | Scale | partly: the command palette finds a card, an agent and a project's jobs (UA-21, fixed). Not walked: filter, sort, the Agents screen at 23 agents | no |
 | 10 | Watch and steer | no | no |
 | 11 | Away mode | no | no |
@@ -91,6 +93,11 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 | Find the most urgent item in the Inbox | it is the first row and the one shown, and its row says "Urgent" (UA-05; before: the last of 7 rows) | `tiller recap` orders by kind, not by the card's priority. On main it ends with a warning that the peer's items are not counted, and the command that lists them (UA-03) |
 | Learn that a host starts no new run | a banner on every screen names the host, the numbers and the step ("peer refuses new runs. 4.6 GB of disk free, under the 878,906 GB floor. ..."); the sidebar row, Health and a queued card say it too, and all clear by themselves within 30 s of a fix (UA-01; before: nothing, until a `tiller spawn` was refused) | `tiller machines` has `refuses_runs` on this host's row, and `tiller doctor` has a `floors` line. Main's CLI does not show the peer's floors (UA-03) |
 | Learn that the peer is out | Health's Safety card reads "Watch" and "Only 1 of 2 machines are live" within 30 s, and "Good" again when the link is back (UA-25; before: "Watch" all day with the peer live) | `tiller machines` on main reads `stale` with `peer_link_down` within 30 s, and `ok` on the next read after the link is back (UA-25; before: `stale` from 2 minutes after every start) |
+| Learn what needs you in the morning | 1 click, about 10 s: the Inbox lists every open item of both hosts, the most urgent first, and the unread answers. The sidebar count shows before the click | `tiller recap`: 4 decisions in 50 lines, then every event as a raw kind (UA-27). The peer's items are not counted, and the last line says so (UA-03) |
+| Learn that the daemon restarted | a banner within 8 s: "Daemon reconnecting. Showing the last known state; answers are queued until it is back." It leaves by itself within 11 s of the start. Good | the CLI reads `state.db` and works with no daemon |
+| Learn that the peer went offline | within 30 s every lane of the peer reads "as of Mon 07:46, just now. peer is not answering since Mon 07:46.", its cards dim, and its answer buttons are off with the same reason. Good | `tiller machines` reads `stale` (UA-25) |
+| Learn that a run died | within 30 s the tile reads "Agent stopped" in red, and the card says whose move is next, when the owner hears of it, and the command that starts the agent again (UA-26; before: "Unknown" on the tile, "running" on the run, no step) | `tiller card show` reads `badge: unknown`, and `tiller agents` no longer lists the worker (UA-26, not done) |
+| Learn that quota ran out | the sidebar reads "2% week left". A start that the floor refuses opens a decision in the Inbox with "Start now anyway" and "Wait for the reset". Good, but the machine row still says "6 free" (UA-29) | `tiller spawn` is refused with the reason; the time is UTC and no next command is printed (UA-29) |
 | Learn that a run is blocked or done | the tile shows the worker's words and "Reports blocked" or "Reports done" within 2 s, on both hosts (UA-19; before, only when the orchestrator raised an item). The card enters "Needs you" only when the orchestrator raises an item | `tiller agents`, in a CSV row |
 
 ## Findings
@@ -444,6 +451,50 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 - Not done: main's `tiller machines` still shows no slots and no agent count for the peer (UA-03). The local host's own `last_seen_at` in `tiller machines` is the time the daemon started, not "now" (P2, added to UA-23). The Safety card does not name the machine that is not live (P2, added to UA-24).
 - Seen during the check, for journey 8: `link freeze` holds an outage for about 2 minutes only. The link then goes `down`, starts a new `peer serve` and is live again 5 s later, while the frozen process stays. While the peer is out, the board shows it only by the amber chips in the sidebar; no header banner says that the peer does not answer. Judge this in the walk of journey 8.
 
+### UA-26 - A run whose agent died reads "Unknown" and "running" (P1, fixed on the board)
+
+- Journey: 5, 8. Found in the phase 3 walk.
+- Tried: I started a task and left. The agent's process died (`scripts/usability-bench.sh kill-agent main <session>`). I came back to the board.
+- Happened: the tile stays in "Working" with a yellow chip "Unknown" and loses its last report line. The card page says Status "Unknown", and its run says "running" beside "Ended". The only sign is `session.ended 91W2MVT` under "Problems in the event log". The Agents screen no longer lists the worker. Nothing says that no agent works on the card, whose move is next, or what the owner can do.
+- Hurts: this is the "can I believe the status" case. By `docs/spec/recovery.md` R03 the orchestrator hears first, and the owner gets an Inbox item only after 30 minutes with no action. For those 30 minutes the board shows a task that looks alive. "Unknown" is also not true: the daemon knows that the session ended.
+- Cause: the badge is `unknown` by contract (`docs/spec/state.md` section 6: the run stays active, and its session has no activity). The board showed the contract word and nothing more.
+- Fixed on Mon 16 Nov 2026 (Lisbon), on the board, with no contract change. The board already reads every live session (`GET /api/v1/agents`). A card with an activity badge (an active run) and no live session of its own has lost its agent (`board/src/components/board/stopped.ts`).
+  - The tile: a red chip "Agent stopped" in place of "Unknown" (or "Idle", "Working", "Stale"), and a tooltip that says so.
+  - The card page: Status "Agent stopped" with the red mark. A "Next step" row: "No agent works on this card. Its agent stopped before the work ended. The work so far is kept. The Juniper orchestrator starts the agent again or ends the run. If it does neither in 30 minutes, the question comes to your Inbox." and the shell command `tiller agent relaunch juniper-1-build --note "..."`. With no orchestrator the row says so and has the "Start orchestrator" button.
+  - The run row: "agent stopped" in red in place of "running". This is per run, so a card with a live reviewer and a dead builder names the dead one.
+  - The verdict must hold 3 s before the board says it, because the board and the agents reads refresh one after the other. It says nothing while the card's host does not answer.
+  - Verified on the bench with a rebuilt binary: killed the builders of `harbor-1` and `juniper-1`; within 30 s (one reconcile pass) the tile, the card and the run row changed with no reload; no other of the 39 cards changed. The printed command, run as the owner, started a new agent, and the card went back to "Idle" with the builder's report within 6 s, with no reload. Checked in light and dark at 1440 px and 390 px.
+  - A first draft printed `tiller agent resume`. The bench refused it ("has no live session to resume"), so the card prints `relaunch`.
+  - Tests: `board/src/components/board/stopped.test.ts` (10 tests: the verdict for a card and for a run, a worker with no orchestrator, an unread roster, a silent host, the two notes, the command) and `views.test.tsx` ("a tile whose run has no live agent says that the agent stopped, once the verdict has held").
+- Not done:
+  - The CLI: `tiller card show` reads `badge: unknown` and `tiller agents` drops the worker, with no word that the run has no agent. `tiller recap` does not list the death. P2, with UA-27.
+  - The board has no "Start again" button: `POST /api/v1/agents/{session}/relaunch` needs a live session. This belongs with the "Start" control of UA-20 under "Needs owner".
+  - The card is not in "Needs you" for the first 30 minutes. That is R03, a contract. The 30-minute Inbox item was not walked (the walk cannot wait 30 minutes); `reconcile::recovery::worker_crash_keeps_run_worktree_and_reservation` covers it.
+
+### UA-27 - `tiller recap` lists raw events (P2, open)
+
+- Journey: 2. Found in the phase 3 walk.
+- Tried: `tiller recap` on main for the morning check.
+- Happened: the 4 open decisions read well (question, recommendation, options), in 50 lines. Then `recap[43]` lists every event since the last ask as `at, card, kind, title` with raw kinds (`card.created`, `run.started`, `approval.decided` with a `null` card), the oldest first. There is no count per project and no sentence. A run that died is not in it (UA-26).
+- Hurts: "what happened overnight" is 43 lines of plumbing. The command is written for an orchestrator that presents it (the `walkthrough` field), so the owner in a shell reads the agent's input.
+- Fix: a `summary` sentence for a person, as UA-09 added to seven commands ("4 decisions wait for you, 1 unread answer. Since Sun 07:40: 6 runs started, 2 ended, 2 cards closed."), and the events in the owner's words, as the card timeline has them since UA-04. The short answer in place of the record waits with UA-09 under "Needs owner".
+
+### UA-28 - "Needs you" on the board lists every project with nothing in it (P2, open)
+
+- Journey: 2. Found in the phase 3 walk.
+- Tried: the "Needs you" tab of the board, to see the 6 cards that wait for me.
+- Happened: all 16 project lanes stay. 10 of them say "Nothing in this tab. No Atlas cards match "Needs you"." The 6 cards are spread over 4 screens of scroll at 1440 px.
+- Hurts: the tab that should be the shortest list is as long as the board. The Inbox does this job well, so it is polish.
+- Fix: in "Needs you" (and "Active"), hide a lane with no matching card, and end the list with one line: "10 projects have nothing here."
+
+### UA-29 - Quota that runs out: small gaps (P2, open)
+
+- Journey: 8. Found in the phase 3 walk.
+- The main case is good: at 2% of the week left, `tiller spawn` is refused, the card is held until the reset, and the Inbox gets one decision ("quota is under the floor, so the builder run for atlas-3 did not start. Start it now anyway, or wait for the reset?").
+- The refusal in the CLI prints the time as `2026-11-19T07:50:07.000Z` (UTC, ISO) in place of "Thu 19 Nov 07:50" (Lisbon), and has no `hint` with the next command (`tiller attention answer <item>`).
+- The sidebar's machine row still reads "13 running, 6 free" at 2%. UA-01 left quota out of the "refuses new runs" verdict; the row should say "under the quota floor" in place of "6 free".
+- A new quota value shows up to 5 minutes late (the poll's cadence), on the board and in the refusal.
+
 ### DX-01 - A debug build made before the board was built never served the board (fixed)
 
 - Found while building the bench: a debug `tiller` compiled while `board/dist` was missing answered "board assets are not built" forever, even after the board was built and the crate was rebuilt. rust-embed keeps the folder's path with its `..` parts in that case and then refuses every file, and the compiler cache returns the same artifact.
@@ -483,9 +534,9 @@ Order of work, highest owner value first. Fixes that share a cause are grouped.
 4. Done: UA-21 and UA-22 (find a card and start a job from anywhere on the board). Done as far as the contract allows: UA-20 part 1 (a queued card says what it waits for). Its "Start" control waits under "Needs owner".
 5. Done: UA-01 (a host that refuses every new run says so on the board, in `tiller machines` and in `tiller doctor`).
 6. Done: UA-25 (a live peer counts as live on Health and in `tiller machines`) and UA-17 (the CLI prints the delivery state and the answer of an ask). Done as far as the contract allows: UA-09 part 1 (a sentence and the next step after seven owner commands). Done as far as the contract allows: UA-03 part 1 (main's CLI names the peer and prints the command for it). Later: UA-10 and UA-23, the CLI as an owner surface.
-7. Next, phase 3: close the bench gaps (the stand-in forge), then walk journeys 1, 2, 6, 8, 9, 10 and 11 and the rest of 5 and 7.
+7. Phase 3, in progress. Walked: journeys 2 and 8 (UA-26 found and fixed on the board; UA-27 to UA-29 are P2). Next: journeys 1, 9, 10 and 11, then the stand-in forge and journey 6 and the rest of 5 and 7.
 8. UA-07 with UA-08: the host out of the owner's way.
-9. UA-11, UA-13, UA-14, UA-22, UA-24: polish.
+9. UA-11, UA-13, UA-14, UA-24, UA-27, UA-28, UA-29: polish.
 
 ## Needs owner
 

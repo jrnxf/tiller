@@ -22,6 +22,7 @@ import {
   reportTone,
   useReport,
 } from "./report";
+import { STOPPED_LABEL, useAgentStopped } from "./stopped";
 import type { Tile } from "./model";
 import type { LaneHealth } from "../states/degraded";
 
@@ -102,6 +103,8 @@ function CardTile({ row, lane }: { row: BoardRow; lane: LaneHealth["kind"] }) {
     report && !row.needs_you && isActivityBadge(row.badge) && overridesActivity(report)
       ? report
       : null;
+  // An active run with no live agent: "Unknown" would hide that it stopped.
+  const stopped = useAgentStopped(row, lane !== "disconnected" && !standing.dim);
   return (
     <Link
       to="/"
@@ -114,9 +117,12 @@ function CardTile({ row, lane }: { row: BoardRow; lane: LaneHealth["kind"] }) {
       title={
         report
           ? `${id}: ${row.title}\n${reportRole(report)}, ${reportLabel(report).toLowerCase()}: ${report.text}`
-          : `${id}: ${row.title}`
+          : stopped
+            ? `${id}: ${row.title}\nNo agent works on this card: its agent stopped before the work ended.`
+            : `${id}: ${row.title}`
       }
       data-report={report?.state}
+      data-stopped={stopped || undefined}
     >
       <div className="c-top">
         <Status mark={statusMark(row)} />
@@ -125,7 +131,7 @@ function CardTile({ row, lane }: { row: BoardRow; lane: LaneHealth["kind"] }) {
           <span className="c-age">
             <AsOf asOf={standing.asOf} />
           </span>
-        ) : dot && row.observed_at ? (
+        ) : dot && row.observed_at && !stopped ? (
           <span className="c-age">
             <Ago
               at={row.observed_at}
@@ -149,7 +155,9 @@ function CardTile({ row, lane }: { row: BoardRow; lane: LaneHealth["kind"] }) {
         {row.pr_number ? <PrChip number={row.pr_number} /> : null}
         {untriaged ? <span className="lab sm yel">Untriaged</span> : null}
         {isTillerBug(row) ? <span className="lab sm bad">Bug</span> : null}
-        {said ? (
+        {stopped ? (
+          <span className="lab sm bad">{STOPPED_LABEL}</span>
+        ) : said ? (
           <span className={`lab sm ${reportTone(said)}`}>{reportLabel(said)}</span>
         ) : untriaged && row.badge === "filed" ? null : (
           <span className={`lab sm ${tone}`}>

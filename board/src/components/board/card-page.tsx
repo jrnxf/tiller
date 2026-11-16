@@ -92,6 +92,13 @@ import { KindLabel, ModelChip } from "./tile";
 import { BugTriage } from "./triage";
 import { StartOrchestratorButton } from "./orchestrator-start";
 import { laneHealth } from "../states/degraded";
+import {
+  relaunchCommand,
+  STOPPED_LABEL,
+  stoppedNote,
+  useAgentStopped,
+  useRunStopped,
+} from "./stopped";
 import { cardWait, spawnCommand } from "./wait";
 import { CheckIcon, CloseIcon } from "../shell/icons";
 import "./board.css";
@@ -261,6 +268,7 @@ function RunCard({
   canAct,
   viewOnly,
   name,
+  reachable,
 }: {
   run: CardRun;
   owner: string | undefined;
@@ -268,6 +276,8 @@ function RunCard({
   canAct: boolean;
   viewOnly: boolean;
   name: string;
+  // False while the run's host does not answer.
+  reachable: boolean;
 }) {
   const off = focusReason(owner);
   const focus = useOpenInTerminal();
@@ -280,6 +290,8 @@ function RunCard({
   const pause = session?.run_id === run.id ? (session.pause ?? null) : null;
   const failed = run.outcome === "failed";
   const active = run.ended_at === null;
+  // The run is open and no agent works on it (recovery.md, R03).
+  const stopped = useRunStopped(run, reachable);
   const activity = run.activity
     ? agentActivity({
         activity: run.activity,
@@ -329,7 +341,13 @@ function RunCard({
       <div className="rh">
         <Status
           mark={
-            failed ? "fail" : active ? "working" : run.outcome === "cancelled" ? "retired" : "ok"
+            failed || stopped
+              ? "fail"
+              : active
+                ? "working"
+                : run.outcome === "cancelled"
+                  ? "retired"
+                  : "ok"
           }
         />
         Attempt {run.number}
@@ -337,7 +355,13 @@ function RunCard({
         {failed ? <span className="lab sm bad">failed</span> : null}
         {run.outcome === "cancelled" ? <span className="lab sm">cancelled</span> : null}
         {run.outcome === "passed" ? <span className="lab sm ok">passed</span> : null}
-        {active ? <span className="lab sm yel">running</span> : null}
+        {stopped ? (
+          <span className="lab sm bad" data-testid="run-stopped">
+            agent stopped
+          </span>
+        ) : active ? (
+          <span className="lab sm yel">running</span>
+        ) : null}
         <span className="sp" />
         <ModelChip model={run.model} />
       </div>
@@ -722,6 +746,12 @@ export function CardPage({
             ),
       });
   const spawn = wait?.direct ? spawnCommand(card.display_id, card.kind) : null;
+  // An active run with no live agent: the status says so, with whose move is
+  // next, in place of "Unknown".
+  const reachable = !hostHealth && (!standing.peer || standing.live);
+  const stopped = useAgentStopped(column, reachable);
+  const stoppedRun = stopped ? activeRun : undefined;
+  const stoppedInfo = stopped ? stoppedNote(projectLabel, Boolean(orchestrator)) : null;
   // A peer's card dependency change is forwarded (protocol.md section 7.4).
   const depsOff = standing.canAct ? null : standing.reason;
 
@@ -800,8 +830,8 @@ export function CardPage({
         <dl className="props">
           <dt>Status</dt>
           <dd>
-            <Status mark={statusMark(column)} />
-            {stateText(column, blockers)}
+            <Status mark={stopped ? "fail" : statusMark(column)} />
+            {stopped ? STOPPED_LABEL : stateText(column, blockers)}
             {untriaged ? <span className="lab sm yel">Untriaged</span> : null}
             {blockers.length > 0 && column.badge !== "blocked" ? (
               <span className="meta">blocked by {blockers.join(", ")}</span>
@@ -819,6 +849,35 @@ export function CardPage({
                   <span className="wait-detail">{wait.detail}</span>
                 </span>
                 {wait.startable ? (
+                  <StartOrchestratorButton
+                    projectId={card.project_id}
+                    projectName={projectLabel}
+                    {...hostField(column)}
+                    off={standing.canAct ? null : standing.reason}
+                  />
+                ) : null}
+              </dd>
+            </>
+          ) : null}
+          {stoppedInfo ? (
+            <>
+              <dt className="wait-dt">Next step</dt>
+              <dd className="wait-dd" data-testid="card-stopped">
+                <span className="wait-text">
+                  <span className="wait-title stuck">
+                    <WarnIcon />
+                    {stoppedInfo.title}
+                  </span>
+                  <span className="wait-detail">{stoppedInfo.detail}</span>
+                  {stoppedRun ? (
+                    <span className="wait-detail">
+                      To start it again now, run{" "}
+                      <code>{relaunchCommand(card.display_id, stoppedRun.role)}</code> in a shell
+                      {standing.peer && standing.host ? ` on ${standing.host}` : ""}.
+                    </span>
+                  ) : null}
+                </span>
+                {stoppedInfo.startable ? (
                   <StartOrchestratorButton
                     projectId={card.project_id}
                     projectName={projectLabel}
@@ -949,6 +1008,7 @@ export function CardPage({
                   canAct={standing.canAct}
                   viewOnly={standing.reason === VIEW_ONLY_REASON}
                   name={id}
+                  reachable={reachable}
                 />
               ))
             ) : (

@@ -3,6 +3,8 @@ import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
+import { SETTLE_MS } from "./stopped";
+
 import type {
   CardDetail,
   AgentsResponse,
@@ -1897,4 +1899,56 @@ test("a tile shows what its worker last reported, and a stopped worker replaces 
   // "Done" is the worker's claim, said as one.
   say("done: All 20 tests pass");
   expect((await within(tile).findByText("Reports done")).className).toContain("ok");
+});
+
+// ---- A run whose agent died (UA-26) ----
+
+test("a tile whose run has no live agent says that the agent stopped, once the verdict has held", async () => {
+  stubApi("default");
+  const { queryClient } = await renderApp();
+  const key = queryKeyFor(agentsPath());
+  await waitFor(() => expect(queryClient.getQueryState(key)?.status).toBe("success"));
+  const board = queryClient.getQueryData<BoardResponse>(queryKeyFor(boardPath()));
+  const before = queryClient.getQueryData<AgentsResponse>(key);
+  const staffed = new Set(
+    before?.orchestrators.flatMap((top) => top.workers.map((worker) => worker.card_id)),
+  );
+  const row = board?.rows.find(
+    (candidate) =>
+      staffed.has(candidate.id) && candidate.badge === "working" && !candidate.needs_you,
+  );
+  if (!row || !before) throw new Error("the fixture has no working card");
+  const tile = tileOf(row.title);
+  expect(within(tile).getByText("Working")).toBeTruthy();
+
+  vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    // The agent dies: its session leaves the roster, and the run stays open.
+    act(() => {
+      queryClient.setQueryData<AgentsResponse>(key, {
+        ...before,
+        orchestrators: before.orchestrators.map((top) => ({
+          ...top,
+          workers: top.workers.filter((worker) => worker.card_id !== row.id),
+        })),
+      });
+    });
+    // Not at once: a run that just started may be ahead of its session.
+    await act(() => vi.advanceTimersByTimeAsync(SETTLE_MS - 500));
+    expect(within(tile).queryByText("Agent stopped")).toBeNull();
+    await act(() => vi.advanceTimersByTimeAsync(600));
+    expect(within(tile).getByText("Agent stopped").className).toContain("bad");
+    expect(within(tile).queryByText("Working")).toBeNull();
+    expect(tile.getAttribute("title")).toContain("No agent works on this card");
+
+    // The orchestrator starts the agent again: the badge is back by itself.
+    act(() => {
+      queryClient.setQueryData<AgentsResponse>(key, before);
+    });
+    await act(() => vi.advanceTimersByTimeAsync(50));
+    expect(within(tile).queryByText("Agent stopped")).toBeNull();
+    expect(within(tile).getByText("Working")).toBeTruthy();
+  } finally {
+    vi.useRealTimers();
+  }
 });
