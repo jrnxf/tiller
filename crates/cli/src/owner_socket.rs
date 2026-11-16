@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use tiller_core::Actor;
 use tiller_core::domain::AttentionKind;
 
-use crate::app::App;
+use crate::app::{App, Failure, Outcome};
 
 /// A read waits at most this long: a peer's single record is a `query` over
 /// the link, answered within 10 s or not at all (`protocol.md` 10.3).
@@ -172,13 +172,11 @@ struct Peer {
     last_seen_at: Option<String>,
 }
 
-/// Adds every paired peer's rows to `data`, a list of this host. It returns
-/// what the person should still be told (a link that is not live, rows a
-/// link does not carry), or `Err` when the daemon did not answer, so the
-/// caller says the list is this host's only.
-pub fn add_peers(socket: &Socket, list: List, data: &mut Value) -> Result<Option<String>, Refusal> {
+/// Every paired peer: the machines with a link, which this host's own row
+/// lacks.
+fn peers(socket: &Socket) -> Result<Vec<Peer>, Refusal> {
     let machines = socket.get("/api/v1/machines")?;
-    let peers: Vec<Peer> = machines["machines"]
+    Ok(machines["machines"]
         .as_array()
         .into_iter()
         .flatten()
@@ -189,7 +187,15 @@ pub fn add_peers(socket: &Socket, list: List, data: &mut Value) -> Result<Option
                 last_seen_at: machine["last_seen_at"].as_str().map(str::to_owned),
             })
         })
-        .collect();
+        .collect())
+}
+
+/// Adds every paired peer's rows to `data`, a list of this host. It returns
+/// what the person should still be told (a link that is not live, rows a
+/// link does not carry), or `Err` when the daemon did not answer, so the
+/// caller says the list is this host's only.
+pub fn add_peers(socket: &Socket, list: List, data: &mut Value) -> Result<Option<String>, Refusal> {
+    let peers = peers(socket)?;
     if peers.is_empty() {
         return Ok(None);
     }
@@ -367,6 +373,242 @@ fn recap(socket: &Socket, data: &mut Value) -> Result<(), Refusal> {
 
 fn rank(kind: &Value) -> u8 {
     serde_json::from_value::<AttentionKind>(kind.clone()).map_or(u8::MAX, crate::cmd::recap::rank)
+}
+
+/// A forwarded write waits at most this long: the daemon's own wait for a
+/// peer's `mutate` answer is 60 s (`protocol.md` 10.3).
+const WRITE_TIMEOUT: Duration = Duration::from_secs(75);
+
+/// A command on a record this host does not have, which a paired peer may
+/// have: the daemon reads it from the peer, or forwards the change over its
+/// link (`protocol.md` 10.3). A record is found by its reference, so the
+/// command names no host.
+#[derive(Debug)]
+pub enum Remote {
+    /// `card show`, or `card timeline`.
+    CardRead {
+        card: String,
+        timeline: Option<Timeline>,
+    },
+    /// A change to a card: `method` on `cards/{id}<action>` with `body`.
+    CardWrite {
+        card: String,
+        method: &'static str,
+        action: &'static str,
+        body: Value,
+        key: Option<String>,
+    },
+    /// `attention answer` with the owner's words.
+    Answer {
+        item: String,
+        answer: String,
+        key: Option<String>,
+    },
+    /// `ask note` on a project.
+    AskNote {
+        project: String,
+        text: String,
+        key: Option<String>,
+    },
+}
+
+/// What `card timeline` reads.
+#[derive(Debug)]
+pub struct Timeline {
+    pub before: Option<i64>,
+    pub limit: i64,
+}
+
+impl Remote {
+    /// Reads or changes the record on the paired peer that has it. `None`
+    /// means no peer has it, so this host's `not_found` stands.
+    pub fn send(self, socket: &Socket) -> Option<Result<Outcome, Failure>> {
+        let peers = match peers(socket) {
+            Ok(peers) => peers,
+            Err(refusal) => return Some(Err(failure(&refusal))),
+        };
+        let labels: Vec<&str> = peers.iter().map(|peer| peer.label.as_str()).collect();
+        match self {
+            Self::CardRead { card, timeline } => {
+                let (label, detail) = match find_card(socket, &labels, &card)? {
+                    Ok(found) => found,
+                    Err(failure) => return Some(Err(failure)),
+                };
+                Some(card_read(socket, label, detail, timeline))
+            }
+            Self::CardWrite {
+                card,
+                method,
+                action,
+                body,
+                key,
+            } => {
+                let (label, detail) = match find_card(socket, &labels, &card)? {
+                    Ok(found) => found,
+                    Err(failure) => return Some(Err(failure)),
+                };
+                let id = detail["card"]["id"].as_str().unwrap_or(&card).to_owned();
+                let path = format!("/api/v1/cards/{}{action}", encode(&id));
+                Some(write(socket, method, &path, label, body, key, &card))
+            }
+            Self::Answer { item, answer, key } => {
+                let (label, id) = match find_item(socket, &item)? {
+                    Ok(found) => found,
+                    Err(failure) => return Some(Err(failure)),
+                };
+                let path = format!("/api/v1/attention/{}/answer", encode(&id));
+                let body = json!({"answer": answer});
+                Some(write(socket, "POST", &path, label, body, key, &item))
+            }
+            Self::AskNote { project, text, key } => {
+                let projects = match socket.get("/api/v1/projects") {
+                    Ok(projects) => projects,
+                    Err(refusal) => return Some(Err(failure(&refusal))),
+                };
+                let label = projects["projects"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|row| row["id"] == project.as_str())
+                    .find_map(|row| row["host"].as_str().filter(|host| labels.contains(host)))?
+                    .to_owned();
+                let path = format!("/api/v1/projects/{}/asks", encode(&project));
+                let body = json!({"text": text});
+                Some(write(socket, "POST", &path, label, body, key, &project))
+            }
+        }
+    }
+}
+
+/// The peer that has `card`, and the card as it reads it. A peer that does
+/// not answer is named only when no other peer has the card.
+fn find_card(
+    socket: &Socket,
+    labels: &[&str],
+    card: &str,
+) -> Option<Result<(String, Value), Failure>> {
+    let mut unanswered = None;
+    for label in labels {
+        let path = format!("/api/v1/cards/{}?host={}", encode(card), encode(label));
+        match socket.get(&path) {
+            Ok(detail) => return Some(Ok(((*label).to_owned(), detail))),
+            Err(refusal) if refusal.status == 404 => {}
+            Err(refusal) => unanswered = Some(failure(&refusal)),
+        }
+    }
+    unanswered.map(Err)
+}
+
+/// The peer whose item is `item`, a ULID or its short form, and the item's
+/// full id.
+fn find_item(socket: &Socket, item: &str) -> Option<Result<(String, String), Failure>> {
+    let attention = match socket.get("/api/v1/attention") {
+        Ok(attention) => attention,
+        Err(refusal) => return Some(Err(failure(&refusal))),
+    };
+    let wanted = item.to_ascii_uppercase();
+    let row = peer_rows(&attention["items"]).find(|row| {
+        row["id"].as_str().is_some_and(|id| {
+            id == wanted
+                || (wanted.len() == tiller_core::ids::short(id).len() && id.ends_with(&wanted))
+        })
+    })?;
+    Some(Ok((
+        row["host"].as_str()?.to_owned(),
+        row["id"].as_str()?.to_owned(),
+    )))
+}
+
+fn card_read(
+    socket: &Socket,
+    label: String,
+    mut detail: Value,
+    timeline: Option<Timeline>,
+) -> Result<Outcome, Failure> {
+    let display = detail["card"]["display_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let summary = format!("{display} is on {label}: read through this host's daemon.");
+    let Some(timeline) = timeline else {
+        detail["host"] = Value::String(label);
+        return Ok(Outcome::read(detail).with_summary(summary));
+    };
+    let id = detail["card"]["id"].as_str().unwrap_or_default();
+    let mut path = format!(
+        "/api/v1/cards/{}/timeline?host={}",
+        encode(id),
+        encode(&label)
+    );
+    if let Some(before) = timeline.before {
+        path.push_str(&format!("&before={before}"));
+    }
+    let mut read = socket.get(&path).map_err(|refusal| failure(&refusal))?;
+    if let Some(entries) = read["entries"].as_array_mut() {
+        entries.truncate(usize::try_from(timeline.limit).unwrap_or(0));
+    }
+    read["host"] = Value::String(label);
+    Ok(Outcome::read(read).with_summary(summary))
+}
+
+/// Sends one change for the peer `label` and shapes its answer as this
+/// host's own. Without `--key` the request gets a new key, which the answer
+/// shows, so that a retry after a timeout replays it.
+fn write(
+    socket: &Socket,
+    method: &str,
+    path: &str,
+    label: String,
+    mut body: Value,
+    key: Option<String>,
+    named: &str,
+) -> Result<Outcome, Failure> {
+    let minted = key.is_none();
+    let key = key.unwrap_or_else(tiller_core::ids::new_ulid);
+    body["host"] = Value::String(label.clone());
+    body["idempotency_key"] = Value::String(key.clone());
+    let answer = socket
+        .request(method, path, Some(&body), WRITE_TIMEOUT)
+        .map_err(|refusal| failure(&refusal))?;
+    let events = answer["events"]
+        .as_array()
+        .map(|events| events.iter().filter_map(Value::as_i64).collect())
+        .unwrap_or_default();
+    let replayed = answer["replayed"] == true;
+    let mut outcome = Outcome::read(answer["data"].clone()).with_summary(format!(
+        "{label} applied the change to {named}, through this host's daemon."
+    ));
+    outcome.mutation = Some((events, replayed));
+    outcome.warning = answer["warning"].as_str().map(str::to_owned);
+    if minted {
+        outcome.key = Some(key);
+    }
+    Ok(outcome)
+}
+
+/// The daemon's refusal as the CLI's own failure, with the code and exit
+/// status a refusal of this host's would have (`protocol.md` 6.2).
+fn failure(refusal: &Refusal) -> Failure {
+    let (code, exit) = match refusal.error["code"].as_str().unwrap_or_default() {
+        "usage" => ("usage", 2),
+        "not_found" => ("not_found", 3),
+        "conflict" => ("conflict", 4),
+        "refused" => ("refused", 5),
+        "peer_refused" => ("peer_refused", 5),
+        "forbidden" => ("forbidden", 6),
+        "read_scope" => ("read_scope", 6),
+        "unavailable" => ("unavailable", 7),
+        "peer_unreachable" => ("peer_unreachable", 7),
+        _ if refusal.status >= 500 || refusal.status == 0 => ("unavailable", 7),
+        _ => ("refused", 5),
+    };
+    let mut failure = Failure::new(code, exit, refusal.message());
+    let text = |name: &str| refusal.error[name].as_str().map(str::to_owned);
+    failure.entity = text("entity");
+    failure.id = text("id");
+    failure.hint = text("hint");
+    failure.current = refusal.error.get("current").cloned();
+    failure
 }
 
 #[cfg(test)]

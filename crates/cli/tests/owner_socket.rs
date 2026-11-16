@@ -190,7 +190,7 @@ struct World {
     peer: Fleet,
     board_daemon: Daemon,
     _peer_daemon: Daemon,
-    /// The peer's card, by its display id.
+    /// The peer's card, by its ULID: a display id may also be this host's.
     card: String,
     /// The peer's open question on it.
     item: String,
@@ -269,7 +269,7 @@ impl World {
         let peer_daemon = Daemon::start(peer.dir.path(), None);
         let board_daemon = Daemon::start(board.dir.path(), Some(&shim));
         let world = Self {
-            card: card.card.display_id.clone(),
+            card: card.card.id.clone(),
             item: item.id.clone(),
             board,
             peer,
@@ -463,5 +463,96 @@ fn a_non_owner_cannot_use_the_socket() {
     );
     assert_eq!(status, 403, "{body}");
     assert_eq!(body["error"]["code"], "forbidden", "{body}");
-    let _ = &world.peer;
+}
+
+/// The kinds of the events the peer's own `state.db` has for its card.
+fn peer_event_kinds(world: &World) -> Vec<String> {
+    let events = world
+        .peer
+        .open()
+        .timeline(&world.card, i64::MAX, 200)
+        .unwrap();
+    serde_json::to_value(events)
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|event| event["kind"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// A card this host does not have is read from the peer, and the owner's
+/// changes to it reach the peer's own records through the daemon's link.
+/// A name no host has stays `not_found`.
+#[test]
+fn the_owner_reads_and_changes_a_peers_card_through_the_socket() {
+    let world = World::start();
+    let short = &world.card[world.card.len() - 7..];
+
+    let show = world.run(&["card", "show", short]);
+    assert_eq!(show["ok"], true, "{show}");
+    assert_eq!(show["data"]["host"], LABEL, "{show}");
+    assert_eq!(show["data"]["card"]["title"], "Peer card", "{show}");
+    let rev = show["data"]["card"]["rev"].as_i64().unwrap();
+
+    let timeline = world.run(&["card", "timeline", &world.card, "--limit", "1"]);
+    assert_eq!(timeline["ok"], true, "{timeline}");
+    assert_eq!(timeline["data"]["entries"].as_array().unwrap().len(), 1);
+
+    let edit = world.run(&[
+        "card",
+        "edit",
+        &world.card,
+        "--rev",
+        &rev.to_string(),
+        "--title",
+        "Peer card, renamed",
+    ]);
+    assert_eq!(edit["ok"], true, "{edit}");
+    assert!(edit["key"].is_string(), "{edit}");
+    assert_eq!(
+        world.peer.open().card(&world.card).unwrap().title,
+        "Peer card, renamed"
+    );
+
+    // A stale rev is the peer's conflict, with this host's code.
+    let stale = world.run(&[
+        "card",
+        "edit",
+        &world.card,
+        "--rev",
+        "1",
+        "--title",
+        "Again",
+    ]);
+    assert_eq!(stale["error"]["code"], "conflict", "{stale}");
+
+    let hold = world.run(&[
+        "card",
+        "hold",
+        &world.card,
+        "--until",
+        "2099-01-01",
+        "--reason",
+        "Wait for the owner",
+    ]);
+    assert_eq!(hold["ok"], true, "{hold}");
+    let unhold = world.run(&["card", "unhold", &world.card]);
+    assert_eq!(unhold["ok"], true, "{unhold}");
+
+    let answer = world.run(&["attention", "answer", &world.item, "--text", "Postgres"]);
+    assert_eq!(answer["ok"], true, "{answer}");
+
+    let kinds = peer_event_kinds(&world);
+    for kind in [
+        "card.edited",
+        "hold.set",
+        "hold.released",
+        "attention.answered",
+    ] {
+        assert!(kinds.iter().any(|seen| seen == kind), "{kind}: {kinds:?}");
+    }
+
+    let missing = world.run(&["card", "show", "01JC00000000000000000NOPE1"]);
+    assert_eq!(missing["error"]["code"], "not_found", "{missing}");
 }

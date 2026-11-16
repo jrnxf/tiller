@@ -291,6 +291,114 @@ fn federated(command: &Command) -> Option<owner_socket::List> {
     })
 }
 
+/// A command on one record that a paired peer may hold, which the daemon
+/// reads from the peer or forwards to it when this host has no such record
+/// (`protocol.md` 10.3). The fields a forwarded change does not carry, words
+/// read from standard input and a chat citation stay this host's: such a
+/// command keeps its `not_found` and the hint to run it on the peer.
+fn remote(command: &Command) -> Option<owner_socket::Remote> {
+    use owner_socket::Remote;
+    use serde_json::json;
+    let write = |card: &str, method, action, body, key: &cmd::KeyArg| Remote::CardWrite {
+        card: card.to_owned(),
+        method,
+        action,
+        body,
+        key: key.key.clone(),
+    };
+    let none = cmd::KeyArg { key: None };
+    Some(match command {
+        Command::Card(card::Cmd::Show { card }) => Remote::CardRead {
+            card: card.clone(),
+            timeline: None,
+        },
+        Command::Card(card::Cmd::Timeline(args)) => Remote::CardRead {
+            card: args.card.clone(),
+            timeline: Some(owner_socket::Timeline {
+                before: args.before,
+                limit: args.limit,
+            }),
+        },
+        Command::Card(card::Cmd::Edit(args)) => {
+            if args.size.is_some()
+                || args.acceptance.is_some()
+                || args.category.is_some()
+                || args.dispatch.is_some()
+                || args.no_dispatch
+            {
+                return None;
+            }
+            let body = json!({
+                "rev": args.rev,
+                "title": args.title,
+                "priority": args.priority,
+                "body": args.body,
+            });
+            write(&args.card, "PATCH", "", body, &args.key)
+        }
+        Command::Card(card::Cmd::Comment(args)) if args.stdin.is_none() => {
+            let body = json!({ "text": args.text.as_deref()? });
+            write(&args.card, "POST", "/comment", body, &args.key)
+        }
+        Command::Card(card::Cmd::Hold(args)) => {
+            let until = lisbon::parse_when(&args.until).ok()?.to_string();
+            let body = json!({ "until": until, "reason": args.reason });
+            write(&args.card, "POST", "/hold", body, &none)
+        }
+        Command::Card(card::Cmd::Unhold { card }) => {
+            write(card, "DELETE", "/hold", json!({}), &none)
+        }
+        Command::Card(card::Cmd::Dep(card::Dep::Add { card, depends_on })) => write(
+            card,
+            "POST",
+            "/deps",
+            json!({ "depends_on": depends_on }),
+            &none,
+        ),
+        Command::Card(card::Cmd::Dep(card::Dep::Rm { card, depends_on })) => write(
+            card,
+            "DELETE",
+            "/deps",
+            json!({ "depends_on": depends_on }),
+            &none,
+        ),
+        Command::Card(card::Cmd::Close(args)) => {
+            let outcome = serde_json::to_value(args.outcome.as_ref()?).ok()?;
+            let body = json!({ "outcome": outcome, "reason": args.reason });
+            write(&args.card, "POST", "/close", body, &none)
+        }
+        Command::Card(card::Cmd::Cancel(args)) => write(
+            &args.card,
+            "POST",
+            "/cancel",
+            json!({ "reason": args.reason }),
+            &none,
+        ),
+        Command::Card(card::Cmd::Reopen(args)) => write(
+            &args.card,
+            "POST",
+            "/reopen",
+            json!({ "reason": args.reason }),
+            &none,
+        ),
+        Command::Attention(attention::Cmd::Answer(args))
+            if args.stdin.is_none() && args.ask.is_none() =>
+        {
+            Remote::Answer {
+                item: args.item.clone(),
+                answer: args.text.clone()?,
+                key: args.key.key.clone(),
+            }
+        }
+        Command::Ask(ask::Cmd::Note(args)) if args.stdin.is_none() => Remote::AskNote {
+            project: args.project.clone(),
+            text: args.text.clone()?,
+            key: args.key.key.clone(),
+        },
+        _ => return None,
+    })
+}
+
 /// The project a list of this host is narrowed to. A name this host does not
 /// have is refused as `not_found`, not answered with an empty list, so that a
 /// person who names a paired host's project is told where it lives.
@@ -526,6 +634,7 @@ fn main() -> ExitCode {
     let app = App::from_env(cli.db);
     let whole_host = lists_this_host(&cli.command);
     let federated = federated(&cli.command);
+    let remote = remote(&cli.command);
     let away = away_command(&cli.command);
     let known = narrowed_to(&cli.command).map_or(Ok(()), |project| -> Result<(), Failure> {
         app.read()?.project(project)?;
@@ -564,6 +673,20 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(mut failure) => {
+            // A record this host does not have may be a paired peer's: the
+            // owner reads or changes it through this host's daemon.
+            let forwarded = remote
+                .filter(|_| failure.code == "not_found")
+                .zip(owner_socket::Socket::for_owner(&app))
+                .and_then(|(remote, socket)| remote.send(&socket));
+            match forwarded {
+                Some(Ok(outcome)) => {
+                    emit(outcome.into_response(), json);
+                    return ExitCode::SUCCESS;
+                }
+                Some(Err(refused)) => failure = refused,
+                None => {}
+            }
             // A name this host does not have may be a paired host's.
             if failure.code == "not_found"
                 && let Some(elsewhere) = Elsewhere::of(&app)
