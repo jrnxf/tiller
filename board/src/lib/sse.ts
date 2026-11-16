@@ -346,8 +346,11 @@ export function applyChange(
       });
       break;
     case "outbox":
-      // Moves the board's receipts on to delivered and done (section 7.2).
-      if (hasState(state)) recordProgress(event.entity_id, state.state, event.at);
+      // Moves the board's receipts on to delivered and done (section 7.2). A
+      // peer's outbox row is recorded under its label (applyPeerChange). The
+      // event's card id refreshes the card's timeline below: the owner's
+      // comment is an outbox note, and it shows there as "You commented".
+      if (!peer && hasState(state)) recordProgress(event.entity_id, state.state, event.at);
       break;
     case "ask":
       // The Asked column lists the unresolved asks, which only the server can
@@ -480,8 +483,10 @@ function applyPeerChange(queryClient: QueryClient, event: PeerEvent): void {
     if (hasState(state)) recordProgress(change.entity_id, state.state, change.at, event.host);
   }
   // Quota windows are not tagged by owner: a peer's would replace this host's
-  // window of the same label. An outbox row has no other read.
-  if (change.entity === "quota" || change.entity === "outbox") return;
+  // window of the same label. An outbox row with no card has no other read;
+  // one with a card moves that card's timeline (a comment from this board).
+  if (change.entity === "quota") return;
+  if (change.entity === "outbox" && !change.card_id) return;
   if (change.entity === "host") {
     // The daemon sends the peer's Machines row with no state: read it again.
     void queryClient.invalidateQueries({

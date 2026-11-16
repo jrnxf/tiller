@@ -664,6 +664,35 @@ test("a peer's outbox event moves a forwarded steer's receipt, not a local row o
   stop();
 });
 
+test("a peer's outbox event for a comment marks that card's page and timeline stale, and no other card's", () => {
+  const { queryClient, stop, source, peerRow } = federatedStream();
+  const detail = queryKeyFor(`/api/v1/cards/${peerRow.display_id}?owner=host-d`);
+  const timeline = queryKeyFor(`/api/v1/cards/${peerRow.display_id}/timeline?owner=host-d`);
+  const other = queryKeyFor("/api/v1/cards/alpha-43/timeline");
+  queryClient.setQueryData(detail, { card: { id: peerRow.id, display_id: peerRow.display_id } });
+  queryClient.setQueryData(timeline, { items: [] });
+  queryClient.setQueryData(other, { items: [] });
+
+  source.emit("peer", {
+    host: "host-d",
+    host_id: "01JPEERD0000000000000000D",
+    as_of: "2026-11-02T12:00:03.000Z",
+    change: event({
+      seq: 9002,
+      kind: "outbox.enqueued",
+      entity: "outbox",
+      entity_id: "01JOUTBOXNOTE",
+      card_id: peerRow.id,
+      entity_state: { id: "01JOUTBOXNOTE", state: "pending" },
+    }),
+  });
+
+  expect(queryClient.getQueryState(detail)?.isInvalidated).toBe(true);
+  expect(queryClient.getQueryState(timeline)?.isInvalidated).toBe(true);
+  expect(queryClient.getQueryState(other)?.isInvalidated).toBe(false);
+  stop();
+});
+
 test("a peer event does not touch a local card or project of the same id", () => {
   const { queryClient, stop, source } = federatedStream();
   const projects = () =>
