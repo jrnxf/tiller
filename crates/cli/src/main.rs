@@ -9,8 +9,10 @@ mod lisbon;
 mod stable;
 mod toon;
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::OnceLock;
 
 use clap::error::ErrorKind;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
@@ -29,6 +31,10 @@ struct Cli {
     /// Print the stable JSON response instead of TOON
     #[arg(long, global = true)]
     json: bool,
+    /// Print the whole record, as TOON, even at a terminal. A person at a
+    /// terminal reads a short answer by default (`protocol.md` 6.1)
+    #[arg(long, global = true)]
+    full: bool,
     /// The state database to open; $TILLER_HOME/state.db by default, and TILLER_HOME is
     /// ~/.tiller unless you set it. `tiller daemon` refuses a database other than that one
     #[arg(long, global = true, env = "TILLER_DB")]
@@ -282,6 +288,21 @@ fn away_command(command: &Command) -> Option<bool> {
     }
 }
 
+/// The subcommand words the caller typed (`card close`), for the sentence of
+/// a mutation that has none of its own.
+static COMMAND_PATH: OnceLock<String> = OnceLock::new();
+
+/// The subcommand words of a parsed command line.
+fn command_path(matches: &clap::ArgMatches) -> String {
+    let mut words = Vec::new();
+    let mut at = matches;
+    while let Some((name, next)) = at.subcommand() {
+        words.push(name);
+        at = next;
+    }
+    words.join(" ")
+}
+
 /// Prints the response to stdout: TOON for agents, JSON on request. Nothing
 /// else goes to stdout (`protocol.md` 6.1).
 fn emit(mut response: Value, json: bool) {
@@ -292,6 +313,53 @@ fn emit(mut response: Value, json: bool) {
         toon::encode_response(&response).trim_end().to_owned()
     };
     println!("{text}");
+}
+
+/// The short answer for a person at a terminal: the `summary` sentence, the
+/// `warning` if any, and the `help` lines, as plain text. `None` when the
+/// response has no `summary`, so a read whose data is the answer still prints
+/// its record (`protocol.md` 6.1).
+fn short_answer(response: &Value) -> Option<String> {
+    let summary = response.get("summary")?.as_str()?;
+    let mut lines = vec![summary.to_owned()];
+    if let Some(warning) = response.get("warning").and_then(Value::as_str) {
+        lines.push(format!("warning: {warning}"));
+    }
+    if let Some(help) = response.get("help").and_then(Value::as_array) {
+        lines.extend(help.iter().filter_map(Value::as_str).map(str::to_owned));
+    }
+    lines.push("The whole record: add --full, or --json.".to_owned());
+    Some(lines.join("\n"))
+}
+
+/// The sentence of a mutation that has no bespoke one: what ran, and whether
+/// it changed anything.
+fn generic_summary(replayed: bool) -> String {
+    let path = COMMAND_PATH.get().map_or("", String::as_str);
+    if replayed {
+        format!("Nothing changed: `tiller {path}` was already done.")
+    } else {
+        format!("Done: `tiller {path}`.")
+    }
+}
+
+/// Prints a command's answer. A person at a terminal reads the short answer;
+/// `--json`, `--full`, a pipe and an agent session keep the whole record.
+fn emit_outcome(mut outcome: app::Outcome, app: &App, json: bool, full: bool) {
+    let short = !json && !full && std::io::stdout().is_terminal() && app.person();
+    if short
+        && outcome.summary.is_none()
+        && let Some((_, replayed)) = &outcome.mutation
+    {
+        outcome.summary = Some(generic_summary(*replayed));
+    }
+    let response = outcome.into_response();
+    if short && let Some(text) = short_answer(&response) {
+        println!("{text}");
+        return;
+    }
+    // No sentence: a read whose record is the answer.
+    emit(response, json);
 }
 
 /// The record of a command line clap refused. Its message keeps the lines
@@ -346,6 +414,7 @@ fn main() -> ExitCode {
         if let Some(name) = matches.subcommand_name() {
             tiller_core::backup::set_holder_command(name);
         }
+        let _ = COMMAND_PATH.set(command_path(&matches));
         Ok(cli)
     });
     let cli = match parsed {
@@ -427,6 +496,7 @@ fn main() -> ExitCode {
         };
     }
     let json = cli.json;
+    let full = cli.full;
     let app = App::from_env(cli.db);
     let whole_host = lists_this_host(&cli.command);
     let away = away_command(&cli.command);
@@ -451,7 +521,7 @@ fn main() -> ExitCode {
                 outcome.warning =
                     Some(elsewhere.away_here(starting, &elsewhere::typed(std::env::args_os())));
             }
-            emit(outcome.into_response(), json);
+            emit_outcome(outcome, &app, json, full);
             ExitCode::SUCCESS
         }
         Err(mut failure) => {
@@ -472,7 +542,37 @@ fn main() -> ExitCode {
 mod tests {
     use clap::CommandFactory;
 
-    use super::Cli;
+    use serde_json::json;
+
+    use super::{Cli, short_answer};
+
+    #[test]
+    fn the_short_answer_is_the_sentence_the_warning_and_the_help_lines() {
+        let response = json!({
+            "ok": true,
+            "data": {"id": "x"},
+            "warning": "no orchestrator",
+            "summary": "Recorded.",
+            "help": ["tiller a", "tiller b"],
+        });
+        let text = short_answer(&response).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            &lines[..4],
+            [
+                "Recorded.",
+                "warning: no orchestrator",
+                "tiller a",
+                "tiller b"
+            ]
+        );
+        assert!(!text.contains("data"));
+    }
+
+    #[test]
+    fn a_response_with_no_sentence_has_no_short_answer() {
+        assert_eq!(short_answer(&json!({"ok": true, "data": {}})), None);
+    }
 
     /// Collects every visible argument and subcommand with no help text.
     fn missing_help(command: &clap::Command, path: &str, found: &mut Vec<String>) {
