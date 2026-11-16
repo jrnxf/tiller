@@ -9,16 +9,19 @@ exit: 0
         "age": "<age>",
         "age_seconds": "<age>",
         "ask": {
+          "answered_at": null,
           "disposition": "unresolved",
           "id": "<id5>",
           "project_id": "alpha",
           "received_at": "<time>",
+          "replies": 0,
           "resolved_at": null,
           "resolved_by_session_id": null,
           "session_id": null,
           "short": "<id5.short>",
           "source": "script",
-          "text": "add a dark mode"
+          "text": "add a dark mode",
+          "unread_replies": 0
         }
       }
     ]

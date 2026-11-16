@@ -5,18 +5,33 @@ exit: 0
 {
   "data": {
     "ask": {
+      "answered_at": null,
       "disposition": "unresolved",
       "id": "<id5>",
       "project_id": "alpha",
       "received_at": "<time>",
+      "replies": 0,
       "resolved_at": null,
       "resolved_by_session_id": null,
       "session_id": null,
       "short": "<id5.short>",
       "source": "script",
-      "text": "add a dark mode"
+      "text": "add a dark mode",
+      "unread_replies": 0
     },
-    "cards": []
+    "cards": [],
+    "delivery": {
+      "delivered_at": null,
+      "failed_at": null,
+      "failure_reason": null,
+      "seen_at": null,
+      "sent_at": "<time>",
+      "state": "pending"
+    },
+    "replies": []
   },
+  "help": [
+    "no answer yet; the note to the orchestrator is pending"
+  ],
   "ok": true
 }

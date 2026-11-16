@@ -6,52 +6,64 @@ exit: 0
   "data": {
     "asks": [
       {
+        "answered_at": null,
         "disposition": "followup",
         "id": "<id17>",
         "project_id": "alpha",
         "received_at": "<time>",
+        "replies": 0,
         "resolved_at": "<time>",
         "resolved_by_session_id": null,
         "session_id": null,
         "short": "<id17.short>",
         "source": "script",
-        "text": "also fix the footer"
+        "text": "also fix the footer",
+        "unread_replies": 0
       },
       {
+        "answered_at": null,
         "disposition": "cancelled",
         "id": "<id15>",
         "project_id": "alpha",
         "received_at": "<time>",
+        "replies": 0,
         "resolved_at": "<time>",
         "resolved_by_session_id": null,
         "session_id": null,
         "short": "<id15.short>",
         "source": "script",
-        "text": "never mind"
+        "text": "never mind",
+        "unread_replies": 0
       },
       {
+        "answered_at": null,
         "disposition": "chat",
         "id": "<id13>",
         "project_id": "alpha",
         "received_at": "<time>",
+        "replies": 0,
         "resolved_at": "<time>",
         "resolved_by_session_id": null,
         "session_id": null,
         "short": "<id13.short>",
         "source": "script",
-        "text": "just thinking aloud"
+        "text": "just thinking aloud",
+        "unread_replies": 0
       },
       {
+        "answered_at": null,
         "disposition": "new",
         "id": "<id5>",
         "project_id": "alpha",
         "received_at": "<time>",
+        "replies": 0,
         "resolved_at": "<time>",
         "resolved_by_session_id": null,
         "session_id": null,
         "short": "<id5.short>",
         "source": "script",
-        "text": "add a dark mode"
+        "text": "add a dark mode",
+        "unread_replies": 0
       }
     ]
   },

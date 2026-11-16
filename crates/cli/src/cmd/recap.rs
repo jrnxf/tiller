@@ -2,6 +2,7 @@
 //! with `/recap` (P35). It reads the record, so it needs no chat history: the
 //! recap is what happened since the owner's previous ask, and the decisions
 //! are every open attention item that still applies, most blocking first.
+//! The unread replies are the answers the orchestrators sent since.
 
 use clap::Args;
 use serde_json::json;
@@ -9,6 +10,7 @@ use tiller_core::Timestamp;
 use tiller_core::domain::{Ask, AskSource, Attention, AttentionKind, Card, Event};
 use tiller_core::state::attention::stale;
 use tiller_core::state::recap::{self, events_since};
+use tiller_core::state::replies::unread_on_host;
 use tiller_core::state::{get, list};
 
 use crate::app::{App, Done, Failure, Outcome};
@@ -107,10 +109,30 @@ pub fn run(app: &App, args: Recap) -> Done {
         })
         .collect();
 
+    // The answers the owner has not read: the other half of "what waits for
+    // me", beside the decisions.
+    let replies: Vec<_> = unread_on_host(store.conn(), project.as_deref())?
+        .into_iter()
+        .map(|view| {
+            json!({
+                "id": view.reply.id,
+                "project": view.reply.project_id,
+                "to": view.to,
+                "ask": view.reply.ask_id,
+                "question": view.question,
+                "asked_at": view.asked_at,
+                "body": view.reply.body,
+                "replied_at": view.reply.replied_at,
+                "card": view.card.as_ref().map(|card| &card.display_id),
+            })
+        })
+        .collect();
+
     Ok(Outcome::read(json!({
         "since": since,
         "recap": recap,
         "decisions": decisions,
+        "replies": replies,
         "superseded": superseded,
         "walkthrough": "Say the order is your pick. Present decisions[0] alone with its \
             question, why it matters, its options and your recommendation. When the owner \

@@ -12,9 +12,9 @@ Status values: `open`, `fixed` (with what was verified), `needs owner`, `to veri
 |---|---|
 | Phase | 1 - audit. Journeys 3 (ask), 4 (start a task) and 5 (trust) are walked on the board and the CLI. Journeys 1, 2 and 6 to 11 are not walked yet. |
 | Open P0 | 0. UA-15 is `needs owner`: the silent part is fixed, the answer itself needs a spec change. |
-| Open P1 | 3 (UA-03, UA-09, UA-17). UA-20 is `needs owner`: a queued card says what it waits for and "Close" is out of the main place, and its "Start" control needs a spec change (see "Needs owner"). UA-18 is `needs owner`: the wrong status line is fixed, Cancel and the full view need a spec change. UA-19 is `needs owner`: the tile, the card and the timeline show the worker's report, and the "Needs you" rule needs a spec change. |
-| Fixed | UA-01, UA-02, UA-04, UA-05, UA-06, UA-12, UA-16, UA-21, UA-22, UA-25, DX-01. UA-15 part 1 (the owner is told where the answer shows). UA-18 part 1 (the ask tile shows an unread answer and opens it). UA-19 part 1 (a worker's report shows on its tile, on the card and in the timeline). UA-20 part 1 (a queued card says what it waits for, and "Close" is under "More" until work starts). |
-| Next step | The CLI group: UA-17 (read an answer in the CLI), then UA-03 and UA-09. Walk journeys 2, 6 and 8 after the stand-in forge of the bench gaps. UA-11 (P2) is not started: check `docs/spec/state.md` section 6 first, because the column of a card is a contract. |
+| Open P1 | 2 (UA-03, UA-09). UA-17 is fixed but for "Mark read" in the CLI, which is `needs owner`. UA-20 is `needs owner`: a queued card says what it waits for and "Close" is out of the main place, and its "Start" control needs a spec change (see "Needs owner"). UA-18 is `needs owner`: the wrong status line is fixed, Cancel and the full view need a spec change. UA-19 is `needs owner`: the tile, the card and the timeline show the worker's report, and the "Needs you" rule needs a spec change. |
+| Fixed | UA-01, UA-02, UA-04, UA-05, UA-06, UA-12, UA-16, UA-21, UA-22, UA-25, DX-01. UA-17 (read an answer in the CLI; "Mark read" in the CLI needs a spec change). UA-15 part 1 (the owner is told where the answer shows). UA-18 part 1 (the ask tile shows an unread answer and opens it). UA-19 part 1 (a worker's report shows on its tile, on the card and in the timeline). UA-20 part 1 (a queued card says what it waits for, and "Close" is under "More" until work starts). |
+| Next step | The CLI group: UA-09 (a short summary in place of the raw record), then UA-03. Walk journeys 2, 6 and 8 after the stand-in forge of the bench gaps. UA-11 (P2) is not started: check `docs/spec/state.md` section 6 first, because the column of a card is a contract. |
 
 ## The bench
 
@@ -77,9 +77,9 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 
 | Job | Board | CLI |
 |---|---|---|
-| Ask a project | 4 steps, about 10 s: `A`, `@` and two letters, Enter, the text, Enter. Good. | 1 command, 36 lines of answer |
-| See that the ask arrived | main project: the tile shows at once. Peer project: the tile shows in about 1 s (UA-16, fixed; it was never without a reload) | `ask show` has no delivery state (UA-17) |
-| Read the answer | main project: 1 click on the ask's tile, which shows "Answered" and the first line within 2 s (UA-18), or Inbox, 2 clicks. Peer project: only on the peer's board; the Ask box, the toast and the tile now say so (UA-15) | not possible (UA-17) |
+| Ask a project | 4 steps, about 10 s: `A`, `@` and two letters, Enter, the text, Enter. Good. | 1 command, 36 lines of answer (UA-09). The last line is the next step: `tiller ask show <ask>` (UA-17) |
+| See that the ask arrived | main project: the tile shows at once. Peer project: the tile shows in about 1 s (UA-16, fixed; it was never without a reload) | `tiller ask show <ask>`: `delivery.state` reads `delivered` within 6 s (UA-17; before: no delivery state) |
+| Read the answer | main project: 1 click on the ask's tile, which shows "Answered" and the first line within 2 s (UA-18), or Inbox, 2 clicks. Peer project: only on the peer's board; the Ask box, the toast and the tile now say so (UA-15) | main project: the same `tiller ask show <ask>` prints the reply's words; `tiller recap` lists every unread answer (UA-17; before: not possible). Peer project: only in a shell on the peer (UA-03) |
 | Ask again | 1 click on "Ask again" in the reply | type the command again |
 | Recover from the wrong project | not possible: the ask tile has no Cancel (UA-18, needs owner) | `ask resolve <ask> cancelled`, which the help calls an orchestrator's tool |
 | Idea to a filed card | 3 steps: New card on the project's row, the title, Enter | 1 command, after one refusal for a missing `--kind` (UA-23) |
@@ -272,13 +272,24 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 - Verified on the bench with the board open and no reload: an ask recorded on the peer moved "Asked" from 3 to 4 within 1 s (before: no change in 25 s), and `ask resolve <ask> cancelled` on the peer moved it back to 3 within 1 s. An ask sent from the main board's Ask box to Pylon showed its tile within 3 s.
 - Tests: `board/src/lib/sse.test.ts` ("peer_reset replaces that host's asks"), and `crates/daemon/tests/peer_e2e.rs` (`board_starts_a_peers_orchestrator_and_asks_it` now waits for a `peer_reset` that carries the new ask and reads it from the board host's `/api/v1/board`, with no `summary`).
 
-### UA-17 - The CLI cannot read an answer (P1, open)
+### UA-17 - The CLI cannot read an answer (P1, fixed; "Mark read" in the CLI needs owner)
 
 - Journey: 3.
 - Tried: `tiller ask note lantern --text ...`, then `tiller ask show <ask>` and `tiller ask list` after the orchestrator replied.
 - Happened: `ask show` prints the ask and `cards[0]`. It has no reply, no "answered" mark and no delivery state of the note. `ask list` shows `unresolved` for the answered ask. `tiller recap` does not list replies. No command prints the reply text.
 - Hurts: a job that starts in the CLI cannot end there. The owner must open the board's Inbox to read the answer to a question typed in a shell.
 - Fix: `ask show` prints the note's delivery state and every reply. `ask list` gets an `answered` column. `tiller recap` lists unread replies beside the decisions, and `tiller reply read <reply>` (or `ask show --mark-read`) marks one read, so the parity row "Mark a reply read" becomes Full on both sides.
+- Fixed (Mon 16 Nov 2026, Lisbon), in the CLI and the core reads:
+  - `tiller ask show <ask>` prints `delivery` (the state of the note the ask went as: `pending`, `delivered`, the times, a failure reason) and `replies` (every reply, oldest first, with its words, its time, `read_at` and its card). With no reply its help line says "no answer yet; the note to the orchestrator is delivered", or that no note went to an orchestrator.
+  - Every row of `tiller ask list` and `tiller ask list --unresolved` has `answered_at`, `replies` and `unread_replies`.
+  - `tiller recap` has `replies`: every unread reply on this host (or of `--project`), newest first, with the project, the question and the words.
+  - After `tiller ask note` the owner's help line is `tiller ask show <short>: whether it arrived, and the answer`. Before, it was the orchestrator's `ask resolve` line. An orchestrator session still gets that one.
+- Verified on the bench, in the CLI on main: `ask note lantern --text "How many mails bounced last week?"`, then the printed `ask show 4WNBNYE` 6 s later read `state: delivered` and "no answer yet". After the orchestrator's `tiller reply`, the same command printed the reply's words, `answered_at` and `unread_replies: 1`. `ask list --project lantern` showed the answer's time, and `tiller recap` listed this answer and the seeded Quill answer. The job is 2 commands, and the second one is printed by the first.
+- Test: `the_owner_reads_the_answer_in_the_cli` (`crates/cli/tests/reply.rs`), and the snapshots of `ask note`, `ask show` and `ask list`.
+- Not done:
+  - "Mark read" in the CLI. `docs/spec/authority.md` and `docs/spec/state.md` name the board as the place where the owner marks a reply read. So an answer read in the CLI stays unread in the Inbox and in `tiller recap` until the owner marks it on the board. See "Needs owner".
+  - An ask sent to a peer's project: main's CLI refuses it and cannot show it (UA-03, and UA-15 for the board).
+  - The answers are fields of a record, not a sentence (UA-09).
 
 ### UA-18 - An ask tile is a dead end, and its status line can be wrong (P1, needs owner; the status line is fixed)
 
@@ -445,7 +456,7 @@ Order of work, highest owner value first. Fixes that share a cause are grouped.
 3. Done: UA-02, UA-05, UA-06 and UA-12 (the "needs you" path). The question is on the card, the Inbox is ordered by urgency, and the kind is named.
 4. Done: UA-21 and UA-22 (find a card and start a job from anywhere on the board). Done as far as the contract allows: UA-20 part 1 (a queued card says what it waits for). Its "Start" control waits under "Needs owner".
 5. Done: UA-01 (a host that refuses every new run says so on the board, in `tiller machines` and in `tiller doctor`).
-6. Done: UA-25 (a live peer counts as live on Health and in `tiller machines`). Next: UA-17 with UA-03, UA-09, UA-10 and UA-23: the CLI as an owner surface.
+6. Done: UA-25 (a live peer counts as live on Health and in `tiller machines`) and UA-17 (the CLI prints the delivery state and the answer of an ask). Next: UA-09, then UA-03, UA-10 and UA-23: the CLI as an owner surface.
 7. Finish the audit in parallel with the fixes: close the bench gaps (the stand-in forge), then walk journeys 1, 2, 6, 8, 9, 10 and 11 and the rest of 5 and 7.
 8. UA-07 with UA-08: the host out of the owner's way.
 9. UA-11, UA-13, UA-14, UA-22, UA-24: polish.
@@ -463,6 +474,8 @@ Order of work, highest owner value first. Fixes that share a cause are grouped.
 - UA-20, the "Start" control: let the owner start a run on the board. Today the board files a card and the orchestrator decides when it runs; the owner's own start is `tiller spawn <card> <role>` in a terminal. `docs/spec/authority.md` already gives the owner the right. `docs/spec/protocol.md` section 7 has no call for it. Recommendation: add `POST /api/v1/cards/{id}/runs` (owner only, forwarded to a peer like the other mutations, the same `run.start` as `tiller spawn` with the role from the card's kind and the model and effort from the dispatch table, and the same refusals for capacity, the floors and quota). The board then gets "File and start" in the new-card dialog and "Start" on a queued card, and shows a refusal with its reason. The work after a yes is about one iteration.
 
 - UA-01, the spec text: the fix added the field `refuses_runs` to the Machines row and a `floors` line to `tiller doctor`. `docs/spec/recovery.md` R16 asks for the first ("The Machines row shows the breached floor"), but the field table of `docs/spec/protocol.md` section 9 and the list of checks in its section 6.4 do not name them, and this audit may not edit a spec. Recommendation: add one row to the table (`refuses_runs`: one line per breached RAM or disk floor, absent while the host can start a run; a peer's from its own row while the link is live) and "the floors" to the list of doctor checks. No code changes with a yes.
+
+- UA-17, "Mark read" in the CLI: `docs/spec/authority.md` (the row "mark a reply read") says the owner marks read "on the board", and `docs/spec/state.md` lists the board as the actor of `reply.read`. The store itself asks only for the owner. Recommendation: let `tiller ask show <ask> --mark-read` run the same `reply.read` for the owner, and change the two spec rows to "the owner, on the board or in the CLI". The work after a yes is small: one flag, one test, and the parity row "Mark a reply read" becomes Full.
 
 Two more candidates, to settle when their fix starts:
 

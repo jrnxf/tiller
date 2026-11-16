@@ -219,6 +219,33 @@ pub fn unread(conn: &Connection, project_id: &str) -> Result<Vec<ReplyView>> {
     replies.into_iter().map(|reply| view(conn, reply)).collect()
 }
 
+/// Every reply to one ask, oldest first: the answer `tiller ask show` prints.
+pub fn for_ask(conn: &Connection, ask_id: &str) -> Result<Vec<Reply>> {
+    list(conn, "ask_id = ?1 ORDER BY replied_at, id", &[&ask_id])
+}
+
+/// The unread replies of one project, or of every project on this host,
+/// newest first: what `tiller recap` lists beside the decisions.
+pub fn unread_on_host(conn: &Connection, project_id: Option<&str>) -> Result<Vec<ReplyView>> {
+    let replies: Vec<Reply> = list(
+        conn,
+        "(?1 IS NULL OR project_id = ?1) AND read_at IS NULL ORDER BY replied_at DESC, id DESC",
+        &[&project_id],
+    )?;
+    replies.into_iter().map(|reply| view(conn, reply)).collect()
+}
+
+/// The note an ask reached its orchestrator as, when one was sent: its
+/// `state` says whether the words arrived. An ask typed into a pane has no
+/// note, and neither has one recorded while no orchestrator ran.
+pub fn ask_note(conn: &Connection, ask_id: &str) -> Result<Option<OutboxMessage>> {
+    super::find(
+        conn,
+        "reply_to = ?1 AND kind = 'note' ORDER BY created_at, id",
+        &[&ask_id],
+    )
+}
+
 /// The asks a session resolved since `since`, other than `cancelled`, that
 /// have no reply yet, oldest first: what the Stop hook's reply check names
 /// (`protocol.md` 2.5).

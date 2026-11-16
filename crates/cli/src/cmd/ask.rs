@@ -3,8 +3,9 @@
 
 use clap::{Args, Subcommand};
 use serde_json::json;
-use tiller_core::domain::{Ask, AskCard, AskSource, Card};
+use tiller_core::domain::{Ask, AskCard, AskSource, Card, OutboxMessage, Reply};
 use tiller_core::state::asks::{NewAsk, Resolution};
+use tiller_core::state::replies;
 use tiller_core::state::{get, list, resolve_id};
 
 use super::{CardFields, KeyArg, tag};
@@ -18,9 +19,10 @@ pub enum Cmd {
     Resolve(Resolve),
     /// Link a further card to a resolved ask
     Link(Link),
-    /// List asks
+    /// List asks, each with the time of its answer
     List(List),
-    /// Show one ask with the cards it touched
+    /// Show one ask: whether it reached the orchestrator, every answer, and
+    /// the cards it touched
     Show {
         /// The ask: a ULID or its short form
         ask: String,
@@ -104,16 +106,67 @@ fn note(app: &App, args: Note) -> Done {
         Some(&keyed.key),
         NewAsk {
             project_id: args.project.clone(),
-            session_id: session.map(|session| session.id),
+            session_id: session.as_ref().map(|session| session.id.clone()),
             source: AskSource::Script,
             text,
         },
     )?;
     let warning = applied.value.warning.clone();
+    // The orchestrator files the ask. Everyone else waits for its answer.
+    let help = match &session {
+        Some(_) => "tiller ask resolve <ask> new|followup:<card>|chat|cancelled".to_owned(),
+        None => format!(
+            "tiller ask show {}: whether it arrived, and the answer",
+            short(&applied.value.ask.id)
+        ),
+    };
     Ok(Outcome::applied(applied)
         .with_warning(warning)
         .with_key(&keyed)
-        .with_help("tiller ask resolve <ask> new|followup:<card>|chat|cancelled"))
+        .with_help(help))
+}
+
+/// The short form of a ULID: its last 7 characters.
+fn short(id: &str) -> &str {
+    id.get(id.len().saturating_sub(7)..).unwrap_or(id)
+}
+
+/// The answer fields every ask row carries: when the latest reply came, how
+/// many came, and how many the owner has not marked read.
+fn answer_fields(replies: &[Reply]) -> serde_json::Value {
+    json!({
+        "answered_at": replies.last().map(|reply| reply.replied_at),
+        "replies": replies.len(),
+        "unread_replies": replies.iter().filter(|reply| reply.read_at.is_none()).count(),
+    })
+}
+
+/// An ask row with its answer fields beside the ask's own.
+fn with_answer(store: &tiller_core::Store, ask: &Ask) -> Result<serde_json::Value, Failure> {
+    let replies = replies::for_ask(store.conn(), &ask.id)?;
+    let mut row = crate::app::to_value(ask);
+    if let (Some(row), serde_json::Value::Object(fields)) =
+        (row.as_object_mut(), answer_fields(&replies))
+    {
+        row.extend(fields);
+    }
+    Ok(row)
+}
+
+/// Whether the ask's words reached the orchestrator, from the note they
+/// went as.
+fn delivery(note: Option<&OutboxMessage>) -> serde_json::Value {
+    match note {
+        Some(note) => json!({
+            "state": note.state,
+            "sent_at": note.created_at,
+            "delivered_at": note.delivered_at,
+            "seen_at": note.acked_at,
+            "failed_at": note.failed_at,
+            "failure_reason": note.failure_reason,
+        }),
+        None => serde_json::Value::Null,
+    }
 }
 
 enum Target {
@@ -194,24 +247,26 @@ fn list_asks(app: &App, args: List) -> Done {
     let store = app.read()?;
     if args.unresolved {
         let rows = store.asked(args.project.as_deref())?;
-        let rows: Vec<_> = rows
-            .into_iter()
-            .map(|row| {
-                json!({
-                    "ask": row.ask,
-                    "age_seconds": row.age_seconds.round(),
-                    "age": crate::lisbon::age(row.age_seconds),
-                })
-            })
-            .collect();
-        return Ok(Outcome::read(json!({"asks": rows})));
+        let mut asks = Vec::new();
+        for row in rows {
+            asks.push(json!({
+                "ask": with_answer(&store, &row.ask)?,
+                "age_seconds": row.age_seconds.round(),
+                "age": crate::lisbon::age(row.age_seconds),
+            }));
+        }
+        return Ok(Outcome::read(json!({"asks": asks})));
     }
     let asks: Vec<Ask> = list(
         store.conn(),
         "(?1 IS NULL OR project_id = ?1) ORDER BY received_at DESC, id DESC LIMIT ?2",
         &[&args.project, &args.limit],
     )?;
-    Ok(Outcome::read(json!({"asks": asks})))
+    let mut rows = Vec::new();
+    for ask in &asks {
+        rows.push(with_answer(&store, ask)?);
+    }
+    Ok(Outcome::read(json!({"asks": rows})))
 }
 
 fn show(app: &App, reference: &str) -> Done {
@@ -230,5 +285,37 @@ fn show(app: &App, reference: &str) -> Done {
             "linked_at": link.linked_at,
         }));
     }
-    Ok(Outcome::read(json!({"ask": ask, "cards": cards})))
+    let answers = replies::for_ask(store.conn(), &id)?;
+    let note = replies::ask_note(store.conn(), &id)?;
+    let mut shown = Vec::new();
+    for reply in &answers {
+        let card: Option<Card> = match &reply.card_id {
+            Some(card) => Some(get(store.conn(), "card", card)?),
+            None => None,
+        };
+        shown.push(json!({
+            "id": reply.id,
+            "body": reply.body,
+            "replied_at": reply.replied_at,
+            "read_at": reply.read_at,
+            "card": card.map(|card| card.display_id),
+        }));
+    }
+    let outcome = Outcome::read(json!({
+        "ask": with_answer(&store, &ask)?,
+        "delivery": delivery(note.as_ref()),
+        "replies": shown,
+        "cards": cards,
+    }));
+    Ok(match (answers.is_empty(), &note) {
+        (false, _) => outcome,
+        (true, Some(note)) => outcome.with_help(format!(
+            "no answer yet; the note to the orchestrator is {}",
+            note.state
+        )),
+        (true, None) => outcome.with_help(
+            "no answer yet, and no note went to an orchestrator: `tiller agents` shows whether \
+             the project has one",
+        ),
+    })
 }

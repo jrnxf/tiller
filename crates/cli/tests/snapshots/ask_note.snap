@@ -45,7 +45,7 @@ exit: 0
     "<seq>"
   ],
   "help": [
-    "tiller ask resolve <ask> new|followup:<card>|chat|cancelled"
+    "tiller ask show <id5.short>: whether it arrived, and the answer"
   ],
   "ok": true,
   "replayed": false

@@ -112,3 +112,82 @@ fn only_the_orchestrator_replies() {
     assert!(!missing.ok(), "{}", missing.json);
     assert_eq!(missing.error_code(), "usage", "{}", missing.json);
 }
+
+/// UA-17: a question typed in a shell is answered in the same shell. The
+/// owner sees that the note arrived, reads the reply's words, and finds the
+/// unread answer in the ask list and in the recap.
+#[test]
+fn the_owner_reads_the_answer_in_the_cli() {
+    let world = World::initialized();
+    let orchestrator = world.orchestrator();
+    let noted = world.must(&["ask", "note", "alpha", "--text", "Is the export nightly?"]);
+    let ask = noted.data()["ask"]["id"].as_str().unwrap().to_owned();
+    let short = &ask[ask.len() - 7..];
+    // The owner's next step is the command that shows the answer.
+    let help = noted.json["help"][0].as_str().unwrap();
+    assert!(
+        help.starts_with(&format!("tiller ask show {short}")),
+        "{}",
+        noted.json
+    );
+
+    // Before the answer: the note's state, no reply, and a line that says so.
+    let waiting = world.must(&["ask", "show", short]);
+    assert_eq!(waiting.data()["delivery"]["state"], "pending");
+    assert_eq!(waiting.data()["replies"], serde_json::json!([]));
+    assert!(waiting.data()["ask"]["answered_at"].is_null());
+    assert!(
+        waiting.json["help"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("no answer yet"),
+        "{}",
+        waiting.json
+    );
+    let listed = world.must(&["ask", "list", "--unresolved"]);
+    assert!(listed.data()["asks"][0]["ask"]["answered_at"].is_null());
+
+    world.must_as(&orchestrator, &["ask", "resolve", short, "chat"]);
+    world.must_as(
+        &orchestrator,
+        &["reply", "--to", short, "--text", "Yes, at 02:00."],
+    );
+    world.must_as(
+        &orchestrator,
+        &["reply", "--to", short, "--text", "It takes 4 minutes."],
+    );
+
+    // After: every reply in the order it came, and no "no answer" line.
+    let answered = world.must(&["ask", "show", short]);
+    let replies = answered.data()["replies"].as_array().unwrap();
+    assert_eq!(replies.len(), 2, "{}", answered.json);
+    assert_eq!(replies[0]["body"], "Yes, at 02:00.");
+    assert_eq!(replies[1]["body"], "It takes 4 minutes.");
+    assert!(replies[0]["read_at"].is_null());
+    assert_eq!(answered.data()["ask"]["replies"], 2);
+    assert_eq!(answered.data()["ask"]["unread_replies"], 2);
+    assert!(answered.data()["ask"]["answered_at"].is_string());
+    assert!(answered.json.get("help").is_none(), "{}", answered.json);
+
+    let listed = world.must(&["ask", "list"]);
+    assert!(listed.data()["asks"][0]["answered_at"].is_string());
+    assert_eq!(listed.data()["asks"][0]["unread_replies"], 2);
+
+    // The recap lists the unread answers with the question, newest first.
+    let recap = world.must(&["recap"]);
+    let unread = recap.data()["replies"].as_array().unwrap();
+    assert_eq!(unread.len(), 2, "{}", recap.json);
+    assert_eq!(unread[0]["body"], "It takes 4 minutes.");
+    assert_eq!(unread[0]["question"], "Is the export nightly?");
+    assert_eq!(unread[0]["project"], "alpha");
+
+    // A reply the owner marked read on the board leaves the recap and stays
+    // in `ask show`.
+    let first = replies[0]["id"].as_str().unwrap();
+    world.store().reply_read(&world.owner_ctx(), first).unwrap();
+    let recap = world.must(&["recap"]);
+    assert_eq!(recap.data()["replies"].as_array().unwrap().len(), 1);
+    let answered = world.must(&["ask", "show", short]);
+    assert!(answered.data()["replies"][0]["read_at"].is_string());
+    assert_eq!(answered.data()["ask"]["unread_replies"], 1);
+}
