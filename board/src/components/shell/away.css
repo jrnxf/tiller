@@ -145,6 +145,12 @@
     display: none;
   }
 
+  /* One project in view adds New card to the bar: the moon alone leaves the
+     screen's title its room. */
+  .top:has(.new-card-top) .away-label {
+    display: none;
+  }
+
   .away-pop {
     position: fixed;
     top: 50px;

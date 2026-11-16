@@ -15,7 +15,7 @@ import { ReconnectingBanner } from "../states/reconnecting-banner";
 import { ReloadBanner } from "../states/reload-banner";
 import { Section } from "../states/section";
 import { AwayControl } from "./away";
-import { ChevronIcon, CloseIcon, LayersIcon, MenuIcon, ServerIcon } from "./icons";
+import { ChevronIcon, CloseIcon, LayersIcon, MenuIcon, PlusIcon, ServerIcon } from "./icons";
 import { useNamedProjects } from "../board/peer-state";
 
 const TITLES: Record<string, string> = {
@@ -33,6 +33,9 @@ interface HeaderProps {
   menuOpen: boolean;
   onOpenMenu: () => void;
   onOpenAsk: () => void;
+  // The one project in view, by name, when a new card can go straight to it.
+  newCardIn: string | null;
+  onNewCard: () => void;
 }
 
 const nothing = () => null;
@@ -69,7 +72,14 @@ function ScopeCrumb({ activeHost }: { activeHost: string | undefined }) {
   );
 }
 
-export function Header({ activeHost, menuOpen, onOpenMenu, onOpenAsk }: HeaderProps) {
+export function Header({
+  activeHost,
+  menuOpen,
+  onOpenMenu,
+  onOpenAsk,
+  newCardIn,
+  onNewCard,
+}: HeaderProps) {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   // The header only decorates with these, so a failed read leaves it working:
   // the machine chip still clears and the view can still be reset.
@@ -137,6 +147,20 @@ export function Header({ activeHost, menuOpen, onOpenMenu, onOpenAsk }: HeaderPr
           </Section>
         ) : null}
         <AwayControl />
+        {newCardIn !== null ? (
+          <button
+            type="button"
+            className="btn new-card-top"
+            // At phone width only the plus shows, so the button names itself.
+            aria-label="New card"
+            title={`File a card in ${newCardIn}`}
+            onClick={onNewCard}
+          >
+            <PlusIcon />
+            <span className="hide-sm">New card</span>
+            <kbd className="kb hide-sm">C</kbd>
+          </button>
+        ) : null}
         <button type="button" className="btn primary ask-open" onClick={onOpenAsk}>
           <SendIcon />
           Ask

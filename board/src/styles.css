@@ -1188,6 +1188,22 @@ kbd {
   color: var(--fg-3);
 }
 
+/* A long card title is cut, so its row keeps one line and its hint. */
+.palette-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.palette-hint {
+  flex: none;
+  margin-left: auto;
+  color: var(--fg-3);
+  font-size: var(--fs-small);
+  white-space: nowrap;
+}
+
 .palette-keys {
   display: flex;
   gap: 4px;

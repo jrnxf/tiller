@@ -1,8 +1,12 @@
+import { useQuery } from "@tanstack/react-query";
 import { useCallback, useId, useRef, useState } from "react";
 
 import type { MutationResponse, Project } from "../../lib/api-types";
 import { LIMITS, isTooLong } from "../../lib/limits";
-import { hostField, ownerOf } from "../../lib/peers";
+import { hostField, ownerOf, projectKey, standingOf } from "../../lib/peers";
+import { prefsStore, visibleProjects } from "../../lib/prefs";
+import { projectsQuery } from "../../lib/queries";
+import { createStore, useStore } from "../../lib/store";
 import { ActionFailure } from "../attention/action-failure";
 import { sendMutation } from "../attention/api";
 import { PRIORITIES } from "../attention/format";
@@ -11,7 +15,34 @@ import { useAction } from "../attention/use-action";
 import { ProjectDialog } from "../shell/project-dialog";
 import { Select } from "../ui/select";
 import "../shell/project-stage.css";
+import { useMachineRows, useNamedProjects } from "./peer-state";
 import { showToast } from "./toast";
+
+// The project (its project key) a New card dialog is open for, when the
+// header, the `C` key or the command palette opened it. A lane's own button
+// keeps its own dialog.
+export const newCardStore = createStore<string | null>(null);
+
+// The project a new card goes to with no question asked: the one the view is
+// focused on, when the owner may act on it. In "All projects" there is none.
+export function useNewCardTarget(): Project | null {
+  const projects = useNamedProjects(useQuery(projectsQuery()).data)?.projects;
+  const machines = useMachineRows();
+  const prefs = useStore(prefsStore);
+  if (prefs.view !== "focus" || !projects) return null;
+  const focused = visibleProjects(prefs, projects)[0];
+  return focused && standingOf(focused, machines).canAct ? focused : null;
+}
+
+// The dialog `newCardStore` asks for. It closes itself when the project is
+// gone from the list.
+export function GlobalNewCard() {
+  const key = useStore(newCardStore);
+  const projects = useNamedProjects(useQuery(projectsQuery()).data)?.projects;
+  const close = useCallback(() => newCardStore.set(null), []);
+  const project = key === null ? undefined : projects?.find((p) => projectKey(p) === key);
+  return project ? <NewCardDialog key={key} project={project} onClose={close} /> : null;
+}
 
 // `tiller card create --kind`'s values, the one most cards are first.
 const KINDS = ["ship", "scout", "question", "ops"] as const;

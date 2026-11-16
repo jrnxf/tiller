@@ -1,12 +1,24 @@
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { Fragment, useId, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 
 import { rankCommands } from "../../lib/commands";
-import { projectKey } from "../../lib/peers";
-import { PrIcon } from "../board/icons";
+import { ownerKey, ownerOf, projectKey, shownId, standingOf } from "../../lib/peers";
+import { SendIcon } from "../attention/icons";
+import { statusMark } from "../board/badge";
+import { PrIcon, Status } from "../board/icons";
+import { COLUMNS } from "../board/model";
+import { newCardStore } from "../board/new-card";
+import { roleName } from "../board/report";
 import type { Command } from "../../lib/commands";
-import { machinesQuery, projectsQuery } from "../../lib/queries";
+import {
+  agentsQuery,
+  awayBriefQuery,
+  boardQuery,
+  machinesQuery,
+  projectsQuery,
+} from "../../lib/queries";
 import { toggleProjectHidden, updatePrefs, prefsStore } from "../../lib/prefs";
 import { useStore } from "../../lib/store";
 import { Modal } from "../ui/modal";
@@ -19,23 +31,49 @@ import {
   InboxIcon,
   LayersIcon,
   MemoryIcon,
+  PlusIcon,
   PulseIcon,
   ServerIcon,
   SettingsIcon,
 } from "./icons";
-import { useNamedProjects } from "../board/peer-state";
+import { useAmbiguousIds, useNamedProjects } from "../board/peer-state";
+import { askPrefillStore } from "./ask-prefill";
+import { MoonIcon, awayRequestStore } from "./away";
 import { NAV } from "./sidebar";
 
 interface PaletteProps {
   open: boolean;
   onClose: () => void;
   activeHost: string | undefined;
+  // What the field holds when the palette opens, such as "New card in ".
+  initialQuery?: string;
+  // The header's Ask and New card, as their keys run them.
+  onAsk: () => void;
+  onNewCard: () => void;
+}
+
+type Jobs = Pick<PaletteProps, "onAsk" | "onNewCard">;
+
+// The words the `C` key opens the palette with when no one project is in
+// view: every "New card in <project>" command, to narrow by typing.
+export const NEW_CARD_QUERY = "New card in ";
+
+// A command that brings its own icon: a card shows its status mark.
+interface PaletteCommand extends Command {
+  icon?: ReactNode;
 }
 
 // The icon in front of a command, as in the approved mocks. Theme and density
 // commands have none; their slot stays empty so the labels line up.
-function iconFor(command: Command) {
+function iconFor(command: PaletteCommand) {
+  if (command.icon) return command.icon;
   switch (command.id) {
+    case "away":
+      return <MoonIcon />;
+    case "ask":
+      return <SendIcon />;
+    case "new-card":
+      return <PlusIcon />;
     case "go-board":
       return <BoardIcon />;
     case "go-agents":
@@ -60,6 +98,9 @@ function iconFor(command: Command) {
     return command.label.startsWith("Hide") ? <EyeOffIcon /> : <EyeIcon />;
   }
   if (command.id.startsWith("host-")) return <ServerIcon />;
+  if (command.id.startsWith("ask-")) return <SendIcon />;
+  if (command.id.startsWith("new-card-")) return <PlusIcon />;
+  if (command.id.startsWith("agent-")) return <AgentsIcon />;
   return null;
 }
 
@@ -69,12 +110,22 @@ function chord(to: string): string[] | undefined {
   return item ? ["G", item.key] : undefined;
 }
 
-function useCommands(activeHost: string | undefined, close: () => void): Command[] {
+const COLUMN_NAME = new Map<string, string>(COLUMNS.map((column) => [column.id, column.name]));
+
+function useCommands(
+  activeHost: string | undefined,
+  close: () => void,
+  { onAsk, onNewCard }: Jobs,
+): PaletteCommand[] {
   const navigate = useNavigate();
   // A read that failed only drops its own commands; going to a screen and
   // changing the look always work.
   const projects = useNamedProjects(useQuery(projectsQuery()).data);
   const machines = useQuery(machinesQuery()).data;
+  const board = useQuery(boardQuery()).data;
+  const agents = useQuery(agentsQuery()).data;
+  const away = useQuery(awayBriefQuery()).data?.brief?.away === true;
+  const ambiguous = useAmbiguousIds();
   const prefs = useStore(prefsStore);
 
   return useMemo(() => {
@@ -82,7 +133,50 @@ function useCommands(activeHost: string | undefined, close: () => void): Command
       (to: "/" | "/agents" | "/contributions" | "/inbox" | "/memory" | "/health" | "/settings") =>
       () =>
         void navigate({ to, search: (prev) => prev });
-    const commands: Command[] = [
+    // The owner's jobs come first: they are what an empty palette offers.
+    // One row per job; the row per project shows once a query names it.
+    const commands: PaletteCommand[] = [
+      { id: "ask", group: "Do", label: "Ask a project", keys: ["A"], run: onAsk },
+      { id: "new-card", group: "Do", label: "New card", keys: ["C"], run: onNewCard },
+      {
+        id: "away",
+        group: "Do",
+        label: away ? "Away mode: show the limits, edit or end" : "Turn on away mode",
+        keywords: "away leave absent",
+        run: () => awayRequestStore.update((count) => count + 1),
+      },
+    ];
+    const nameOf = new Map<string, string>();
+    for (const project of projects?.projects ?? []) {
+      const key = projectKey(project);
+      // Two hosts may each have a project of one name; only then the host
+      // tells them apart.
+      const twin = projects?.projects.some((p) => p !== project && p.name === project.name);
+      const name = twin && project.host ? `${project.name} (${project.host})` : project.name;
+      nameOf.set(key, name);
+      if (!standingOf(project, machines?.machines ?? []).canAct) continue;
+      commands.push({
+        id: `ask-${key}`,
+        group: "Ask",
+        label: `Ask ${name}`,
+        keywords: "question orchestrator",
+        searchOnly: true,
+        run: () => askPrefillStore.set({ project: key, text: "" }),
+      });
+    }
+    for (const project of projects?.projects ?? []) {
+      const key = projectKey(project);
+      if (!standingOf(project, machines?.machines ?? []).canAct) continue;
+      commands.push({
+        id: `new-card-${key}`,
+        group: "New card",
+        label: `New card in ${nameOf.get(key) ?? project.name}`,
+        keywords: "task file create add",
+        searchOnly: true,
+        run: () => newCardStore.set(key),
+      });
+    }
+    commands.push(
       {
         id: "go-inbox",
         group: "Go to",
@@ -172,7 +266,7 @@ function useCommands(activeHost: string | undefined, close: () => void): Command
         label: "Focus on one project",
         run: () => updatePrefs({ view: "focus" }),
       },
-    ];
+    );
     for (const project of projects?.projects ?? []) {
       commands.push({
         id: `focus-${projectKey(project)}`,
@@ -204,6 +298,45 @@ function useCommands(activeHost: string | undefined, close: () => void): Command
         run: () => void navigate({ to: ".", search: (prev) => ({ ...prev, host: undefined }) }),
       });
     }
+    // Things to find. They show only for a query (lib/commands.ts).
+    for (const row of board?.rows ?? []) {
+      const owner = ownerOf(row);
+      const project = nameOf.get(ownerKey(row.project_id, row)) ?? row.project_id;
+      commands.push({
+        id: `card-${owner ?? ""}/${row.id}`,
+        group: "Cards",
+        label: `${shownId(row, ambiguous)} ${row.title}`,
+        keywords: project,
+        hint: `${project} / ${row.needs_you ? "Needs you" : (COLUMN_NAME.get(row.column) ?? "")}`,
+        icon: <Status mark={row.needs_you ? "needs_you" : statusMark(row)} />,
+        searchOnly: true,
+        run: () => void navigate({ to: "/", search: (prev) => ({ ...prev, card: row.id, owner }) }),
+      });
+    }
+    for (const orchestrator of agents?.orchestrators ?? []) {
+      for (const agent of [orchestrator, ...orchestrator.workers]) {
+        const project = nameOf.get(ownerKey(agent.project_id ?? "", agent));
+        const role = agent.role === "orchestrator" ? "Orchestrator" : roleName(agent.role);
+        const card = agent.card_id
+          ? board?.rows.find((row) => row.id === agent.card_id && ownerOf(row) === ownerOf(agent))
+          : undefined;
+        commands.push({
+          id: `agent-${ownerOf(agent) ?? ""}/${agent.session_id}`,
+          group: "Agents",
+          label: card
+            ? `${role} on ${shownId(card, ambiguous)} ${card.title}`
+            : `${role} of ${project ?? "a project"}`,
+          keywords: `${agent.name ?? ""} agent session terminal ${project ?? ""}`,
+          hint: card ? project : undefined,
+          searchOnly: true,
+          run: () =>
+            void navigate({
+              to: "/agents",
+              search: (prev) => ({ ...prev, agent: agent.session_id }),
+            }),
+        });
+      }
+    }
     return commands.map((command) => ({
       ...command,
       run: () => {
@@ -211,18 +344,39 @@ function useCommands(activeHost: string | undefined, close: () => void): Command
         command.run();
       },
     }));
-  }, [navigate, projects, machines, prefs.hiddenProjects, activeHost, close]);
+  }, [
+    navigate,
+    projects,
+    machines,
+    board,
+    agents,
+    away,
+    onAsk,
+    onNewCard,
+    ambiguous,
+    prefs.hiddenProjects,
+    activeHost,
+    close,
+  ]);
 }
 
 // Mounted only while open, so each opening starts with an empty query.
-export function CommandPalette({ open, onClose, activeHost }: PaletteProps) {
+export function CommandPalette({ open, initialQuery = "", ...rest }: PaletteProps) {
   if (!open) return null;
-  return <PaletteBody onClose={onClose} activeHost={activeHost} />;
+  // A new opening query is a new opening: "New card" inside the palette
+  // opens it again on its projects.
+  return <PaletteBody key={initialQuery} initialQuery={initialQuery} {...rest} />;
 }
 
-function PaletteBody({ onClose, activeHost }: Omit<PaletteProps, "open">) {
-  const commands = useCommands(activeHost, onClose);
-  const [query, setQuery] = useState("");
+function PaletteBody({
+  onClose,
+  activeHost,
+  initialQuery = "",
+  onAsk,
+  onNewCard,
+}: Omit<PaletteProps, "open">) {
+  const commands = useCommands(activeHost, onClose, { onAsk, onNewCard });
+  const [query, setQuery] = useState(initialQuery);
   const [index, setIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listId = useId();
@@ -249,7 +403,7 @@ function PaletteBody({ onClose, activeHost }: Omit<PaletteProps, "open">) {
         aria-expanded="true"
         aria-controls={listId}
         aria-activedescendant={results[selected] ? `${listId}-${results[selected].id}` : undefined}
-        placeholder="Type a command, or search..."
+        placeholder="Search cards and agents, or type a command..."
         value={query}
         onChange={(event) => {
           setQuery(event.target.value);
@@ -269,7 +423,9 @@ function PaletteBody({ onClose, activeHost }: Omit<PaletteProps, "open">) {
         }}
       />
       <ul className="palette-list" id={listId} role="listbox">
-        {results.length === 0 ? <li className="palette-empty">No command matches</li> : null}
+        {results.length === 0 ? (
+          <li className="palette-empty">No card, agent or command matches</li>
+        ) : null}
         {results.map((command, position) => (
           <Fragment key={command.id}>
             {position === 0 || results[position - 1]?.group !== command.group ? (
@@ -285,7 +441,8 @@ function PaletteBody({ onClose, activeHost }: Omit<PaletteProps, "open">) {
               onClick={() => command.run()}
             >
               <span className="palette-icon">{iconFor(command)}</span>
-              <span>{command.label}</span>
+              <span className="palette-label">{command.label}</span>
+              {command.hint ? <span className="palette-hint">{command.hint}</span> : null}
               {command.keys ? (
                 <span className="palette-keys" aria-hidden="true">
                   {command.keys.map((key) => (

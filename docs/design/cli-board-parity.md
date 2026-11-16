@@ -18,7 +18,7 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 
 | Capability | CLI | Board | Notes |
 |---|---|---|---|
-| Create a card | Full: `card create` | Part | The board takes project, kind, title, priority, category and body. It has no size, acceptance, fixes or ask link. It also records a Board ask and notes the orchestrator. |
+| Create a card | Full: `card create` | Part | The board takes project, kind, title, priority, category and body. It has no size, acceptance, fixes or ask link. It also records a Board ask and notes the orchestrator. The dialog opens from a project's row, from "New card" in the header of a one-project view, from the `C` key, and from "New card in <project>" in the command palette. |
 | Edit a card | Full: `card edit` | Part | The board edits title, body and priority. An empty value clears a field on the CLI. An empty body clears it on the API too: the store decides, so both paths match (commit 3d57e2f, test `daemon::api::tests::an_empty_body_on_an_edit_clears_it`). |
 | Comment on a card | Full: `card comment` | Full | Both need a live orchestrator to read the comment. Both cap a comment at 20,000 characters. |
 | Hold and release | Full: `card hold`, `card unhold` | Full | Both on the card page. The CLI accepts a date, a local datetime or RFC 3339. The board sends an instant it builds from a Lisbon date and time. |
@@ -27,7 +27,7 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 | Cancel and reopen | Full: `card cancel`, `card reopen` | Full | Both need a reason. |
 | Card dependencies | Full: `card dep add`, `card dep rm` | Full | The card page's Depends on row: a chip per dependency, open or released, with an x that asks first and then removes it, and Add, which picks an open card of the same project on the same host and turns off the cards that would make a loop. Both run the same core checks. On a peer's card both are forwarded to that host (`protocol.md` 7.4). |
 | Read cards | Full: `card show`, `card list`, `card timeline` | Full | The card page and the lanes. |
-| Add a note to the orchestrator | Full: `ask note` | Full | The Ask dialog sends one note per mentioned project. Both cap a note at 8,000 characters. |
+| Add a note to the orchestrator | Full: `ask note` | Full | The Ask dialog sends one note per mentioned project. Both cap a note at 8,000 characters. "Ask <project>" in the command palette opens the dialog with that project picked. |
 | Resolve, link and list asks | Full: `ask resolve`, `ask link`, `ask list`, `ask show` | No | These are orchestrator tools. |
 | Reply to an ask or a comment | Full: `reply` | No | An orchestrator tool. The orchestrator sends its answer with `tiller reply`. The board reads the unread replies in the Inbox and on the card timeline, and an ask's tile in the Asked column shows its unread answer and opens it. |
 | Mark a reply read | No | Full | The Inbox's Mark read. It does not forward the call to a peer. |

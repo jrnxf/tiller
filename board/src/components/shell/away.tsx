@@ -10,13 +10,14 @@ import { ownerOf } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import { awayBriefPath, awayBriefQuery, projectsQuery, queryKeyFor } from "../../lib/queries";
 import { shortcutsBlocked } from "../../lib/shortcuts";
+import { createStore } from "../../lib/store";
 import { sendMutation } from "../attention/api";
 import { useAction } from "../attention/use-action";
 import { useNamedProjects } from "../board/peer-state";
 import { FLEET_PROJECT, ProjectDialog } from "./project-dialog";
 import "./away.css";
 
-const MoonIcon = () => (
+export const MoonIcon = () => (
   <svg className="icon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
     <path
       d="M12.8 10.2A5.5 5.5 0 0 1 5.8 3.2a5.5 5.5 0 1 0 7 7z"
@@ -411,6 +412,10 @@ function AwayPopover({
 // the Start dialog. While away it is a status, and a popover holds the limits
 // with Edit and End. End asks nothing: it only gives control back, and opens
 // the brief.
+// Counts the command palette's requests to open the control as a click on
+// it does.
+export const awayRequestStore = createStore(0);
+
 export function AwayControl() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -426,6 +431,16 @@ export function AwayControl() {
   const away = brief?.away ? brief : null;
 
   const closeDialog = useCallback(() => setDialog(null), []);
+  const isAway = away !== null;
+  const canStart = mine.length > 0;
+  useEffect(
+    () =>
+      awayRequestStore.subscribe(() => {
+        if (isAway) setOpen(true);
+        else if (canStart) setDialog("start");
+      }),
+    [isAway, canStart],
+  );
   const end = useAction<{ brief: AwayBrief | null }>({
     binding: `away:end:${away?.approval_id ?? ""}`,
     send: useCallback(
@@ -481,11 +496,13 @@ export function AwayControl() {
         <button
           type="button"
           className="btn away-open"
+          // On a phone, beside New card, only the moon shows.
+          aria-label="Away"
           disabled={mine.length === 0}
           onClick={() => setDialog("start")}
         >
           <MoonIcon />
-          Away
+          <span className="away-label">Away</span>
         </button>
       )}
       {away && open ? (

@@ -6,10 +6,12 @@ import { applyAppearance, prefsStore } from "../../lib/prefs";
 import { blockShortcuts, dialogOpen, shortcutsBlocked } from "../../lib/shortcuts";
 import { useStore } from "../../lib/store";
 import { useDropEndedAnswers } from "../board/answer-strip";
+import { GlobalNewCard, newCardStore, useNewCardTarget } from "../board/new-card";
+import { projectKey } from "../../lib/peers";
 import { ToastHost } from "../board/toast";
 import { AskDialog } from "./ask-dialog";
 import { askPrefillStore } from "./ask-prefill";
-import { CommandPalette } from "./command-palette";
+import { CommandPalette, NEW_CARD_QUERY } from "./command-palette";
 import { Header } from "./header";
 import { Sidebar } from "./sidebar";
 
@@ -37,7 +39,8 @@ export function Shell({
   activeHost: string | undefined;
   children: ReactNode;
 }) {
-  const [paletteOpen, setPaletteOpen] = useState(false);
+  // null is closed; a string is the query the palette opens with.
+  const [palette, setPalette] = useState<string | null>(null);
   const [askOpen, setAskOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const shellRef = useRef<HTMLDivElement>(null);
@@ -46,13 +49,22 @@ export function Shell({
   useAppearance();
   useDropEndedAnswers();
 
-  const closePalette = useCallback(() => setPaletteOpen(false), []);
+  const closePalette = useCallback(() => setPalette(null), []);
+  // `C` files a card in the project in view. With every project in view it
+  // opens the palette on "New card in", to pick one by a few letters.
+  const target = useNewCardTarget();
+  const targetKey = target ? projectKey(target) : null;
+  const newCard = useCallback(() => {
+    if (targetKey !== null) newCardStore.set(targetKey);
+    else setPalette(NEW_CARD_QUERY);
+  }, [targetKey]);
   // "Ask again" on a reply opens the box with its question in it.
   const prefill = useStore(askPrefillStore);
   const closeAsk = useCallback(() => {
     setAskOpen(false);
     askPrefillStore.set(null);
   }, []);
+  const openAsk = useCallback(() => setAskOpen(true), []);
   const closeMenu = useCallback(() => setMenuOpen(false), []);
 
   useEffect(() => {
@@ -61,7 +73,7 @@ export function Shell({
         // It closes the palette too, but opens nothing over another dialog.
         event.preventDefault();
         const blocked = dialogOpen();
-        setPaletteOpen((open) => (open ? false : !blocked));
+        setPalette((open) => (open !== null || blocked ? null : ""));
       } else if (event.key === "Escape") {
         // An Escape a dialog took closes that dialog only.
         if (!event.defaultPrevented && !dialogOpen()) setMenuOpen(false);
@@ -69,11 +81,14 @@ export function Shell({
         // The Ask button's shortcut, as long as nothing else is being typed into.
         event.preventDefault();
         setAskOpen(true);
+      } else if (event.key.toLowerCase() === "c" && isPlainKey(event) && !shortcutsBlocked(event)) {
+        event.preventDefault();
+        newCard();
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [newCard]);
 
   // The drawer only exists on a phone-width layout; widening the window while
   // it is open must not leave the screen behind it inert.
@@ -121,7 +136,7 @@ export function Shell({
       <Sidebar
         activeHost={activeHost}
         onNavigate={closeMenu}
-        onOpenPalette={() => setPaletteOpen(true)}
+        onOpenPalette={() => setPalette("")}
       />
       <div className="nav-scrim" onClick={closeMenu} aria-hidden="true" />
       <div ref={mainRef} className="main">
@@ -130,12 +145,22 @@ export function Shell({
           menuOpen={menuOpen}
           onOpenMenu={() => setMenuOpen(true)}
           onOpenAsk={() => setAskOpen(true)}
+          newCardIn={target?.name ?? null}
+          onNewCard={newCard}
         />
         <main className="content">{children}</main>
       </div>
       <AskDialog open={askOpen || prefill !== null} prefill={prefill} onClose={closeAsk} />
       <ToastHost />
-      <CommandPalette open={paletteOpen} onClose={closePalette} activeHost={activeHost} />
+      <GlobalNewCard />
+      <CommandPalette
+        open={palette !== null}
+        initialQuery={palette ?? ""}
+        onClose={closePalette}
+        activeHost={activeHost}
+        onAsk={openAsk}
+        onNewCard={newCard}
+      />
     </div>
   );
 }

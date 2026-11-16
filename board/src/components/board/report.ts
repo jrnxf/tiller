@@ -55,8 +55,13 @@ export function reportTone(report: Report): BadgeTone {
   return TONE[report.state];
 }
 
+// A worker role as the owner reads it: "Builder" for `build`.
+export function roleName(role: string): string {
+  return ROLE[role] ?? "Worker";
+}
+
 export function reportRole(report: Report): string {
-  return ROLE[report.role] ?? "Worker";
+  return roleName(report.role);
 }
 
 // A run's status line is stored as `<state>: <line>` (state.md, `run.status`).

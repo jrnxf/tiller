@@ -12,9 +12,9 @@ Status values: `open`, `fixed` (with what was verified), `needs owner`, `to veri
 |---|---|
 | Phase | 1 - audit. Journeys 3 (ask), 4 (start a task) and 5 (trust) are walked on the board and the CLI. Journeys 1, 2 and 6 to 11 are not walked yet. |
 | Open P0 | 0. UA-15 is `needs owner`: the silent part is fixed, the answer itself needs a spec change. |
-| Open P1 | 6 (UA-01, UA-03, UA-09, UA-17, UA-20, UA-21). UA-18 is `needs owner`: the wrong status line is fixed, Cancel and the full view need a spec change. UA-19 is `needs owner`: the tile, the card and the timeline show the worker's report, and the "Needs you" rule needs a spec change. |
-| Fixed | UA-02, UA-04, UA-05, UA-06, UA-12, UA-16, DX-01. UA-15 part 1 (the owner is told where the answer shows). UA-18 part 1 (the ask tile shows an unread answer and opens it). UA-19 part 1 (a worker's report shows on its tile, on the card and in the timeline). |
-| Next step | UA-20 with UA-21 and UA-22 (start a task from anywhere on the board). Check `docs/spec/authority.md` first: a board "Start" may need the owner. Then UA-01. Walk journeys 2, 6 and 8 after the stand-in forge of the bench gaps. UA-11 (P2) is not started: check `docs/spec/state.md` section 6 first, because the column of a card is a contract. |
+| Open P1 | 5 (UA-01, UA-03, UA-09, UA-17, UA-20). UA-20 is open: its "Start" control needs a spec change (see "Needs owner"), and its in-contract part (what a queued card waits for, "Close" out of the main place) is not done. UA-18 is `needs owner`: the wrong status line is fixed, Cancel and the full view need a spec change. UA-19 is `needs owner`: the tile, the card and the timeline show the worker's report, and the "Needs you" rule needs a spec change. |
+| Fixed | UA-02, UA-04, UA-05, UA-06, UA-12, UA-16, UA-21, UA-22, DX-01. UA-15 part 1 (the owner is told where the answer shows). UA-18 part 1 (the ask tile shows an unread answer and opens it). UA-19 part 1 (a worker's report shows on its tile, on the card and in the timeline). |
+| Next step | The in-contract part of UA-20 (a queued card says what it waits for, and "Close" moves into "More"). Then UA-01. Walk journeys 2, 6 and 8 after the stand-in forge of the bench gaps. UA-11 (P2) is not started: check `docs/spec/state.md` section 6 first, because the column of a card is a contract. |
 
 ## The bench
 
@@ -69,7 +69,7 @@ Bench gaps (fix before the journeys that need them):
 | 6 | Decide | first look only | no |
 | 7 | Peer transparency | partly: an ask to a peer project (UA-15, UA-16) | first look only |
 | 8 | Failure | no | no |
-| 9 | Scale | partly: the command palette (UA-21) | no |
+| 9 | Scale | partly: the command palette finds a card, an agent and a project's jobs (UA-21, fixed). Not walked: filter, sort, the Agents screen at 23 agents | no |
 | 10 | Watch and steer | no | no |
 | 11 | Away mode | no | no |
 
@@ -83,6 +83,8 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 | Ask again | 1 click on "Ask again" in the reply | type the command again |
 | Recover from the wrong project | not possible: the ask tile has no Cancel (UA-18, needs owner) | `ask resolve <ask> cancelled`, which the help calls an orchestrator's tool |
 | Idea to a filed card | 3 steps: New card on the project's row, the title, Enter | 1 command, after one refusal for a missing `--kind` (UA-23) |
+| Idea to a filed card, from anywhere | 4 steps, about 8 s: `C`, two letters of the project, Enter, the title, Enter. In a one-project view: `C`, the title, Enter (UA-22; before: scroll to the project's row for its button) | the same command |
+| Find one card among 43 | `Cmd+K`, a word of its title or its id, Enter: about 4 s, on both hosts (UA-21; before: scroll the board, "No command matches") | `card list`, then read 43 records (UA-09) |
 | Filed card to a running card | not possible: the orchestrator decides (UA-20) | `tiller spawn <card> builder`, 73 lines of answer (UA-09) |
 | Read what happened on a card | the timeline shows the owner's news only (`harbor-2`: 4 lines in place of 24), with the question, the answer and a comment quoted (UA-04) | `card timeline` prints raw events (UA-09) |
 | Answer a card that says "Decision" | 2 steps: open the card, click an option or press its digit. The question, the recommendation and the answer control are at the top of the card (UA-02; before: leave the card, open the Inbox, find the item, answer: 4 steps) | `attention answer <item>`, after `attention list --open` for the id |
@@ -303,20 +305,41 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 - Happened: the toast says "Filed lantern-4". The card sits in "Queued" with the badge "Filed", Model "none yet", and "No runs yet. The orchestrator starts one when the card leaves the queue." Nothing says when that is, on which machine, or with which model. There is no "Start" control: `tiller spawn` exists only in the CLI (`docs/design/cli-board-parity.md`, "Run and session control ... No"). The one filled button on a card that is seconds old is "Close".
 - Hurts: "from an idea to a running card" ends one step short on the board, and the owner cannot tell whether the next step is theirs. The loudest button does the opposite of what the owner came for.
 - Fix: the new-card dialog gets "File and start" as its main action, which files the card and starts the run the dispatch rule picks, and the card then says what was started ("Builder, sonnet, on main, started 10 s ago"). A queued card says what it waits for ("Waits for the orchestrator's next turn", "Waits for a free slot", "Waits on harbor-1"). On an open card "Close" moves into "More", and the main action is "Start". This adds an owner mutation to the board, so check `docs/spec/authority.md` before the work; if the board may not start a run by contract, it moves to "Needs owner".
+- Checked (Mon 16 Nov 2026, Lisbon): `docs/spec/authority.md` gives the owner the right ("Start a run (the execute decision): yes"), but `docs/spec/protocol.md` section 7 has no board call that starts a run, and `docs/design/cli-board-parity.md` lists run control as "No" for the board. So "File and start" and "Start" need the owner (see "Needs owner").
+- Still open inside the contract: a queued card says what it waits for, and "Close" is not the one filled button on a new card.
 
-### UA-21 - "Search or run" finds no card and runs no job (P1, open)
+### UA-21 - "Search or run" finds no card and runs no job (P1, fixed)
 
 - Journey: 3, 4, 9.
 - Tried: `Cmd+K`, then "digest" (a word of a card's title), "lantern-1" and "new".
 - Happened: "No command matches". The palette holds navigation, theme, density, "Focus <project>", "Hide <project>" and two machine filters. It has no card, no session, no "New card", no "Ask", no "Away".
 - Hurts: with 14 projects and 43 cards, the only way to one card is to scroll the board. The field's own label promises search.
 - Fix: the palette searches cards (id and title), projects and agents on both hosts, and runs the owner's jobs: "Ask <project>", "New card in <project>", "Turn on away mode", "Open the Inbox item for <card>".
+- Fixed (Mon 16 Nov 2026, Lisbon), in the board only, with reads the board already makes:
+  - The palette searches cards of both hosts by id and by the words of the title. A card's row shows its status mark, its project and its column, or "Needs you". Enter opens the card (a peer's card too).
+  - It searches agents: "Builder on pylon-1 ..." and "Orchestrator of Harbor" open that agent on the Agents screen.
+  - It runs the owner's jobs. The empty palette starts with "Ask a project" (`A`), "New card" (`C`) and "Turn on away mode". A query that names a project lists "Ask <project>" and "New card in <project>". A project the owner cannot act on now (a peer whose link is down, a view-only peer) has no such row.
+  - A found thing is listed only when every word of the query is in its text. Before, the match was "letters in order", which would list most of 43 cards for any short query. Commands keep the loose match.
+  - A group stays in one piece under one heading. Before, a group heading could show twice in one result list.
+  - The field's hint says "Search cards and agents, or type a command...", and no result says "No card, agent or command matches".
+  - Verified on the bench: "digest" lists `lantern-1` and its builder, and Enter opens the card. "pylon" lists the 3 peer cards, "Ask Pylon", "New card in Pylon", the 2 builders and the orchestrator, and Enter opens `pylon-1` with the peer as its owner. "orchestrator harbor" and Enter opens that agent. "away" and Enter opens "Start away mode". Checked in light and dark at 1440 px and at 390 px.
+  - Tests: `board/src/lib/commands.test.ts` (search-only rows, word match, group order) and 7 new tests in `board/src/components/shell/shell.test.tsx`.
+- Not done:
+  - "Open the Inbox item for <card>" is not a command: the card itself now shows its question and takes the answer (UA-02), and its row says "Needs you".
+  - The palette does not search memory, contributions or the text of asks. An ask has no page to open (UA-18, needs owner).
+  - "Focus Pylon (peer)" still names the host (UA-07).
 
-### UA-22 - The view of one project has no "New card" (P2, open)
+### UA-22 - The view of one project has no "New card" (P2, fixed)
 
 - Journey: 4.
 - Happened: "New card" is on each project's row in "All projects". After a click on one project in the sidebar, the board shows that project alone, and the button is gone. The header has "Show all projects", the filters, "Away" and "Ask".
 - Fix: keep "New card" in the header of the one-project view, and give it a key (`C`) next to `A` for Ask.
+- Fixed (Mon 16 Nov 2026, Lisbon):
+  - The header of a one-project view has "New card" with its key `C`, between "Away" and "Ask". It opens the dialog for that project.
+  - `C` works on every screen. With one project in view it opens that project's dialog. With all projects in view it opens the palette on "New card in ", and two letters and Enter pick the project. The palette's own "New card" row does the same.
+  - At 390 px the button is a plus, and "Away" beside it is its moon alone, so the screen's title keeps its room (it was cut to "B" in the first try).
+  - Verified on the bench: `C`, "lan", Enter, a title, Enter filed `lantern-4` in about 8 s with no scroll. In the Lantern view, `C` and the header button both open "New card in Lantern". Checked in light and dark at 1440 px and 390 px.
+  - Tests: 3 tests in `board/src/components/shell/shell.test.tsx`.
 
 ### UA-23 - Small CLI refusals with no next step (P2, open)
 
@@ -371,7 +394,7 @@ Order of work, highest owner value first. Fixes that share a cause are grouped.
 1. Done as far as the contract allows: UA-16, UA-15 part 1, UA-18 part 1 and UA-19 part 1. The rest of UA-15, UA-18 and UA-19 waits under "Needs owner".
 2. Done: UA-04 (a timeline without plumbing lines). UA-11 (no ended run in "Working") moves to the polish step: it is P2, and the column is a contract of `docs/spec/state.md` section 6.
 3. Done: UA-02, UA-05, UA-06 and UA-12 (the "needs you" path). The question is on the card, the Inbox is ordered by urgency, and the kind is named.
-4. UA-20 with UA-21 and UA-22: start a task from anywhere on the board.
+4. Done: UA-21 and UA-22 (find a card and start a job from anywhere on the board). Next: the in-contract part of UA-20. Its "Start" control waits under "Needs owner".
 5. UA-01: an honest host verdict in every place that shows a host.
 6. UA-17 with UA-03, UA-09, UA-10 and UA-23: the CLI as an owner surface.
 7. Finish the audit in parallel with the fixes: close the bench gaps (the stand-in forge), then walk journeys 1, 2, 6, 8, 9, 10 and 11 and the rest of 5 and 7.
@@ -387,6 +410,8 @@ Order of work, highest owner value first. Fixes that share a cause are grouped.
 - UA-18, the rest: let the owner cancel an ask on the board, and open one. Today a wrong ask leaves the board only when the orchestrator resolves it, or when the owner runs `tiller ask resolve <ask> cancelled` in a terminal. `docs/spec/authority.md` (the matrix row "Resolve an ask, create or edit a card") already gives the owner this right, but `docs/spec/state.md` names the board as an actor of `ask.resolve` only "implicit on add", and `docs/spec/protocol.md` section 7 lists no call. Recommendation: add `POST /api/v1/asks/{id}/cancel` (owner only, forwarded to a peer like the other mutations, `ask.resolve cancelled` with the reason "cancelled by the owner on the board") and `GET /api/v1/asks/{id}` (the full text, the note's delivery state, the replies), and add `answered_at` to the `asked` row (shared with UA-15 part 2). The board work after a yes is about one iteration: a panel that the tile opens, with the text, "Delivered", the answer, "Ask again" and "Cancel".
 
 - UA-19, the rest: let a worker's `blocked` or `needs-decision` report flag its card. Today the card enters "Needs you" only when the orchestrator opens an item, so a worker that stops while its orchestrator is busy, slow or gone shows "Reports blocked" on its tile but is in no count and no Inbox. `docs/spec/state.md` section 6 fixes the flag. Recommendation: do not change the flag. Have the daemon open a `recovery` item when a `blocked` or `needs-decision` report is older than a few minutes and no open item exists for the card (a reconcile rule, so `docs/spec/recovery.md` gets a row). The owner then gets one Inbox item with the worker's words, and the existing flag, counts and notification apply unchanged. Also add `last_status_at` to the agents rows (`docs/spec/protocol.md` section 7.3), so the tile can say how old the report is. The work after a yes is about one iteration.
+
+- UA-20, the "Start" control: let the owner start a run on the board. Today the board files a card and the orchestrator decides when it runs; the owner's own start is `tiller spawn <card> <role>` in a terminal. `docs/spec/authority.md` already gives the owner the right. `docs/spec/protocol.md` section 7 has no call for it. Recommendation: add `POST /api/v1/cards/{id}/runs` (owner only, forwarded to a peer like the other mutations, the same `run.start` as `tiller spawn` with the role from the card's kind and the model and effort from the dispatch table, and the same refusals for capacity, the floors and quota). The board then gets "File and start" in the new-card dialog and "Start" on a queued card, and shows a refusal with its reason. The work after a yes is about one iteration.
 
 Two more candidates, to settle when their fix starts:
 

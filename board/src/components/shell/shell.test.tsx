@@ -7,8 +7,10 @@ import { hydrateFromSnapshot } from "../../lib/boot";
 import { connectionStore } from "../../lib/connection";
 import { fixtureSnapshot } from "../../lib/fixtures";
 import type { Scenario } from "../../lib/fixtures";
-import { prefsStore, loadPrefs } from "../../lib/prefs";
+import { prefsStore, loadPrefs, updatePrefs } from "../../lib/prefs";
 import { createAppRouter } from "../../lib/router";
+import { newCardStore } from "../board/new-card";
+import { askPrefillStore } from "./ask-prefill";
 import { createTestQueryClient, loadAskEditor, loadRouteChunks } from "../../test-app";
 
 await Promise.all([loadRouteChunks(), loadAskEditor()]);
@@ -40,6 +42,13 @@ async function renderApp(scenario: Scenario = "default", path = "/", now = Date.
 
 beforeEach(() => {
   localStorage.clear();
+  // What the palette's jobs set, so one test's open dialog is not the next's.
+  askPrefillStore.set(null);
+  newCardStore.set(null);
+  // jsdom lays nothing out, so a Range has no rects. A prefilled Ask box puts
+  // the caret at the end and scrolls to it, which reads them.
+  Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
+  Range.prototype.getBoundingClientRect = () => new DOMRect();
   prefsStore.set(loadPrefs());
   connectionStore.set("live");
   stubMedia(false);
@@ -309,6 +318,107 @@ test("the palette goes to Settings", async () => {
   await vi.waitFor(() => expect(screen.getByTestId("settings")).toBeTruthy());
 });
 
+// Opens the palette and types a query.
+function search(query: string): HTMLElement {
+  fireEvent.keyDown(window, { key: "k", metaKey: true });
+  const input = screen.getByRole("combobox");
+  fireEvent.change(input, { target: { value: query } });
+  return input;
+}
+
+test("the palette finds a card by a word of its title and opens it", async () => {
+  const router = await renderApp();
+  // No card is listed until something is typed.
+  fireEvent.keyDown(window, { key: "k", metaKey: true });
+  expect(screen.queryByRole("option", { name: /alpha-42/ })).toBeNull();
+  fireEvent.keyDown(window, { key: "k", metaKey: true });
+
+  const input = search("machines summary");
+  const found = screen.getByRole("option", {
+    name: /^alpha-42 Add the machines summary to the sidebar/,
+  });
+  // The row says where the card is: its project and its column.
+  expect(found.textContent).toContain("alpha / Working");
+  expect(screen.getAllByRole("option")[0]).toBe(found);
+  // The agent on that card is found by the card's words too.
+  expect(screen.getByRole("option", { name: /on alpha-42 Add the machines/ })).toBeTruthy();
+  fireEvent.keyDown(input, { key: "Enter" });
+
+  await vi.waitFor(() => expect(router.state.location.search.card).toBeTruthy());
+  expect(screen.queryByRole("dialog", { name: "Command palette" })).toBeNull();
+  await screen.findByTestId("card-drawer");
+});
+
+test("the palette finds a card by its id, and says when nothing matches", async () => {
+  await renderApp();
+  search("beta-8");
+  const found = screen.getByRole("option", { name: /beta-8 Document the cutover steps/ });
+  expect(found.textContent).toContain("beta / Queued");
+  // A card that waits on the owner says so in place of its column.
+  fireEvent.change(screen.getByRole("combobox"), { target: { value: "alpha-41" } });
+  expect(screen.getByRole("option", { name: /^alpha-41/ }).textContent).toContain(
+    "alpha / Needs you",
+  );
+  fireEvent.change(screen.getByRole("combobox"), { target: { value: "zzzz" } });
+  expect(screen.getByText("No card, agent or command matches")).toBeTruthy();
+});
+
+test("the palette asks one project: the Ask box opens with it picked", async () => {
+  await renderApp();
+  const input = search("ask alpha");
+  expect(screen.getAllByRole("option")[0]?.textContent).toBe("Ask alpha");
+  fireEvent.keyDown(input, { key: "Enter" });
+  const dialog = await screen.findByRole("dialog", { name: "Ask orchestrators" });
+  await vi.waitFor(() =>
+    expect(dialog.querySelector(".ProseMirror")?.textContent).toContain("alpha"),
+  );
+});
+
+test("C with every project in view opens the palette on New card, and a pick opens the dialog", async () => {
+  await renderApp();
+  // The header has no New card: each lane has its own.
+  expect(document.querySelector("header.top .new-card-top")).toBeNull();
+  press("c");
+  const input = screen.getByRole("combobox") as HTMLInputElement;
+  expect(input.value).toBe("New card in ");
+  const options = screen.getAllByRole("option").map((option) => option.textContent);
+  expect(options).toContain("New card in alpha");
+  expect(options.every((label) => label?.startsWith("New card"))).toBe(true);
+
+  fireEvent.change(input, { target: { value: "New card in alpha" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+  const dialog = await screen.findByRole("dialog", { name: "New card in alpha" });
+  expect(screen.queryByRole("dialog", { name: "Command palette" })).toBeNull();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  await vi.waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+
+test("with one project in view the header has New card, and C opens its dialog", async () => {
+  await renderApp();
+  act(() => updatePrefs({ view: "focus", focusProject: "alpha" }));
+  const header = document.querySelector("header.top") as HTMLElement;
+  const button = await within(header).findByRole("button", { name: "New card" });
+  fireEvent.click(button);
+  const dialog = await screen.findByRole("dialog", { name: "New card in alpha" });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  await vi.waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+  press("c");
+  await screen.findByRole("dialog", { name: "New card in alpha" });
+  // The project is known, so the palette has nothing to ask.
+  expect(screen.queryByRole("dialog", { name: "Command palette" })).toBeNull();
+});
+
+test("New card in the palette opens it again on the projects", async () => {
+  await renderApp();
+  const input = search("new card");
+  expect(screen.getAllByRole("option")[0]?.textContent).toBe("New cardC");
+  fireEvent.keyDown(input, { key: "Enter" });
+  await vi.waitFor(() =>
+    expect((screen.getByRole("combobox") as HTMLInputElement).value).toBe("New card in "),
+  );
+});
+
 test("the top-bar Ask button and the A key open the ask dialog with the text focused", async () => {
   await renderApp();
   expect(screen.queryByRole("dialog", { name: "Ask orchestrators" })).toBeNull();
@@ -449,4 +559,12 @@ test("a dialog opened from the drawer keeps the screen inert when widening close
 
   fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
   expect(document.querySelector(".main")?.hasAttribute("inert")).toBe(false);
+});
+
+test("the palette turns on away mode: the Start dialog opens", async () => {
+  await renderApp();
+  const input = search("away");
+  expect(screen.getAllByRole("option")[0]?.textContent).toBe("Turn on away mode");
+  fireEvent.keyDown(input, { key: "Enter" });
+  await screen.findByRole("dialog", { name: /away/i });
 });
