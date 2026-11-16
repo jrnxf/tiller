@@ -1611,6 +1611,36 @@ fn rss_kib(pid: u32) -> u64 {
         .unwrap_or(0)
 }
 
+/// The holder's own CPU time, user plus system, over all its threads: from
+/// `/proc/<pid>/stat` where there is one, else from `ps` (`[[DD-]HH:]MM:SS.cc`).
+fn cpu_time(pid: u32) -> Duration {
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        // The fields after the command name: state is the first, utime the
+        // twelfth and stime the thirteenth.
+        let ticks: u64 = stat
+            .rsplit_once(')')
+            .map(|(_, rest)| rest.split_whitespace().skip(11).take(2))
+            .into_iter()
+            .flatten()
+            .map(|field| field.parse::<u64>().unwrap())
+            .sum();
+        return Duration::from_secs_f64(
+            ticks as f64 / rustix::param::clock_ticks_per_second() as f64,
+        );
+    }
+    let output = std::process::Command::new("ps")
+        .args(["-o", "time=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    let (days, clock) = text.trim().split_once('-').unwrap_or(("0", text.trim()));
+    let seconds = clock
+        .split(':')
+        .map(|part| part.parse::<f64>().unwrap())
+        .fold(0.0, |total, part| total * 60.0 + part);
+    Duration::from_secs_f64(days.parse::<f64>().unwrap() * 86_400.0 + seconds)
+}
+
 /// How long this test's own side of a request waited for a core: the
 /// calling thread's run-queue wait plus that of each client reply reader
 /// (`tiller-panes-replies`), from `/proc/<tid>/schedstat`. Zero where
@@ -1635,8 +1665,17 @@ fn own_run_queue_wait() -> Duration {
 }
 
 // Section 9.4: a flood of 200 MiB, with a subscriber that reads nothing.
-// The holder's memory stays bound, and every `ping` is answered in under
-// 50 ms.
+// The holder takes it in 10 s on the two cores its runtime keeps busy (20 s
+// of its own CPU time), its memory stays bound, and every `ping` is
+// answered in under 50 ms.
+//
+// The 10 s is gated on the holder's CPU time, not on the flood's wall time:
+// on a shared host the wall time also holds the app's and every neighbour's
+// wait for a core, which the holder cannot change (10.5 s to 11.95 s on CI
+// with pings under 3 ms, about 14 s on a loaded Mac). On a quiet Mac the
+// holder takes the flood in 3.7 s of wall time and 7 s of CPU, so the CPU
+// bound keeps the margin the 10 s wall bound had there, and a holder that
+// does 3 times the work per byte still fails.
 //
 // A ping's wall time also holds the time this test's own threads waited
 // for a core, which a loaded host adds and the holder cannot change, so
@@ -1665,7 +1704,7 @@ fn a_flood_keeps_the_holders_memory_bound_and_every_ping_fast() {
     raw_subscribe(&mut stalled, &pane);
     let reading = holder.drain(&pane);
     let pid = holder.running.id();
-    let before = rss_kib(pid);
+    let (before, cpu_before) = (rss_kib(pid), cpu_time(pid));
     holder.client.input(&pane.pane, "g\n").unwrap();
     let started = Instant::now();
     let (mut slowest, mut slowest_wall, mut peak, mut pings) =
@@ -1686,15 +1725,17 @@ fn a_flood_keeps_the_holders_memory_bound_and_every_ping_fast() {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    let took = started.elapsed();
+    let (took, cpu) = (started.elapsed(), cpu_time(pid) - cpu_before);
     eprintln!(
-        "flood: {took:?}, {pings} pings, slowest {slowest:?} ({slowest_wall:?} wall), rss {before} KiB to {peak} KiB"
+        "flood: {took:?} wall, {cpu:?} holder cpu, {pings} pings, slowest {slowest:?} ({slowest_wall:?} wall), rss {before} KiB to {peak} KiB"
     );
     reading.end();
-    // The app writes as fast as the holder takes it.
+    // The holder takes the output at 10 MiB/s of its CPU or faster. A CPU
+    // time of zero means `cpu_time` cannot read it here, not a fast holder.
+    assert!(cpu > Duration::ZERO, "the holder's CPU time read as zero");
     assert!(
-        took < Duration::from_secs(10),
-        "the holder took 200 MiB in {took:?}"
+        cpu < Duration::from_secs(20),
+        "the holder spent {cpu:?} of CPU on 200 MiB"
     );
     assert!(
         slowest < Duration::from_millis(50),

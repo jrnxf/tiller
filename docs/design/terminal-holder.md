@@ -546,7 +546,7 @@ With 8 live `fake-agent` panes, two of them in the alternate screen, one with ki
 - `SIGKILL` the holder: the daemon sees a new instance, the ladder runs, sessions are resumed (R21), and one notification is sent.
 - A forced model panic (a test-only feature flag): only that pane's model resets, and the child lives.
 - A slow subscriber: its stream gets `lagged` at 4 MiB, its connection stays, and the agent's writes never wait.
-- A flood: 200 MiB of output in 10 s. The holder's memory stays bound, and every reply to `ping` takes under 50 ms.
+- A flood: 200 MiB of output in 10 s on the two cores the holder keeps busy, gated as under 20 s of the holder's own CPU time, which a loaded host does not move. The holder's memory stays bound, and every reply to `ping` takes under 50 ms.
 - A wrong uid on the socket: tested by calling the peer check with injected credentials, because a test cannot change its uid.
 - A stale socket file, a lock held by a live holder, and two holders started at once: exactly one serves.
 - Every query sequence is answered once on the PTY and never reaches a subscriber.

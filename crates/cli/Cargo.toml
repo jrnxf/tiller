@@ -49,7 +49,7 @@ required-features = ["record"]
 insta.workspace = true
 nix.workspace = true
 rsa.workspace = true
-rustix = { workspace = true, features = ["pty"] }
+rustix = { workspace = true, features = ["param", "pty"] }
 tempfile.workspace = true
 tiller-core = { workspace = true, features = ["test-owner"] }
 tiller-daemon = { workspace = true, features = ["testing"] }
