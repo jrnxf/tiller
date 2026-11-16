@@ -12,18 +12,18 @@ On Monday 2026-11-16 at about 15:30 Lisbon time, the owner said yes to every ite
 - [ ] UA-15 part 2 (P0): the answer to an ask sent to a peer project shows on the board that sent it
 - [ ] UA-18: cancel and open an ask on the board (`POST /api/v1/asks/{id}/cancel`, `GET /api/v1/asks/{id}`)
 - [ ] UA-19: a worker's `blocked` or `needs-decision` report puts its card in "Needs you" (a `recovery` item)
-- [ ] UA-20: "Start" a run on the board (`POST /api/v1/cards/{id}/runs`)
+- [x] UA-20: "Start" a run on the board (`POST /api/v1/cards/{id}/runs`)
 - [ ] UA-38: a note about an ended approval leaves the list
 - [ ] UA-46: a plain `tiller spawn` uses the owner's unused "Start now anyway"
 - [ ] UA-51: the store refuses a start on a held card
-- [ ] UA-53: one spec sentence for `approvals.repo` of a `local-only` project with no repo
-- [ ] UA-01: the spec names `refuses_runs` and the `floors` doctor check
+- [x] UA-53: one spec sentence for `approvals.repo` of a `local-only` project with no repo
+- [x] UA-01: the spec names `refuses_runs` and the `floors` doctor check
 - [ ] UA-17: "Mark read" in the CLI (`tiller ask show <ask> --mark-read`)
 - [x] UA-09: a short answer for a person at a terminal, the full record with `--json` or `--full`
 - [ ] UA-03: the owner's CLI reaches a peer's work through the local daemon
 - [ ] UA-30: one "Away" for every paired host
 - [ ] UA-43: grants for a peer's project from one board
-- [ ] UA-07: show the host chip on a card only when the host needs attention
+- [x] UA-07: show the host chip on a card only when the host needs attention
 
 ## Work after the decisions
 
@@ -37,6 +37,10 @@ On Monday 2026-11-16 at about 15:30 Lisbon time, the owner said yes to every ite
 The owner skipped the full test passes on Monday 2026-11-16 to get a release out. These shipped with unit and integration tests only, and no walk on the bench:
 
 - [ ] UA-57: the `local-only` start from the newer of the checkout and `origin` (f89bd22)
+- [ ] UA-20: "Start" and "File and start" on the board (`POST /api/v1/cards/{id}/runs`): unit and peer tests only, no bench walk
+- [ ] UA-07: the host chip shows only when the host needs attention: board tests only, no bench walk
+- [ ] UA-53: the Approval sentence in `docs/spec/state.md`: text only
+- [ ] UA-01: `refuses_runs` and the floors check in the spec: text only
 - [ ] UA-63 and UA-64 from iteration 33: no seventh pass confirmed that the sixth pass found every P1
 - [ ] UA-09: the short answer at a real terminal, on the bench; only a pseudo-terminal test ran. A read with no sentence still prints its record
 - [ ] Every owner decision above, as each one lands

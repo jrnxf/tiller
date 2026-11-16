@@ -44,7 +44,7 @@ import { CardQuestions } from "./card-questions";
 import { bugProjectOf, isTillerBug, isUntriaged, machineOf } from "./bugs";
 import { runRefusal, runRefusalStep } from "../../lib/machines";
 import { HostChip, PeerNote } from "./host-chip";
-import { phaseOf } from "../attention/card-lifecycle";
+import { canStart, phaseOf } from "../attention/card-lifecycle";
 import { AnswerForm } from "../attention/answer";
 import { CommentControl } from "../attention/card-actions";
 import "../attention/inbox.css";
@@ -1092,7 +1092,10 @@ export function CardPage({
                 </p>
                 {spawn ? (
                   <p className="run-hint">
-                    To start one now, run <code>{spawn}</code> in a shell
+                    {canStart(column) && standing.canAct
+                      ? "To start one now, press Start, or run "
+                      : "To start one now, run "}
+                    <code>{spawn}</code> in a shell
                     {standing.peer && standing.host ? ` on ${standing.host}` : ""}.
                   </p>
                 ) : null}
