@@ -1197,6 +1197,65 @@ fn orchestrator_start_needs_the_project_checkout_configured() {
         out.json
     );
     assert_eq!(world.store().last_seq().unwrap(), seq, "nothing is written");
+
+    // The refusal lists every setting the start lacks, not only the first,
+    // and its hint is the command for each, then the start again: the owner
+    // does not meet them one refusal at a time.
+    let listed = out.json["error"]["current"]["settings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no settings in {}", out.json));
+    let keys: Vec<&str> = listed
+        .iter()
+        .filter_map(|setting| setting["key"].as_str())
+        .collect();
+    assert!(keys.contains(&"checkouts.alpha"), "{keys:?}");
+    let hint = out.json["error"]["hint"].as_str().unwrap();
+    let steps: Vec<&str> = hint.lines().collect();
+    for key in &keys {
+        assert!(
+            steps
+                .iter()
+                .any(|step| step.starts_with(&format!("tiller config set {key} "))),
+            "no step for {key} in {hint}"
+        );
+    }
+    assert_eq!(steps.last(), Some(&"tiller orchestrator start alpha"));
+    // The checkout is the last folder to set: it goes inside the host's own.
+    assert!(
+        steps[steps.len() - 2].starts_with("tiller config set checkouts.alpha "),
+        "{hint}"
+    );
+
+    // `project add` ends with the same steps, so the start it names works.
+    let added = world.must(&[
+        "project",
+        "add",
+        "beta",
+        "--name",
+        "Beta",
+        "--delivery",
+        "local-only",
+    ]);
+    let help: Vec<&str> = added.json["help"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|line| line.as_str())
+        .collect();
+    assert_eq!(help.last(), Some(&"tiller orchestrator start beta"));
+    assert!(
+        help.iter()
+            .any(|line| line.starts_with("tiller config set checkouts.beta ")),
+        "{help:?}"
+    );
+    assert!(
+        added.json["summary"]
+            .as_str()
+            .is_some_and(|line| line.ends_with("Set its folders first: the steps are below.")),
+        "{}",
+        added.json
+    );
+
     let out = world.run(&["orchestrator", "start", "nope"]);
     assert_eq!((out.code, out.error_code()), (3, "not_found"));
 }

@@ -38,6 +38,7 @@ export function StartSettingsFix({
   project,
   host,
   checkoutsRoot,
+  done: doneText = "Saved. Press Retry to send.",
 }: {
   problems: SettingProblem[];
   // The project's id, for the default checkout folder.
@@ -46,6 +47,8 @@ export function StartSettingsFix({
   host: string | undefined;
   // The saved checkouts folder, when this host has one.
   checkoutsRoot: string | null;
+  // What to do once every setting is saved; it names the caller's own button.
+  done?: string;
 }) {
   const [saved, setSaved] = useState<Set<string>>(new Set());
   const done = useCallback((key: string) => setSaved((now) => new Set(now).add(key)), []);
@@ -76,7 +79,7 @@ export function StartSettingsFix({
       })}
       {!host && all ? (
         <p className="ask-fix-done" role="status">
-          Saved. Press Retry to send.
+          {doneText}
         </p>
       ) : null}
     </div>

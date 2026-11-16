@@ -31,9 +31,12 @@ exit: 0
     "<seq>"
   ],
   "help": [
+    "tiller config set spawn.pool_root <a folder for the agents' worktrees>",
+    "tiller config set spawn.checkouts_root <the folder that holds every project's clone>",
+    "tiller config set checkouts.alpha <the clone of alpha under spawn.checkouts_root>",
     "tiller orchestrator start alpha"
   ],
   "ok": true,
   "replayed": false,
-  "summary": "Added the project Alpha (alpha). It has no orchestrator yet."
+  "summary": "Added the project Alpha (alpha). It has no orchestrator yet. Set its folders first: the steps are below."
 }

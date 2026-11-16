@@ -1,14 +1,15 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useRef, useState } from "react";
 import type { MouseEvent, RefObject } from "react";
 
-import type { MutationResponse } from "../../lib/api-types";
-import { agentsPath, queryKeyFor } from "../../lib/queries";
+import type { MutationResponse, SettingProblem } from "../../lib/api-types";
+import { agentsPath, queryKeyFor, startSettingsQuery } from "../../lib/queries";
 import { ActionFailure } from "../attention/action-failure";
 import { ActionError, sendMutation } from "../attention/api";
 import { ReopenIcon } from "../attention/icons";
 import { ulid } from "../attention/ulid";
 import { useAction } from "../attention/use-action";
+import { settingsOf, StartSettingsFix } from "../shell/start-settings-fix";
 import { Modal } from "../ui/modal";
 import { showToast } from "./toast";
 import "./run-menu.css";
@@ -18,9 +19,19 @@ export const startPath = (projectId: string) => `/api/v1/projects/${projectId}/o
 // What the daemon returns: the started or live orchestrator (protocol.md 7.4).
 type Started = { warning?: string | null } | null;
 
+// A refusal over settings lists every one (`settings`), with the peer that
+// refused (`host`) when the start ran there.
 type StartResult =
   | { ok: true; replayed: boolean; warning: string | null }
-  | { ok: false; message: string };
+  | { ok: false; message: string; settings: SettingProblem[]; host: string | undefined };
+
+// A refusal that is not about settings.
+const failed = (message: string): StartResult => ({
+  ok: false,
+  message,
+  settings: [],
+  host: undefined,
+});
 
 // `POST /api/v1/projects/{id}/orchestrator`: the same start as `tiller
 // orchestrator start`, forwarded to `host` for a peer's project. A live
@@ -38,19 +49,22 @@ async function startOrchestrator(projectId: string, host?: string): Promise<Star
   } catch (error) {
     if (!(error instanceof ActionError)) throw error;
     if (error.status === 0) {
-      return { ok: false, message: "The daemon did not answer, so no orchestrator started." };
+      return failed("The daemon did not answer, so no orchestrator started.");
     }
     // This host's 403 is the cookie, unless its owner marker names another
     // system; that refusal, and a peer's own (it names the peer), is shown
     // in its words.
     if (error.status === 403 && error.host === null && error.code !== "owner_marker") {
-      return {
-        ok: false,
-        message:
-          "This browser is not signed in as the owner. Run `tiller board --login` for a login link.",
-      };
+      return failed(
+        "This browser is not signed in as the owner. Run `tiller board --login` for a login link.",
+      );
     }
-    return { ok: false, message: error.message };
+    return {
+      ok: false,
+      message: error.message,
+      settings: settingsOf(error),
+      host: error.host ?? host,
+    };
   }
 }
 
@@ -179,15 +193,30 @@ export function StartOrchestratorButton({
 }) {
   const queryClient = useQueryClient();
   const [starting, setStarting] = useState(false);
-  const start = (event: MouseEvent) => {
-    event.stopPropagation();
+  // The settings a refused start named. They are fixed in a dialog, since a
+  // toast would name the first one only and offer no way to set it.
+  const [fix, setFix] = useState<{ problems: SettingProblem[]; host: string | undefined } | null>(
+    null,
+  );
+  // What a start that failed for another reason said, shown in the dialog.
+  const [failure, setFailure] = useState<string | null>(null);
+  const button = useRef<HTMLButtonElement>(null);
+  const run = () => {
     setStarting(true);
+    setFailure(null);
     void startOrchestrator(projectId, host)
       .then((result) => {
         if (!result.ok) {
-          showToast("bad", "Could not start the orchestrator", result.message);
+          if (result.settings.length > 0) {
+            setFix({ problems: result.settings, host: result.host });
+          } else if (fix) {
+            setFailure(result.message);
+          } else {
+            showToast("bad", "Could not start the orchestrator", result.message);
+          }
           return;
         }
+        setFix(null);
         const where = host ? ` on ${host}` : "";
         const title = result.replayed
           ? `The ${projectName} orchestrator is already running${where}`
@@ -204,15 +233,108 @@ export function StartOrchestratorButton({
       })
       .finally(() => setStarting(false));
   };
+  const close = () => {
+    setFix(null);
+    setFailure(null);
+    button.current?.focus();
+  };
   return (
-    <button
-      type="button"
-      className="btn sm primary start-orch"
-      disabled={starting || off !== null}
-      title={off ?? `Start the ${projectName} orchestrator${host ? ` on ${host}` : ""}`}
-      onClick={start}
+    <>
+      <button
+        ref={button}
+        type="button"
+        className="btn sm primary start-orch"
+        disabled={starting || off !== null}
+        title={off ?? `Start the ${projectName} orchestrator${host ? ` on ${host}` : ""}`}
+        onClick={(event: MouseEvent) => {
+          event.stopPropagation();
+          run();
+        }}
+      >
+        {starting ? "Starting..." : "Start orchestrator"}
+      </button>
+      {fix ? (
+        // A click inside a portal still bubbles to the lane's bar, which
+        // would fold the lane; it stops here.
+        <span
+          style={{ display: "contents" }}
+          onClick={(event: MouseEvent) => event.stopPropagation()}
+        >
+          <StartSettingsDialog
+            // A new list is a new form: what was saved before is not asked again.
+            key={fix.problems.map((problem) => problem.key).join(" ")}
+            projectId={projectId}
+            projectName={projectName}
+            problems={fix.problems}
+            host={fix.host}
+            failure={failure}
+            starting={starting}
+            onStart={run}
+            onClose={close}
+          />
+        </span>
+      ) : null}
+    </>
+  );
+}
+
+// What a start refused for its settings opens: every folder the start needs,
+// each with a field and a Save (or, for a peer, the command to run there),
+// and the start again.
+function StartSettingsDialog({
+  projectId,
+  projectName,
+  problems,
+  host,
+  failure,
+  starting,
+  onStart,
+  onClose,
+}: {
+  projectId: string;
+  projectName: string;
+  problems: SettingProblem[];
+  host: string | undefined;
+  failure: string | null;
+  starting: boolean;
+  onStart: () => void;
+  onClose: () => void;
+}) {
+  const roots = useQuery(startSettingsQuery()).data;
+  return (
+    <Modal
+      className="dialog run-dlg start-fix-dlg"
+      labelledBy="start-fix-title"
+      describedBy="start-fix-body"
+      dismissable={!starting}
+      onClose={onClose}
     >
-      {starting ? "Starting..." : "Start orchestrator"}
-    </button>
+      <h2 id="start-fix-title">The {projectName} orchestrator cannot start yet</h2>
+      <p id="start-fix-body">
+        {host
+          ? `${host} needs ${problems.length === 1 ? "a folder" : "folders"} that it does not have yet. Set ${problems.length === 1 ? "it" : "them"} on ${host}, then start again.`
+          : `A start needs ${problems.length === 1 ? "a folder" : "folders"} that this host does not have yet. Save ${problems.length === 1 ? "it" : "them"} here, then start again.`}
+      </p>
+      <StartSettingsFix
+        problems={problems}
+        project={projectId}
+        host={host}
+        checkoutsRoot={roots?.checkouts_root ?? null}
+        done="Saved. Press Start orchestrator."
+      />
+      {failure ? (
+        <p className="refusal" role="alert">
+          {failure}
+        </p>
+      ) : null}
+      <div className="dialog-actions">
+        <button type="button" className="btn" disabled={starting} onClick={onClose}>
+          Cancel
+        </button>
+        <button type="button" className="btn primary" disabled={starting} onClick={onStart}>
+          {starting ? "Starting..." : "Start orchestrator"}
+        </button>
+      </div>
+    </Modal>
   );
 }

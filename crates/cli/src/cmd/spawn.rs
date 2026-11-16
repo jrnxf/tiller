@@ -11,6 +11,7 @@ use tiller_agents::control::Waits;
 use tiller_agents::spawn::config::{Paths, SpawnConfig};
 use tiller_agents::spawn::listeners::Lavish;
 use tiller_agents::spawn::pool::Treehouse;
+use tiller_agents::spawn::settings::{self, Problem};
 use tiller_agents::spawn::trust::ClaudeConfig;
 use tiller_agents::spawn::{self as agents, Request, SpawnError, World, readings};
 use tiller_core::state::resolve_card;
@@ -336,7 +337,7 @@ pub fn orchestrator_start(app: &App, project: &str, restart: bool) -> Done {
     let homes = orchestrator_homes(&tools)?;
     let mut store = app.write()?;
     let applied = start_orchestrator(&tools, &homes, &mut store, &app.ctx(), project, restart)
-        .map_err(failure)?;
+        .map_err(|error| settings_failure(&tools, &homes, project, error))?;
     let warning = applied.value.warning.clone();
     let replayed = applied.replayed;
     let outcome = Outcome::applied(applied).with_warning(warning);
@@ -351,6 +352,109 @@ pub fn orchestrator_start(app: &App, project: &str, restart: bool) -> Done {
             "tiller ask note {project} --text \"<your question>\""
         ))
         .with_help(format!("tiller attach {project}: watch it work")))
+}
+
+/// Every setting a start of `project` would refuse, when `message` (the
+/// start's own refusal, which names the first) is about one of them. Any
+/// other config error gives `None` and stays as it is.
+fn settings_named(
+    tools: &Tools,
+    homes: &Path,
+    project: &str,
+    message: &str,
+) -> Option<Vec<Problem>> {
+    let problems = settings::problems(&tools.config, homes, tools.scratch_root(), Some(project));
+    problems
+        .iter()
+        .any(|problem| message.contains(&problem.key))
+        .then_some(problems)
+}
+
+/// The keys `problems` name, each once, in the order a start meets them.
+fn problem_keys(problems: &[Problem]) -> Vec<&str> {
+    let mut keys: Vec<&str> = Vec::new();
+    for problem in problems {
+        if !keys.contains(&problem.key.as_str()) {
+            keys.push(&problem.key);
+        }
+    }
+    keys
+}
+
+/// The command that sets each setting in `problems`, one per key, the
+/// host's folders first. A checkout gets its folder under a saved
+/// checkouts folder, as the board suggests it; every other value is a
+/// placeholder that says what the folder is for.
+pub(super) fn settings_fix(tools: &Tools, project: &str, problems: &[Problem]) -> Vec<String> {
+    let root = tools.config.spawn.checkouts_root.as_deref().filter(|_| {
+        !problems
+            .iter()
+            .any(|problem| problem.key == settings::CHECKOUTS_ROOT)
+    });
+    // The host's two folders first: the checkout goes inside one of them.
+    let mut keys = problem_keys(problems);
+    keys.sort_by_key(|key| key.starts_with("checkouts."));
+    keys.into_iter()
+        .map(|key| {
+            let value = match (key, root) {
+                (settings::POOL_ROOT, _) => "<a folder for the agents' worktrees>".to_owned(),
+                (settings::CHECKOUTS_ROOT, _) => {
+                    "<the folder that holds every project's clone>".to_owned()
+                }
+                (_, Some(root)) => root.join(project).display().to_string(),
+                (_, None) => format!("<the clone of {project} under spawn.checkouts_root>"),
+            };
+            format!("tiller config set {key} {value}")
+        })
+        .collect()
+}
+
+/// What `tiller project add` prints as the owner's next steps: the settings
+/// a start of the new project still needs, each as its command, then the
+/// start. A `config.toml` that cannot be read leaves only the start, which
+/// says why.
+pub(super) fn first_start_steps(app: &App, project: &str) -> Vec<String> {
+    let mut steps = Tools::load(app)
+        .ok()
+        .and_then(|tools| {
+            let homes = orchestrator_homes(&tools).ok()?;
+            let problems =
+                settings::problems(&tools.config, &homes, tools.scratch_root(), Some(project));
+            Some(settings_fix(&tools, project, &problems))
+        })
+        .unwrap_or_default();
+    steps.push(format!("tiller orchestrator start {project}"));
+    steps
+}
+
+/// A start's refusal as `tiller orchestrator start` gives it. A start
+/// returns the first setting it finds wrong, and the owner would meet the
+/// next one only after a fix; so a refusal over settings lists every one in
+/// `current.settings`, as the board gets them, and its hint is the command
+/// for each, then the start again.
+fn settings_failure(tools: &Tools, homes: &Path, project: &str, error: SpawnError) -> Failure {
+    let SpawnError::Config(message) = &error else {
+        return failure(error);
+    };
+    let Some(problems) = settings_named(tools, homes, project, message) else {
+        return failure(error);
+    };
+    let mut steps = settings_fix(tools, project, &problems);
+    steps.push(format!("tiller orchestrator start {project}"));
+    let mut refusal = match problems.as_slice() {
+        [only] => Failure::usage(format!("config.toml: {}", only.problem)),
+        many => {
+            let keys = problem_keys(many);
+            Failure::usage(format!(
+                "config.toml: {} settings are missing or wrong, and tiller orchestrator start needs them: {}",
+                keys.len(),
+                keys.join(", ")
+            ))
+        }
+    }
+    .hint(steps.join("\n"));
+    refusal.current = Some(json!({ "settings": problems }));
+    refusal
 }
 
 /// Where orchestrator homes live: `spawn.orchestrator_home`, or its default.
@@ -405,20 +509,12 @@ impl tiller_daemon::api::OrchestratorStart for BoardStart {
                 // shows every one.
                 error @ SpawnError::Config(_) => {
                     let mut refusal = refused(failure(error));
-                    let problems = tiller_agents::spawn::settings::problems(
-                        &tools.config,
-                        &homes,
-                        tools.scratch_root(),
-                        Some(project),
-                    );
                     // Only a refusal that names one of the listed settings is
                     // about them; any other config error stays as it is.
                     if let StartError::Refused {
                         current, message, ..
                     } = &mut refusal
-                        && problems
-                            .iter()
-                            .any(|problem| message.contains(&problem.key))
+                        && let Some(problems) = settings_named(&tools, &homes, project, message)
                     {
                         *current = Some(json!({ "settings": problems }));
                     }
@@ -500,15 +596,11 @@ impl tiller_daemon::api::OrchestratorStart for BoardStart {
                 settings.checkouts_root = tools.config.spawn.checkouts_root.as_deref().map(shown);
                 settings.orchestrator_home = Some(shown(&homes));
                 settings.scratch_root = Some(shown(tools.scratch_root()));
-                settings.problems = tiller_agents::spawn::settings::problems(
-                    &tools.config,
-                    &homes,
-                    tools.scratch_root(),
-                    None,
-                )
-                .into_iter()
-                .map(Into::into)
-                .collect();
+                settings.problems =
+                    settings::problems(&tools.config, &homes, tools.scratch_root(), None)
+                        .into_iter()
+                        .map(Into::into)
+                        .collect();
             }
             Err(failure) => settings.config_error = Some(failure.message.clone()),
         }
@@ -518,13 +610,7 @@ impl tiller_daemon::api::OrchestratorStart for BoardStart {
     fn check_setting(&self, key: &str, value: &str) -> Result<Vec<String>, String> {
         let tools = Tools::load(&self.app).map_err(|failure| failure.message.clone())?;
         let homes = orchestrator_homes(&tools).map_err(|failure| failure.message.clone())?;
-        tiller_agents::spawn::settings::check(
-            &tools.config,
-            &homes,
-            tools.scratch_root(),
-            key,
-            value,
-        )
+        settings::check(&tools.config, &homes, tools.scratch_root(), key, value)
     }
 
     fn restart(

@@ -351,9 +351,19 @@ pub fn project(app: &App, cmd: ProjectCmd) -> Done {
             }
             let line = summary::project_added(&outcome.data);
             let id = outcome.data["id"].as_str().unwrap_or("<id>").to_owned();
-            Ok(outcome
-                .with_summary(line)
-                .with_help(format!("tiller orchestrator start {id}")))
+            // A start reads settings the new project may not have yet; the
+            // next steps name each one, so the start they end with works.
+            let steps = super::spawn::first_start_steps(app, &id);
+            let line = if steps.len() > 1 {
+                format!("{line} Set its folders first: the steps are below.")
+            } else {
+                line
+            };
+            let mut outcome = outcome.with_summary(line);
+            for step in steps {
+                outcome = outcome.with_help(step);
+            }
+            Ok(outcome)
         }
         ProjectCmd::Edit(args) => {
             let checks = args

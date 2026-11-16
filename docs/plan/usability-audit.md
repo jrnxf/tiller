@@ -10,11 +10,11 @@ Status values: `open`, `fixed` (with what was verified), `needs owner`, `to veri
 
 | | |
 |---|---|
-| Phase | 3 - the full walk. Journeys 2 (morning check), 8 (failure), 10 (watch and steer) and 11 (away mode) are walked on the board and the CLI in this phase (Mon 16 Nov 2026, Lisbon). Journeys 1, 6 and 9, and the rest of 5 and 7, are not walked yet. |
+| Phase | 3 - the full walk. Journeys 1 (first run), 2 (morning check), 8 (failure), 9 (scale), 10 (watch and steer) and 11 (away mode) are walked on the board and the CLI in this phase (Mon 16 Nov 2026, Lisbon). Journey 6, and the rest of 5 and 7, are not walked yet: they need the stand-in forge. |
 | Open P0 | 0. UA-15 is `needs owner`: the silent part is fixed, the answer itself needs a spec change. |
-| Open P1 | 0. UA-26 (a run whose agent died read "Unknown" and "running") and UA-30 (away mode covers this host only and did not say so) were found in the phase 3 walk. UA-26 is fixed on the board. UA-30 is `needs owner`: the board and the CLI now say what away mode leaves out, and away mode for a paired host from one board needs a spec change. UA-03 is `needs owner`: the CLI on main now says that it reads main only and prints the command for the peer, and reads and writes of a peer's work through the local daemon need a spec change. UA-09 is `needs owner`: seven owner commands end with a sentence and the next step, and a short answer in place of the record needs a spec change. UA-17 is fixed but for "Mark read" in the CLI, which is `needs owner`. UA-20 is `needs owner`: a queued card says what it waits for and "Close" is out of the main place, and its "Start" control needs a spec change (see "Needs owner"). UA-18 is `needs owner`: the wrong status line is fixed, Cancel and the full view need a spec change. UA-19 is `needs owner`: the tile, the card and the timeline show the worker's report, and the "Needs you" rule needs a spec change. |
-| Fixed | UA-01, UA-02, UA-04, UA-05, UA-06, UA-12, UA-16, UA-21, UA-22, UA-25, UA-26 (on the board), DX-01. UA-30 part 1 (the away dialog, the away popover, the return brief and `tiller away` name the paired host that away mode does not cover). UA-17 (read an answer in the CLI; "Mark read" in the CLI needs a spec change). UA-15 part 1 (the owner is told where the answer shows). UA-18 part 1 (the ask tile shows an unread answer and opens it). UA-19 part 1 (a worker's report shows on its tile, on the card and in the timeline). UA-20 part 1 (a queued card says what it waits for, and "Close" is under "More" until work starts). UA-09 part 1 (a `summary` sentence and the owner's next step at the end of `init`, `project add`, `orchestrator start`, `card create`, `spawn`, `ask note` and `attention answer`). UA-03 part 1 (a `not_found` and every host-wide list in main's CLI name the paired host and print the `ssh -t` command for it). |
-| Next step | Phase 3 goes on: walk journeys 1 (first run) and 9 (scale) next; they need no new bench part. Then close the bench gap of the stand-in forge and walk journey 6 and the rest of 5 and 7. The loop ends only when one full pass of all 11 journeys finds no new P0 or P1; this pass has found two (UA-26, UA-30), so one more pass of journeys 5, 8 and 11 follows the rest. P2 work after that: UA-27 to UA-29, UA-31, UA-32, then UA-07 with UA-08, UA-10, UA-11, UA-13, UA-14, UA-23, UA-24. |
+| Open P1 | 0. UA-33 (first run: the start that `project add` names was refused once per missing folder, and the board ended in a toast) was found in the walk of journey 1 and is fixed on the board and the CLI. UA-26 (a run whose agent died read "Unknown" and "running") and UA-30 (away mode covers this host only and did not say so) were found in the phase 3 walk. UA-26 is fixed on the board. UA-30 is `needs owner`: the board and the CLI now say what away mode leaves out, and away mode for a paired host from one board needs a spec change. UA-03 is `needs owner`: the CLI on main now says that it reads main only and prints the command for the peer, and reads and writes of a peer's work through the local daemon need a spec change. UA-09 is `needs owner`: seven owner commands end with a sentence and the next step, and a short answer in place of the record needs a spec change. UA-17 is fixed but for "Mark read" in the CLI, which is `needs owner`. UA-20 is `needs owner`: a queued card says what it waits for and "Close" is out of the main place, and its "Start" control needs a spec change (see "Needs owner"). UA-18 is `needs owner`: the wrong status line is fixed, Cancel and the full view need a spec change. UA-19 is `needs owner`: the tile, the card and the timeline show the worker's report, and the "Needs you" rule needs a spec change. |
+| Fixed | UA-01, UA-02, UA-04, UA-05, UA-06, UA-12, UA-16, UA-21, UA-22, UA-25, UA-26 (on the board), UA-33, DX-01. UA-30 part 1 (the away dialog, the away popover, the return brief and `tiller away` name the paired host that away mode does not cover). UA-17 (read an answer in the CLI; "Mark read" in the CLI needs a spec change). UA-15 part 1 (the owner is told where the answer shows). UA-18 part 1 (the ask tile shows an unread answer and opens it). UA-19 part 1 (a worker's report shows on its tile, on the card and in the timeline). UA-20 part 1 (a queued card says what it waits for, and "Close" is under "More" until work starts). UA-09 part 1 (a `summary` sentence and the owner's next step at the end of `init`, `project add`, `orchestrator start`, `card create`, `spawn`, `ask note` and `attention answer`). UA-03 part 1 (a `not_found` and every host-wide list in main's CLI name the paired host and print the `ssh -t` command for it). |
+| Next step | Phase 3 goes on: close the bench gap of the stand-in forge (a stand-in `gh`, two projects with a repository and `direct-pr` delivery), then walk journey 6 and the rest of 5 and 7. The loop ends only when one full pass of all 11 journeys finds no new P0 or P1; this pass has found three (UA-26, UA-30, UA-33), so one more pass of journeys 1, 5, 8 and 11 follows the rest. P2 work after that: UA-27 to UA-29, UA-31, UA-32, UA-34, UA-35, then UA-07 with UA-08, UA-10, UA-11, UA-13, UA-14, UA-23, UA-24. |
 
 ## The bench
 
@@ -63,7 +63,7 @@ Bench gaps (fix before the journeys that need them):
 
 | # | Journey | Walked on the board | Walked on the CLI |
 |---|---|---|---|
-| 1 | First run | no | partly (the bench script is a first run by script) |
+| 1 | First run | yes, phase 3, on a third and a fourth empty home beside the bench: the first board, "Add project", "Start orchestrator" (UA-33, UA-34). Pairing: a look at Settings > Hosts > "Add a host" only; the bench pairs by script | yes, phase 3: `tiller init`, `project add`, `orchestrator start` up to the launch (UA-33, UA-34). `peer add` is the bench script's own step |
 | 2 | Morning check | yes, phase 3 (UA-28; the Inbox does the job in one click) | yes, phase 3 (UA-27) |
 | 3 | Ask | yes (UA-15 to UA-18, UA-21, UA-24) | yes (UA-17, UA-23) |
 | 4 | Start a task | yes (UA-20, UA-21, UA-22) | yes (UA-09, UA-23) |
@@ -71,7 +71,7 @@ Bench gaps (fix before the journeys that need them):
 | 6 | Decide | first look only | no |
 | 7 | Peer transparency | partly: an ask to a peer project (UA-15, UA-16) | first look only |
 | 8 | Failure | yes, phase 3: a daemon restart, the peer offline, a run that dies (UA-26), quota out (UA-29). Not walked: an agent that waits on a prompt (bench gap) | yes, phase 3: the same cases (UA-26, UA-29) |
-| 9 | Scale | partly: the command palette finds a card, an agent and a project's jobs (UA-21, fixed). Not walked: filter, sort, the Agents screen at 23 agents | no |
+| 9 | Scale | yes, phase 3: one card, one project and one agent among 16 lanes, 39 cards and 23 agents, by the palette, the Focus view, the filters and the keys, at 1440 px and 390 px (UA-35, P2 only) | yes, phase 3: `tiller board`, `card list --project`, `--column`, `--needs-you`, `tiller agents` (UA-35, P2 only) |
 | 10 | Watch and steer | yes, phase 3: a main agent and a peer agent, watch, type, leave (UA-32, P2 only) | yes, phase 3: `tiller send --kind steer`, and `tiller attach` in a pseudo terminal with a typed line and a detach (UA-32, P2 only) |
 | 11 | Away mode | yes, phase 3: start, the status, edit, end, the brief (UA-30, UA-13, UA-31) | yes, phase 3: `away start`, the spend cap, `away brief`, `away end` (UA-30, UA-31) |
 
@@ -102,6 +102,9 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 | Turn away mode on | 3 steps, about 15 s: "Away", the form (every project of this host is ticked, 6 runs, a 20% floor, existing grants), "Start away mode". The header then reads "Away until Tue 09:00". With a paired host, the form says "Away mode covers main only, not peer's 6 projects", what that means and where to start it for them (UA-30; before: the peer's projects were absent from the form with no word) | 1 command. The last lines are a sentence ("Away mode is on for Harbor and Lantern on main until Tue 2026-11-17 09:00 (Lisbon). At most 3 new runs start on main. Nothing merges."), the next steps, and with a paired host a warning with the `ssh -t` command that covers it too (UA-30; before: 30 lines of an approval record) |
 | Return and catch up | 2 clicks: the status, "End". The brief opens by itself in the Inbox: the projects, the orders, the spend, what landed, the runs that started, what still waits, "Open waiting items". Good. It now names the projects it covers and the paired host it does not count (UA-30, UA-13) | `tiller away end` prints the brief as a record; it ends with the same warning (UA-30) |
 | Watch an agent and steer it | 3 steps, about 6 s: Agents, the agent's row (or `J`/`K`), click the screen and type. The line under the screen reads "Typing goes to the agent. Board shortcuts are paused." and "Done" leaves. The same for an agent on the peer. Good | `tiller attach <card>-<role>`, type, `Ctrl-\ d`. Good. `tiller send <run> --kind steer --text ...` ends with a record in state `pending` and no sentence (UA-32) |
+| First run: a project and its orchestrator | 4 steps, about 40 s: "Add project" (the id and the checkout folder), "Start orchestrator", the two folders the host lacks in the dialog that opens, "Start orchestrator" again. The dialog lists every missing folder with a field and a Save, and shows the next refusal (no terminal holder) in place (UA-33; before: a toast that named the first missing setting as a `config.toml` key, and no way to set it there) | 5 commands: `project add`, the three `tiller config set` lines that it prints, and `tiller orchestrator start`, which it prints last. A start that still lacks a folder lists all of them at once with the command for each (UA-33; before: `project add` printed only the start, which was refused three times in a row, each time for one more key and with the hint `tiller config set <key> <value>`) |
+| Find one project among 14 | 1 click on its sidebar row, or `Cmd+K`, "focus" and two letters, Enter: about 4 s. The Focus view scopes the Board, the Inbox count and the Agents list, and "Show all projects" is in the header. Good | `tiller card list --project <id>`: one row per card |
+| Find one agent among 23 | `Cmd+K`, the card id or "orchestrator" and the project, Enter: about 4 s. Or Agents, then `J`/`K`; the list is grouped by project. Good | `tiller agents`: a record of 15 lines per agent (UA-09) |
 
 ## Findings
 
@@ -538,6 +541,45 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 - On the board, the typing field of a worker is named "Type to ├ pylon-1 build" for a screen reader: the tree mark is part of the name.
 - "Open in terminal" is off for an agent on the peer, with no reason in view. To verify: whether its tooltip gives one.
 
+### UA-33 - First run: the start that `project add` names is refused, one missing folder at a time (P1, fixed)
+
+- Journey: 1.
+- Tried: on an empty home, `tiller init`, `tiller project add notes --name Notes --delivery local-only`, then the next step that it printed, `tiller orchestrator start notes`. On the board of a second empty home: "Add project", then "Start orchestrator" on the new lane.
+- Happened:
+  - CLI: the start was refused with "config.toml: checkouts.notes is not set; tiller orchestrator start needs it" and the hint `tiller config set <key> <value>`. After that key was set, the same start was refused for `spawn.pool_root`, then for `spawn.checkouts_root`. Three refusals in a row, each for a key the one before did not name, and no word on what the value is.
+  - Board: a toast, "Could not start the orchestrator. config.toml: spawn.pool_root is not set; tiller orchestrator start needs it". It named the first missing setting only, as a raw key, and offered no way to set it. The fix was two screens away, under Settings > Starting agents. The Ask box already had a form for this case; the lane's button did not use it.
+- Hurts: this is the first thing a new owner does, and the printed next step fails. The owner must guess three values from three key names, or read the spec.
+- Fixed (Mon 16 Nov 2026, Lisbon), with the reads and the refusal that `docs/spec/protocol.md` section 7.4 already defines (`current.settings`):
+  - CLI: a `tiller orchestrator start` that is refused over settings lists every one in `current.settings`, as the board gets them, and its hint is one command per setting, then the start again. The host's two folders come first, since the checkout goes inside one of them. With a saved checkouts folder, the checkout's command has the full path (`tiller config set checkouts.maps /home/user/src/maps`).
+  - CLI: `tiller project add` ends with the same steps. Its sentence says "Set its folders first: the steps are below." when a folder is missing, and the last step is the start.
+  - Board: "Start orchestrator" on a lane or a card opens a dialog, "The Notes orchestrator cannot start yet", with every missing folder as a field with a Save (a checkout is filled in with its default), and "Start orchestrator" again. A refusal for another reason (no terminal holder) shows in the dialog. For a paired host, the dialog shows the command to run there, as the Ask box does.
+  - Verified on two empty homes beside the bench, with a rebuilt binary: the CLI printed the three commands after `project add`, and one refusal listed the three settings; on the board, two folders were saved in the dialog, the start then named the missing holder in place, and with a holder running the same button started the orchestrator and the lane showed it. Checked at 1440 px in light and at 390 px in dark.
+  - Tests: `orchestrator_start_needs_the_project_checkout_configured` (crates/cli/tests/commands.rs) asserts the list, the steps and their order, and the steps of `project add`; one new test in `board/src/components/board/views.test.tsx` walks the dialog to a start.
+
+### UA-34 - First run: small gaps (P2, open)
+
+- Journey: 1.
+- `tiller init` needs `--host-label` and `--lane-capacity`, with no default and no suggested number. A daemon that starts on an empty home sets the host up by itself, with the machine's name and 2 runs.
+- Before `init`, every command says "host : state.db is not initialized; run tiller owner set tiller, then tiller init" (an empty name before the colon). `tiller init` works without the first command.
+- The next steps of `tiller init` name `tiller daemon` and not `tiller holder`. A start without a holder is refused with the right hint, but the board shows no banner on a home where no terminal holder runs.
+- `tiller project add` needs `--delivery` with no default (the board defaults to `direct-pr`), and has no flag for the checkout folder, which the board's dialog asks for.
+- The board's "Add project" dialog shows "give a folder; spawn.checkouts_root is not set, so there is no default" in red as soon as the id is typed, before the owner reached the folder field, and names a raw key.
+- `tiller peer add` ends with a record and no sentence or next step (as UA-09).
+- A hint of more than one command prints as one quoted string with `\n` in it. The short answer of UA-09 ("Needs owner") would print one command per line.
+- Fix: defaults for `--lane-capacity` and `--delivery`; a `--checkout` flag (a spec question, `docs/spec/protocol.md` section 6.4); a board banner for a missing holder; plain words in the dialog.
+
+### UA-35 - Scale: small gaps (P2, open)
+
+- Journey: 9.
+- The board has no key that moves between cards: Tab is the only way, through 39 tiles. The Agents screen has `J`, `K` and `N`. The palette (`Cmd+K`) is the fast path and works.
+- The board has no sort and no text filter. The filters are All, Active, Needs you, one machine, and the Focus view.
+- In the Focus view the sidebar still says "Agents 23", while the Board and Inbox counts follow the focus and the Agents list itself shows 3.
+- A project's name in the palette lists its cards first; "Focus Harbor" is the eighth row.
+- The banner "peer refuses new runs" arrives about a second after the first paint and moves the board down by its height.
+- A tile with a one-line title keeps an empty second line.
+- CLI: `tiller card list` filters by project, column and "needs you", but has no search by a word of the title; `tiller agents` prints 15 lines per agent (UA-09).
+- Fix: `J`/`K` and Enter on the board as on Agents; the project's own rows first when the query is a project's name; the Agents count scoped as the others; `card list --search`.
+
 ### DX-01 - A debug build made before the board was built never served the board (fixed)
 
 - Found while building the bench: a debug `tiller` compiled while `board/dist` was missing answered "board assets are not built" forever, even after the board was built and the crate was rebuilt. rust-embed keeps the folder's path with its `..` parts in that case and then refuses every file, and the compiler cache returns the same artifact.
@@ -577,9 +619,9 @@ Order of work, highest owner value first. Fixes that share a cause are grouped.
 4. Done: UA-21 and UA-22 (find a card and start a job from anywhere on the board). Done as far as the contract allows: UA-20 part 1 (a queued card says what it waits for). Its "Start" control waits under "Needs owner".
 5. Done: UA-01 (a host that refuses every new run says so on the board, in `tiller machines` and in `tiller doctor`).
 6. Done: UA-25 (a live peer counts as live on Health and in `tiller machines`) and UA-17 (the CLI prints the delivery state and the answer of an ask). Done as far as the contract allows: UA-09 part 1 (a sentence and the next step after seven owner commands). Done as far as the contract allows: UA-03 part 1 (main's CLI names the peer and prints the command for it). Later: UA-10 and UA-23, the CLI as an owner surface.
-7. Phase 3, in progress. Walked: journeys 2 and 8 (UA-26 found and fixed on the board; UA-27 to UA-29 are P2), and journeys 10 and 11 (UA-30 found, fixed as far as the contract allows; UA-31 and UA-32 are P2). Next: journeys 1 and 9, then the stand-in forge and journey 6 and the rest of 5 and 7.
+7. Phase 3, in progress. Walked: journeys 2 and 8 (UA-26 found and fixed on the board; UA-27 to UA-29 are P2), journeys 10 and 11 (UA-30 found, fixed as far as the contract allows; UA-31 and UA-32 are P2), and journeys 1 and 9 (UA-33 found and fixed; UA-34 and UA-35 are P2). Next: the stand-in forge, then journey 6 and the rest of 5 and 7, then one more pass of journeys 1, 5, 8 and 11.
 8. UA-07 with UA-08: the host out of the owner's way.
-9. UA-11, UA-13, UA-14, UA-24, UA-27, UA-28, UA-29, UA-31, UA-32: polish.
+9. UA-11, UA-13, UA-14, UA-24, UA-27, UA-28, UA-29, UA-31, UA-32, UA-34, UA-35: polish.
 
 ## Needs owner
 

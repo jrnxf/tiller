@@ -753,6 +753,85 @@ test("Start orchestrator on a lane with none posts the start and leaves the lane
   expect(within(alpha).queryByRole("button", { name: "Start orchestrator" })).toBeNull();
 });
 
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+const recorded = (data: unknown) =>
+  json({ ok: true, replayed: false, events: [], receipt: null, data });
+
+test("a start refused for its settings opens a form for every one, then starts", async () => {
+  stubApi("degraded");
+  const base = globalThis.fetch;
+  let lacking = ["checkouts.kiln", "spawn.pool_root"];
+  const sent: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      const body = JSON.parse(String(init?.body ?? "{}")) as { key?: string; value?: string };
+      if (path === "/api/v1/start-settings") {
+        return json({
+          pool_root: null,
+          checkouts_root: "/home/user/src",
+          orchestrator_home: null,
+          scratch_root: null,
+          problems: [],
+          config_error: null,
+        });
+      }
+      if (init?.method !== "POST") return base(input, init);
+      sent.push(path);
+      if (path === "/api/v1/config") {
+        lacking = lacking.filter((key) => key !== body.key);
+        return recorded({ key: body.key, value: body.value, changed: true });
+      }
+      if (path.endsWith("/orchestrator") && lacking.length > 0) {
+        const settings = lacking.map((key) => ({
+          key,
+          kind: "missing",
+          problem: `${key} is not set; tiller orchestrator start needs it`,
+        }));
+        const message = `config.toml: ${lacking[0]} is not set`;
+        return json({ ok: false, error: { code: "usage", message, current: { settings } } }, 400);
+      }
+      return recorded(null);
+    }),
+  );
+  await renderApp("degraded");
+
+  const header = screen.getByTestId("lane-kiln").querySelector(".lane-h") as HTMLElement;
+  fireEvent.click(within(header).getByRole("button", { name: "Start orchestrator" }));
+  const dialog = await screen.findByRole("dialog", {
+    name: "The kiln orchestrator cannot start yet",
+  });
+  // Both settings at once, and no toast that names only the first.
+  expect(within(dialog).getByTestId("start-settings-fix").textContent).toContain(
+    "2 settings are missing or wrong",
+  );
+  expect(screen.queryByText("Could not start the orchestrator")).toBeNull();
+  const folder = within(within(dialog).getByTestId("setting-checkouts.kiln"));
+  const pool = within(within(dialog).getByTestId("setting-spawn.pool_root"));
+  await waitFor(() =>
+    expect((folder.getByRole("textbox") as HTMLInputElement).value).toBe("/home/user/src/kiln"),
+  );
+  fireEvent.click(folder.getByRole("button", { name: "Save" }));
+  fireEvent.change(pool.getByRole("textbox"), { target: { value: "/home/user/pool" } });
+  fireEvent.click(pool.getByRole("button", { name: "Save" }));
+  await within(dialog).findByText("Saved. Press Start orchestrator.");
+  // A click in the dialog never folds the lane behind it.
+  expect(laneToggle(header).getAttribute("aria-expanded")).toBe("true");
+
+  fireEvent.click(within(dialog).getByRole("button", { name: "Start orchestrator" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await waitFor(() =>
+    expect(screen.getByTestId("toast").textContent).toContain("Started the kiln orchestrator"),
+  );
+  expect(sent).toEqual([
+    "/api/v1/projects/kiln/orchestrator",
+    "/api/v1/config",
+    "/api/v1/config",
+    "/api/v1/projects/kiln/orchestrator",
+  ]);
+});
+
 test("New card files a card for its lane's project and never folds the lane", async () => {
   const posted = stubApi("degraded");
   await renderApp("degraded");
