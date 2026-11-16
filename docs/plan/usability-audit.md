@@ -11,9 +11,10 @@ Status values: `open`, `fixed` (with what was verified), `needs owner`, `to veri
 | | |
 |---|---|
 | Phase | 1 - audit. Journeys 3 (ask), 4 (start a task) and 5 (trust) are walked on the board and the CLI. Journeys 1, 2 and 6 to 11 are not walked yet. |
-| Open P0 | 1 (UA-15) |
-| Open P1 | 12 (UA-01, UA-02, UA-03, UA-04, UA-05, UA-09, UA-16, UA-17, UA-18, UA-19, UA-20, UA-21) |
-| Next step | Fix UA-15 with UA-16 (an ask to a peer project must show at once and its answer must reach the owner). Then walk journeys 2, 6 and 8, which need the stand-in forge of the bench gaps. |
+| Open P0 | 0. UA-15 is `needs owner`: the silent part is fixed, the answer itself needs a spec change. |
+| Open P1 | 11 (UA-01, UA-02, UA-03, UA-04, UA-05, UA-09, UA-17, UA-18, UA-19, UA-20, UA-21) |
+| Fixed | UA-16, DX-01. UA-15 part 1 (the owner is told where the answer shows). |
+| Next step | Fix UA-18 (the ask tile opens, shows "Answered", and can be cancelled). Then UA-19 with UA-04 and UA-11. Walk journeys 2, 6 and 8 after the stand-in forge of the bench gaps. |
 
 ## The bench
 
@@ -77,8 +78,8 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 | Job | Board | CLI |
 |---|---|---|
 | Ask a project | 4 steps, about 10 s: `A`, `@` and two letters, Enter, the text, Enter. Good. | 1 command, 36 lines of answer |
-| See that the ask arrived | main project: the tile shows at once. Peer project: nothing until a reload (UA-16) | `ask show` has no delivery state (UA-17) |
-| Read the answer | main project: Inbox, 2 clicks. Peer project: never (UA-15) | not possible (UA-17) |
+| See that the ask arrived | main project: the tile shows at once. Peer project: the tile shows in about 1 s (UA-16, fixed; it was never without a reload) | `ask show` has no delivery state (UA-17) |
+| Read the answer | main project: Inbox, 2 clicks. Peer project: only on the peer's board; the Ask box, the toast and the tile now say so (UA-15) | not possible (UA-17) |
 | Ask again | 1 click on "Ask again" in the reply | type the command again |
 | Recover from the wrong project | not possible: the ask tile has no action (UA-18) | `ask resolve <ask> cancelled`, which the help calls an orchestrator's tool |
 | Idea to a filed card | 3 steps: New card on the project's row, the title, Enter | 1 command, after one refusal for a missing `--kind` (UA-23) |
@@ -188,7 +189,7 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 - Hurts: the owner typed both. "script" suggests that something else sent it.
 - Fix: show no chip for the owner's own asks, or one word for both ("you"). Keep "script" for an ask that a script's idempotency key marks. The wording "Waiting for the orchestrator to tag it" moved to UA-18.
 
-### UA-15 - The answer to an ask sent to a peer project never reaches the owner (P0, open)
+### UA-15 - The answer to an ask sent to a peer project never reaches the owner (P0, needs owner; the silent part is fixed)
 
 - Journey: 3, 7.
 - Tried: on the main board, `A`, `@Pylon`, "What port does the gateway listen on?", Enter. The toast said "Sent to the Pylon orchestrator". Pylon's orchestrator answered with `tiller reply`.
@@ -198,14 +199,23 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 - Fix, in two parts:
   1. Inside the contract (no spec change): the main board learns from the peer's `ask.replied` event that an answer exists. The Inbox then shows a row "Pylon answered your ask", and the tile says "Answered". Until part 2, the row opens the answer on the peer's board. The Ask box says so before the send when a target is a peer project.
   2. With a spec change (see "Needs owner"): the link carries the ask's first line and the unread replies of a paired host, and "Mark read" forwards. The text already crossed the link once, from this board to the peer, when the owner sent it.
+- Part 1, done on Mon 16 Nov 2026 (Lisbon), smaller than first planned: the board no longer lets the owner wait in silence.
+  - The Ask box shows "The answer shows on the board of peer, not in this Inbox." under the project list as soon as a target is a peer project. The toast after the send repeats it.
+  - A peer's ask tile reads "Ask kept on peer" and "Text and answer are on peer". It no longer says "Waiting for the orchestrator to tag this ask". The tooltip has the full sentence.
+  - Not done: the row "Pylon answered your ask" and the "Answered" mark. An `ask.replied` event of a peer does reach the board, but it is a one-time event: after a reload or a daemon restart the mark would be gone, so the tile would say "waiting" for an answered ask. A mark that survives needs a field in the peer's `asked` rows, which is the same spec change as part 2.
+  - Verified on the bench: Ask box, toast and tile in both themes at 1440 px and 390 px. Tests: `board/src/lib/ask-plan.test.ts` (`answersElsewhere`), `ask-dialog.test.tsx` (the line shows before the send), `federation.test.tsx` (the tile's words).
+- Still open for the owner: the answer itself. It stays `needs owner` until the decision under "Needs owner".
 
-### UA-16 - An ask sent to a peer project does not show on the board until a reload (P1, open)
+### UA-16 - An ask sent to a peer project does not show on the board until a reload (P1, fixed)
 
 - Journey: 3, 7.
 - Tried: sent an ask to Pylon from the Ask box, then looked for it. Later, recorded an ask on the peer and watched the open main board.
 - Happened: the "Asked" count and Pylon's row did not change for 25 s and for 20 s. After a reload the tile was there. A new card on the same peer project showed in 6 s without a reload, so the link works: only ask changes of a peer are missed. `board/src/lib/sse.ts` does refetch the board on an `ask` event, so the event of a peer's ask does not reach the browser, or the cached peer board is not replaced when it comes.
 - Hurts: "Sent" and then nothing. The owner sends it a second time, or reloads to check.
-- Fix: find where the peer's `ask.recorded` and `ask.resolved` events stop (the peer link's event relay, or the snapshot cache in the daemon), and add a test in `crates/daemon/tests/peer_e2e.rs` that a peer's new ask reaches the board host's `/api/v1/board`.
+- Cause: in the board, not the daemon. An ask event of a peer carries no row, so the peer's next snapshot brings it (at most 2 s later), and the daemon pushes that to the browser as `peer_reset`. The board's `peer_reset` handler replaced the peer's card rows, attention items, agents and projects, but not its `asked` rows (`board/src/lib/sse.ts`, `applyPeerReset`). The refetch that the `ask` event starts runs before the snapshot, so it read the old rows.
+- Fixed on Mon 16 Nov 2026 (Lisbon): `peer_reset` replaces that host's `asked` rows too.
+- Verified on the bench with the board open and no reload: an ask recorded on the peer moved "Asked" from 3 to 4 within 1 s (before: no change in 25 s), and `ask resolve <ask> cancelled` on the peer moved it back to 3 within 1 s. An ask sent from the main board's Ask box to Pylon showed its tile within 3 s.
+- Tests: `board/src/lib/sse.test.ts` ("peer_reset replaces that host's asks"), and `crates/daemon/tests/peer_e2e.rs` (`board_starts_a_peers_orchestrator_and_asks_it` now waits for a `peer_reset` that carries the new ask and reads it from the board host's `/api/v1/board`, with no `summary`).
 
 ### UA-17 - The CLI cannot read an answer (P1, open)
 
@@ -268,6 +278,8 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 - At 390 px the "x" that removes a project in the Ask box wraps to a line of its own.
 - To verify: the Ask box said "will start orchestrator" for Lantern, whose orchestrator was running, right after a page load. The label may read "not running" while the agents list still loads (`board/src/components/shell/ask-dialog.tsx`, `statusOf`).
 - The Inbox counts unread replies in "Needs you 8". A reply is news, not a job for the owner.
+- To verify: the `A` key that opens the Ask box may also type "a" into its field. Seen once with a scripted key press (`chrome-devtools-axi press a`); not checked with a real keyboard.
+- To verify: `board/src/components/shell/ask-settings.test.tsx` (line 181, the folder field's value) failed once in a full `bun run test` while the bench ran, and passed 3 times alone and in the next full run. It has a `waitFor` deadline, so the cause is probably the machine's load.
 
 ### DX-01 - A debug build made before the board was built never served the board (fixed)
 
@@ -300,7 +312,7 @@ Next step for these: find out whether they fail on a quiet machine and on Linux.
 
 Order of work, highest owner value first. Fixes that share a cause are grouped.
 
-1. UA-15 part 1 with UA-16 and UA-18: an ask is honest from end to end. A peer ask shows at once, the tile opens, an answer is announced, and the wrong ask can be cancelled.
+1. UA-18 (UA-16 and UA-15 part 1 are done): the ask tile opens, an answer shows as "Answered", and the wrong ask can be cancelled. For this host's asks no spec change is needed if the answered state comes from the replies read; check `docs/spec/protocol.md` section 7 before a field is added to the `asked` rows.
 2. UA-19 with UA-04 and UA-11: what a card says about its own progress. The worker's report on the tile, a readable timeline, no ended run in "Working".
 3. UA-02 with UA-05 and UA-06: the "needs you" path. The question is on the card, the Inbox is ordered by urgency, and the kind is named.
 4. UA-20 with UA-21 and UA-22: start a task from anywhere on the board.
@@ -314,7 +326,7 @@ Order of work, highest owner value first. Fixes that share a cause are grouped.
 
 - The test failures in "Gates on the bench machine": six tests fail on this machine without any change of this audit. Recommendation: one iteration finds the cause of the four holder failures (they may be real macOS bugs of the terminal holder); the two 10 ms budgets are judged against a quiet machine.
 
-- UA-15 part 2: `docs/spec/protocol.md` section 10 says that ask text stays on the peer, and replies are not federated. With that rule the owner can never read, on one board, the answer to a question that the same board sent. Recommendation: for a paired host with an `act` key, let the link carry the first line of each ask and the unread replies, and forward "Mark read". The owner's words already cross the link when the ask is sent. Part 1 of UA-15 needs no decision and comes first.
+- UA-15 part 2 (the last P0): `docs/spec/protocol.md` section 10 says that ask text stays on the peer, and replies are not federated. With that rule the owner can never read, on one board, the answer to a question that the same board sent. Today the board says so in the Ask box, the toast and the tile (part 1, done), but the owner must still open the peer's board to read the answer. Recommendation: for a paired host with an `act` key, let the link carry the first line of each ask, an `answered_at` on each `asked` row, and the unread replies, and forward "Mark read". The owner's words already cross the link when the ask is sent. The work after a yes is about one iteration: the snapshot rows, a federated replies read, the forwarded "Mark read", and the tile and Inbox on the board.
 
 Two more candidates, to settle when their fix starts:
 

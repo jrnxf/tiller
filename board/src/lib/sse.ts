@@ -505,9 +505,12 @@ function applyPeerReset(queryClient: QueryClient, event: PeerResetEvent): void {
     queryKeyFor("/api/v1/board?filter=all"),
     (old) => {
       if (!old) return old;
+      // The Asked rows too: a peer's ask event carries no row, so its new or
+      // resolved ask reaches the board only here.
       return {
         ...old,
         rows: replaceHost(old.rows, host, at("/api/v1/board?filter=all").rows),
+        asked: replaceHost(old.asked, host, at("/api/v1/board?filter=all").asked),
       };
     },
   );

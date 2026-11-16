@@ -155,7 +155,11 @@ test("a peer's ask is a tile in that host's own lane, with its host chip and wha
   const [ask] = askTiles(screen.getByTestId("lane-host-d/fleet"));
   expect(ask).toBeDefined();
   expect(within(ask as HTMLElement).getByTestId("host-chip").textContent).toBe("host-d");
-  expect(ask?.textContent).toContain("Waiting for the orchestrator to tag this ask");
+  // The link carries no ask text and no answer: the tile says where they are.
+  expect(ask?.textContent).toContain("Ask kept on host-d");
+  expect(ask?.textContent).toContain("Text and answer are on host-d");
+  expect(ask?.title).toContain("show on the board of host-d, not here");
+  expect(ask?.textContent).not.toContain("tag");
   expect(ask?.className).not.toContain("dim");
   expect(askTiles(screen.getByTestId("lane-fleet"))).toHaveLength(0);
 });

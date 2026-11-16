@@ -145,17 +145,24 @@ const ASK_SOURCE: Record<AskSource, string> = {
 const UNTAGGED = "Waiting for the orchestrator to tag this ask";
 
 // An ask that is not a card yet: what was asked, and why it is not a card. A
-// peer's ask carries no text, so its tile says only that it waits, and its
-// host chip says whose it is. Like a card, it dims with its lane or its link.
+// peer's ask carries no text and its answer stays on the peer, so its tile
+// says where both are read. Like a card, it dims with its lane or its link.
 function AskTile({ ask, lane }: { ask: NonNullable<Tile["ask"]>; lane: LaneHealth["kind"] }) {
   const source = ask.source ? ASK_SOURCE[ask.source] : null;
   const summary = ask.summary || null;
   const standing = useStanding(ask);
+  const owner = ownerOf(ask);
+  // Short, since the tile cuts this line at its width; the tooltip has room.
+  const waits = owner ? `Text and answer are on ${owner}` : UNTAGGED;
+  const title = summary ?? (owner ? `Ask kept on ${owner}` : UNTAGGED);
+  const tip = owner
+    ? `This ask's text and its answer show on the board of ${owner}, not here`
+    : waits;
   return (
     <div
       className={`card${lane === "disconnected" || standing.dim ? " dim" : ""}`}
       data-peer-state={standing.peer ? (standing.dim ? "stale" : "live") : undefined}
-      title={summary ? `${summary}\n${UNTAGGED}` : UNTAGGED}
+      title={title === tip ? title : `${title}\n${tip}`}
     >
       <div className="c-top">
         <Status mark="asked" />
@@ -168,11 +175,15 @@ function AskTile({ ask, lane }: { ask: NonNullable<Tile["ask"]>; lane: LaneHealt
         ) : null}
       </div>
       <div className="c-title">
-        <span>{summary ?? UNTAGGED}</span>
+        <span>{title}</span>
       </div>
       {summary ? (
         <div className="c-from">
           <span>Waiting for the orchestrator to tag it</span>
+        </div>
+      ) : owner ? (
+        <div className="c-from">
+          <span>{waits}</span>
         </div>
       ) : null}
       <div className="c-chips">

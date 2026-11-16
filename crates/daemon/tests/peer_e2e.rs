@@ -961,6 +961,7 @@ fn board_starts_a_peers_orchestrator_and_asks_it() {
     assert_eq!(status, 200, "{again}");
     assert_eq!(again["data"]["session"]["id"], session.as_str());
 
+    let events = sse(world.board_daemon.port, &world.cookie);
     let (status, asked) = world.post(
         "/api/v1/projects/alpha/asks",
         &json!({
@@ -971,6 +972,26 @@ fn board_starts_a_peers_orchestrator_and_asks_it() {
     );
     assert_eq!(status, 200, "{asked}");
     assert_eq!(asked["host"], LABEL);
+    // The ask shows on an open board with no reload: an ask event carries no
+    // row, so the peer's next snapshot brings it, and the board host pushes
+    // that to browsers as a `peer_reset` with the Asked row in it.
+    let ask = asked["data"]["ask"]["id"].as_str().unwrap().to_owned();
+    until("a peer_reset that carries the peer's new ask", || {
+        let data = events.recv_timeout(Duration::from_millis(100)).ok()?;
+        let reset: Value = serde_json::from_str(&data).ok()?;
+        (reset["queries"]["/api/v1/board?filter=all"]["asked"].as_array()?)
+            .iter()
+            .any(|row| row["id"] == ask.as_str())
+            .then_some(())
+    });
+    let (status, board) = world.get("/api/v1/board?filter=all");
+    assert_eq!(status, 200, "{board}");
+    let row = (board["asked"].as_array().unwrap().iter())
+        .find(|row| row["id"] == ask.as_str())
+        .unwrap_or_else(|| panic!("the peer's ask is not on the board: {board}"));
+    assert_eq!(row["host"], LABEL);
+    // The ask's text stays on the peer (protocol.md section 10).
+    assert!(row.get("summary").is_none(), "{row}");
     let target: String = world
         .peer
         .open()

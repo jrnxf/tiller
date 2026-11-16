@@ -47,3 +47,16 @@ export function askFor(message: string, others: string[]): string {
   const footer = footerFor(others);
   return footer ? `${message}\n\n${footer}` : message;
 }
+
+// A paired host keeps the text of an ask and its answer (protocol.md section
+// 10), so this board cannot show the answer of a project that host owns. The
+// owner is told so before the send and after it, never left to wait. `owner`
+// is the paired host's label, or undefined for this host's own project.
+export function answersElsewhere(projects: { name: string; owner?: string }[]): string | null {
+  const peers = projects.filter((project) => project.owner !== undefined);
+  if (peers.length === 0) return null;
+  const hosts = [...new Set(peers.map((project) => project.owner))].join(" and ");
+  if (projects.length === 1) return `The answer shows on the board of ${hosts}, not in this Inbox.`;
+  const names = peers.map((project) => project.name).join(", ");
+  return `The answer from ${names} shows on the board of ${hosts}, not in this Inbox.`;
+}

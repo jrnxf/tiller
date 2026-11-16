@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { askFor, footerFor, mentionedKeys, messageFor } from "./ask-plan";
+import { answersElsewhere, askFor, footerFor, mentionedKeys, messageFor } from "./ask-plan";
 import type { AskPiece } from "./ask-plan";
 
 const text = (value: string): AskPiece => ({ kind: "text", text: value });
@@ -52,5 +52,27 @@ describe("footerFor and askFor", () => {
   it("adds nothing for a single project", () => {
     expect(footerFor([])).toBeNull();
     expect(askFor("optimize fonts", [])).toBe("optimize fonts");
+  });
+});
+
+describe("answersElsewhere", () => {
+  it("says nothing when every project is this host's own", () => {
+    expect(answersElsewhere([{ name: "Harbor" }, { name: "Quill" }])).toBeNull();
+  });
+
+  it("says where the answer of one peer project shows", () => {
+    expect(answersElsewhere([{ name: "Pylon", owner: "peer" }])).toBe(
+      "The answer shows on the board of peer, not in this Inbox.",
+    );
+  });
+
+  it("names only the peer projects of a mixed ask, and each host once", () => {
+    expect(
+      answersElsewhere([
+        { name: "Harbor" },
+        { name: "Pylon", owner: "peer" },
+        { name: "Orbit", owner: "peer" },
+      ]),
+    ).toBe("The answer from Pylon, Orbit shows on the board of peer, not in this Inbox.");
   });
 });

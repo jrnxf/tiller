@@ -657,6 +657,49 @@ test("peer_reset replaces that host's rows and no one else's", () => {
   stop();
 });
 
+// An Asked row: this host's own, or with `host` that peer's.
+function askRow(id: string, host?: string) {
+  return {
+    id,
+    project_id: "alpha",
+    session_id: null,
+    received_at: "2026-11-02T12:00:00.000Z",
+    age_seconds: 1,
+    source: "board" as const,
+    ...(host ? { host, link: "live" as const, as_of: "2026-11-02T12:00:02.000Z" } : {}),
+  };
+}
+
+test("peer_reset replaces that host's asks, so a peer's new ask shows without a reload", () => {
+  const { queryClient, stop, source } = federatedStream();
+  const key = queryKeyFor("/api/v1/board?filter=all");
+  const local = { ...askRow("01JASKLOCAL"), summary: "A local ask" };
+  queryClient.setQueryData<BoardResponse>(key, (old) =>
+    old ? { ...old, asked: [local, askRow("01JASKOLD", "host-d")] } : old,
+  );
+  const reset = (asked: unknown) =>
+    source.emit("peer_reset", {
+      host: "host-d",
+      host_id: "01JPEERD0000000000000000D",
+      link: "live",
+      as_of: "2026-11-02T12:00:02.000Z",
+      queries: { "/api/v1/board?filter=all": asked === undefined ? {} : { rows: [], asked } },
+    });
+  const asked = () => queryClient.getQueryData<BoardResponse>(key)?.asked ?? [];
+
+  reset([askRow("01JASKNEW", "host-d")]);
+  expect(asked()).toEqual([local, askRow("01JASKNEW", "host-d")]);
+
+  // A reset without the board path keeps the peer's asks.
+  reset(undefined);
+  expect(asked()).toEqual([local, askRow("01JASKNEW", "host-d")]);
+
+  // The peer resolved its ask: only this host's ask is left.
+  reset([]);
+  expect(asked()).toEqual([local]);
+  stop();
+});
+
 test("a link event updates that machine's link state and no other", () => {
   const { queryClient, stop, source } = federatedStream();
   const machine = (label: string) =>
