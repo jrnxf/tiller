@@ -418,6 +418,15 @@ export function applyChange(
         // events only, so the Inbox reads them again.
         refetchPaths(queryClient, attentionPath);
       }
+      // The away status counts the runs that started under the contract
+      // ("Runs 1 of 6"), and the brief lists them. The contract is this
+      // host's own, so a peer's run does not move it.
+      if (!peer && event.entity === "run") {
+        queryClient.invalidateQueries({
+          queryKey: queryKeyFor(awayBriefPath),
+          refetchType: "active",
+        });
+      }
   }
 
   if (event.card) {

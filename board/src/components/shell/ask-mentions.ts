@@ -1,5 +1,7 @@
 import type { Editor } from "@tiptap/core";
 
+import { scoreMatch } from "../../lib/commands";
+
 // One project the owner can mention. This file holds what the dialog needs
 // before the editor loads, so the dialog imports no editor code.
 export interface MentionOption {
@@ -24,4 +26,19 @@ export function removeMention(editor: Editor, key: string) {
   });
   for (const { from, to } of at) tr.delete(from, to);
   editor.view.dispatch(tr);
+}
+
+// The projects that a typed `@` query finds, the best match first. Fuzzy enough
+// for project names: the typed letters appear in order. A name that starts with
+// them comes before a name that only holds them ("la": Lantern, then Atlas),
+// because Enter takes the first row.
+export function rankMentions(options: MentionOption[], query: string): MentionOption[] {
+  const ranked: { option: MentionOption; score: number }[] = [];
+  for (const option of options) {
+    const score = scoreMatch(option.name, query);
+    if (score !== null) ranked.push({ option, score });
+  }
+  // Array.prototype.sort is stable, so equal scores keep the listed order.
+  ranked.sort((a, b) => b.score - a.score);
+  return ranked.map(({ option }) => option);
 }

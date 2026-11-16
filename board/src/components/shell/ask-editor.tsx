@@ -9,6 +9,7 @@ import { useEffect, useRef } from "react";
 import type { RefObject } from "react";
 
 import type { AskPiece } from "../../lib/ask-plan";
+import { rankMentions } from "./ask-mentions";
 import type { MentionOption } from "./ask-mentions";
 
 // The text and chips of the document, in order. A new paragraph reads as a line break.
@@ -26,17 +27,6 @@ function piecesOf(doc: JSONContent): AskPiece[] {
     }
   });
   return pieces;
-}
-
-// Fuzzy enough for project names: the typed letters appear in order.
-function matches(name: string, query: string): boolean {
-  const lower = name.toLowerCase();
-  let at = 0;
-  for (const letter of query.toLowerCase()) {
-    at = lower.indexOf(letter, at) + 1;
-    if (at === 0) return false;
-  }
-  return true;
 }
 
 interface Popup {
@@ -219,8 +209,9 @@ export function AskEditor(props: Props) {
             allowedPrefixes: null,
             items: ({ query }) => {
               const { options, used } = latest.current;
-              return options.filter(
-                (option) => !used.includes(option.key) && matches(option.name, query),
+              return rankMentions(
+                options.filter((option) => !used.includes(option.key)),
+                query,
               );
             },
             render: () =>

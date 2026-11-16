@@ -46,6 +46,32 @@ export function closeOutcome(kind: string, choice: CloseChoice): string {
   return DONE_OUTCOME[kind] ?? "completed";
 }
 
+// What "Done" needs on a card of this kind, in the owner's words; null when it
+// needs nothing. The store refuses the close without it (a ship card closes
+// `landed` only after an approved merge, a scout card `reported` only with its
+// report), so the dialog says so before the owner writes a reason.
+export function doneNeeds(kind: string): string | null {
+  if (kind === "ship") {
+    return "Done needs a landing: the card closes as done by itself when its approved work lands. With no landing, the close is refused. To end the card without one, pick Won't do.";
+  }
+  if (kind === "scout") {
+    return "Done needs the scout's report on the card. With no report, the close is refused. To end the card without one, pick Won't do.";
+  }
+  return null;
+}
+
+// The store's two refusals of a "Done" close, in the owner's words; null for
+// any other failure, which shows as it came.
+export function doneRefusal(message: string): string | null {
+  if (message.includes("landed needs")) {
+    return "Not closed: the work of this card has not landed. The card closes as done by itself when an approved merge lands. To end it now, pick Won't do and say where the work is.";
+  }
+  if (message.includes("no report artifact")) {
+    return "Not closed: the card has no scout report yet. To end it now, pick Won't do and say why.";
+  }
+  return null;
+}
+
 // How a closed card's outcome reads on its page.
 export function outcomeLabel(outcome: string | null): string {
   switch (outcome) {
@@ -304,6 +330,15 @@ function CloseDialog({ card, onClose }: { card: BoardRow; onClose: () => void })
     onRecorded: onClose,
   });
   const keep = useRef<HTMLButtonElement>(null);
+  const needs = doneNeeds(card.kind);
+  const refusal = action.error ? doneRefusal(action.error.message) : null;
+  // Why "Close card" is off, so a dim button is never the only word.
+  const missing =
+    outcome === null
+      ? "Pick an outcome and give a reason to close the card."
+      : reason.trim() === ""
+        ? "Give a reason to close the card."
+        : null;
   return (
     <ProjectDialog name="close-card" pending={action.pending} onClose={onClose} initial={keep}>
       <h2 id="close-card-dialog-title">Close {card.display_id}</h2>
@@ -323,6 +358,11 @@ function CloseDialog({ card, onClose }: { card: BoardRow; onClose: () => void })
           ]}
         />
       </Field>
+      {choice === "done" && needs !== null ? (
+        <p className="pa-help" data-testid="close-done-needs">
+          {needs}
+        </p>
+      ) : null}
       <Field label="Reason" htmlFor="close-reason">
         <textarea
           id="close-reason"
@@ -333,7 +373,18 @@ function CloseDialog({ card, onClose }: { card: BoardRow; onClose: () => void })
           onChange={(event) => setReason(event.target.value)}
         />
       </Field>
-      <ActionFailure error={action.error} host={ownerOf(card)} />
+      {refusal !== null ? (
+        <p className="refusal" role="alert">
+          {refusal}
+        </p>
+      ) : (
+        <ActionFailure error={action.error} host={ownerOf(card)} />
+      )}
+      {missing !== null && !action.pending ? (
+        <p className="pa-help" data-testid="close-missing">
+          {missing}
+        </p>
+      ) : null}
       <div className="dialog-actions">
         <button
           ref={keep}

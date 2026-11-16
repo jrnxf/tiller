@@ -11,7 +11,7 @@ import { loadPrefs, prefsStore } from "../../lib/prefs";
 import { receiptsStore } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
 import { choose } from "../../test-select";
-import { closeOutcome, outcomeLabel } from "./card-lifecycle";
+import { closeOutcome, doneNeeds, doneRefusal, outcomeLabel } from "./card-lifecycle";
 import { createTestQueryClient, loadRouteChunks } from "../../test-app";
 
 await loadRouteChunks();
@@ -168,6 +168,37 @@ test("Close needs an outcome and a reason, then sends both", async () => {
   expect(sent().method).toBe("POST");
   expect(sent().path).toBe(`/api/v1/cards/${SHIP}/close`);
   expect(sent().body).toMatchObject({ outcome: "abandoned", reason: "not needed now" });
+});
+
+test("Close says what Done needs on a ship card, and why the button is off", async () => {
+  stubApi();
+  const actions = await renderCard();
+  fireEvent.click(within(actions).getByRole("button", { name: "Close" }));
+  const dialog = await screen.findByRole("dialog");
+  expect(within(dialog).getByTestId("close-missing").textContent).toContain("Pick an outcome");
+  expect(within(dialog).queryByTestId("close-done-needs")).toBeNull();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Done" }));
+  expect(within(dialog).getByTestId("close-done-needs").textContent).toContain("needs a landing");
+  expect(within(dialog).getByTestId("close-missing").textContent).toBe(
+    "Give a reason to close the card.",
+  );
+  fireEvent.click(within(dialog).getByRole("button", { name: "Won't do" }));
+  expect(within(dialog).queryByTestId("close-done-needs")).toBeNull();
+  fireEvent.change(within(dialog).getByRole("textbox"), { target: { value: "not needed now" } });
+  expect(within(dialog).queryByTestId("close-missing")).toBeNull();
+});
+
+test("the store's refusal of a Done close reads as a sentence with the next step", () => {
+  expect(
+    doneRefusal(
+      'card beta-8: landed needs a succeeded merge or land approval, or a recovery item answered "Mark landed"',
+    ),
+  ).toContain("has not landed");
+  expect(doneRefusal("card beta-9: no report artifact is recorded on the card")).toContain(
+    "no scout report",
+  );
+  expect(doneRefusal("the daemon is not reachable")).toBeNull();
+  expect(doneNeeds("ops")).toBeNull();
 });
 
 test("Cancel asks for a reason and confirms", async () => {

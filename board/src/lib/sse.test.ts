@@ -17,6 +17,7 @@ import { hydrateFromSnapshot } from "./boot";
 import type { QueryPath } from "./queries";
 import {
   attentionPath,
+  awayBriefPath,
   boardPath,
   hostConfigPath,
   machinesPath,
@@ -430,6 +431,20 @@ test("a session or run event marks the agents and run details stale", () => {
 
   expect(queryClient.getQueryState(run)?.isInvalidated).toBe(true);
   expect(queryClient.getQueryState(queryKeyFor("/api/v1/agents"))?.isInvalidated).toBe(true);
+});
+
+test("a run of this host marks the away status stale, and a peer's run does not", () => {
+  // The header's "Runs 1 of 6" and the brief count the runs started under the
+  // away contract, and no approval event says that one started.
+  const away = queryKeyFor(awayBriefPath);
+  const queryClient = seededClient();
+  queryClient.setQueryData(away, {});
+
+  applyChange(queryClient, event({ entity: "run" }), { peer: true });
+  expect(queryClient.getQueryState(away)?.isInvalidated).toBe(false);
+
+  applyChange(queryClient, event({ entity: "run" }));
+  expect(queryClient.getQueryState(away)?.isInvalidated).toBe(true);
 });
 
 test("a session or observation event marks the permission prompts stale", () => {
