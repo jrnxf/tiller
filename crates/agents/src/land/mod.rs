@@ -624,6 +624,33 @@ impl Lander<'_> {
                     &format!("the work landed after it, as {short}"),
                 )?;
             }
+            // An earlier request on the card, bound to an older head, no
+            // longer matches the branch that just landed. Left open, its
+            // merge item would keep the card open and in "Needs you" (UA-55).
+            let siblings: Vec<String> = {
+                let mut statement = store
+                    .conn()
+                    .prepare(
+                        "SELECT id FROM approvals
+                         WHERE card_id = ?1 AND id <> ?2
+                           AND kind IN ('merge', 'land_direct')
+                           AND state IN ('requested', 'accepted')
+                         ORDER BY id",
+                    )
+                    .map_err(tiller_core::Error::from)?;
+                statement
+                    .query_map([card, &approval.id], |row| row.get::<_, String>(0))
+                    .map_err(tiller_core::Error::from)?
+                    .collect::<std::result::Result<_, _>>()
+                    .map_err(tiller_core::Error::from)?
+            };
+            for sibling in siblings {
+                store.approval_stale(
+                    &lock.ctx(),
+                    &sibling,
+                    &format!("the work landed as {short} through a later request"),
+                )?;
+            }
         }
         let finished = store.approval_finish(
             &lock.ctx(),

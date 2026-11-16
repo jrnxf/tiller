@@ -12,9 +12,9 @@ use std::process::Command;
 use serde_json::{Value, json};
 use tiller_core::domain::{
     AnsweredVia, Approval, ApprovalAction, ApprovalKind, ApprovalState, Attention, AttentionKind,
-    Boundary, Card, CardKind, Checks, Coverage, Delivery, Effort, GrantKind, MergeGate, Mergeable,
-    OutboxMessage, PipelineState, Pr, PrState, Publish, ReviewDecision, Reviewer, Run, RunRole,
-    Stage, StatusState, Verdict,
+    Boundary, Card, CardKind, CardOutcome, Checks, Coverage, Delivery, Effort, GrantKind,
+    MergeGate, Mergeable, OutboxMessage, PipelineState, Pr, PrState, Publish, ReviewDecision,
+    Reviewer, Run, RunRole, Stage, StatusState, Verdict,
 };
 use tiller_core::state::approvals::{Decision, NewApproval, NewGrant, NewPr, PrFetch};
 use tiller_core::state::cards::NewCard;
@@ -1460,6 +1460,55 @@ fn direct_push_is_fast_forward_of_bound_sha() {
     );
     assert!(matches!(pushed, direct::Pushed::Refused(_)), "{pushed:?}");
     assert_eq!(git(remote.path(), &["rev-parse", "refs/heads/main"]), head);
+}
+
+/// The worker pushed again after the orchestrator asked: the owner approves
+/// the newer request and it lands. The older request, bound to the earlier
+/// head, goes stale with its question, so the card closes `landed` and does
+/// not stay in "Needs you" (UA-55).
+#[test]
+fn a_landing_stales_the_older_requests_on_its_card() {
+    let (remote, work, first) = repos();
+    let mut world = World::new(Delivery::DirectPush);
+    let lock = world.lock();
+    let forge = FakeForge::new();
+    let card = world.card("push it");
+    let run = world.builder(&card, Some(work.path()), "fm/alpha-1");
+    let request = |world: &mut World, head: &str| {
+        world
+            .store
+            .approval_request(
+                &owner(),
+                NewApproval {
+                    kind: ApprovalKind::LandDirect,
+                    card: card.id.clone(),
+                    run_id: Some(run.clone()),
+                    pr_id: None,
+                    branch: Some("fm/alpha-1".into()),
+                    head_sha: head.into(),
+                    action: ApprovalAction::Push,
+                    memory_paths: None,
+                    grant_id: None,
+                },
+            )
+            .unwrap()
+            .value
+    };
+    let older = request(&mut world, &first);
+    let head = commit(work.path(), "later");
+    let newer = request(&mut world, &head);
+    assert_eq!(world.attention(&card).len(), 2);
+    world.accept(&newer);
+
+    let landed = lander(&forge)
+        .land(&lock, &mut world.store, &newer.id)
+        .unwrap();
+    assert!(matches!(landed, Landed::Succeeded { .. }), "{landed:?}");
+    assert_eq!(git(remote.path(), &["rev-parse", "refs/heads/main"]), head);
+    assert_eq!(world.approval(&older.id).state, ApprovalState::Stale);
+    assert!(world.attention(&card).is_empty());
+    let closed: Card = get(world.store.conn(), "card", &card.id).unwrap();
+    assert_eq!(closed.outcome, Some(CardOutcome::Landed));
 }
 
 /// A `land_direct` grant that expires after the approval it accepted: the

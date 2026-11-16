@@ -1,15 +1,18 @@
 //! Approvals, landing, grants and away mode (`protocol.md` section 6.4,
 //! Attention and approvals). `tiller land` needs the daemon and waits for it.
 
+use std::path::Path;
+
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
 use tiller_agents::handoff::ReturnBrief;
 use tiller_agents::land::DaemonLock;
 use tiller_core::domain::{
     AnsweredVia, Approval, ApprovalAction, ApprovalKind, ApprovalState, Checks, GrantKind, Pr,
-    Role, Run, Worktree,
+    Project, Role, Run, Worktree,
 };
 use tiller_core::state::approvals::{Decision, NewApproval, NewGrant};
+use tiller_core::state::caches::{WorktreeReading, landed_heads};
 use tiller_core::state::{find, get, list, resolve_card, resolve_id};
 use tiller_core::{Actor, Ctx, Store, Timestamp};
 
@@ -18,6 +21,8 @@ use super::attention::chat_ask;
 use super::summary;
 use crate::app::{App, Done, Failure, Outcome};
 use crate::lisbon;
+use tiller_reconcile::git::GitScanner;
+use tiller_reconcile::sources::Scanner;
 
 #[derive(Subcommand, Debug)]
 pub enum Request {
@@ -151,6 +156,41 @@ pub struct AwayStart {
     pub key: KeyArg,
 }
 
+/// Scans a worktree of this host and records the reading (`cache.refresh`),
+/// so a request binds the head the worktree has now. A worktree on another
+/// host, or one that is gone, keeps its last reading.
+fn refresh_worktree(
+    app: &App,
+    store: &mut Store,
+    run: &Run,
+    project: &str,
+    path: &Path,
+) -> Result<(), Failure> {
+    if run.host_id != store.local_host()?.id {
+        return Ok(());
+    }
+    let project: Project = get(store.conn(), "project", project)?;
+    let text = path.to_string_lossy().into_owned();
+    let heads = landed_heads(store.conn(), &run.host_id, &text)?;
+    let scan = GitScanner::new().scan(path, &project, &heads);
+    if scan.exists {
+        store.cache_worktree(
+            &app.ctx(),
+            &run.host_id,
+            WorktreeReading {
+                path: text,
+                project_id: Some(project.id.clone()),
+                run_id: Some(run.id.clone()),
+                branch: scan.branch,
+                head_sha: scan.head_sha,
+                dirty: scan.dirty,
+                unlanded_commits: scan.unlanded_commits,
+            },
+        )?;
+    }
+    Ok(())
+}
+
 pub fn run_request(app: &App, cmd: Request) -> Done {
     let Request::Request(args) = cmd;
     request(app, args)
@@ -199,6 +239,15 @@ fn request(app: &App, args: RequestArgs) -> Done {
                 .branch
                 .clone()
                 .ok_or_else(|| Failure::refused(format!("run {} has no branch", run.id)))?;
+            // The lander pushes the branch's head as git reads it at the
+            // landing, and stales an approval bound to any other commit. The
+            // worktree cache lags a commit by up to a reconcile pass, so an
+            // approval bound to it asked the owner to approve the branch's
+            // first commit, then again (UA-54). Read this host's worktree
+            // now, as spawn and `tiller done` do, and bind the fresh reading.
+            if let Some(path) = run.worktree_path.as_deref() {
+                refresh_worktree(app, &mut store, &run, &card.project_id, Path::new(path))?;
+            }
             let worktree: Option<Worktree> = match &run.worktree_path {
                 Some(path) => find(
                     store.conn(),

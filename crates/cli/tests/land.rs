@@ -385,3 +385,96 @@ fn a_second_owner_run_of_request_and_approve_is_harmless() {
     );
     assert_eq!(seq(&world), accepted, "a reject after an accept wrote");
 }
+
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// The worker commits, and the orchestrator asks for the landing at once:
+/// the worktree cache still holds the branch's first commit. The request
+/// binds the head the lander will push, not the cached one, so the owner
+/// approves the work and approves it once (UA-54).
+#[test]
+fn a_direct_landing_binds_the_branch_head_and_not_a_stale_cache() {
+    use tiller_core::domain::{Effort, RunRole};
+    use tiller_core::state::caches::WorktreeReading;
+    use tiller_core::state::runs::{NewRun, SpawnChecks};
+
+    let world = World::initialized();
+    world.orchestrator();
+    world.must(&[
+        "card", "create", "alpha", "--kind", "ship", "--title", "One",
+    ]);
+    let work = tempfile::tempdir().unwrap();
+    git(work.path(), &["init", "-q", "-b", "alpha-1-build"]);
+    git(
+        work.path(),
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+    );
+    let first = git(work.path(), &["rev-parse", "HEAD"]);
+    let path = work.path().to_string_lossy().into_owned();
+    let started = world
+        .store()
+        .run_start(
+            &world.owner_ctx(),
+            None,
+            NewRun {
+                card: "alpha-1".into(),
+                role: RunRole::Builder,
+                model: "test-model".into(),
+                effort: Effort::Medium,
+                host_id: None,
+                worktree_path: Some(path.clone()),
+                branch: Some("alpha-1-build".into()),
+                base_branch: Some("main".into()),
+                base_sha: None,
+                config_hash: None,
+                checks: SpawnChecks::default(),
+            },
+        )
+        .unwrap()
+        .value;
+    let mut store = world.store();
+    store
+        .cache_worktree(
+            &Ctx::new(Actor::Daemon),
+            &started.run.host_id,
+            WorktreeReading {
+                path: path.clone(),
+                project_id: Some("alpha".into()),
+                run_id: Some(started.run.id.clone()),
+                branch: Some("alpha-1-build".into()),
+                head_sha: Some(first.clone()),
+                dirty: Some(false),
+                unlanded_commits: Some(0),
+            },
+        )
+        .unwrap();
+    std::fs::write(work.path().join("feature"), "work\n").unwrap();
+    git(work.path(), &["add", "feature"]);
+    git(work.path(), &["commit", "-q", "-m", "the work"]);
+    let head = git(work.path(), &["rev-parse", "HEAD"]);
+    assert_ne!(head, first);
+
+    let out = world.must(&["approval", "request", "alpha-1", "--kind", "land_direct"]);
+    assert_eq!(out.data()["head_sha"], head.as_str(), "{}", out.json);
+}
