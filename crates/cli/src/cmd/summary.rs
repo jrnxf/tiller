@@ -137,6 +137,35 @@ pub fn answered(data: &Value) -> String {
     line
 }
 
+/// `tiller away start`: `names` are the covered projects' names, `until` is
+/// the end as the owner reads it, and `host` is the one host it binds.
+pub fn away_started(data: &Value, names: &[String], until: &str, host: &str) -> String {
+    let projects = match names {
+        [] => "no project".to_owned(),
+        [one] => one.clone(),
+        [first @ .., last] => format!("{} and {last}", first.join(", ")),
+    };
+    let mut line = format!("Away mode is on for {projects} on {host} until {until} (Lisbon).");
+    match data
+        .get("scope")
+        .and_then(|scope| scope.get("spend"))
+        .and_then(|spend| spend.get("max_new_runs"))
+        .and_then(Value::as_i64)
+    {
+        Some(1) => line.push_str(&format!(" At most 1 new run starts on {host}.")),
+        Some(n) => line.push_str(&format!(" At most {n} new runs start on {host}.")),
+        None => line.push_str(" No cap on new runs."),
+    }
+    match data.get("scope").and_then(|scope| scope.get("merge")) {
+        Some(Value::String(merge)) if merge == "none" => line.push_str(" Nothing merges."),
+        Some(Value::Object(_)) => {
+            line.push_str(" Your grants and the conditions you gave merge.");
+        }
+        _ => line.push_str(" Only your existing grants merge."),
+    }
+    line
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -150,6 +179,38 @@ mod tests {
         let cut = quote(&long);
         assert_eq!(cut.chars().count(), QUOTE + 2);
         assert!(cut.ends_with("...'"));
+    }
+
+    #[test]
+    fn away_mode_names_the_projects_the_end_and_the_limits() {
+        let data = json!({"scope": {"spend": {"max_new_runs": 1}, "merge": "none"}});
+        assert_eq!(
+            away_started(
+                &data,
+                &["Alpha".to_owned(), "Beta".to_owned()],
+                "Tue 2026-11-17 09:00",
+                "host-a"
+            ),
+            "Away mode is on for Alpha and Beta on host-a until Tue 2026-11-17 09:00 (Lisbon). \
+             At most 1 new run starts on host-a. Nothing merges."
+        );
+        let open = json!({"scope": {}});
+        assert_eq!(
+            away_started(
+                &open,
+                &["Alpha".to_owned()],
+                "Tue 2026-11-17 09:00",
+                "host-a"
+            ),
+            "Away mode is on for Alpha on host-a until Tue 2026-11-17 09:00 (Lisbon). \
+             No cap on new runs. Only your existing grants merge."
+        );
+        let conditions = json!({"scope": {"spend": {"max_new_runs": 6}, "merge": {"v": 1}}});
+        assert!(
+            away_started(&conditions, &["Alpha".to_owned()], "x", "host-a").ends_with(
+                "At most 6 new runs start on host-a. Your grants and the conditions you gave merge."
+            )
+        );
     }
 
     #[test]

@@ -259,6 +259,16 @@ fn lists_this_host(command: &Command) -> bool {
     }
 }
 
+/// An away command: `Some(true)` when it turns away mode on. Away mode binds
+/// this host only, so a person with a paired host is told what it leaves out.
+fn away_command(command: &Command) -> Option<bool> {
+    match command {
+        Command::Away(approval::Away::Start(_)) => Some(true),
+        Command::Away(_) => Some(false),
+        _ => None,
+    }
+}
+
 /// Prints the response to stdout: TOON for agents, JSON on request. Nothing
 /// else goes to stdout (`protocol.md` 6.1).
 fn emit(mut response: Value, json: bool) {
@@ -369,6 +379,7 @@ fn main() -> ExitCode {
     let json = cli.json;
     let app = App::from_env(cli.db);
     let whole_host = lists_this_host(&cli.command);
+    let away = away_command(&cli.command);
     match dispatch(&app, cli.command) {
         Ok(mut outcome) => {
             // A list of this host is part of the whole on a board host with
@@ -378,6 +389,13 @@ fn main() -> ExitCode {
                 && let Some(elsewhere) = Elsewhere::of(&app)
             {
                 outcome.warning = Some(elsewhere.only_here(&elsewhere::typed(std::env::args_os())));
+            }
+            if let Some(starting) = away
+                && outcome.warning.is_none()
+                && let Some(elsewhere) = Elsewhere::of(&app)
+            {
+                outcome.warning =
+                    Some(elsewhere.away_here(starting, &elsewhere::typed(std::env::args_os())));
             }
             emit(outcome.into_response(), json);
             ExitCode::SUCCESS

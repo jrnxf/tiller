@@ -104,6 +104,28 @@ test("idle, the Away button sits left of Ask and opens the Start dialog", async 
   expect(within(dialog).getByRole("radio", { name: "Existing grants" }).ariaChecked).toBe("true");
 });
 
+test("with a paired host the dialog says whose projects away mode leaves out", async () => {
+  await renderApp("federated");
+  fireEvent.click(screen.getByRole("button", { name: "Away" }));
+  const dialog = await screen.findByRole("dialog", { name: "Start away mode" });
+  const note = within(dialog).getByTestId("away-uncovered").textContent ?? "";
+  expect(note).toMatch(/^Away mode covers \S+ only, not host-\w+'s \d+ projects?/);
+  expect(note).toContain("They keep running with no away limit, and their grants still merge.");
+  expect(note).toMatch(/start away mode on .*own boards?/);
+  // No paired host's project is offered: the contract could not hold it.
+  const offered = within(dialog)
+    .getAllByRole("checkbox")
+    .map((box) => box.closest("label")?.textContent ?? "");
+  expect(offered.some((name) => name.startsWith("host /"))).toBe(false);
+});
+
+test("with no paired host the dialog has no such note", async () => {
+  await renderApp("default");
+  fireEvent.click(screen.getByRole("button", { name: "Away" }));
+  const dialog = await screen.findByRole("dialog", { name: "Start away mode" });
+  expect(within(dialog).queryByTestId("away-uncovered")).toBeNull();
+});
+
 test("Start sends the scope, as typed, to POST /api/v1/away", async () => {
   stubDaemon();
   await renderApp("default");
@@ -234,7 +256,10 @@ test("End asks nothing, sends DELETE and opens the brief", async () => {
   expect(posts("DELETE")[0]?.path).toBe("/api/v1/away");
   await waitFor(() => expect(router.state.location.pathname).toBe("/inbox"));
   expect(router.state.location.search).toEqual({ item: "away-brief" });
-  expect(await screen.findByTestId("away-brief")).toBeTruthy();
+  const card = await screen.findByTestId("away-brief");
+  // The brief names the projects it covers, and no paired host is left out here.
+  expect(card.textContent).toMatch(/Projects.*alpha/i);
+  expect(within(card).queryByTestId("away-brief-uncovered")).toBeNull();
   expect(screen.queryByRole("button", { name: /^Away until/ })).toBeNull();
   expect(screen.getByRole("button", { name: "Away" })).toBeTruthy();
 });

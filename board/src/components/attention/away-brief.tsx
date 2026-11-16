@@ -2,9 +2,16 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import type { CSSProperties } from "react";
 
 import type { AwayBrief, BoardRow, Project } from "../../lib/api-types";
-import { AWAY_BRIEF_ID, markBriefRead, mergeLabel } from "../../lib/away";
+import {
+  AWAY_BRIEF_ID,
+  markBriefRead,
+  mergeLabel,
+  ownBoards,
+  uncoveredHosts,
+  uncoveredNames,
+} from "../../lib/away";
 import { formatLisbonDay } from "../../lib/clock";
-import { projectIndex } from "../../lib/peers";
+import { ownerOf, projectIndex } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import { KIND_LABELS, formatWhen } from "./format";
 import { BackIcon, NeedsIcon } from "./icons";
@@ -139,6 +146,14 @@ export function AwayBriefDetail({ brief, ctx }: { brief: AwayBrief; ctx: Context
       ? "no quota floor"
       : `quota floor ${spend.quota_floor_percent} %`;
   const merges = brief.merged_by_grant.length;
+  const uncovered = uncoveredHosts(ctx.projects);
+  const covered = brief.projects
+    .map(
+      (id) =>
+        ctx.projects.find((project) => project.id === id && ownerOf(project) === undefined)?.name ??
+        id,
+    )
+    .join(", ");
 
   return (
     <>
@@ -163,6 +178,8 @@ export function AwayBriefDetail({ brief, ctx }: { brief: AwayBrief; ctx: Context
         <div className="ab-s">
           {brief.orders ? <p className="ab-quote">&ldquo;{brief.orders}&rdquo;</p> : null}
           <dl className="props ab-props">
+            <dt>Projects</dt>
+            <dd>{covered}</dd>
             <dt>Spend</dt>
             <dd>
               {spend.max_new_runs === null
@@ -175,6 +192,15 @@ export function AwayBriefDetail({ brief, ctx }: { brief: AwayBrief; ctx: Context
               {mergeLabel(brief.merge)}
               {` · ${plural(merges, "merge")}`}
             </dd>
+            {uncovered.length > 0 ? (
+              <>
+                <dt>Not covered</dt>
+                <dd data-testid="away-brief-uncovered">
+                  {uncoveredNames(uncovered)}. This brief does not count them: see{" "}
+                  {ownBoards(uncovered)}.
+                </dd>
+              </>
+            ) : null}
           </dl>
         </div>
         <Section title="Landed" count={brief.landed.length}>

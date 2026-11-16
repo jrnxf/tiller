@@ -4,7 +4,15 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 
 import type { AwayBrief, AwayBriefResponse, AwayMerge, Project } from "../../lib/api-types";
-import { AWAY_BRIEF_ID, MERGE_ACTIONS, mergeLabel } from "../../lib/away";
+import {
+  AWAY_BRIEF_ID,
+  MERGE_ACTIONS,
+  mergeLabel,
+  ownBoards,
+  uncoveredHosts,
+  uncoveredNames,
+} from "../../lib/away";
+import type { Uncovered } from "../../lib/away";
 import { formatLisbon, formatLisbonDay, lisbonField16, serverNow } from "../../lib/clock";
 import { ownerOf } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
@@ -13,7 +21,7 @@ import { shortcutsBlocked } from "../../lib/shortcuts";
 import { createStore } from "../../lib/store";
 import { sendMutation } from "../attention/api";
 import { useAction } from "../attention/use-action";
-import { useNamedProjects } from "../board/peer-state";
+import { useMachineRows, useNamedProjects } from "../board/peer-state";
 import { FLEET_PROJECT, ProjectDialog } from "./project-dialog";
 import "./away.css";
 
@@ -132,10 +140,14 @@ function toggled(list: string[], value: string): string[] {
 
 function AwayDialog({
   projects,
+  uncovered,
+  local,
   editing,
   onClose,
 }: {
   projects: Project[];
+  uncovered: Uncovered[];
+  local: string | null;
   editing: AwayBrief | null;
   onClose: () => void;
 }) {
@@ -212,6 +224,15 @@ function AwayDialog({
               </label>
             ))}
           </div>
+          {uncovered.length > 0 ? (
+            <p className="pa-help away-out" data-testid="away-uncovered">
+              <b>
+                Away mode covers {local ?? "this host"} only, not {uncoveredNames(uncovered)}.
+              </b>{" "}
+              They keep running with no away limit, and their grants still merge. To cover them,
+              start away mode on {ownBoards(uncovered)}.
+            </p>
+          ) : null}
         </fieldset>
         <div className="pa-f">
           <label className="pa-l" htmlFor={`${id}-orders`}>
@@ -361,6 +382,7 @@ function namesOf(ids: string[], projects: Project[]): string {
 function AwayPopover({
   brief,
   projects,
+  uncovered,
   onEdit,
   onEnd,
   ending,
@@ -368,6 +390,7 @@ function AwayPopover({
 }: {
   brief: AwayBrief;
   projects: Project[];
+  uncovered: Uncovered[];
   onEdit: () => void;
   onEnd: () => void;
   ending: boolean;
@@ -389,6 +412,14 @@ function AwayPopover({
           </dd>
           <dt>Merges</dt>
           <dd>{mergeLabel(brief.merge)}</dd>
+          {uncovered.length > 0 ? (
+            <>
+              <dt className="away-out">Not covered</dt>
+              <dd className="away-out" data-testid="away-uncovered">
+                {uncoveredNames(uncovered)}. Start away mode on {ownBoards(uncovered)}.
+              </dd>
+            </>
+          ) : null}
         </dl>
         {error ? (
           <p className="refusal" role="alert">
@@ -425,6 +456,8 @@ export function AwayControl() {
   const mine = projects.filter(
     (project) => ownerOf(project) === undefined && project.id !== FLEET_PROJECT,
   );
+  const uncovered = uncoveredHosts(projects);
+  const local = useMachineRows().find((machine) => machine.kind === "local")?.label ?? null;
   const [dialog, setDialog] = useState<"start" | "edit" | null>(null);
   const [open, setOpen] = useState(false);
   const wrap = useRef<HTMLSpanElement>(null);
@@ -509,6 +542,7 @@ export function AwayControl() {
         <AwayPopover
           brief={away}
           projects={projects}
+          uncovered={uncovered}
           ending={end.pending}
           error={end.error?.message ?? null}
           onEdit={() => {
@@ -521,6 +555,8 @@ export function AwayControl() {
       {dialog ? (
         <AwayDialog
           projects={mine}
+          uncovered={uncovered}
+          local={local}
           editing={dialog === "edit" ? away : null}
           onClose={closeDialog}
         />

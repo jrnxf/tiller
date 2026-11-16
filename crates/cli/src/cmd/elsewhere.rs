@@ -126,6 +126,41 @@ impl Elsewhere {
         }
         line
     }
+
+    /// The warning of an away command. Away mode is one host's contract
+    /// (`authority.md` section 6): its spend cap, its merge rule and its
+    /// orders bind this host only, and the board host cannot start it on a
+    /// peer. A person who leaves must not believe that the peer is covered.
+    pub fn away_here(&self, starting: bool, args: &[String]) -> String {
+        let peers = self.labels();
+        if !starting {
+            let mut line = format!(
+                "This covers {} only. {peers} is paired and keeps an away mode of its own, \
+                 which is not shown here.",
+                self.this,
+            );
+            if let Some(command) = self.command(args) {
+                line.push_str(&format!(" For {peers}, run: {command}"));
+            }
+            return line;
+        }
+        let mut line = format!(
+            "Away mode is on for {} only. {peers} is paired and is not covered: its projects \
+             keep running with no away limit, and its grants still merge.",
+            self.this,
+        );
+        let start = ["away", "start"].map(str::to_owned);
+        if let Some(command) = self.command(&start) {
+            line.push_str(&format!(
+                " To cover {peers} too, run: {command} --until <date> --projects <ids>"
+            ));
+        } else {
+            line.push_str(&format!(
+                " To cover {peers} too, run `tiller away start` in a shell there."
+            ));
+        }
+        line
+    }
 }
 
 /// The arguments to repeat on a peer: the ones the caller typed, without
@@ -264,6 +299,27 @@ mod tests {
             one_peer(None).only_here(&args(&["recap"])),
             "This lists main only. peer is paired and is not counted here: the board shows \
              every host."
+        );
+    }
+
+    #[test]
+    fn away_mode_says_that_the_peer_is_not_covered() {
+        assert_eq!(
+            one_peer(Some("peer.example.com")).away_here(true, &args(&["away", "start"])),
+            "Away mode is on for main only. peer is paired and is not covered: its projects \
+             keep running with no away limit, and its grants still merge. To cover peer too, \
+             run: ssh -t peer.example.com tiller away start --until <date> --projects <ids>"
+        );
+        assert_eq!(
+            one_peer(None).away_here(true, &args(&["away", "start"])),
+            "Away mode is on for main only. peer is paired and is not covered: its projects \
+             keep running with no away limit, and its grants still merge. To cover peer too, \
+             run `tiller away start` in a shell there."
+        );
+        assert_eq!(
+            one_peer(Some("peer.example.com")).away_here(false, &args(&["away", "brief"])),
+            "This covers main only. peer is paired and keeps an away mode of its own, which \
+             is not shown here. For peer, run: ssh -t peer.example.com tiller away brief"
         );
     }
 

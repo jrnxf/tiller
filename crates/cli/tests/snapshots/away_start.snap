@@ -46,6 +46,11 @@ exit: 0
   "events": [
     "<seq>"
   ],
+  "help": [
+    "tiller away end: turn it off and print what happened",
+    "tiller away brief: what started, landed and waits, so far"
+  ],
   "ok": true,
-  "replayed": false
+  "replayed": false,
+  "summary": "Away mode is on for Alpha Project on host-a until Sun 2099-03-01 09:00 (Lisbon). At most 6 new runs start on host-a. Nothing merges."
 }

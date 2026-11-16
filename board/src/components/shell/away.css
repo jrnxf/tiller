@@ -163,3 +163,27 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* What the contract leaves out: a paired host's projects. */
+.dialog p.pa-help.away-out {
+  margin-top: 10px;
+  color: var(--fg-2);
+}
+
+.dialog p.pa-help.away-out b {
+  color: var(--yellow-text);
+  font-weight: var(--w-medium);
+}
+
+.away-pop .away-props dt.away-out,
+.away-pop .away-props dd.away-out {
+  color: var(--yellow-text);
+}
+
+.away-pop {
+  max-width: min(340px, calc(100vw - 24px));
+}
+
+.away-pop .away-props dt.away-out {
+  align-self: start;
+}

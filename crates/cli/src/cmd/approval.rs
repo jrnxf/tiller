@@ -15,6 +15,7 @@ use tiller_core::{Actor, Ctx, Store, Timestamp};
 
 use super::KeyArg;
 use super::attention::chat_ask;
+use super::summary;
 use crate::app::{App, Done, Failure, Outcome};
 use crate::lisbon;
 
@@ -579,7 +580,25 @@ pub fn run_away(app: &App, cmd: Away) -> Done {
             }
             let keyed = app.key(&store, "away.start", &scope, &args.key.key)?;
             let applied = store.away_start(&app.ctx().with_key(&keyed.key), scope)?;
-            Ok(Outcome::applied(applied).with_key(&keyed))
+            let outcome = Outcome::applied(applied).with_key(&keyed);
+            if !app.person() {
+                return Ok(outcome);
+            }
+            let names: Vec<String> = args
+                .projects
+                .iter()
+                .map(|id| summary::project_name(&store, id))
+                .collect();
+            let line = summary::away_started(
+                &outcome.data,
+                &names,
+                &lisbon::display(until.as_jiff()),
+                &summary::host_label(&store),
+            );
+            Ok(outcome
+                .with_summary(line)
+                .with_help("tiller away end: turn it off and print what happened")
+                .with_help("tiller away brief: what started, landed and waits, so far"))
         }
         Away::End { reason } => {
             app.require_owner("tiller away")?;

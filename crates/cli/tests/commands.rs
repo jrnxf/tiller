@@ -1537,6 +1537,51 @@ fn a_paired_host_is_named_when_this_host_lacks_the_answer() {
         assert!(out.json.get("warning").is_none(), "{args:?}: {}", out.json);
     }
 
+    // Away mode binds this host only: turning it on says that the paired
+    // host is not covered, and how to cover it.
+    let away = world.must(&[
+        "away",
+        "start",
+        "--until",
+        "2099-01-02",
+        "--projects",
+        "alpha",
+        "--max-new-runs",
+        "2",
+        "--merge",
+        "none",
+    ]);
+    assert_eq!(
+        away.json["warning"],
+        format!(
+            "Away mode is on for {host} only. host-b is paired and is not covered: its \
+             projects keep running with no away limit, and its grants still merge. To cover \
+             host-b too, run: ssh -t host-b.example.com tiller away start --until <date> \
+             --projects <ids>"
+        )
+    );
+    let summary = away.json["summary"].as_str().unwrap_or_default();
+    assert!(
+        summary.starts_with(&format!("Away mode is on for Alpha on {host} until "))
+            && summary.ends_with(&format!(
+                "(Lisbon). At most 2 new runs start on {host}. Nothing merges."
+            )),
+        "{summary}"
+    );
+    for args in [&["away", "brief"][..], &["away", "end"]] {
+        let out = world.must(args);
+        let warning = out.json["warning"].as_str().unwrap_or_default();
+        assert!(
+            warning.starts_with(&format!(
+                "This covers {host} only. host-b is paired and keeps an away mode of its own"
+            )) && warning.ends_with(&format!(
+                "run: ssh -t host-b.example.com tiller --json {}",
+                args.join(" ")
+            )),
+            "{args:?}: {warning}"
+        );
+    }
+
     // An orchestrator works on this host: its answers do not change.
     let orchestrator = world.orchestrator();
     let by_agent = world.run_as(&orchestrator, &["card", "show", "pylon-2"]);

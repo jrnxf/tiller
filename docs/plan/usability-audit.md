@@ -10,11 +10,11 @@ Status values: `open`, `fixed` (with what was verified), `needs owner`, `to veri
 
 | | |
 |---|---|
-| Phase | 3 - the full walk. Journeys 2 (morning check) and 8 (failure) are walked on the board and the CLI in this phase (Mon 16 Nov 2026, Lisbon). Journeys 1, 6, 9, 10 and 11, and the rest of 5 and 7, are not walked yet. |
+| Phase | 3 - the full walk. Journeys 2 (morning check), 8 (failure), 10 (watch and steer) and 11 (away mode) are walked on the board and the CLI in this phase (Mon 16 Nov 2026, Lisbon). Journeys 1, 6 and 9, and the rest of 5 and 7, are not walked yet. |
 | Open P0 | 0. UA-15 is `needs owner`: the silent part is fixed, the answer itself needs a spec change. |
-| Open P1 | 0. UA-26 (a run whose agent died read "Unknown" and "running") was found in the phase 3 walk and is fixed on the board. UA-03 is `needs owner`: the CLI on main now says that it reads main only and prints the command for the peer, and reads and writes of a peer's work through the local daemon need a spec change. UA-09 is `needs owner`: seven owner commands end with a sentence and the next step, and a short answer in place of the record needs a spec change. UA-17 is fixed but for "Mark read" in the CLI, which is `needs owner`. UA-20 is `needs owner`: a queued card says what it waits for and "Close" is out of the main place, and its "Start" control needs a spec change (see "Needs owner"). UA-18 is `needs owner`: the wrong status line is fixed, Cancel and the full view need a spec change. UA-19 is `needs owner`: the tile, the card and the timeline show the worker's report, and the "Needs you" rule needs a spec change. |
-| Fixed | UA-01, UA-02, UA-04, UA-05, UA-06, UA-12, UA-16, UA-21, UA-22, UA-25, UA-26 (on the board), DX-01. UA-17 (read an answer in the CLI; "Mark read" in the CLI needs a spec change). UA-15 part 1 (the owner is told where the answer shows). UA-18 part 1 (the ask tile shows an unread answer and opens it). UA-19 part 1 (a worker's report shows on its tile, on the card and in the timeline). UA-20 part 1 (a queued card says what it waits for, and "Close" is under "More" until work starts). UA-09 part 1 (a `summary` sentence and the owner's next step at the end of `init`, `project add`, `orchestrator start`, `card create`, `spawn`, `ask note` and `attention answer`). UA-03 part 1 (a `not_found` and every host-wide list in main's CLI name the paired host and print the `ssh -t` command for it). |
-| Next step | Phase 3 goes on: walk journeys 1 (first run), 9 (scale), 10 (watch and steer) and 11 (away mode) next; they need no new bench part. Then close the bench gap of the stand-in forge and walk journey 6 and the rest of 5 and 7. The loop ends only when one full pass of all 11 journeys finds no new P0 or P1; this pass has found one (UA-26), so one more pass of journeys 5 and 8 follows the rest. P2 work after that: UA-27 to UA-29, then UA-07 with UA-08, UA-10, UA-11, UA-13, UA-14, UA-23, UA-24. |
+| Open P1 | 0. UA-26 (a run whose agent died read "Unknown" and "running") and UA-30 (away mode covers this host only and did not say so) were found in the phase 3 walk. UA-26 is fixed on the board. UA-30 is `needs owner`: the board and the CLI now say what away mode leaves out, and away mode for a paired host from one board needs a spec change. UA-03 is `needs owner`: the CLI on main now says that it reads main only and prints the command for the peer, and reads and writes of a peer's work through the local daemon need a spec change. UA-09 is `needs owner`: seven owner commands end with a sentence and the next step, and a short answer in place of the record needs a spec change. UA-17 is fixed but for "Mark read" in the CLI, which is `needs owner`. UA-20 is `needs owner`: a queued card says what it waits for and "Close" is out of the main place, and its "Start" control needs a spec change (see "Needs owner"). UA-18 is `needs owner`: the wrong status line is fixed, Cancel and the full view need a spec change. UA-19 is `needs owner`: the tile, the card and the timeline show the worker's report, and the "Needs you" rule needs a spec change. |
+| Fixed | UA-01, UA-02, UA-04, UA-05, UA-06, UA-12, UA-16, UA-21, UA-22, UA-25, UA-26 (on the board), DX-01. UA-30 part 1 (the away dialog, the away popover, the return brief and `tiller away` name the paired host that away mode does not cover). UA-17 (read an answer in the CLI; "Mark read" in the CLI needs a spec change). UA-15 part 1 (the owner is told where the answer shows). UA-18 part 1 (the ask tile shows an unread answer and opens it). UA-19 part 1 (a worker's report shows on its tile, on the card and in the timeline). UA-20 part 1 (a queued card says what it waits for, and "Close" is under "More" until work starts). UA-09 part 1 (a `summary` sentence and the owner's next step at the end of `init`, `project add`, `orchestrator start`, `card create`, `spawn`, `ask note` and `attention answer`). UA-03 part 1 (a `not_found` and every host-wide list in main's CLI name the paired host and print the `ssh -t` command for it). |
+| Next step | Phase 3 goes on: walk journeys 1 (first run) and 9 (scale) next; they need no new bench part. Then close the bench gap of the stand-in forge and walk journey 6 and the rest of 5 and 7. The loop ends only when one full pass of all 11 journeys finds no new P0 or P1; this pass has found two (UA-26, UA-30), so one more pass of journeys 5, 8 and 11 follows the rest. P2 work after that: UA-27 to UA-29, UA-31, UA-32, then UA-07 with UA-08, UA-10, UA-11, UA-13, UA-14, UA-23, UA-24. |
 
 ## The bench
 
@@ -72,8 +72,8 @@ Bench gaps (fix before the journeys that need them):
 | 7 | Peer transparency | partly: an ask to a peer project (UA-15, UA-16) | first look only |
 | 8 | Failure | yes, phase 3: a daemon restart, the peer offline, a run that dies (UA-26), quota out (UA-29). Not walked: an agent that waits on a prompt (bench gap) | yes, phase 3: the same cases (UA-26, UA-29) |
 | 9 | Scale | partly: the command palette finds a card, an agent and a project's jobs (UA-21, fixed). Not walked: filter, sort, the Agents screen at 23 agents | no |
-| 10 | Watch and steer | no | no |
-| 11 | Away mode | no | no |
+| 10 | Watch and steer | yes, phase 3: a main agent and a peer agent, watch, type, leave (UA-32, P2 only) | yes, phase 3: `tiller send --kind steer`, and `tiller attach` in a pseudo terminal with a typed line and a detach (UA-32, P2 only) |
+| 11 | Away mode | yes, phase 3: start, the status, edit, end, the brief (UA-30, UA-13, UA-31) | yes, phase 3: `away start`, the spend cap, `away brief`, `away end` (UA-30, UA-31) |
 
 What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 
@@ -99,6 +99,9 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 | Learn that a run died | within 30 s the tile reads "Agent stopped" in red, and the card says whose move is next, when the owner hears of it, and the command that starts the agent again (UA-26; before: "Unknown" on the tile, "running" on the run, no step) | `tiller card show` reads `badge: unknown`, and `tiller agents` no longer lists the worker (UA-26, not done) |
 | Learn that quota ran out | the sidebar reads "2% week left". A start that the floor refuses opens a decision in the Inbox with "Start now anyway" and "Wait for the reset". Good, but the machine row still says "6 free" (UA-29) | `tiller spawn` is refused with the reason; the time is UTC and no next command is printed (UA-29) |
 | Learn that a run is blocked or done | the tile shows the worker's words and "Reports blocked" or "Reports done" within 2 s, on both hosts (UA-19; before, only when the orchestrator raised an item). The card enters "Needs you" only when the orchestrator raises an item | `tiller agents`, in a CSV row |
+| Turn away mode on | 3 steps, about 15 s: "Away", the form (every project of this host is ticked, 6 runs, a 20% floor, existing grants), "Start away mode". The header then reads "Away until Tue 09:00". With a paired host, the form says "Away mode covers main only, not peer's 6 projects", what that means and where to start it for them (UA-30; before: the peer's projects were absent from the form with no word) | 1 command. The last lines are a sentence ("Away mode is on for Harbor and Lantern on main until Tue 2026-11-17 09:00 (Lisbon). At most 3 new runs start on main. Nothing merges."), the next steps, and with a paired host a warning with the `ssh -t` command that covers it too (UA-30; before: 30 lines of an approval record) |
+| Return and catch up | 2 clicks: the status, "End". The brief opens by itself in the Inbox: the projects, the orders, the spend, what landed, the runs that started, what still waits, "Open waiting items". Good. It now names the projects it covers and the paired host it does not count (UA-30, UA-13) | `tiller away end` prints the brief as a record; it ends with the same warning (UA-30) |
+| Watch an agent and steer it | 3 steps, about 6 s: Agents, the agent's row (or `J`/`K`), click the screen and type. The line under the screen reads "Typing goes to the agent. Board shortcuts are paused." and "Done" leaves. The same for an agent on the peer. Good | `tiller attach <card>-<role>`, type, `Ctrl-\ d`. Good. `tiller send <run> --kind steer --text ...` ends with a record in state `pending` and no sentence (UA-32) |
 
 ## Findings
 
@@ -260,12 +263,13 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 - Fix: keep the age on the right edge of the row, outside the wrapping text.
 - Fixed on Mon 16 Nov 2026 (Lisbon), another way: the row's second line is two pieces that never break inside, the place (host, project, card) and "kind / age". A narrow row wraps between the pieces, so no "/" hangs and no age stands alone. Verified at 1440 px and 390 px.
 
-### UA-13 - The away brief counts runs outside the away scope (P2, to verify in journey 11)
+### UA-13 - The away brief counts runs outside the away scope (P2, open; verified in journey 11)
 
 - Journey: 11.
 - Happened: away mode covered Quill and Ember. The brief says "Runs started 6" and lists Harbor, Lantern and Juniper too. "Still waiting for you 2" counts only the two projects in scope, while the Inbox holds 7.
 - Hurts: two different scopes in one card. The owner cannot tell whether the brief is the whole picture.
 - Fix: say the scope in the brief ("Quill and Ember"), keep both lists to it, and add one line for what happened outside it.
+- Verified in the phase 3 walk (Mon 16 Nov 2026, Lisbon). The two scopes are the contract: `docs/spec/authority.md` section 6 makes the spend cap count every run of the host, and the list of projects decides only the temporary grants and the waiting items. So "Runs started" is host-wide by design. With the fix of UA-30 the brief has a "Projects" row with the names. Still open: no word says that "Runs started" counts the whole host, and that "Still waiting for you" counts the named projects only.
 
 ### UA-14 - An ask from the CLI is labelled "script" (P2, open)
 
@@ -495,6 +499,45 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 - The sidebar's machine row still reads "13 running, 6 free" at 2%. UA-01 left quota out of the "refuses new runs" verdict; the row should say "under the quota floor" in place of "6 free".
 - A new quota value shows up to 5 minutes late (the poll's cadence), on the board and in the refusal.
 
+### UA-30 - Away mode covers this host only, and did not say so (P1, needs owner; the silent part is fixed)
+
+- Journey: 11, 7. Found in the phase 3 walk.
+- Tried: on main's board I clicked "Away" to leave for a day, with 8 projects on main and 6 on the peer.
+- Happened: the form offered main's 8 projects. The peer's 6 were absent, with no word. After "Start away mode" the header read "Away until Tue 09:00" beside "All projects 16". On the peer nothing changed: `tiller away brief` there answered "no away contract yet". So the peer's orchestrators had no orders and no cap on new runs, and with "Merges: None" on main the peer's grants still merged. The return brief counted main only and did not say so. The CLI was the same: `tiller away start --projects pylon` on main answered "no project pylon" (UA-03), and a start for main's projects said nothing about the peer.
+- Hurts: this is the "start and leave" promise. The owner believes that all 14 projects run inside the limits, and 6 of them run with none. The owner must think about the machine to be safe, and nothing tells them to.
+- Cause: away mode is one host's contract. `docs/spec/authority.md` section 6 ("the owner through a peer board") says that the board host never has "grants, away mode, landing, spawn, ..." on a peer. A forward of away mode needs a spec change: see "Needs owner".
+- Fixed on Mon 16 Nov 2026 (Lisbon), the part inside the contract: every away surface names what it leaves out, and the step.
+  - The "Start away mode" and "Edit away mode" form: under the projects, "Away mode covers main only, not peer's 6 projects. They keep running with no away limit, and their grants still merge. To cover them, start away mode on peer's own board." It shows only when a paired host has projects.
+  - The status popover in the header: a row "Not covered: peer's 6 projects. Start away mode on peer's own board."
+  - The return brief: a "Projects" row with the names of the covered projects (it had none: UA-13), and a row "Not covered: peer's 6 projects. This brief does not count them: see peer's own board."
+  - `tiller away start` on a host with a paired host ends with a warning: "Away mode is on for main only. peer is paired and is not covered: its projects keep running with no away limit, and its grants still merge. To cover peer too, run: ssh -t <alias> tiller away start --until <date> --projects <ids>". `tiller away brief` and `tiller away end` end with "This covers main only. peer is paired and keeps an away mode of its own, which is not shown here." and the same command for the peer.
+  - `tiller away start` also ends with a sentence and the next steps, as the seven commands of UA-09 do: "Away mode is on for Harbor and Lantern on main until Tue 2026-11-17 09:00 (Lisbon). At most 3 new runs start on main. Nothing merges."
+  - Verified on the bench with a rebuilt binary: on main's board, the popover in dark at 1440 px and in light at 390 px, the form in light at 1440 px and in dark at 390 px, and the brief in dark at 1440 px. The printed `ssh -t bench-peer tiller away start --until 2026-11-17 --projects pylon` ran through the bench's SSH shim and turned away mode on on the peer.
+  - Tests: `board/src/lib/away.test.ts` (2 tests), `away.test.tsx` (the note with a paired host, no note without one, the brief's "Projects" row), `cmd::elsewhere::tests::away_mode_says_that_the_peer_is_not_covered`, `cmd::summary::tests::away_mode_names_the_projects_the_end_and_the_limits`, and `a_paired_host_is_named_when_this_host_lacks_the_answer` in `crates/cli/tests/commands.rs`. The `away_start` snapshot has the new `summary` and `help`.
+- Not done:
+  - One "Away" for both hosts (needs owner).
+  - Main's board does not show whether the peer is away. Its header reads "Away" or "Away until" for main only.
+
+### UA-31 - Away mode: small gaps (P2, open)
+
+- Journey: 11. Found in the phase 3 walk.
+- The spend cap stops every start on the host, in and out of the listed projects, and the popover says only "Runs 1 of 1". It should say "the cap is reached: no new run starts" there and on the header's status. The refusal in the CLI reads "approval 01M7...: away mode allows 1 new runs and 1 have started; the owner raises the cap or returns": a raw id, "1 new runs", and no command (the CLI has no `away edit`; only the board edits a running contract, `docs/design/cli-board-parity.md`).
+- The brief does not count the starts that the cap refused, so the owner cannot see that the cap was too low.
+- The popover does not show the orders. The brief does.
+- In the form with "None" chosen under Merges, the help line still reads "Only the grants you already have may merge."
+- A project's dot has another colour in the form than in the sidebar (Harbor is orange in the sidebar and grey-blue in the form): the form counts colours over this host's projects only.
+- `tiller away start` while away mode is on answers "approval 01M7...: away mode is already on", with no hint to `tiller away end` or to the board's Edit.
+- The date field shows the browser's own date format ("11/17/2026, 06:00 PM" in a US browser) under a "Lisbon time" label. To verify in a browser with a Portuguese locale.
+
+### UA-32 - Watch and steer: small gaps (P2, open)
+
+- Journey: 10. Found in the phase 3 walk. The journey itself is good on both surfaces, for an agent on main and on the peer.
+- `tiller send <run> --kind steer` ends with the message record in state `pending` and no sentence or next step (the UA-09 pattern is not applied to `send`). The owner sees that it arrived only in the agent's terminal, as a line `tiller inbox <id> # steer <card>`.
+- `tiller send harbor-1 --kind steer` (the card's id, which `tiller attach` takes) answers "no run harbor-1 on main ... peer may have it" with an `ssh -t` hint for the peer. The card is on main; `send` takes only a run or a session. It should take the names that `attach` takes, and the hint for the peer is wrong here.
+- `tiller attach` without a terminal answers "an agent never attaches", which reads as an accusation to an owner who ran it from a script.
+- On the board, the typing field of a worker is named "Type to ├ pylon-1 build" for a screen reader: the tree mark is part of the name.
+- "Open in terminal" is off for an agent on the peer, with no reason in view. To verify: whether its tooltip gives one.
+
 ### DX-01 - A debug build made before the board was built never served the board (fixed)
 
 - Found while building the bench: a debug `tiller` compiled while `board/dist` was missing answered "board assets are not built" forever, even after the board was built and the crate was rebuilt. rust-embed keeps the folder's path with its `..` parts in that case and then refuses every file, and the compiler cache returns the same artifact.
@@ -534,9 +577,9 @@ Order of work, highest owner value first. Fixes that share a cause are grouped.
 4. Done: UA-21 and UA-22 (find a card and start a job from anywhere on the board). Done as far as the contract allows: UA-20 part 1 (a queued card says what it waits for). Its "Start" control waits under "Needs owner".
 5. Done: UA-01 (a host that refuses every new run says so on the board, in `tiller machines` and in `tiller doctor`).
 6. Done: UA-25 (a live peer counts as live on Health and in `tiller machines`) and UA-17 (the CLI prints the delivery state and the answer of an ask). Done as far as the contract allows: UA-09 part 1 (a sentence and the next step after seven owner commands). Done as far as the contract allows: UA-03 part 1 (main's CLI names the peer and prints the command for it). Later: UA-10 and UA-23, the CLI as an owner surface.
-7. Phase 3, in progress. Walked: journeys 2 and 8 (UA-26 found and fixed on the board; UA-27 to UA-29 are P2). Next: journeys 1, 9, 10 and 11, then the stand-in forge and journey 6 and the rest of 5 and 7.
+7. Phase 3, in progress. Walked: journeys 2 and 8 (UA-26 found and fixed on the board; UA-27 to UA-29 are P2), and journeys 10 and 11 (UA-30 found, fixed as far as the contract allows; UA-31 and UA-32 are P2). Next: journeys 1 and 9, then the stand-in forge and journey 6 and the rest of 5 and 7.
 8. UA-07 with UA-08: the host out of the owner's way.
-9. UA-11, UA-13, UA-14, UA-24, UA-27, UA-28, UA-29: polish.
+9. UA-11, UA-13, UA-14, UA-24, UA-27, UA-28, UA-29, UA-31, UA-32: polish.
 
 ## Needs owner
 
@@ -557,6 +600,8 @@ Order of work, highest owner value first. Fixes that share a cause are grouped.
 - UA-09, the short answer: `docs/spec/protocol.md` section 6.1 says that the default output is TOON with the full `data`, for agents. The owner's commands now end with a `summary` sentence and `help`, but 40 to 70 lines of record print first. Recommendation: when the caller is a person (no agent session) and stdout is a terminal, print only `summary`, a `warning` if any, and `help`; `--json` and a pipe keep the full record, and so does a new `--full`. Add `summary` to the list of response fields in 6.1 ("a sentence for a person; absent for an agent session"). The work after a yes is small: one branch in `emit` (crates/cli/src/main.rs) and a sentence for the commands that have none yet.
 
 - UA-03, the rest: let the owner's CLI on the board host reach a peer's work through the local daemon. Today the CLI reads and writes this host's `state.db` only. The daemon holds the peer's rows in memory (`docs/spec/protocol.md` 10.2), gives its reads to a browser's owner session only (7.1), and ADR 0003 keeps `tiller spawn`, grants, away mode and landing local. So on main, `tiller recap` cannot count the peer's decisions and `tiller card show pylon-2` cannot find a peer's card; since part 1 they say so and print `ssh -t <alias> tiller ...`. Recommendation: a second listener of the daemon on a Unix socket inside `~/.tiller/run` (mode 0600; every fleet role is already denied `~/.tiller`, G20), which serves the same federated reads and forwarded mutations as the board to the owner's CLI, with the CLI's own owner check done first. The CLI then uses it when a name is not on this host, and for `recap`, `board`, `agents`, `attention list` and `ask list`, and falls back to this host with today's warning when the daemon is down. Keep `spawn`, grants, away mode and landing local, as ADR 0003 says. The work after a yes is about two iterations: the socket and its credential rule in `authority.md`, then the CLI reads, then the forwarded writes.
+
+- UA-30, the rest: one "Away" for every paired host. `docs/spec/authority.md` section 6 says that the board host never has away mode on a peer, so the owner who leaves must start away mode twice, once per board, and read two briefs. Today every away surface says so (part 1, done). Recommendation: let the board host forward `away.start`, `away.edit` and `away.end` to a host paired with the `act` scope, as it forwards a project edit (D22), with one form that lists every host's projects and applies the limits per host; and carry each host's away state and brief over the link, so that one header status and one brief cover all. Temporary grants made by "Conditions" stay each host's own records. The work after a yes is about two iterations.
 
 One more candidate, to settle when its fix starts:
 
