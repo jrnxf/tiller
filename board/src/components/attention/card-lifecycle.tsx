@@ -11,6 +11,7 @@ import { hostField, ownerOf } from "../../lib/peers";
 import type { Owned } from "../../lib/peers";
 import { cardQuery } from "../../lib/queries";
 import { ChevronDownIcon } from "../board/icons";
+import { showToast } from "../board/toast";
 import { CheckIcon } from "../shell/icons";
 import { ProjectDialog } from "../shell/project-dialog";
 import { Segmented } from "../ui/segmented";
