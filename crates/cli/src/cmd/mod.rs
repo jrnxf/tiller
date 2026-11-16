@@ -11,6 +11,7 @@ pub mod bug;
 pub mod card;
 pub mod control;
 pub mod doctor;
+pub mod elsewhere;
 pub mod health;
 pub mod import;
 pub mod later;

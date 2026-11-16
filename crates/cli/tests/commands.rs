@@ -1447,3 +1447,101 @@ fn the_owner_reads_one_sentence_and_the_next_step() {
         by_agent.json
     );
 }
+
+/// UA-03: the CLI reads this host only. On a board host with a paired peer,
+/// a person is told that a missing name may be the peer's, with the command
+/// for it, and that a list is this host's part. An agent session is not.
+#[test]
+fn a_paired_host_is_named_when_this_host_lacks_the_answer() {
+    use tiller_core::domain::PeerScope;
+    use tiller_core::state::peers::NewPairing;
+    use tiller_core::{Actor, Ctx};
+
+    let world = World::initialized();
+
+    // No peer: the answers are as they were.
+    let alone = world.run(&["card", "show", "pylon-2"]);
+    assert_eq!(alone.code, 3);
+    assert_eq!(alone.json["error"]["message"], "no card pylon-2");
+    assert!(alone.json["error"].get("hint").is_none(), "{}", alone.json);
+    let board = world.must(&["board"]);
+    assert!(board.json.get("warning").is_none(), "{}", board.json);
+
+    let host = world.must(&["machines"]).data()["machines"][0]["label"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    world
+        .store()
+        .peer_pair(
+            &Ctx::new(Actor::Owner),
+            NewPairing {
+                label: "host-b".into(),
+                scope: PeerScope::Act,
+                peer_host_id: "01JC0000000000000000H0STB1".into(),
+            },
+        )
+        .unwrap();
+    world.must(&["config", "set", "peers.host-b.ssh", "host-b.example.com"]);
+
+    let missing = world.run(&["ask", "note", "pylon", "--text", "Which port?"]);
+    assert_eq!(missing.code, 3);
+    assert_eq!(missing.json["error"]["code"], "not_found");
+    assert_eq!(
+        missing.json["error"]["message"],
+        format!(
+            "no project pylon on {host}. This command reads {host} only, and host-b may have \
+             it: the board shows every host"
+        )
+    );
+    assert_eq!(
+        missing.json["error"]["hint"],
+        "ssh -t host-b.example.com tiller --json ask note pylon --text 'Which port?'"
+    );
+
+    // Every list that covers the whole host says what it leaves out.
+    let lists: [&[&str]; 7] = [
+        &["recap"],
+        &["board"],
+        &["agents"],
+        &["ask", "list"],
+        &["card", "list"],
+        &["attention", "list", "--open"],
+        &["project", "list"],
+    ];
+    for args in lists {
+        let out = world.must(args);
+        let warning = out.json["warning"].as_str().unwrap_or_default();
+        assert!(
+            warning.starts_with(&format!(
+                "This lists {host} only. host-b is paired and is not counted here"
+            )),
+            "{args:?}: {}",
+            out.json
+        );
+        assert!(
+            warning.ends_with(&format!(
+                "run: ssh -t host-b.example.com tiller --json {}",
+                args.join(" ")
+            )),
+            "{args:?}: {warning}"
+        );
+    }
+    // A list of one project of this host is whole.
+    for args in [
+        &["board", "--project", "alpha"][..],
+        &["card", "list", "--project", "alpha"],
+        &["recap", "--project", "alpha"],
+    ] {
+        let out = world.must(args);
+        assert!(out.json.get("warning").is_none(), "{args:?}: {}", out.json);
+    }
+
+    // An orchestrator works on this host: its answers do not change.
+    let orchestrator = world.orchestrator();
+    let by_agent = world.run_as(&orchestrator, &["card", "show", "pylon-2"]);
+    assert_eq!(by_agent.json["error"]["message"], "no card pylon-2");
+    assert!(by_agent.json["error"].get("hint").is_none());
+    let recap = world.must_as(&orchestrator, &["board"]);
+    assert!(recap.json.get("warning").is_none(), "{}", recap.json);
+}

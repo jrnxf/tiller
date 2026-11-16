@@ -16,6 +16,8 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 
 A CLI command that a person runs (not an agent session) ends with a `summary` line, one sentence that says what it did with names in place of ids, and `help` lines with the next step. `init`, `project add`, `orchestrator start`, `card create`, `spawn`, `ask note` and `attention answer` have one (added on Monday 2026-11-16, Lisbon time). The full record still prints above it. The board says the same in a toast or on the card.
 
+The CLI reads and writes this host only. The board also shows a paired host's projects, cards and questions. On a board host with a paired peer, a person's `not_found` of a project, card, ask, attention item, run, session or approval says that the peer may have it, and its `hint` is the same command for the peer (`ssh -t <alias> tiller ...`). `recap`, `board`, `agents`, `ask list`, `card list`, `attention list` and `project list` end with a `warning` that the list covers this host only, with the command that lists the peer's part (added on Monday 2026-11-16, Lisbon time).
+
 ## Capabilities
 
 | Capability | CLI | Board | Notes |

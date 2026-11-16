@@ -17,6 +17,7 @@ use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use serde_json::Value;
 
 use app::{App, Done, Failure};
+use cmd::elsewhere::{self, Elsewhere};
 use cmd::{
     admin, approval, ask, attention, backup, bug, card, doctor, health, import, later, learn, mem,
     peer, read, recap, records, reply, review, run, spawn,
@@ -242,6 +243,22 @@ fn dispatch(app: &App, command: Command) -> Done {
     }
 }
 
+/// Whether the command lists every project of this host, so that a paired
+/// host's part is missing from it. A list narrowed to one project or one host
+/// is whole.
+fn lists_this_host(command: &Command) -> bool {
+    match command {
+        Command::Recap(args) => args.project.is_none(),
+        Command::Board(args) => args.project.is_none() && args.host.is_none() && !args.login,
+        Command::Agents(args) => args.host.is_none(),
+        Command::Ask(ask::Cmd::List(args)) => args.project.is_none(),
+        Command::Card(card::Cmd::List(args)) => args.project.is_none(),
+        Command::Attention(attention::Cmd::List { .. })
+        | Command::Project(admin::ProjectCmd::List) => true,
+        _ => false,
+    }
+}
+
 /// Prints the response to stdout: TOON for agents, JSON on request. Nothing
 /// else goes to stdout (`protocol.md` 6.1).
 fn emit(mut response: Value, json: bool) {
@@ -351,12 +368,27 @@ fn main() -> ExitCode {
     }
     let json = cli.json;
     let app = App::from_env(cli.db);
+    let whole_host = lists_this_host(&cli.command);
     match dispatch(&app, cli.command) {
-        Ok(outcome) => {
+        Ok(mut outcome) => {
+            // A list of this host is part of the whole on a board host with
+            // a paired peer: a person is told so, not left to count.
+            if whole_host
+                && outcome.warning.is_none()
+                && let Some(elsewhere) = Elsewhere::of(&app)
+            {
+                outcome.warning = Some(elsewhere.only_here(&elsewhere::typed(std::env::args_os())));
+            }
             emit(outcome.into_response(), json);
             ExitCode::SUCCESS
         }
-        Err(failure) => {
+        Err(mut failure) => {
+            // A name this host does not have may be a paired host's.
+            if failure.code == "not_found"
+                && let Some(elsewhere) = Elsewhere::of(&app)
+            {
+                elsewhere.explain(&mut failure, &elsewhere::typed(std::env::args_os()));
+            }
             let exit = failure.exit;
             emit(failure.into_response(), json);
             ExitCode::from(exit)
