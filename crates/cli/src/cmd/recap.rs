@@ -30,7 +30,7 @@ pub struct Recap {
 
 /// How much an item blocks, lowest first: a credential stops a worker, a
 /// decision stops a card, a merge waits on the owner's word.
-fn rank(kind: AttentionKind) -> u8 {
+pub(crate) fn rank(kind: AttentionKind) -> u8 {
     match kind {
         AttentionKind::Credential => 0,
         AttentionKind::Decision => 1,

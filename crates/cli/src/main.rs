@@ -6,6 +6,7 @@ mod guard;
 mod holder;
 mod hook;
 mod lisbon;
+mod owner_socket;
 mod stable;
 mod toon;
 
@@ -265,6 +266,31 @@ fn lists_this_host(command: &Command) -> bool {
     }
 }
 
+/// A list of this host that the daemon completes with each paired peer's
+/// rows over the owner socket (`protocol.md` 7.1). `card list` and `project
+/// list` read what the link does not carry, so they stay this host's.
+fn federated(command: &Command) -> Option<owner_socket::List> {
+    if !lists_this_host(command) {
+        return None;
+    }
+    Some(match command {
+        Command::Recap(_) => owner_socket::List::Recap,
+        Command::Board(args) => owner_socket::List::Board(match args.filter {
+            read::Filter::All => "all",
+            read::Filter::Active => "active",
+            read::Filter::Needs => "needs",
+        }),
+        Command::Agents(_) => owner_socket::List::Agents,
+        Command::Attention(attention::Cmd::List { open }) => {
+            owner_socket::List::Attention { open: *open }
+        }
+        Command::Ask(ask::Cmd::List(args)) => owner_socket::List::Asks {
+            unresolved: args.unresolved,
+        },
+        _ => return None,
+    })
+}
+
 /// The project a list of this host is narrowed to. A name this host does not
 /// have is refused as `not_found`, not answered with an empty list, so that a
 /// person who names a paired host's project is told where it lives.
@@ -499,6 +525,7 @@ fn main() -> ExitCode {
     let full = cli.full;
     let app = App::from_env(cli.db);
     let whole_host = lists_this_host(&cli.command);
+    let federated = federated(&cli.command);
     let away = away_command(&cli.command);
     let known = narrowed_to(&cli.command).map_or(Ok(()), |project| -> Result<(), Failure> {
         app.read()?.project(project)?;
@@ -507,12 +534,24 @@ fn main() -> ExitCode {
     match known.and_then(|()| dispatch(&app, cli.command)) {
         Ok(mut outcome) => {
             // A list of this host is part of the whole on a board host with
-            // a paired peer: a person is told so, not left to count.
+            // a paired peer: the daemon adds the peer's rows for the owner,
+            // and when it cannot, a person is told so, not left to count.
             if whole_host
                 && outcome.warning.is_none()
                 && let Some(elsewhere) = Elsewhere::of(&app)
             {
-                outcome.warning = Some(elsewhere.only_here(&elsewhere::typed(std::env::args_os())));
+                let added = federated
+                    .zip(owner_socket::Socket::for_owner(&app))
+                    .and_then(|(list, socket)| {
+                        let mut data = outcome.data.clone();
+                        let note = owner_socket::add_peers(&socket, list, &mut data).ok()?;
+                        outcome.data = data;
+                        Some(note)
+                    });
+                outcome.warning = match added {
+                    Some(note) => note,
+                    None => Some(elsewhere.only_here(&elsewhere::typed(std::env::args_os()))),
+                };
             }
             if let Some(starting) = away
                 && outcome.warning.is_none()
