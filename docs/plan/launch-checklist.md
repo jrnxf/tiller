@@ -20,7 +20,7 @@ On Monday 2026-11-16 at about 15:30 Lisbon time, the owner said yes to every ite
 - [x] UA-01: the spec names `refuses_runs` and the `floors` doctor check
 - [ ] UA-17: "Mark read" in the CLI (`tiller ask show <ask> --mark-read`)
 - [x] UA-09: a short answer for a person at a terminal, the full record with `--json` or `--full`
-- [ ] UA-03: the owner's CLI reaches a peer's work through the local daemon
+- [x] UA-03: the owner's CLI reaches a peer's work through the local daemon
 - [x] UA-30: one "Away" for every paired host
 - [x] UA-43: grants for a peer's project from one board
 - [x] UA-07: show the host chip on a card only when the host needs attention
@@ -45,6 +45,7 @@ The owner skipped the full test passes on Monday 2026-11-16 to get a release out
 - [ ] UA-09: the short answer at a real terminal, on the bench; only a pseudo-terminal test ran. A read with no sentence still prints its record
 - [ ] UA-43: a grant made and revoked, and a stage switched, on a peer's project from main's board, through a real SSH link
 - [ ] UA-30: away mode started, edited and ended on main and the peer from main's board, with one status and one brief, through a real SSH link
+- [ ] UA-03: the owner CLI socket, the peer rows in the CLI lists and the forwarded card writes, with no walk on the bench
 - [ ] Every owner decision above, as each one lands
 - [ ] UA-19: the daemon's `recovery` item for a worker that waits 5 minutes with no item (R23), and the age of the report on the tile
 - [ ] UA-38: a new request or a rejection withdraws the notes of the PR's earlier approvals, and Withdraw works on a note whose approval ended
