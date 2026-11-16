@@ -140,8 +140,10 @@ start_holder() {
   local host=$1
   alive "$bench/$host/holder.pid" && return 0
   detached "$host" holder holder
+  local run_dir="$bench/$host/home"
+  run_dir="$run_dir/run"
   for _ in $(seq 1 100); do
-    [ -S "$bench/$host/home/run/holder.sock" ] && return 0
+    [ -S "$run_dir/holder.sock" ] && return 0
     sleep 0.1
   done
   echo "the holder of $host made no socket" >&2
