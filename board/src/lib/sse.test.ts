@@ -432,6 +432,20 @@ test("a session or run event marks the agents and run details stale", () => {
   expect(queryClient.getQueryState(queryKeyFor("/api/v1/agents"))?.isInvalidated).toBe(true);
 });
 
+test("a session or observation event marks the permission prompts stale", () => {
+  // A permission prompt is a session that waits, not an attention row, so no
+  // attention event says that one came or went.
+  for (const entity of ["session", "observation"]) {
+    const queryClient = seededClient();
+    const attention = queryKeyFor("/api/v1/attention?state=open");
+    expect(queryClient.getQueryState(attention)?.isInvalidated).toBe(false);
+
+    applyChange(queryClient, event({ entity }));
+
+    expect(queryClient.getQueryState(attention)?.isInvalidated).toBe(true);
+  }
+});
+
 test("an archived project leaves the list instead of being written back", () => {
   const queryClient = seededClient();
   const alpha = queryClient
@@ -836,6 +850,33 @@ test("peer_reset replaces the peer's attention, agents and projects, and a missi
   expect(attention().filter((item) => item.host === "host-d")).toHaveLength(0);
   expect(projects().some((project) => project.host === "host-d")).toBe(false);
   expect(projects().some((project) => project.host === undefined)).toBe(true);
+  stop();
+});
+
+test("peer_reset brings a peer's permission prompt and takes it away, and keeps this host's", () => {
+  const { queryClient, stop, source } = federatedStream();
+  const prompts = () =>
+    queryClient.getQueryData<AttentionResponse>(queryKeyFor(attentionPath))?.permission_prompts ??
+    [];
+  const own = { session_id: "s-own", card_id: "c1", tool: "Bash", detail: null, since: "t" };
+  queryClient.setQueryData<AttentionResponse>(queryKeyFor(attentionPath), (old) =>
+    old ? { ...old, permission_prompts: [own] } : old,
+  );
+  const reset = (permission_prompts: unknown[]) =>
+    source.emit("peer_reset", {
+      host: "host-d",
+      host_id: "01JPEERD0000000000000000D",
+      link: "live",
+      as_of: null,
+      queries: { "/api/v1/attention?state=open": { items: [], permission_prompts } },
+    });
+
+  reset([{ ...own, session_id: "s-peer", host: "host-d", link: "live", as_of: null }]);
+  expect(prompts().map((prompt) => prompt.session_id)).toEqual(["s-own", "s-peer"]);
+
+  // The owner answered it: the peer's next snapshot has no prompt.
+  reset([]);
+  expect(prompts().map((prompt) => prompt.session_id)).toEqual(["s-own"]);
   stop();
 });
 

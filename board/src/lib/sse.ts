@@ -412,6 +412,11 @@ export function applyChange(
           },
           refetchType: "active",
         });
+        // The attention read lists the permission prompts, which are not rows
+        // of their own: each is a session whose newest observation says it
+        // waits (state.md, Attention). A prompt comes and goes with these
+        // events only, so the Inbox reads them again.
+        refetchPaths(queryClient, attentionPath);
       }
   }
 
@@ -514,11 +519,17 @@ function applyPeerReset(queryClient: QueryClient, event: PeerResetEvent): void {
       };
     },
   );
-  queryClient.setQueryData<AttentionResponse | undefined>(attentionKey, (old) =>
-    old
-      ? { ...old, items: replaceHost(old.items, host, at("/api/v1/attention?state=open").items) }
-      : old,
-  );
+  // The permission prompts too: a peer's event carries none, so a prompt of
+  // its agent comes to the Inbox, and leaves it once answered, only here.
+  queryClient.setQueryData<AttentionResponse | undefined>(attentionKey, (old) => {
+    if (!old) return old;
+    const theirs = at("/api/v1/attention?state=open");
+    return {
+      ...old,
+      items: replaceHost(old.items, host, theirs.items),
+      permission_prompts: replaceHost(old.permission_prompts, host, theirs.permission_prompts),
+    };
+  });
   queryClient.setQueryData<AgentsResponse | undefined>(queryKeyFor(agentsPath()), (old) =>
     old
       ? {

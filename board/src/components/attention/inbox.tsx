@@ -542,7 +542,8 @@ function PaneShows({
         ) : null}
       </div>
       {tail.data && tail.data.text.trim() !== "" ? (
-        <Terminal tail={tail.data.text} sessionId={sessionId} actions={actions} />
+        // The dialog stands where the input box does, so its rows stay.
+        <Terminal tail={tail.data.text} sessionId={sessionId} actions={actions} whole />
       ) : null}
       {/* With nothing to show, the way to the live terminal stays. */}
       {tail.isError || tail.data?.text.trim() === "" ? (
@@ -662,6 +663,10 @@ function DialogDetail({ agent, ctx }: { agent: AgentRow; ctx: Context }) {
             <>
               {top(false)}
               {waits}
+              {/* A peer's screen takes a few seconds to read: say so. */}
+              <p className="d-ctx" role="status">
+                Reading the dialog from the agent's screen{peer ? ` on ${peer}` : ""}...
+              </p>
             </>
           }
           fallback={unknown}

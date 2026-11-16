@@ -20,6 +20,11 @@
 //!   replayed and exit is appended to as a JSON line.
 //! - `FAKE_AGENT_BUSY_MS`: how long a turn runs (default 300).
 //! - `FAKE_AGENT_PASTE_MS`: the paste window (default 100).
+//! - `FAKE_AGENT_DIALOG`: a file. While it exists, the stand-in shows Claude
+//!   Code's permission dialog for the shell command on the file's first
+//!   line, in place of its composer. `1`, `2` or Enter allows the command,
+//!   `3` or Escape declines it; both delete the file and log a `dialog` entry.
+//!   Any other input is dropped, as the dialog drops it.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -32,6 +37,7 @@ use rustix::termios::{OptionalActions, tcgetattr, tcgetwinsize, tcsetattr};
 use serde_json::{Value, json};
 
 const PROMPT: &str = "\u{276f}\u{a0}";
+const PROMPT_GLYPH: char = '\u{276f}';
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -155,6 +161,10 @@ struct Agent {
     paste_window: Duration,
     busy_for: Duration,
     size: (u16, u16),
+    /// The file whose presence opens the permission dialog.
+    dialog_file: Option<std::path::PathBuf>,
+    /// The command the open permission dialog asks about.
+    dialog: Option<String>,
 }
 
 impl Agent {
@@ -169,7 +179,51 @@ impl Agent {
             paste_window: env_ms("FAKE_AGENT_PASTE_MS", 100),
             busy_for: env_ms("FAKE_AGENT_BUSY_MS", 300),
             size: (0, 0),
+            dialog_file: std::env::var_os("FAKE_AGENT_DIALOG").map(Into::into),
+            dialog: None,
         }
+    }
+
+    /// Opens the permission dialog when its file appears, and closes it when
+    /// the file goes. True when the screen has to be painted again.
+    fn poll_dialog(&mut self) -> bool {
+        let asked = self
+            .dialog_file
+            .as_ref()
+            .and_then(|file| std::fs::read_to_string(file).ok())
+            .map(|text| text.lines().next().unwrap_or_default().trim().to_owned());
+        if asked == self.dialog {
+            return false;
+        }
+        if let Some(command) = &asked {
+            log(&json!({"event": "dialog", "state": "open", "command": command}));
+            self.history.push(format!("\u{25cf} Bash({command})"));
+            self.history.push("  \u{23bf}  Waiting\u{2026}".into());
+        }
+        self.dialog = asked;
+        true
+    }
+
+    /// Takes one read of input while the permission dialog shows.
+    fn answer_dialog(&mut self, bytes: &[u8]) {
+        let allowed = match bytes {
+            [b'1' | b'2' | b'\r' | b'\n', ..] => true,
+            [b'3', ..] | [0x1b] => false,
+            _ => return,
+        };
+        let state = if allowed { "allowed" } else { "declined" };
+        log(&json!({"event": "dialog", "state": state}));
+        if let Some(file) = &self.dialog_file {
+            let _ = std::fs::remove_file(file);
+        }
+        self.dialog = None;
+        self.history.pop();
+        self.history.push(if allowed {
+            "  \u{23bf}  Done".into()
+        } else {
+            "  \u{23bf}  Declined by the user".into()
+        });
+        self.draw();
     }
 
     fn run(mut self) -> ! {
@@ -190,9 +244,18 @@ impl Agent {
                 Ok(0) | Err(rustix::io::Errno::INTR) => {}
                 Ok(_) => match rustix::io::read(&stdin, &mut buf) {
                     Ok(0) | Err(_) => self.exit(),
+                    Ok(read) if self.dialog.is_some() => {
+                        log(
+                            &json!({"event": "read", "bytes": String::from_utf8_lossy(&buf[..read]), "ms": now_ms()}),
+                        );
+                        self.answer_dialog(&buf[..read]);
+                    }
                     Ok(read) => self.take(&buf[..read]),
                 },
                 Err(_) => self.exit(),
+            }
+            if self.poll_dialog() {
+                self.draw();
             }
             if self.busy_until.is_some_and(|until| Instant::now() >= until) {
                 self.busy_until = None;
@@ -336,13 +399,31 @@ impl Agent {
         }
         let busy = self.busy_until.is_some();
         let mut below = vec![rule.clone()];
-        below.extend(composer);
-        below.push(rule);
-        below.push(if busy {
-            "  esc to interrupt".into()
+        if let Some(command) = &self.dialog {
+            // Claude Code 2.1's permission dialog
+            // (`tests/fixtures/claude/permission-dialog.ansi`).
+            let dashes = "\u{254c}".repeat(usize::from(cols));
+            below.extend([
+                " Bash command".into(),
+                dashes.clone(),
+                format!(" {command}"),
+                dashes,
+                " Do you want to proceed?".into(),
+                format!(" {PROMPT_GLYPH} 1. Yes"),
+                "   2. Yes, and don't ask again for this command".into(),
+                "   3. No".into(),
+                String::new(),
+                " Esc to cancel \u{b7} Tab to amend".into(),
+            ]);
         } else {
-            "  ? for shortcuts".into()
-        });
+            below.extend(composer);
+            below.push(rule);
+            below.push(if busy {
+                "  esc to interrupt".into()
+            } else {
+                "  ? for shortcuts".into()
+            });
+        }
         let mut above = self.history.clone();
         above.push(String::new());
         if busy {

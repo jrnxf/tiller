@@ -91,8 +91,11 @@ export function trimChrome(text: string): string {
   return (cut > 0 ? lines.slice(0, cut) : lines).join("\n");
 }
 
-export function tidy(text: string): string {
-  return trimChrome(text.replace(/\r/g, ""))
+// `whole` keeps the rows from the input box down: where a dialog stands in
+// the box's place, they are the dialog.
+export function tidy(text: string, whole = false): string {
+  const plain = text.replace(/\r/g, "");
+  return (whole ? plain : trimChrome(plain))
     .split("\n")
     .map((line) => line.replace(/\s+$/, ""))
     .join("\n")

@@ -132,7 +132,8 @@ function stubDaemon(scenario: Scenario, hold = false) {
         };
         return new Response(JSON.stringify({ ok: false, error }), { status: 503 });
       }
-      const text = " Select a model for this session:\n ❯ 1. Default (recommended)\n";
+      // As Claude Code draws it: the dialog under a rule, where the input box was.
+      const text = `● Switching the model.\n${"─".repeat(60)}\n Select a model for this session:\n ❯ 1. Default (recommended)\n`;
       return new Response(JSON.stringify({ session_id: "s", cols: 100, rows: 28, text }));
     }
     // A live terminal's stream: it never answers, so it stays connecting.

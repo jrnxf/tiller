@@ -34,13 +34,16 @@ export function Terminal({
   tail,
   sessionId,
   actions,
+  whole = false,
 }: {
   tail: string;
   sessionId: string | null;
   // The pane's controls: Open in terminal and View live.
   actions: React.ReactNode;
+  // Show the rows from the input box down too: a dialog stands there.
+  whole?: boolean;
 }) {
-  const text = tidy(tail);
+  const text = tidy(tail, whole);
   const lines = lineCount(text);
   const body = useRef<HTMLPreElement>(null);
   const [open, setOpen] = useState(false);

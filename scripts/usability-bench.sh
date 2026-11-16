@@ -18,6 +18,11 @@
 #   scripts/usability-bench.sh link freeze|thaw  stop or continue the peer's `peer serve`
 #   scripts/usability-bench.sh quota HOST PERCENT   the weekly quota the next poll reads
 #   scripts/usability-bench.sh kill-agent HOST SESSION   kill that session's agent process
+#   scripts/usability-bench.sh prompt HOST SESSION [COMMAND [--no-hook]]   that session's agent
+#                                                stops at a permission dialog for COMMAND, until
+#                                                `1`, `2` or `3` is typed into its pane (the
+#                                                board's answer buttons do it). With --no-hook
+#                                                no hook reports it: only the screen shows it
 #   scripts/usability-bench.sh checks HOST PROJECT NUMBER success|failure|pending
 #                                                the checks of a pull request on the stand-in
 #                                                forge (the daemon reads them within a minute)
@@ -226,7 +231,8 @@ if [ "\$1" = --version ]; then exec "$agent" --version; fi
 id=claude-\$TILLER_SESSION_ID
 case " \$* " in *" --resume "*) id=\$id-resumed;; esac
 printf '{"session_id":"%s","source":"startup"}' "\$id" | "$bin" hook SessionStart >/dev/null 2>&1
-exec env FAKE_AGENT_LOG="$root/agent-logs/\$TILLER_SESSION_ID.jsonl" FAKE_AGENT_BUSY_MS=4000 "$agent" "\$@"
+exec env FAKE_AGENT_LOG="$root/agent-logs/\$TILLER_SESSION_ID.jsonl" \\
+  FAKE_AGENT_DIALOG="$root/agent-logs/\$TILLER_SESSION_ID.dialog" FAKE_AGENT_BUSY_MS=4000 "$agent" "\$@"
 STUB
   # quota-axi's stand-in: one weekly window, with the percent left that
   # `usability-bench.sh quota` wrote.
@@ -481,6 +487,20 @@ case "$command" in
       success | failure | pending) echo "$4" >"$file.checks" ;;
       *) echo "checks HOST PROJECT NUMBER success|failure|pending" >&2; exit 2 ;;
     esac
+    ;;
+  prompt)
+    host=${1:?main or peer}
+    log=$bench/$host/agent-logs/${2:?session}.jsonl
+    [ -f "$log" ] || { echo "no agent of session $2 on $1" >&2; exit 1; }
+    echo "${3:-git push --force origin main}" >"${log%.jsonl}.dialog"
+    # Claude Code fires these two hooks with its permission dialog. Without
+    # them (`--no-hook`) the dialog is one that only the screen shows.
+    if [ "${4:-}" != --no-hook ]; then
+      for hook in 'PermissionRequest:"tool_name":"Bash"' 'Notification:"notification_type":"permission_prompt"'; do
+        printf '{"session_id":"claude-%s",%s}' "$2" "${hook#*:}" |
+          as "$host" "$2" hook "${hook%%:*}" >/dev/null
+      done
+    fi
     ;;
   kill-agent)
     log=$bench/${1:?main or peer}/agent-logs/${2:?session}.jsonl
