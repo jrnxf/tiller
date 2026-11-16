@@ -1649,3 +1649,39 @@ fn a_paired_host_is_named_when_this_host_lacks_the_answer() {
     let recap = world.must_as(&orchestrator, &["board"]);
     assert!(recap.json.get("warning").is_none(), "{}", recap.json);
 }
+
+/// A command line clap refuses names what is missing in its record, not a
+/// message cut at a colon, and its hint is that subcommand's own help.
+#[test]
+fn a_usage_refusal_names_the_missing_arguments_and_the_subcommand_help() {
+    let out = World::new().run(&["init"]);
+    assert_eq!((out.code, out.error_code()), (2, "usage"), "{}", out.json);
+    let message = out.json["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("--host-label"), "{message}");
+    assert!(message.contains("--lane-capacity"), "{message}");
+    assert!(!message.ends_with(':'), "{message}");
+    assert_eq!(
+        out.json["error"]["hint"], "tiller init --help",
+        "{}",
+        out.json
+    );
+
+    // An unknown subcommand keeps the hint of the level that refused it.
+    let out = World::new().run(&["approval", "list"]);
+    assert_eq!((out.code, out.error_code()), (2, "usage"), "{}", out.json);
+    let message = out.json["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("'list'"), "{message}");
+    assert_eq!(
+        out.json["error"]["hint"], "tiller approval --help",
+        "{}",
+        out.json
+    );
+
+    // Clap's tip of a near name stays in the record.
+    let out = World::new().run(&["card", "lst"]);
+    let message = out.json["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("similar subcommand exists: 'list'"),
+        "{message}"
+    );
+}

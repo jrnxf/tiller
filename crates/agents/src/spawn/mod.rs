@@ -50,7 +50,9 @@ use tiller_core::domain::{
     Artifact, Card, CardKind, CheckPlan, Delivery, Effort, Hold, Pr, Project, Reservation, Run,
     RunOutcome, RunRole, Session, Worktree,
 };
-use tiller_core::state::attention::{QUOTA_HOLD_REASON, quota_start_decision};
+use tiller_core::state::attention::{
+    QUOTA_HOLD_REASON, QUOTA_START_LABEL, QUOTA_WAIT_LABEL, quota_start_decision,
+};
 use tiller_core::state::caches::{WorktreeReading, landed_heads};
 use tiller_core::state::projects::meta;
 use tiller_core::state::publishes::published_head;
@@ -348,20 +350,31 @@ pub(crate) fn hold_for_quota(
         &[&card.id],
     )
     .unwrap_or_default();
+    // Dates in Lisbon time with the weekday, as every owner-facing time.
+    let lisbon = |at: tiller_core::Timestamp| {
+        format!(
+            "{} (Lisbon)",
+            tiller_core::time::lisbon::display(at.as_jiff())
+        )
+    };
     let held = match hold {
         Some(hold) if hold.reason == QUOTA_HOLD_REASON => {
-            format!("the card is held until {}", hold.until_at)
+            format!("the card is held until {}", lisbon(hold.until_at))
         }
         Some(hold) => format!(
             "the card already has another hold, until {} ({})",
-            hold.until_at, hold.reason
+            lisbon(hold.until_at),
+            hold.reason
         ),
         None => "the card is not held".to_owned(),
     };
     let owner = if item.value.answered_at.is_some() {
-        "the owner chose to wait for the reset"
+        "the owner chose to wait for the reset".to_owned()
     } else {
-        "the owner has a decision to make"
+        format!(
+            "the owner has a decision to make: `tiller attention answer {} --text \"{QUOTA_START_LABEL}\"` or `--text \"{QUOTA_WAIT_LABEL}\"` (or the board's Inbox)",
+            tiller_core::ids::short(&item.value.id)
+        )
     };
     let start = if unused_start {
         format!(

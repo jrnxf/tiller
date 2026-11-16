@@ -418,6 +418,12 @@ export function applyChange(
         // events only, so the Inbox reads them again.
         refetchPaths(queryClient, attentionPath);
       }
+      // A machine row counts its live sessions and runs ("14 running, 6
+      // free"), and no host event says that one started or ended. Every
+      // screen shows it, so a busy fleet reads it at most once a second.
+      if (event.entity === "session" || event.entity === "run") {
+        refetchSoon(queryClient, "machines", (path) => path === machinesPath);
+      }
       // The away status counts the runs that started under the contract
       // ("Runs 1 of 6"), and the brief lists them. The contract is this
       // host's own, so a peer's run does not move it.

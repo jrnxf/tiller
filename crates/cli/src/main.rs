@@ -281,6 +281,50 @@ fn emit(mut response: Value, json: bool) {
     println!("{text}");
 }
 
+/// The record of a command line clap refused. Its message keeps the lines
+/// that name what is wrong ("the following required arguments were not
+/// provided: --host-label <HOST_LABEL>") and clap's tip, not only the first
+/// line, which ends at a colon. The hint is the refused command's own usage, so the next
+/// step names that subcommand's flags, not the whole tool's help.
+fn usage_failure(rendered: &str) -> Failure {
+    let mut lines = rendered.lines();
+    let mut message = lines
+        .next()
+        .unwrap_or("bad arguments")
+        .trim_start_matches("error: ")
+        .trim_end()
+        .to_owned();
+    // The indented lines up to the usage: the missing arguments, and clap's
+    // "tip: a similar subcommand exists: 'list'".
+    let details: Vec<&str> = lines
+        .take_while(|line| !line.starts_with("Usage:") && !line.starts_with("For more"))
+        .filter(|line| line.starts_with(' ') && !line.trim().is_empty())
+        .map(str::trim)
+        .collect();
+    if !details.is_empty() {
+        let joined = details.join(", ");
+        message = match message.strip_suffix(':') {
+            Some(head) => format!("{head}: {joined}"),
+            None => format!("{message} ({joined})"),
+        };
+    }
+    let usage = rendered
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Usage: "))
+        .and_then(|usage| {
+            // `tiller init --host-label <HOST_LABEL>`: the words before the
+            // first option or argument are the subcommand.
+            let words: Vec<&str> = usage
+                .split_whitespace()
+                .take_while(|word| {
+                    !word.starts_with('-') && !word.starts_with('<') && !word.starts_with('[')
+                })
+                .collect();
+            (words.len() > 1).then(|| format!("{} --help", words.join(" ")))
+        });
+    Failure::usage(message).hint(usage.unwrap_or_else(|| "tiller --help".to_owned()))
+}
+
 fn main() -> ExitCode {
     let parsed = Cli::command().try_get_matches().and_then(|matches| {
         let cli =
@@ -314,14 +358,7 @@ fn main() -> ExitCode {
             let json = std::env::args_os().any(|arg| arg == "--json");
             let rendered = error.render().to_string();
             eprint!("{rendered}");
-            let message = rendered
-                .lines()
-                .next()
-                .unwrap_or("bad arguments")
-                .trim_start_matches("error: ")
-                .to_owned();
-            let failure = Failure::usage(message).hint("tiller --help");
-            emit(failure.into_response(), json);
+            emit(usage_failure(&rendered).into_response(), json);
             return ExitCode::from(2);
         }
     };

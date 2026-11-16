@@ -942,6 +942,16 @@ fn a_start_the_quota_floor_refuses_is_held_with_one_open_decision() {
             .try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
             .unwrap_err();
         assert!(refusal(&error).contains("held until"), "{error}");
+        // The reset in Lisbon time, not UTC, and the command that answers.
+        let lisbon = tiller_core::time::lisbon::display(reset.as_jiff());
+        assert!(
+            refusal(&error).contains(&format!("{lisbon} (Lisbon)")),
+            "{error}"
+        );
+        assert!(
+            refusal(&error).contains("tiller attention answer "),
+            "{error}"
+        );
     }
     assert!(rig.pool.taken().is_empty());
 
@@ -1208,7 +1218,8 @@ fn a_quota_refusal_keeps_an_unrelated_hold() {
         .unwrap_err();
     assert!(
         refusal(&error).contains(&format!(
-            "the card already has another hold, until {vendor} (the vendor ships on Friday)"
+            "the card already has another hold, until {} (Lisbon) (the vendor ships on Friday)",
+            tiller_core::time::lisbon::display(vendor.as_jiff())
         )),
         "{error}"
     );

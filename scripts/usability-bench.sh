@@ -357,6 +357,10 @@ build() {
 }
 
 down() {
+  # The browser that `shots` signed in to this bench outlives it otherwise.
+  if command -v chrome-devtools-axi >/dev/null; then
+    CHROME_DEVTOOLS_AXI_SESSION=tiller-bench chrome-devtools-axi stop >/dev/null 2>&1 || true
+  fi
   [ -d "$bench" ] || return 0
   for host in main peer; do
     stop_pid "$bench/$host/daemon.pid"

@@ -433,6 +433,29 @@ test("a session or run event marks the agents and run details stale", () => {
   expect(queryClient.getQueryState(queryKeyFor("/api/v1/agents"))?.isInvalidated).toBe(true);
 });
 
+test("a session or run event marks the machine rows stale, and an observation does not", () => {
+  // The sidebar's "14 running, 6 free" counts live sessions and runs, and no
+  // host event says that a run started: with the page open it read 12 after
+  // two new runs, until a reload.
+  const machines = queryKeyFor(machinesPath);
+  for (const [entity, peer] of [
+    ["session", false],
+    ["run", false],
+    ["run", true],
+  ] as const) {
+    const queryClient = seededClient();
+    queryClient.setQueryData(machines, { machines: [] });
+
+    applyChange(queryClient, event({ entity }), { peer });
+
+    expect(queryClient.getQueryState(machines)?.isInvalidated).toBe(true);
+  }
+  const quiet = seededClient();
+  quiet.setQueryData(machines, { machines: [] });
+  applyChange(quiet, event({ entity: "observation" }));
+  expect(quiet.getQueryState(machines)?.isInvalidated).toBe(false);
+});
+
 test("a run of this host marks the away status stale, and a peer's run does not", () => {
   // The header's "Runs 1 of 6" and the brief count the runs started under the
   // away contract, and no approval event says that one started.
