@@ -689,6 +689,9 @@ async fn host_check(State(state): State<AppState>, request: Request, next: Next)
 
 /// The checks every mutation passes before its body is read.
 pub(crate) async fn guard(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    if via_socket() {
+        return Err(socket_writes_peers_only());
+    }
     same_origin(state, headers)?;
     owner_only()
 }
@@ -699,6 +702,12 @@ pub(crate) async fn guard(state: &AppState, headers: &HeaderMap) -> Result<(), A
 /// depending on that list alone.
 pub(crate) fn owner_only() -> Result<(), ApiError> {
     verified_owner().map(drop).ok_or_else(not_owner)
+}
+
+/// A write over the owner socket that does not name a paired peer.
+fn socket_writes_peers_only() -> ApiError {
+    ApiError::forbidden("the owner socket forwards a paired peer's mutations only")
+        .hint("this host's records change through the tiller command itself")
 }
 
 fn not_owner() -> ApiError {
@@ -1105,6 +1114,71 @@ fn signed_out_policy(
 }
 
 pub fn router(state: AppState) -> Router {
+    routes()
+        .layer(middleware::from_fn(bind_args))
+        .layer(middleware::from_fn_with_state(state.clone(), owner_gate))
+        .layer(middleware::from_fn_with_state(state.clone(), host_check))
+        .with_state(state)
+}
+
+/// The owner CLI socket's router (`authority.md` section 7, Owner CLI
+/// socket): the board's routes behind [`socket_gate`] in place of the Host
+/// check and the owner cookie. Serve it with
+/// `into_make_service_with_connect_info::<socket::Caller>()`.
+pub fn socket_router(state: AppState) -> Router {
+    routes()
+        .layer(middleware::from_fn(bind_args))
+        .layer(middleware::from_fn(socket_gate))
+        .with_state(state)
+}
+
+tokio::task_local! {
+    /// Set for a request that came over the owner CLI socket.
+    static VIA_SOCKET: ();
+}
+
+/// Whether the request this task serves came over the owner CLI socket.
+fn via_socket() -> bool {
+    VIA_SOCKET.try_with(|()| ()).is_ok()
+}
+
+/// The owner CLI socket's gate: a route on [`crate::socket::SOCKET_ROUTES`],
+/// from a caller the kernel names as the owner
+/// ([`crate::socket::Caller::refusal`]). The caller check walks the process
+/// table, so it runs on the blocking pool.
+async fn socket_gate(request: Request, next: Next) -> Response {
+    let route = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|route| route.as_str().to_owned());
+    if !crate::socket::serves(request.method(), route.as_deref()) {
+        return ApiError::forbidden(
+            "the owner socket serves the federated reads and a peer's mutations only",
+        )
+        .hint("use the board, or the tiller command that writes this host's state")
+        .into_response();
+    }
+    let caller = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<crate::socket::Caller>>()
+        .map(|info| info.0.clone());
+    let refusal = match caller {
+        Some(caller) => tokio::task::spawn_blocking(move || caller.refusal())
+            .await
+            .unwrap_or_else(|error| Some(error.to_string())),
+        None => Some("the connection has no caller credential".to_owned()),
+    };
+    if let Some(why) = refusal {
+        tracing::warn!(%why, "the owner socket refused a caller");
+        return ApiError::forbidden(format!("the owner socket serves the owner only: {why}"))
+            .hint("run tiller in your own terminal, not from an agent")
+            .into_response();
+    }
+    VIA_SOCKET.scope((), next.run(request)).await
+}
+
+/// The routes of the board and of the owner CLI socket.
+fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/snapshot", get(snapshot))
         .route("/api/v1/board", get(board))
@@ -1237,10 +1311,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/logout", post(logout))
         .route("/login/{token}", get(login))
         .fallback(app_shell)
-        .layer(middleware::from_fn(bind_args))
-        .layer(middleware::from_fn_with_state(state.clone(), owner_gate))
-        .layer(middleware::from_fn_with_state(state.clone(), host_check))
-        .with_state(state)
 }
 
 // -- reads ------------------------------------------------------------------------
@@ -3051,10 +3121,18 @@ async fn submit(
     target: Option<String>,
     bytes: &[u8],
 ) -> ApiResult<MutationResponse> {
-    guard(state, headers).await?;
+    // The owner socket's caller was checked by its gate, and it changes a
+    // peer's records only: this host's own the CLI writes itself.
+    let socket = via_socket();
+    if !socket {
+        guard(state, headers).await?;
+    }
     let mutation = Mutation::parse(op, target, bytes)?;
     if let Some(view) = peer_for(state, mutation.host()).await? {
         return forward(state, &view, mutation, bytes).await;
+    }
+    if socket {
+        return Err(socket_writes_peers_only());
     }
     let lookup = mutation.target.clone().unwrap_or_default();
     let key = mutation.key.clone();

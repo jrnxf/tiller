@@ -498,6 +498,29 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
     };
     let retros = state.0.retros.clone();
     let evals = state.0.evals.clone();
+    // The owner CLI socket (`authority.md` section 7): without it the
+    // board still serves, and the CLI says it lists this host only.
+    let owner_socket = match crate::socket::bind(&config.home) {
+        Ok(socket) => {
+            let mut stopped = stop.clone();
+            let app = api::socket_router(state.clone())
+                .into_make_service_with_connect_info::<crate::socket::Caller>();
+            Some(tokio::spawn(async move {
+                let served = axum::serve(socket, app)
+                    .with_graceful_shutdown(async move {
+                        let _ = stopped.wait_for(|stop| *stop).await;
+                    })
+                    .await;
+                if let Err(error) = served {
+                    tracing::warn!(%error, "the owner socket stopped");
+                }
+            }))
+        }
+        Err(error) => {
+            tracing::warn!(%error, "the owner socket is not served; the CLI reads this host only");
+            None
+        }
+    };
     let server = axum::serve(listener, api::router(state)).with_graceful_shutdown(shutdown);
     let mut stopped = stop.clone();
     // A serve error is returned only once the curators and evals the board
@@ -513,6 +536,11 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         }
     };
     let _ = stop_tx.send(true);
+    // No socket is left for a CLI to find once the daemon is gone.
+    if let Some(socket) = owner_socket {
+        let _ = tokio::time::timeout(DRAIN, socket).await;
+        let _ = std::fs::remove_file(crate::socket::socket_path(&config.home));
+    }
     if let Ok(Ok(handles)) = tokio::time::timeout(DRAIN, workers).await {
         for handle in handles {
             let _ = tokio::time::timeout(DRAIN, handle).await;

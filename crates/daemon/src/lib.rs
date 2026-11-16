@@ -18,6 +18,7 @@ pub mod quota;
 pub mod readonly;
 pub mod retros;
 pub mod server;
+pub mod socket;
 pub mod sse;
 pub mod stale;
 #[cfg(feature = "testing")]

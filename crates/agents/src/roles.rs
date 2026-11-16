@@ -15,6 +15,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::Path;
 
 use serde_json::Value;
 
@@ -340,6 +341,19 @@ impl fmt::Display for Role {
 pub fn render_settings(role: Role, fill: &Placeholders) -> Result<Value, RoleError> {
     let template = role.settings_template();
     fill.check(role, template)?;
+    // Every fleet role is denied the Tiller home, the owner CLI socket in it
+    // included (`authority.md` G20): no socket there is ever let through.
+    if let Some(socket) = &fill.no_mistakes_socket
+        && !fill.tiller_home.is_empty()
+        && Path::new(socket).starts_with(&fill.tiller_home)
+    {
+        return Err(RoleError::InvalidPlaceholder {
+            role,
+            placeholder: "<no_mistakes_socket>",
+            requirement: "a socket outside the Tiller home",
+            value: socket.clone(),
+        });
+    }
     let mut value: Value =
         serde_json::from_str(template).map_err(|e| RoleError::InvalidTemplate {
             role,
@@ -1221,6 +1235,36 @@ mod tests {
                     "{role}, opt-in {on}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn no_role_reaches_the_owner_socket() {
+        for role in Role::ALL {
+            let mut fill = sample_fill(role);
+            fill.no_mistakes_socket = Some("/home/user/.tiller/run/daemon.sock".into());
+            assert!(
+                matches!(
+                    render_settings(role, &fill),
+                    Err(RoleError::InvalidPlaceholder {
+                        placeholder: "<no_mistakes_socket>",
+                        ..
+                    })
+                ),
+                "{role}: a socket in the Tiller home"
+            );
+            let rendered = render_settings(role, &sample_fill(role)).unwrap();
+            let sandbox = &rendered["sandbox"];
+            for socket in strings(&sandbox["network"]["allowUnixSockets"]) {
+                assert!(
+                    !socket.starts_with("/home/user/.tiller"),
+                    "{role}: {socket} allowed"
+                );
+            }
+            assert!(
+                strings(&sandbox["filesystem"]["denyRead"]).contains(&"/home/user/.tiller"),
+                "{role}: the Tiller home readable"
+            );
         }
     }
 

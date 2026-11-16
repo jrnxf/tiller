@@ -178,6 +178,12 @@ pub fn is_claude_code(process: &Process) -> bool {
 
 /// The caller's ancestors, nearest first, up to but not including pid 1.
 pub fn ancestors() -> std::io::Result<Vec<Process>> {
+    process_chain(std::os::unix::process::parent_id(), 128)
+}
+
+/// Process `start` and its ancestors, nearest first, at most `limit` of
+/// them, up to but not including pid 1.
+fn process_chain(start: u32, limit: usize) -> std::io::Result<Vec<Process>> {
     #[cfg(target_os = "linux")]
     let read = read_process;
     #[cfg(not(target_os = "linux"))]
@@ -189,16 +195,58 @@ pub fn ancestors() -> std::io::Result<Vec<Process>> {
             .cloned()
             .ok_or_else(|| std::io::Error::other(format!("pid {pid}: no such process")))
     };
-    walk(std::os::unix::process::parent_id(), read)
+    walk(start, limit, read)
+}
+
+/// The daemon's check of a caller on its owner socket (`authority.md`
+/// section 7, Owner CLI socket): the kernel gave the caller's `uid` and
+/// `pid`. The caller is the owner when its uid is the daemon's own
+/// (`own_uid`) and neither it nor any of its ancestors is Claude Code. The
+/// daemon cannot read another process's environment, so the CLI runs its
+/// own owner check (`CLAUDECODE`, stdin a terminal) before it connects. In
+/// a test build with `TILLER_TEST_OWNER` set on the daemon, only the
+/// caller itself is looked at, as [`owner_at_terminal`] skips the chain
+/// there.
+pub fn socket_owner(uid: u32, own_uid: u32, pid: Option<i32>) -> Result<(), String> {
+    let limit = if test_owner() { 1 } else { 128 };
+    socket_owner_check(uid, own_uid, pid, |pid| process_chain(pid, limit))
+}
+
+/// [`socket_owner`] on facts read elsewhere: `chain` reads the caller and
+/// its ancestors, nearest first.
+pub fn socket_owner_check(
+    uid: u32,
+    own_uid: u32,
+    pid: Option<i32>,
+    chain: impl FnOnce(u32) -> std::io::Result<Vec<Process>>,
+) -> Result<(), String> {
+    if uid != own_uid {
+        return Err(format!("uid {uid} is not the daemon's own uid {own_uid}"));
+    }
+    let Some(pid) = pid
+        .and_then(|pid| u32::try_from(pid).ok())
+        .filter(|pid| *pid > 1)
+    else {
+        return Err("the system does not say which process is calling".into());
+    };
+    let chain = chain(pid).map_err(|error| format!("the caller's process chain: {error}"))?;
+    match claude_ancestor(&chain) {
+        Some(found) if found == pid => Err(format!("the caller (pid {pid}) is Claude Code")),
+        Some(found) => Err(format!(
+            "Claude Code (pid {found}) is among the caller's ancestors"
+        )),
+        None => Ok(()),
+    }
 }
 
 fn walk(
     start: u32,
+    limit: usize,
     mut read: impl FnMut(u32) -> std::io::Result<(u32, Process)>,
 ) -> std::io::Result<Vec<Process>> {
     let mut chain = Vec::new();
     let mut pid = start;
-    while pid > 1 && chain.len() < 128 {
+    while pid > 1 && chain.len() < limit {
         let (parent, process) = read(pid)?;
         chain.push(process);
         pid = parent;
@@ -364,7 +412,7 @@ mod tests {
     #[test]
     fn walk_follows_parents_and_stops_before_pid_one() {
         let parents = [(30, 20, "zsh"), (20, 10, "claude"), (10, 1, "launchd")];
-        let chain = walk(30, |pid| {
+        let chain = walk(30, 128, |pid| {
             let (_, parent, comm) = parents
                 .iter()
                 .find(|(candidate, ..)| *candidate == pid)
@@ -375,7 +423,7 @@ mod tests {
         let comms: Vec<_> = chain.iter().map(|process| process.comm.as_str()).collect();
         assert_eq!(comms, ["zsh", "claude", "launchd"]);
         assert_eq!(claude_ancestor(&chain), Some(20));
-        assert!(walk(30, |_| Err(std::io::Error::other("gone"))).is_err());
+        assert!(walk(30, 128, |_| Err(std::io::Error::other("gone"))).is_err());
     }
 
     /// `ps` pads its columns, so a short ppid (a terminal app's 1) sits
@@ -458,5 +506,45 @@ mod tests {
         ] {
             assert!(!is_claude_code(&other), "{other:?}");
         }
+    }
+
+    /// The owner socket's rule (`authority.md` section 7): the daemon's own
+    /// uid, a caller the kernel names, and no Claude Code in its chain.
+    /// The test host has no second uid, so the rule runs on crafted facts.
+    #[test]
+    fn the_socket_serves_only_the_owners_uid_with_no_claude_in_the_chain() {
+        let chain = |names: &'static [&'static str]| {
+            move |pid: u32| -> std::io::Result<Vec<Process>> {
+                Ok(names
+                    .iter()
+                    .enumerate()
+                    .map(|(at, comm)| process_at(pid + at as u32, comm))
+                    .collect())
+            }
+        };
+        assert_eq!(
+            socket_owner_check(501, 501, Some(40), chain(&["tiller", "zsh", "Terminal"])),
+            Ok(())
+        );
+        for uid in [0, 502, u32::MAX] {
+            let refused = socket_owner_check(uid, 501, Some(40), chain(&["tiller"])).unwrap_err();
+            assert!(
+                refused.contains("not the daemon's own uid 501"),
+                "{refused}"
+            );
+        }
+        let unknown = socket_owner_check(501, 501, None, chain(&["tiller"])).unwrap_err();
+        assert!(unknown.contains("does not say"), "{unknown}");
+        let itself = socket_owner_check(501, 501, Some(40), chain(&["claude"])).unwrap_err();
+        assert_eq!(itself, "the caller (pid 40) is Claude Code");
+        let below = socket_owner_check(501, 501, Some(40), chain(&["tiller", "zsh", "claude"]))
+            .unwrap_err();
+        assert_eq!(
+            below,
+            "Claude Code (pid 42) is among the caller's ancestors"
+        );
+        let gone = socket_owner_check(501, 501, Some(40), |_| Err(std::io::Error::other("gone")))
+            .unwrap_err();
+        assert!(gone.contains("gone"), "{gone}");
     }
 }
