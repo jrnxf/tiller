@@ -1,10 +1,12 @@
 import { createStore } from "../../lib/store";
 
-// Which lanes are folded and whether the Done column is folded to numbers.
+// Which lanes are folded, whether the Done column is folded to numbers, and
+// whether a card shows the system events of its timeline.
 // Per browser, like the theme: it is a way of looking, not shared state.
 interface BoardLook {
   collapsed: string[];
   doneFolded: boolean;
+  systemEvents: boolean;
 }
 
 const KEY = "tiller-board-look";
@@ -17,9 +19,10 @@ function load(): BoardLook {
         ? parsed.collapsed.filter((id) => typeof id === "string")
         : [],
       doneFolded: parsed?.doneFolded === true,
+      systemEvents: parsed?.systemEvents === true,
     };
   } catch {
-    return { collapsed: [], doneFolded: false };
+    return { collapsed: [], doneFolded: false, systemEvents: false };
   }
 }
 
@@ -54,8 +57,16 @@ export function toggleDoneFolded() {
   });
 }
 
+export function toggleSystemEvents() {
+  boardLookStore.update((look) => {
+    const next = { ...look, systemEvents: !look.systemEvents };
+    save(next);
+    return next;
+  });
+}
+
 export function resetBoardLook() {
-  const look = { collapsed: [], doneFolded: false };
+  const look = { collapsed: [], doneFolded: false, systemEvents: false };
   save(look);
   boardLookStore.set(look);
 }

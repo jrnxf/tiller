@@ -12,9 +12,9 @@ Status values: `open`, `fixed` (with what was verified), `needs owner`, `to veri
 |---|---|
 | Phase | 1 - audit. Journeys 3 (ask), 4 (start a task) and 5 (trust) are walked on the board and the CLI. Journeys 1, 2 and 6 to 11 are not walked yet. |
 | Open P0 | 0. UA-15 is `needs owner`: the silent part is fixed, the answer itself needs a spec change. |
-| Open P1 | 9 (UA-01, UA-02, UA-03, UA-04, UA-05, UA-09, UA-17, UA-20, UA-21). UA-18 is `needs owner`: the wrong status line is fixed, Cancel and the full view need a spec change. UA-19 is `needs owner`: the tile, the card and the timeline show the worker's report, and the "Needs you" rule needs a spec change. |
-| Fixed | UA-16, DX-01. UA-15 part 1 (the owner is told where the answer shows). UA-18 part 1 (the ask tile shows an unread answer and opens it). UA-19 part 1 (a worker's report shows on its tile, on the card and in the timeline). |
-| Next step | Finish UA-04 (hide the system events of the timeline behind a switch, fold "queued a message" lines) with UA-11. Then UA-02 with UA-05 and UA-06. Walk journeys 2, 6 and 8 after the stand-in forge of the bench gaps. |
+| Open P1 | 8 (UA-01, UA-02, UA-03, UA-05, UA-09, UA-17, UA-20, UA-21). UA-18 is `needs owner`: the wrong status line is fixed, Cancel and the full view need a spec change. UA-19 is `needs owner`: the tile, the card and the timeline show the worker's report, and the "Needs you" rule needs a spec change. |
+| Fixed | UA-04, UA-16, DX-01. UA-15 part 1 (the owner is told where the answer shows). UA-18 part 1 (the ask tile shows an unread answer and opens it). UA-19 part 1 (a worker's report shows on its tile, on the card and in the timeline). |
+| Next step | UA-02 with UA-05 and UA-06 (the "needs you" path). Then UA-20 with UA-21 and UA-22. Walk journeys 2, 6 and 8 after the stand-in forge of the bench gaps. UA-11 (P2) is not started: check `docs/spec/state.md` section 6 first, because the column of a card is a contract. |
 
 ## The bench
 
@@ -84,6 +84,7 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 | Recover from the wrong project | not possible: the ask tile has no Cancel (UA-18, needs owner) | `ask resolve <ask> cancelled`, which the help calls an orchestrator's tool |
 | Idea to a filed card | 3 steps: New card on the project's row, the title, Enter | 1 command, after one refusal for a missing `--kind` (UA-23) |
 | Filed card to a running card | not possible: the orchestrator decides (UA-20) | `tiller spawn <card> builder`, 73 lines of answer (UA-09) |
+| Read what happened on a card | the timeline shows the owner's news only (`harbor-2`: 4 lines in place of 24), with the question, the answer and a comment quoted (UA-04) | `card timeline` prints raw events (UA-09) |
 | Learn that a run is blocked or done | the tile shows the worker's words and "Reports blocked" or "Reports done" within 2 s, on both hosts (UA-19; before, only when the orchestrator raised an item). The card enters "Needs you" only when the orchestrator raises an item | `tiller agents`, in a CSV row |
 
 ## Findings
@@ -112,7 +113,7 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 - Hurts: the owner must know which machine owns a project, and open a shell on it, to use the CLI. The board hides the host; the CLI makes it the first question. `tiller recap` gives an incomplete morning list without saying so.
 - Fix: owner reads and writes in the CLI go through the local daemon when it runs, as the board's do, so a peer's project, card and question resolve by name. Until then, a `not_found` on a name the peer owns says "pylon is on peer" and `tiller recap` says how many items the peer holds. Check `docs/spec` before the fix: if the CLI is host-local by contract, this moves to "Needs owner".
 
-### UA-04 - The card timeline is plumbing (P1, open; a worker's report is now readable)
+### UA-04 - The card timeline is plumbing (P1, fixed)
 
 - Journey: 5.
 - Tried: read `harbor-2`'s timeline to learn what happened.
@@ -120,7 +121,18 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 - Hurts: the timeline is the proof behind "done" and "blocked". The owner cannot read it. "You stamped the session" credits the owner with steps the system took.
 - Fix: the default timeline shows owner events with their content (the status line, the question, the answer, the PR, the landing). A "Show system events" switch shows the rest. Events a command made in one step fold into one line.
 - Done with UA-19 on Mon 16 Nov 2026 (Lisbon): a worker's report reads "Worker reported blocked" with its words quoted under it, and a worker's lines no longer say "Orchestrator".
-- Still open: the plumbing lines stay. Each report is followed by "Worker queued a message" and "Tiller deferred a message: busy" (the wake of the orchestrator). "You stamped the session" and "You placed the run on a machine" still credit the owner. A raised item does not quote its question.
+- Fixed on Mon 16 Nov 2026 (Lisbon), in the daemon's timeline read and the board's card page:
+  - Each line of `GET /api/v1/cards/{id}/timeline` has a new field `system`. It is true for the steps of the machinery: message delivery (`outbox.*`, except a failed delivery and the owner's own words), session and slot bookkeeping (`session.*`, `reservation.*`, `run.placed`, `run.cleaned`), obligations, observations and a sent notification. The read still returns every event, so the contract of `docs/spec/protocol.md` ("the card's events, newest first, paged") holds. `contract/openapi.json` is regenerated.
+  - The board hides the system lines. A "System events 21" switch in the timeline's header shows them, in a quieter colour. The choice is kept in the browser, like a folded lane.
+  - The lines that stay say what happened: "Orchestrator asked you for a decision" with the question quoted, "You answered" with the answer quoted, "You commented" with the comment quoted (before: "You queued a message"), "You started a builder run (opus, medium)", "ended the run as failed".
+  - A system step is never credited to the owner: "Tiller stamped the session", "Tiller reserved a slot" (before: "You recorded a reservation reserved").
+  - The raw "Events" list at the bottom of the card (UA-24) shows only with the switch on. With the switch off, a line of that list that reports a problem still shows, under "Problems in the event log".
+  - Verified on the bench: `harbor-2` showed 4 lines in place of 24, then 6 after a comment on the board and an answer in the CLI, each within 2 s and with its words. The switch showed all 27. The peer's `pylon-1` showed 3 lines and "System events 16" through the link. Checked in light at 1440 px (switch off and on) and in dark at 390 px.
+  - Tests: `crates/daemon/tests/status_timeline.rs` (`the_owners_news_is_quoted_and_the_machinery_is_marked`), `views::tests::timeline_lines_read_as_plain_sentences`, `board/src/components/board/views.test.tsx` ("a card's timeline keeps system events out of the way until the owner asks for them").
+- Not done, by choice:
+  - Lines are hidden, not folded into one. With the system lines out, no run of repeated lines was left on the bench.
+  - `tiller card timeline` in the CLI still prints the raw events. That belongs to UA-09 (CLI answers are raw records).
+  - When the newest 50 events are all system events, the timeline says so and offers "Show earlier". It does not load further pages by itself.
 
 ### UA-05 - The Inbox ignores priority (P1, open)
 
@@ -296,7 +308,7 @@ What the walked journeys cost, on the bench (Mon 16 Nov 2026, Lisbon):
 
 - The toast ("Sent to the Pylon orchestrator", "Filed lantern-4") covers the "All / Active / Needs you" filter at 1440 px.
 - The new-card dialog explains itself with a command ("Files a card, as `tiller card create` does") and shows the raw kind "ship".
-- The card panel has two event lists: "Timeline" and, at the bottom, "Events" with raw kinds (`outbox.delivered BX6YJFV`, `session.stamped`). The second belongs behind the "Show system events" switch of UA-04.
+- Fixed with UA-04: the card panel had two event lists, "Timeline" and, at the bottom, "Events" with raw kinds (`outbox.delivered BX6YJFV`, `session.stamped`). The second now shows only with the "System events" switch on.
 - A new card's panel shows the worktree's absolute path and the slug before anything the owner needs.
 - At 390 px the "x" that removes a project in the Ask box wraps to a line of its own.
 - To verify: the Ask box said "will start orchestrator" for Lantern, whose orchestrator was running, right after a page load. The label may read "not running" while the agents list still loads (`board/src/components/shell/ask-dialog.tsx`, `statusOf`).
@@ -336,14 +348,14 @@ Next step for these: find out whether they fail on a quiet machine and on Linux.
 Order of work, highest owner value first. Fixes that share a cause are grouped.
 
 1. Done as far as the contract allows: UA-16, UA-15 part 1, UA-18 part 1 and UA-19 part 1. The rest of UA-15, UA-18 and UA-19 waits under "Needs owner".
-2. The rest of UA-04 with UA-11: a timeline without plumbing lines (a "Show system events" switch, folded lines, the question of a raised item quoted), and no ended run in "Working".
+2. Done: UA-04 (a timeline without plumbing lines). UA-11 (no ended run in "Working") moves to the polish step: it is P2, and the column is a contract of `docs/spec/state.md` section 6.
 3. UA-02 with UA-05 and UA-06: the "needs you" path. The question is on the card, the Inbox is ordered by urgency, and the kind is named.
 4. UA-20 with UA-21 and UA-22: start a task from anywhere on the board.
 5. UA-01: an honest host verdict in every place that shows a host.
 6. UA-17 with UA-03, UA-09, UA-10 and UA-23: the CLI as an owner surface.
 7. Finish the audit in parallel with the fixes: close the bench gaps (the stand-in forge), then walk journeys 1, 2, 6, 8, 9, 10 and 11 and the rest of 5 and 7.
 8. UA-07 with UA-08: the host out of the owner's way.
-9. UA-12, UA-13, UA-14, UA-22, UA-24: polish.
+9. UA-11, UA-12, UA-13, UA-14, UA-22, UA-24: polish.
 
 ## Needs owner
 

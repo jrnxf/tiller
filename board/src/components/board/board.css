@@ -789,6 +789,12 @@ button.colh:hover {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+/* A system event, shown on request: quieter than the owner's news. */
+.tl .it.sys b,
+.tl .it.sys .q {
+  color: var(--fg-3);
+  font-weight: var(--w-normal);
+}
 .tl .it .when {
   color: var(--fg-4);
   white-space: nowrap;

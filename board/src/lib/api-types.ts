@@ -422,9 +422,12 @@ export interface TimelineEntry {
   // `worker` is a scout, builder, reviewer or verifier session.
   actor: "you" | "orchestrator" | "worker" | "hook" | "system";
   text: string;
-  // The words the line quotes under it: the orchestrator's reply, or a
-  // worker's status line.
+  // The words the line quotes under it: the orchestrator's reply, a worker's
+  // status line, an item's question or answer, the owner's comment.
   quote?: string | null;
+  // A step of the machinery (message delivery, session and slot bookkeeping).
+  // Hidden until the owner asks for system events.
+  system?: boolean;
 }
 
 export interface TimelineResponse {

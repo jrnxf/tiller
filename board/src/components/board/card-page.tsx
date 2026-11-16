@@ -10,6 +10,7 @@ import type {
   CardPr,
   CardReview,
   CardRun,
+  EventLine,
   TimelineEntry,
   TimelineResponse,
 } from "../../lib/api-types";
@@ -43,6 +44,8 @@ import { phaseOf } from "../attention/card-lifecycle";
 import { AnswerForm } from "../attention/answer";
 import { CommentControl } from "../attention/card-actions";
 import "../attention/inbox.css";
+import { useStore } from "../../lib/store";
+import { boardLookStore, toggleSystemEvents } from "./board-prefs";
 import {
   useAmbiguousIds,
   useHostLabel,
@@ -127,7 +130,12 @@ function Timeline({
     setLoaded({ base: first, older, cursor });
   }
   const next = cursor === undefined ? first.next_before : cursor;
-  const entries = mergeTimeline(first.entries, older);
+  const all = mergeTimeline(first.entries, older);
+  // System events (message delivery, session and slot bookkeeping) stay out
+  // of the way until the owner asks for them.
+  const showSystem = useStore(boardLookStore).systemEvents;
+  const hidden = all.filter((entry) => entry.system === true).length;
+  const entries = showSystem ? all : all.filter((entry) => entry.system !== true);
 
   const loadEarlier = async () => {
     if (next === null) return;
@@ -152,16 +160,34 @@ function Timeline({
     <div className="sect">
       <div className="sect-h">
         Timeline<span className="c">{entries.length} newest first</span>
+        <span className="sp" />
+        {hidden > 0 ? (
+          <button
+            type="button"
+            className="lchip"
+            aria-pressed={showSystem}
+            title="Message delivery, session and slot steps"
+            onClick={toggleSystemEvents}
+          >
+            System events <span className="c">{hidden}</span>
+          </button>
+        ) : null}
       </div>
       {composer}
       {entries.length === 0 ? (
         <div className="run">
-          <p style={{ margin: 0 }}>Nothing has happened on this card yet.</p>
+          <p style={{ margin: 0 }}>
+            {all.length === 0
+              ? "Nothing has happened on this card yet."
+              : next === null
+                ? "Only system events so far."
+                : "Only system events in the newest part. Show earlier events, or turn on system events."}
+          </p>
         </div>
       ) : (
         <div className="tl">
           {entries.map((entry) => (
-            <div key={entry.seq} className="it">
+            <div key={entry.seq} className={entry.system === true ? "it sys" : "it"}>
               <span className="ic">
                 <ActorIcon actor={entry.actor} />
               </span>
@@ -181,6 +207,43 @@ function Timeline({
         </button>
       )}
       {failed ? <p className="muted">Could not load earlier events. Try again.</p> : null}
+    </div>
+  );
+}
+
+// The raw event log under a card. It is system detail, so it shows in full
+// only with the timeline's system events. A line that reports a problem
+// always shows.
+function EventLog({ events }: { events: EventLine[] }) {
+  const showSystem = useStore(boardLookStore).systemEvents;
+  const shown = showSystem
+    ? events
+    : events.filter((event) => event.tone === "bad" || event.tone === "warn");
+  if (!showSystem && shown.length === 0) return null;
+  return (
+    <div className="sect">
+      <div className="sect-h">
+        {showSystem ? "Events" : "Problems in the event log"}
+        <span className="c">
+          {shown.length} {showSystem ? "newest" : `of ${events.length}`}
+        </span>
+      </div>
+      {shown.length > 0 ? (
+        <div className="evlog">
+          {shown.map((event) => (
+            <div
+              key={`${event.at}-${event.source}-${event.text}`}
+              className={event.tone === "bad" ? "bad" : event.tone === "warn" ? "warnl" : ""}
+            >
+              <span className="tm">{formatLisbonMoment(event.at)}</span>
+              <span className="src">{event.source}</span>
+              <span className="tx">{event.text}</span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="muted">No events yet.</p>
+      )}
     </div>
   );
 }
@@ -860,27 +923,7 @@ export function CardPage({
         </>
       )}
 
-      <div className="sect">
-        <div className="sect-h">
-          Events<span className="c">{detail.events.length} newest</span>
-        </div>
-        {detail.events.length > 0 ? (
-          <div className="evlog">
-            {detail.events.map((event) => (
-              <div
-                key={`${event.at}-${event.source}-${event.text}`}
-                className={event.tone === "bad" ? "bad" : event.tone === "warn" ? "warnl" : ""}
-              >
-                <span className="tm">{formatLisbonMoment(event.at)}</span>
-                <span className="src">{event.source}</span>
-                <span className="tx">{event.text}</span>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p className="muted">No events yet.</p>
-        )}
-      </div>
+      <EventLog events={detail.events} />
 
       {hostHealth ? null : (
         <div className="sect">

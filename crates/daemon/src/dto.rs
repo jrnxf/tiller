@@ -497,9 +497,16 @@ pub struct TimelineEntry {
     pub actor: String,
     pub text: String,
     /// The words the line quotes: a reply's body on `ask.replied`, a worker's
-    /// status line on `run.status`. Absent from a peer that predates replies.
+    /// status line on `run.status`, an item's question on `attention.opened`
+    /// and its answer on `attention.answered`, the owner's comment or steer.
+    /// Absent from a peer that predates replies.
     #[serde(default)]
     pub quote: Option<String>,
+    /// True for a step of the machinery (message delivery, session and slot
+    /// bookkeeping, a sent notification). The board hides these lines until
+    /// the owner asks for them. Absent from a peer that predates it.
+    #[serde(default)]
+    pub system: bool,
 }
 
 /// `GET /api/v1/cards/{id}/timeline`: newest first, paged by `before`.

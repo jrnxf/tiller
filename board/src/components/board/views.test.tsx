@@ -920,6 +920,30 @@ test("the drawer expands to the full page, and Back returns to the board with th
   expect(await screen.findByTestId("card-drawer")).toBeTruthy();
 });
 
+test("a card's timeline keeps system events out of the way until the owner asks for them", async () => {
+  stubApi("default");
+  await renderApp("default", `/?card=${CARD_43}`);
+  const drawer = await screen.findByTestId("card-drawer");
+  // The owner's news shows, and the delivery step does not.
+  expect(await within(drawer).findByText("started attempt 2")).toBeTruthy();
+  expect(within(drawer).queryByText("delivered a message")).toBeNull();
+  // The raw event log is system detail too.
+  expect(within(drawer).queryByText("Events")).toBeNull();
+
+  // The switch says how many lines it holds back.
+  const toggle = within(drawer).getByRole("button", { name: /System events\s*1/ });
+  expect(toggle.getAttribute("aria-pressed")).toBe("false");
+  fireEvent.click(toggle);
+  expect(await within(drawer).findByText("delivered a message")).toBeTruthy();
+  expect(toggle.getAttribute("aria-pressed")).toBe("true");
+  expect(within(drawer).getByText("Events")).toBeTruthy();
+  // The choice is a way of looking, kept for the next card and the next visit.
+  expect(JSON.parse(localStorage.getItem("tiller-board-look") ?? "{}").systemEvents).toBe(true);
+
+  fireEvent.click(toggle);
+  await waitFor(() => expect(within(drawer).queryByText("delivered a message")).toBeNull());
+});
+
 test("opening the drawer fetches the card page's route chunk, so the full page needs no wait", async () => {
   stubApi("default");
   const queryClient = createTestQueryClient();
@@ -1023,6 +1047,9 @@ test("the page lists runs, the PR with its head, events and how fresh each signa
     "href",
     "https://github.com/example/alpha/pull/52",
   );
+  // The raw event log comes with the timeline's system events.
+  expect(page.textContent).not.toContain("ci.pass 4/4");
+  fireEvent.click(within(page).getByRole("button", { name: /System events/ }));
   expect(page.textContent).toContain("ci.pass 4/4");
   expect(page.textContent).toContain("Observation freshness");
   expect(page.textContent).toContain("Pane (holder)");

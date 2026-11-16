@@ -1388,26 +1388,37 @@ pub fn timeline(store: &Store, reference: &str, before: Option<i64>) -> Result<T
     } else {
         None
     };
+    // The owner's own words to an agent, for the lines that carry them.
+    let words = events
+        .iter()
+        .map(|event| owner_words(store, event))
+        .collect::<Result<Vec<_>>>()?;
     let quote = |event: &Event| -> Result<Option<String>> {
-        // A worker's report is quoted in its own words.
-        if event.kind == "run.status" {
-            return Ok(event
+        let field = |name: &str| {
+            event
                 .payload
-                .get("line")
+                .get(name)
                 .and_then(Value::as_str)
-                .map(str::to_owned));
-        }
-        if event.kind != "ask.replied" {
-            return Ok(None);
-        }
-        Ok(store
-            .conn()
-            .query_row(
-                "SELECT body FROM replies WHERE id = ?1",
-                [&event.entity_id],
-                |row| row.get(0),
-            )
-            .optional()?)
+                .filter(|text| !text.trim().is_empty())
+                .map(str::to_owned)
+        };
+        Ok(match event.kind.as_str() {
+            // A worker's report is quoted in its own words.
+            "run.status" => field("line"),
+            // The question of an item, and the owner's answer to it.
+            "attention.opened" => field("question"),
+            "attention.answered" => field("answer"),
+            "run.ended" => field("note"),
+            "ask.replied" => store
+                .conn()
+                .query_row(
+                    "SELECT body FROM replies WHERE id = ?1",
+                    [&event.entity_id],
+                    |row| row.get(0),
+                )
+                .optional()?,
+            _ => None,
+        })
     };
     // A session that is not an orchestrator is a worker: its lines must not
     // read as the orchestrator's.
@@ -1442,18 +1453,106 @@ pub fn timeline(store: &Store, reference: &str, before: Option<i64>) -> Result<T
         .into_iter()
         .zip(quotes)
         .zip(actors)
-        .map(|((event, quote), actor)| TimelineEntry {
-            seq: event.seq,
-            at: at(event.at),
-            actor: actor.to_owned(),
-            text: timeline_text(&event),
-            quote,
+        .zip(words)
+        .map(|(((event, quote), actor), words)| {
+            let system = words.is_none() && is_system_event(&event);
+            let text = match &words {
+                Some(_) if payload_kind(&event) == Some("steer") => "steered the agent".to_owned(),
+                Some(_) => "commented".to_owned(),
+                None => timeline_text(&event),
+            };
+            TimelineEntry {
+                seq: event.seq,
+                at: at(event.at),
+                // A step that Tiller takes inside a command is Tiller's,
+                // whoever ran the command: "You stamped the session" credits
+                // the wrong party.
+                actor: if system && actor == "you" {
+                    "system".to_owned()
+                } else {
+                    actor.to_owned()
+                },
+                text,
+                quote: words.or(quote),
+                system,
+            }
         })
         .collect();
     Ok(TimelineResponse {
         entries,
         next_before,
     })
+}
+
+/// The owner acting through the CLI, this board or a paired board host.
+fn is_owner(actor: &str) -> bool {
+    matches!(actor, "owner" | "board") || actor.starts_with("board@")
+}
+
+fn payload_kind(event: &Event) -> Option<&str> {
+    event.payload.get("kind").and_then(Value::as_str)
+}
+
+/// The words of a message the owner wrote to an agent: a steer, or a card
+/// comment (a note whose body is `[<card>] <text>`; the timeline is the
+/// card's own, so the tag is left out). Every other queued message (a wake,
+/// the note of a new card, an answer that its item already shows) is
+/// plumbing and has none.
+fn owner_words(store: &Store, event: &Event) -> Result<Option<String>> {
+    let kind = payload_kind(event);
+    if event.kind != "outbox.enqueued"
+        || !is_owner(&event.actor)
+        || !matches!(kind, Some("steer" | "note"))
+    {
+        return Ok(None);
+    }
+    let body: Option<String> = store
+        .conn()
+        .query_row(
+            "SELECT body FROM outbox WHERE id = ?1",
+            [&event.entity_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(body.and_then(|body| {
+        if kind == Some("steer") {
+            return Some(body);
+        }
+        match body
+            .strip_prefix('[')
+            .and_then(|rest| rest.split_once("] "))
+        {
+            Some((tag, text)) if !tag.contains(char::is_whitespace) => Some(text.to_owned()),
+            _ => None,
+        }
+    }))
+}
+
+/// Whether a line is a step of the machinery, not news for the owner: the
+/// delivery of messages, session and slot bookkeeping, a sent notification.
+/// The board hides these lines until the owner asks for them.
+fn is_system_event(event: &Event) -> bool {
+    match event.kind.as_str() {
+        // A message that could not be delivered is news.
+        "outbox.failed" => false,
+        "session.memory_loaded" => event
+            .payload
+            .get("skipped")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty),
+        "run.placed"
+        | "run.cleaned"
+        | "card.linked"
+        | "attention.notified"
+        | "attention.notify_sent"
+        | "observation.recorded"
+        | "intervention.relabeled"
+        | "review_pass.created"
+        | "review_pass.started" => true,
+        kind => ["outbox.", "session.", "reservation.", "obligation."]
+            .iter()
+            .any(|prefix| kind.starts_with(prefix)),
+    }
 }
 
 /// One timeline line as a plain sentence. The board puts the actor in front
@@ -1482,7 +1581,21 @@ fn timeline_text(event: &Event) -> String {
             Some(on) => format!("made the card depend on {on}"),
             None => "added a dependency".to_owned(),
         },
-        "run.started" => "started a run".to_owned(),
+        "run.started" => {
+            let setup: Vec<&str> = [field("model"), field("effort")]
+                .into_iter()
+                .flatten()
+                .collect();
+            let run = match field("role") {
+                Some(role) => format!("started a {role} run"),
+                None => "started a run".to_owned(),
+            };
+            if setup.is_empty() {
+                run
+            } else {
+                format!("{run} ({})", setup.join(", "))
+            }
+        }
         "run.placed" => "placed the run on a machine".to_owned(),
         "run.status" => match field("state") {
             Some(state) => format!("reported {}", state.replace('-', " ")),
@@ -1490,7 +1603,10 @@ fn timeline_text(event: &Event) -> String {
         },
         "run.paused" => "paused the run".to_owned(),
         "run.unpaused" => "cleared the pause".to_owned(),
-        "run.ended" => "ended the run".to_owned(),
+        "run.ended" => match field("outcome") {
+            Some(outcome) => format!("ended the run as {}", outcome.replace('_', " ")),
+            None => "ended the run".to_owned(),
+        },
         "run.cleaned" => "cleaned up the run".to_owned(),
         "run.relaunched" => "relaunched the run".to_owned(),
         "run.reconfigured" => "changed the run setup".to_owned(),
@@ -1512,12 +1628,20 @@ fn timeline_text(event: &Event) -> String {
         "review_pass.created" => "created a review pass".to_owned(),
         "review_pass.started" => "started a review pass".to_owned(),
         "review_pass.finished" => "finished a review pass".to_owned(),
-        "attention.opened" => "raised an item for you".to_owned(),
+        "attention.opened" => match field("kind") {
+            Some("decision") => "asked you for a decision".to_owned(),
+            Some("credential") => "asked you for a credential".to_owned(),
+            Some("report") => "sent you a report".to_owned(),
+            Some("recovery") => "asked you how to recover".to_owned(),
+            Some("merge") => "asked you about a merge".to_owned(),
+            Some("review") => "asked you for a review".to_owned(),
+            _ => "raised an item for you".to_owned(),
+        },
         // The write-ahead record, shown only when no outcome followed it.
         "attention.notified" => "tried to notify you about an item".to_owned(),
         "attention.notify_sent" => "notified you about an item".to_owned(),
         "attention.notify_failed" => "could not notify you about an item".to_owned(),
-        "attention.answered" => "answered an item".to_owned(),
+        "attention.answered" => "answered".to_owned(),
         "attention.withdrawn" => "withdrew an item".to_owned(),
         "obligation.opened" => "opened an obligation".to_owned(),
         "obligation.due" => "found an obligation due".to_owned(),
@@ -1543,6 +1667,8 @@ fn timeline_text(event: &Event) -> String {
         "observation.recorded" => "recorded an observation".to_owned(),
         "intervention.relabeled" => "relabeled an intervention".to_owned(),
         "outbox.enqueued" => "queued a message".to_owned(),
+        "reservation.reserved" => "reserved a slot".to_owned(),
+        "reservation.released" => "released the slot".to_owned(),
         "outbox.delivered" => "delivered a message".to_owned(),
         "outbox.acked" => "confirmed a message".to_owned(),
         "outbox.deferred" => "deferred a message".to_owned(),
@@ -2400,6 +2526,29 @@ mod tests {
         assert_eq!(
             text("card.closed", serde_json::json!({"outcome": "landed"})),
             "closed the card as landed"
+        );
+        assert_eq!(
+            text(
+                "run.started",
+                serde_json::json!({"role": "builder", "model": "opus", "effort": "medium"})
+            ),
+            "started a builder run (opus, medium)"
+        );
+        assert_eq!(text("run.started", serde_json::json!({})), "started a run");
+        assert_eq!(
+            text("run.ended", serde_json::json!({"outcome": "failed"})),
+            "ended the run as failed"
+        );
+        assert_eq!(
+            text(
+                "attention.opened",
+                serde_json::json!({"kind": "credential"})
+            ),
+            "asked you for a credential"
+        );
+        assert_eq!(
+            text("reservation.reserved", serde_json::json!({})),
+            "reserved a slot"
         );
         assert_eq!(
             text("attention.notified", serde_json::json!({})),

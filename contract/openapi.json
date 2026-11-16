@@ -12885,11 +12885,15 @@
               "string",
               "null"
             ],
-            "description": "The words the line quotes: a reply's body on `ask.replied`, a worker's\nstatus line on `run.status`. Absent from a peer that predates replies."
+            "description": "The words the line quotes: a reply's body on `ask.replied`, a worker's\nstatus line on `run.status`, an item's question on `attention.opened`\nand its answer on `attention.answered`, the owner's comment or steer.\nAbsent from a peer that predates replies."
           },
           "seq": {
             "type": "integer",
             "format": "int64"
+          },
+          "system": {
+            "type": "boolean",
+            "description": "True for a step of the machinery (message delivery, session and slot\nbookkeeping, a sent notification). The board hides these lines until\nthe owner asks for them. Absent from a peer that predates it."
           },
           "text": {
             "type": "string"

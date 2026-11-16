@@ -1531,6 +1531,7 @@ function timelineFor(
       text: "replied to your comment",
       quote: `I moved ${row.display_id} back to the queue so attempt 2 starts from the fixed test. It should land within the hour.`,
     },
+    { seq: 4172, at: minutes(now, -8), actor: "system", text: "delivered a message", system: true },
     { seq: 4170, at: minutes(now, -9), actor: "system", text: "started attempt 2" },
     { seq: 4160, at: minutes(now, -95), actor: "system", text: "attempt 1 failed: exit 1" },
   ];
