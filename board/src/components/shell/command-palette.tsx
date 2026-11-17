@@ -11,6 +11,7 @@ import { PrIcon, Status } from "../board/icons";
 import { COLUMNS } from "../board/model";
 import { newCardStore } from "../board/new-card";
 import { roleName } from "../board/report";
+import { ChatIcon } from "../chat/icons";
 import type { Command } from "../../lib/commands";
 import {
   agentsQuery,
@@ -99,6 +100,7 @@ function iconFor(command: PaletteCommand) {
   }
   if (command.id.startsWith("host-")) return <ServerIcon />;
   if (command.id.startsWith("ask-")) return <SendIcon />;
+  if (command.id.startsWith("chat-")) return <ChatIcon />;
   if (command.id.startsWith("new-card-")) return <PlusIcon />;
   if (command.id.startsWith("agent-")) return <AgentsIcon />;
   return null;
@@ -162,6 +164,23 @@ function useCommands(
         keywords: "question orchestrator",
         searchOnly: true,
         run: () => askPrefillStore.set({ project: key, text: "" }),
+      });
+    }
+    // A chat reads without acting, so a view-only peer's project has one too.
+    for (const project of projects?.projects ?? []) {
+      const key = projectKey(project);
+      commands.push({
+        id: `chat-${key}`,
+        group: "Chat",
+        label: `Chat with ${nameOf.get(key) ?? project.name}`,
+        keywords: "orchestrator thread conversation messages",
+        searchOnly: true,
+        run: () =>
+          void navigate({
+            to: "/chat/$project",
+            params: { project: project.id },
+            search: (prev) => ({ ...prev, owner: ownerOf(project) }),
+          }),
       });
     }
     for (const project of projects?.projects ?? []) {

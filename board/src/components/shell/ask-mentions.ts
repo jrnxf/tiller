@@ -2,7 +2,7 @@ import type { Editor } from "@tiptap/core";
 
 import { scoreMatch } from "../../lib/commands";
 
-// One project the owner can mention. This file holds what the dialog needs
+// One project, or card, the owner can mention. This file holds what the dialog needs
 // before the editor loads, so the dialog imports no editor code.
 export interface MentionOption {
   key: string;
@@ -12,6 +12,8 @@ export interface MentionOption {
   host: string | null;
   // Why this project cannot take an ask now; null when it can.
   off: string | null;
+  // More words after the name, such as a card's title.
+  detail?: string;
 }
 
 // Takes every chip of this project out of the text.

@@ -9,6 +9,7 @@ import { useDropEndedAnswers } from "../board/answer-strip";
 import { GlobalNewCard, newCardStore, useNewCardTarget } from "../board/new-card";
 import { projectKey } from "../../lib/peers";
 import { ToastHost } from "../board/toast";
+import { ChatDrawer } from "../chat/chat-drawer";
 import { AskDialog } from "./ask-dialog";
 import { askPrefillStore } from "./ask-prefill";
 import { CommandPalette, NEW_CARD_QUERY } from "./command-palette";
@@ -153,6 +154,7 @@ export function Shell({
       <AskDialog open={askOpen || prefill !== null} prefill={prefill} onClose={closeAsk} />
       <ToastHost />
       <GlobalNewCard />
+      <ChatDrawer />
       <CommandPalette
         open={palette !== null}
         initialQuery={palette ?? ""}

@@ -119,6 +119,34 @@ export function repliesFor(
   return { replies };
 }
 
+// Every reply of one project, oldest first, read or not, as its chat shows
+// them.
+export function projectReplies(
+  projectId: string,
+  host: string | undefined,
+  now: number,
+): ReplyItem[] {
+  const replies = allReplies(now)
+    .filter((reply) => reply.project === projectId && reply.host === host)
+    .map((reply) => ({ ...reply, read_at: readAt.get(reply.id) ?? null }));
+  replies.sort((a, b) => a.replied_at.localeCompare(b.replied_at));
+  return replies;
+}
+
+// `POST /api/v1/projects/{id}/thread/read`: the project's replies it marked
+// read, newest first. A second call marks none.
+export function markProjectRead(
+  projectId: string,
+  host: string | undefined,
+  now: number,
+): ReplyItem[] {
+  const unread = projectReplies(projectId, host, now).filter((reply) => !reply.read_at);
+  const stamp = new Date(now).toISOString();
+  for (const reply of unread) readAt.set(reply.id, stamp);
+  unread.reverse();
+  return unread.map((reply) => ({ ...reply, read_at: stamp, rev: 2 }));
+}
+
 // Every reply to one ask, oldest first, read or not, as the ask panel reads
 // them.
 function repliesToAsk(askId: string, now: number): ReplyItem[] {

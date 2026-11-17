@@ -200,6 +200,15 @@ export function ReplyDetail({
         </div>
       ) : null}
       <div className="acts reply-acts">
+        <Link
+          to="/chat/$project"
+          params={{ project: reply.project }}
+          search={({ host }) => ({ host, owner: ownerOf(reply) })}
+          className="btn"
+          data-testid="reply-chat"
+        >
+          Open the chat
+        </Link>
         <button
           type="button"
           className="btn"

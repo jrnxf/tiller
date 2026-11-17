@@ -33,6 +33,7 @@ import type {
   RunDetail,
   SignalsResponse,
   StartSettings,
+  ThreadResponse,
   TimelineResponse,
 } from "./api-types.ts";
 import { ownerFetch } from "./owner.ts";
@@ -145,6 +146,17 @@ export const repliesPath = (projectId: string, host?: string): QueryPath =>
   withParams(`/api/v1/projects/${projectId}/replies`, { host });
 export const repliesQuery = (projectId: string, host?: string) =>
   readQuery<RepliesResponse>(repliesPath(projectId, host));
+
+// A project's orchestrator chat, the newest page. With a peer `host`, read
+// over the link. Every change that can add to it refetches it (lib/sse.ts),
+// and its context use comes with it: the context has no event of its own.
+export const threadPath = (projectId: string, host?: string, before?: number): QueryPath =>
+  withParams(`/api/v1/projects/${projectId}/thread`, {
+    host,
+    before: before === undefined ? undefined : String(before),
+  });
+export const threadQuery = (projectId: string, host?: string, before?: number) =>
+  readQuery<ThreadResponse>(threadPath(projectId, host, before));
 
 // One ask in full: its text, its delivery and every reply. A peer's ask is
 // read over the link.

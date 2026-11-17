@@ -112,6 +112,16 @@
   white-space: nowrap;
 }
 
+.ask-pop-detail {
+  flex: 2;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+
 .ask-pop-off {
   flex: 2;
   min-width: 0;
