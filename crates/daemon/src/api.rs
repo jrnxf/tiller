@@ -1304,6 +1304,8 @@ fn routes() -> Router<AppState> {
         .route("/api/v1/recap/seen", post(mark_recap_seen))
         .route("/api/v1/projects/{id}/replies", get(project_replies))
         .route("/api/v1/replies/{id}/read", post(mark_reply_read))
+        .route("/api/v1/projects/{id}/thread", get(project_thread))
+        .route("/api/v1/projects/{id}/thread/read", post(mark_thread_read))
         .route("/api/v1/asks/{id}", get(ask_detail))
         .route("/api/v1/asks/{id}/cancel", post(cancel_ask))
         .route("/api/v1/signals", get(signals))
@@ -2176,6 +2178,7 @@ enum Parsed {
     AwayEnd(String),
     MarkReplyRead,
     CancelAsk,
+    MarkThreadRead,
 }
 
 impl Mutation {
@@ -2526,6 +2529,14 @@ impl Mutation {
                 let request: CancelAsk = body(bytes)?;
                 (request.idempotency_key, request.host, Parsed::CancelAsk)
             }
+            Op::MarkThreadRead => {
+                let request: MarkThreadRead = body(bytes)?;
+                (
+                    request.idempotency_key,
+                    request.host,
+                    Parsed::MarkThreadRead,
+                )
+            }
         };
         Ok(Self {
             op,
@@ -2707,6 +2718,20 @@ impl Mutation {
                 let read = store.reply_read(ctx, id)?;
                 Ok(Done {
                     data: serde_json::to_value(views::reply_item(read.value))?,
+                    events: read.events,
+                    replayed: read.replayed,
+                    outbox_id: None,
+                    approval_id: None,
+                    warning: None,
+                })
+            }
+            // The same core call as `tiller thread <project> --mark-read`.
+            Parsed::MarkThreadRead => {
+                let read = store.thread_read(ctx, id)?;
+                let replies: Vec<ReplyItem> =
+                    read.value.into_iter().map(views::reply_item).collect();
+                Ok(Done {
+                    data: json!({"replies": replies}),
                     events: read.events,
                     replayed: read.replayed,
                     outbox_id: None,
@@ -4941,6 +4966,80 @@ async fn mark_reply_read(
     submit(&state, &headers, Op::MarkReplyRead, Some(id), &bytes).await
 }
 
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct ThreadQuery {
+    /// Only items older than this `seq`: the last page's `next_before`.
+    pub before: Option<i64>,
+    /// How many items, 1 to 200; 50 when absent.
+    pub limit: Option<i64>,
+    /// A peer's label for a peer's project; absent means this host.
+    pub host: Option<String>,
+}
+
+#[utoipa::path(get, path = "/api/v1/projects/{id}/thread", tag = "reads",
+    params(("id" = String, Path), ThreadQuery),
+    responses((status = 200, body = ThreadResponse), (status = 400, body = ErrorBody),
+              (status = 404, body = ErrorBody),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: a `read` pairing (`read_scope`)"),
+              (status = 503, body = ErrorBody)))]
+async fn project_thread(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<ThreadQuery>,
+) -> ApiResult<ThreadResponse> {
+    let host = query.host.as_deref();
+    let (before, limit) = (query.before, query.limit);
+    let path = || {
+        let params: Vec<String> = [("before", before), ("limit", limit)]
+            .into_iter()
+            .filter_map(|(name, value)| value.map(|value| format!("{name}={value}")))
+            .collect();
+        let tail = match params.is_empty() {
+            true => "/thread".to_owned(),
+            false => format!("/thread?{}", params.join("&")),
+        };
+        peer_project_path(&id, &tail)
+    };
+    if let Some(mut thread) = host_read::<ThreadResponse>(&state, host, path, true).await? {
+        // The peer's replies, which the owner marks read there.
+        let label = host.and_then(|host| {
+            state
+                .0
+                .peers
+                .federation()
+                .peer(host)
+                .map(|v| v.label.clone())
+        });
+        for item in &mut thread.items {
+            if let ThreadItem::Reply(reply) = item {
+                reply.reply.host.clone_from(&label);
+            }
+        }
+        return Ok(Json(thread));
+    }
+    read(&state, move |store| {
+        views::thread(store, &id, before, limit)
+    })
+    .await
+    .map(Json)
+}
+
+#[utoipa::path(post, path = "/api/v1/projects/{id}/thread/read", tag = "mutations", request_body = MarkThreadRead,
+    params(("id" = String, Path)),
+    responses((status = 200, body = MutationResponse, description = "`data.replies`: the replies it marked read, newest first"),
+              (status = 400, body = ErrorBody), (status = 403, body = ErrorBody),
+              (status = 404, body = ErrorBody),
+              (status = 502, body = ErrorBody, description = "`peer_refused`"),
+              (status = 503, body = ErrorBody, description = "`peer_unreachable`: nothing was sent or queued")))]
+async fn mark_thread_read(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    submit(&state, &headers, Op::MarkThreadRead, Some(id), &bytes).await
+}
+
 /// The reason an ask cancelled from the board records (`protocol.md` 7.4).
 const OWNER_CANCEL: &str = "cancelled by the owner on the board";
 
@@ -6924,7 +7023,7 @@ async fn app_shell(
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, add_dep, remove_dep, close,
         cancel, reopen, start_card_run, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, steer_agent, interrupt_agent, stop_agent, pause_agent, unpause_agent, resume_agent, relaunch_agent, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, project_fields, edit_project, start_settings, host_config_read, set_config,
         project_grants, create_grant, revoke_grant,
-        away_start, away_edit, away_end, away_brief, host_fields, edit_host, crate::backups::list, crate::backups::take, pick_bug_project, recap, mark_recap_seen, project_replies, mark_reply_read, ask_detail, cancel_ask, relabel_intervention, memory::view, memory::revision,
+        away_start, away_edit, away_end, away_brief, host_fields, edit_host, crate::backups::list, crate::backups::take, pick_bug_project, recap, mark_recap_seen, project_replies, mark_reply_read, project_thread, mark_thread_read, ask_detail, cancel_ask, relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo, memory::repropose, memory::eval::eval_plan,
         memory::eval::eval_start, crate::retros::list_retros, crate::retros::run_retro,
         crate::pairings::list, crate::pairings::unpair, crate::pairings::revoke, session, login_code, logout
@@ -13950,6 +14049,239 @@ pub(crate) mod tests {
             "{}",
             refused.body
         );
+    }
+
+    /// Orchestrator chat PR 1: the thread is one list of the owner's ask,
+    /// the orchestrator's work on it, the merge it asks for and its reply,
+    /// with the session's context use. Opening it marks the reply read in
+    /// one call.
+    #[tokio::test]
+    async fn the_thread_lists_an_ask_its_activity_a_decision_and_the_reply() {
+        use tiller_core::domain::{ApprovalAction, ApprovalKind, AskSource, CardKind};
+        use tiller_core::state::approvals::{NewApproval, NewPr};
+        use tiller_core::state::asks::Resolution;
+        use tiller_core::state::context::ContextUse;
+        use tiller_core::state::replies::NewReply;
+
+        /// Ids, short ids and times change each run; the shape does not.
+        fn stable(value: &mut Value) {
+            match value {
+                Value::Object(map) => {
+                    for (key, field) in map.iter_mut() {
+                        match (key.as_str(), &field) {
+                            ("short", Value::String(_)) => *field = json!("<short>"),
+                            ("seq" | "next_before", Value::Number(_)) => *field = json!("<seq>"),
+                            _ => stable(field),
+                        }
+                    }
+                }
+                Value::Array(items) => items.iter_mut().for_each(stable),
+                Value::String(text) => {
+                    let ulid = text.len() == 26
+                        && text
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || b.is_ascii_uppercase());
+                    let time = text.len() >= 20
+                        && text.as_bytes()[4] == b'-'
+                        && text.as_bytes()[10] == b'T';
+                    if ulid {
+                        *value = json!("<id>");
+                    } else if time {
+                        *value = json!("<time>");
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut fleet = Fleet::new();
+        let session = fleet.orchestrator_session.clone();
+        let orchestrator = Ctx::new(Actor::Session(session.clone()));
+        let ask = fleet
+            .store
+            .ask_record(
+                &Ctx::new(Actor::Board),
+                Some("k-ask"),
+                NewAsk {
+                    project_id: "alpha".into(),
+                    session_id: None,
+                    source: AskSource::Board,
+                    text: "Can the export run nightly?".into(),
+                },
+            )
+            .unwrap()
+            .value
+            .ask;
+        let card = fleet
+            .store
+            .ask_resolve(
+                &orchestrator,
+                &ask.id,
+                Resolution::New(NewCard {
+                    kind: CardKind::Ship,
+                    title: "Run the export nightly".into(),
+                    ..NewCard::default()
+                }),
+            )
+            .unwrap()
+            .value
+            .card
+            .unwrap();
+        let daemon = Ctx::new(Actor::Daemon);
+        let pr = fleet
+            .store
+            .pr_link(
+                &daemon,
+                NewPr {
+                    card: card.id.clone(),
+                    run_id: None,
+                    number: 7,
+                    url: "https://example.com/example/alpha/pull/7".into(),
+                    head_sha: Some("1111222233334444".into()),
+                    base_ref: Some("main".into()),
+                },
+            )
+            .unwrap()
+            .value;
+        fleet
+            .store
+            .approval_request(
+                &daemon,
+                NewApproval {
+                    kind: ApprovalKind::Merge,
+                    card: card.id.clone(),
+                    run_id: None,
+                    pr_id: Some(pr.id),
+                    branch: None,
+                    head_sha: "1111222233334444".into(),
+                    action: ApprovalAction::Squash,
+                    memory_paths: None,
+                    grant_id: None,
+                },
+            )
+            .unwrap();
+        fleet
+            .store
+            .reply_send(
+                &orchestrator,
+                None,
+                NewReply {
+                    to: ask.id.clone(),
+                    text: "Yes. PR #7 runs it at 02:00; it waits for your merge.".into(),
+                    card: None,
+                },
+            )
+            .unwrap();
+        fleet
+            .store
+            .session_context_record(
+                &daemon,
+                &session,
+                ContextUse {
+                    used: 82_771,
+                    window: Some(1_000_000),
+                    at: Timestamp::now(),
+                },
+            )
+            .unwrap();
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let cookie = owner_cookie(fleet.dir.path());
+        let headers = [("cookie", cookie.as_str())];
+
+        let answer = get(&app, "/api/v1/projects/alpha/thread").await;
+        assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+        let thread: Value = serde_json::from_str(&answer.body).unwrap();
+        let types: Vec<&str> = thread["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            types,
+            ["checkpoint", "ask", "activity", "decision", "reply"],
+            "{thread}"
+        );
+        assert_eq!(thread["items"][3]["open"], true);
+        assert_eq!(
+            thread["context"],
+            json!({"used": 82_771, "window": 1_000_000})
+        );
+        let mut shape = thread.clone();
+        stable(&mut shape);
+        insta::assert_json_snapshot!("project_thread", shape);
+
+        // A page of 2 holds the two newest items and points at the rest.
+        let page = get(&app, "/api/v1/projects/alpha/thread?limit=2").await;
+        let page: Value = serde_json::from_str(&page.body).unwrap();
+        assert_eq!(page["items"][0], thread["items"][3], "{page}");
+        let before = page["next_before"].as_i64().unwrap();
+        assert_eq!(json!(before), thread["items"][3]["seq"]);
+        let rest = get(
+            &app,
+            &format!("/api/v1/projects/alpha/thread?before={before}&limit=3"),
+        )
+        .await;
+        let rest: Value = serde_json::from_str(&rest.body).unwrap();
+        assert_eq!(rest["items"].as_array().unwrap().len(), 3, "{rest}");
+        assert!(rest["next_before"].is_null(), "{rest}");
+        for bad in ["limit=0", "limit=201"] {
+            let refused = get(&app, &format!("/api/v1/projects/alpha/thread?{bad}")).await;
+            assert_eq!(
+                refused.status,
+                StatusCode::BAD_REQUEST,
+                "{bad}: {}",
+                refused.body
+            );
+        }
+        let missing = get(&app, "/api/v1/projects/nope/thread").await;
+        assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.body);
+        let peer = get(&app, "/api/v1/projects/alpha/thread?host=elsewhere").await;
+        assert_ne!(peer.status, StatusCode::OK, "{}", peer.body);
+
+        // Opening the thread marks the reply read: one call, then nothing.
+        let mark = |key: &str, host: Option<&str>| {
+            mutation(
+                "POST",
+                "/api/v1/projects/alpha/thread/read",
+                json!({"idempotency_key": key, "host": host}),
+                &headers,
+            )
+        };
+        let refused = send(&app, mark("k-peer", Some("elsewhere"))).await;
+        assert_ne!(refused.status, StatusCode::OK, "{}", refused.body);
+        let marked = send(&app, mark("k-read", None)).await;
+        assert_eq!(marked.status, StatusCode::OK, "{}", marked.body);
+        let body: Value = serde_json::from_str(&marked.body).unwrap();
+        assert_eq!(
+            body["data"]["replies"].as_array().unwrap().len(),
+            1,
+            "{body}"
+        );
+        assert_eq!(body["events"].as_array().unwrap().len(), 1, "{body}");
+        let again = send(&app, mark("k-read-2", None)).await;
+        let again: Value = serde_json::from_str(&again.body).unwrap();
+        assert!(
+            again["data"]["replies"].as_array().unwrap().is_empty(),
+            "{again}"
+        );
+        let reread = get(&app, "/api/v1/projects/alpha/thread").await;
+        let reread: Value = serde_json::from_str(&reread.body).unwrap();
+        assert!(
+            reread["items"][4]["reply"]["read_at"].is_string(),
+            "{reread}"
+        );
+        let anonymous = send(
+            &app,
+            mutation(
+                "POST",
+                "/api/v1/projects/alpha/thread/read",
+                json!({"idempotency_key": "k-anon"}),
+                &[],
+            ),
+        )
+        .await;
+        assert_ne!(anonymous.status, StatusCode::OK, "{}", anonymous.body);
     }
 
     /// UA-18: Cancel on the board's ask panel resolves an open ask as

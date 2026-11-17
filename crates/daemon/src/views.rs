@@ -346,14 +346,7 @@ pub fn ask_detail(store: &Store, reference: &str) -> Result<AskDetail> {
     }
     Ok(AskDetail {
         answered_at: shown.last().map(|reply| reply.replied_at.clone()),
-        delivery: note.map(|note| AskDelivery {
-            state: note.state.to_string(),
-            sent_at: at(note.created_at),
-            delivered_at: note.delivered_at.map(at),
-            seen_at: note.acked_at.map(at),
-            failed_at: note.failed_at.map(at),
-            failure_reason: note.failure_reason,
-        }),
+        delivery: note.map(ask_delivery),
         id: ask.id,
         project_id: ask.project_id,
         session_id: ask.session_id,
@@ -365,6 +358,18 @@ pub fn ask_detail(store: &Store, reference: &str) -> Result<AskDetail> {
         replies: shown,
         host: None,
     })
+}
+
+/// Whether an ask's note reached the orchestrator.
+fn ask_delivery(note: tiller_core::domain::OutboxMessage) -> AskDelivery {
+    AskDelivery {
+        state: note.state.to_string(),
+        sent_at: at(note.created_at),
+        delivered_at: note.delivered_at.map(at),
+        seen_at: note.acked_at.map(at),
+        failed_at: note.failed_at.map(at),
+        failure_reason: note.failure_reason,
+    }
 }
 
 /// A peer's unread replies of one project, from its last snapshot, tagged
@@ -1584,6 +1589,337 @@ pub fn timeline(store: &Store, reference: &str, before: Option<i64>) -> Result<T
         entries,
         next_before,
     })
+}
+
+// -- thread -------------------------------------------------------------------
+
+/// The items a thread page holds when the caller names no `limit`.
+pub const THREAD_PAGE: i64 = 50;
+/// The most items one thread page holds.
+pub const THREAD_PAGE_MAX: i64 = 200;
+/// The most steps one activity item holds; a longer run is split.
+pub const THREAD_STEPS_MAX: usize = 100;
+/// The events read from the log at a time while a page is built.
+const THREAD_BATCH: i64 = 500;
+
+/// A thread item while its page is built: one anchor event, or a run of the
+/// orchestrator's other events, newest first.
+enum Built {
+    Anchor(Box<Event>),
+    Activity(Vec<Event>),
+}
+
+impl Built {
+    /// The oldest event's `seq`.
+    fn first_seq(&self) -> i64 {
+        match self {
+            Built::Anchor(event) => event.seq,
+            Built::Activity(steps) => steps.last().map_or(i64::MAX, |step| step.seq),
+        }
+    }
+}
+
+/// Whether an event is an item of its own: an ask, a reply, an approval
+/// request, an attention item, or the start of an orchestrator session.
+fn thread_anchor(event: &Event, orchestrators: &HashSet<&str>) -> bool {
+    match event.kind.as_str() {
+        "ask.recorded" | "ask.replied" | "approval.requested" | "attention.opened" => true,
+        "session.started" => orchestrators.contains(event.entity_id.as_str()),
+        _ => false,
+    }
+}
+
+/// `GET /api/v1/projects/{id}/thread` and `tiller thread`: the project's
+/// orchestrator chat, oldest first, `limit` items older than `before`. The
+/// log is read newest first. Each anchor event is one item, and each run of
+/// the orchestrator's other events between them is one activity item, so a
+/// page holds only whole items: an activity at the page's edge takes its
+/// older steps with it, up to [`THREAD_STEPS_MAX`].
+pub fn thread(
+    store: &Store,
+    project: &str,
+    before: Option<i64>,
+    limit: Option<i64>,
+) -> Result<ThreadResponse> {
+    let project = store.project(project)?;
+    let limit = match limit {
+        None => THREAD_PAGE,
+        Some(limit) if (1..=THREAD_PAGE_MAX).contains(&limit) => limit,
+        Some(limit) => {
+            return Err(tiller_core::Error::Usage(format!(
+                "limit is 1 to {THREAD_PAGE_MAX}, not {limit}"
+            )));
+        }
+    };
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    let orchestrators: Vec<Session> = list(
+        store.conn(),
+        "project_id = ?1 AND role = 'orchestrator' ORDER BY started_at, id",
+        &[&project.id],
+    )?;
+    let ids: HashSet<&str> = orchestrators.iter().map(|s| s.id.as_str()).collect();
+    let mut built: Vec<Built> = Vec::new();
+    let mut cursor = before.unwrap_or(i64::MAX);
+    let mut more = false;
+    'read: loop {
+        let batch = store.thread_events(&project.id, cursor, THREAD_BATCH)?;
+        let full = i64::try_from(batch.len()).is_ok_and(|len| len == THREAD_BATCH);
+        for event in batch {
+            cursor = event.seq;
+            let anchor = thread_anchor(&event, &ids);
+            let joins = !anchor
+                && matches!(built.last(), Some(Built::Activity(steps))
+                    if steps.len() < THREAD_STEPS_MAX
+                        && steps.first().is_some_and(|step| step.actor == event.actor));
+            if !joins && built.len() == limit {
+                more = true;
+                break 'read;
+            }
+            match built.last_mut() {
+                Some(Built::Activity(steps)) if joins => steps.push(event),
+                _ if anchor => built.push(Built::Anchor(Box::new(event))),
+                _ => built.push(Built::Activity(vec![event])),
+            }
+        }
+        if !full {
+            break;
+        }
+    }
+    let next_before = more.then(|| built.last().map(Built::first_seq)).flatten();
+    let mut items = Vec::with_capacity(built.len());
+    for item in built.into_iter().rev() {
+        if let Some(item) = thread_item(store, item, &orchestrators)? {
+            items.push(item);
+        }
+    }
+    let context = orchestrators
+        .iter()
+        .find(|session| session.ended_at.is_none())
+        .and_then(|session| {
+            session.context_used.map(|used| ThreadContext {
+                used,
+                window: session.context_window,
+            })
+        });
+    Ok(ThreadResponse {
+        items,
+        context,
+        next_before,
+    })
+}
+
+/// One built item in its API shape; `None` for an anchor whose row is gone.
+fn thread_item(
+    store: &Store,
+    built: Built,
+    orchestrators: &[Session],
+) -> Result<Option<ThreadItem>> {
+    use tiller_core::state::replies;
+    let conn = store.conn();
+    let event = match built {
+        Built::Anchor(event) => *event,
+        Built::Activity(mut steps) => {
+            steps.reverse();
+            let (Some(first), Some(last)) = (steps.first(), steps.last()) else {
+                return Ok(None);
+            };
+            let (seq, started, ended) = (first.seq, first.at, last.at);
+            let session_id = first
+                .actor
+                .strip_prefix("session:")
+                .unwrap_or(&first.actor)
+                .to_owned();
+            let steps = steps
+                .iter()
+                .map(|step| thread_step(store, step))
+                .collect::<Result<Vec<_>>>()?;
+            return Ok(Some(ThreadItem::Activity(ThreadActivity {
+                seq,
+                at: at(started),
+                session_id,
+                ended_at: at(ended),
+                duration_seconds: (ended.as_millis() - started.as_millis()) / 1000,
+                steps,
+            })));
+        }
+    };
+    let (seq, when) = (event.seq, at(event.at));
+    let id = event.entity_id.as_str();
+    Ok(match event.kind.as_str() {
+        "ask.recorded" => find::<tiller_core::domain::Ask>(conn, "id = ?1", &[&id])?
+            .map(|ask| -> Result<ThreadItem> {
+                let mut stmt = conn.prepare(
+                    "SELECT card_id, relation FROM ask_cards WHERE ask_id = ?1
+                     ORDER BY linked_at, card_id",
+                )?;
+                let links = stmt
+                    .query_map([&ask.id], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let mut cards = Vec::with_capacity(links.len());
+                for (card, relation) in links {
+                    if let Some(card) = thread_card(store, &card)? {
+                        cards.push(ReplyCard {
+                            id: card.id,
+                            display_id: card.display_id,
+                            title: card.title,
+                            relation: Some(relation),
+                        });
+                    }
+                }
+                Ok(ThreadItem::Ask(ThreadAsk {
+                    seq,
+                    at: when.clone(),
+                    delivery: replies::ask_note(conn, &ask.id)?.map(ask_delivery),
+                    id: ask.id,
+                    text: ask.text,
+                    source: ask.source.to_string(),
+                    disposition: ask.disposition.to_string(),
+                    cards,
+                }))
+            })
+            .transpose()?,
+        "ask.replied" => match find::<tiller_core::domain::Reply>(conn, "id = ?1", &[&id])? {
+            Some(reply) => Some(ThreadItem::Reply(ThreadReply {
+                seq,
+                at: when,
+                reply: reply_item(replies::view(conn, reply)?),
+            })),
+            None => None,
+        },
+        "approval.requested" => match find::<Approval>(conn, "id = ?1", &[&id])? {
+            Some(approval) => {
+                use tiller_core::domain::ApprovalState;
+                let state = approval.state;
+                Some(ThreadItem::Decision(Box::new(ThreadDecision {
+                    seq,
+                    at: when,
+                    source: "approval".into(),
+                    kind: approval.kind.to_string(),
+                    state: state.to_string(),
+                    open: state == ApprovalState::Requested,
+                    question: conn
+                        .query_row(
+                            "SELECT question FROM attention
+                              WHERE json_valid(evidence)
+                                AND json_extract(evidence, '$.approval_id') = ?1
+                              ORDER BY opened_at DESC, id DESC LIMIT 1",
+                            [&approval.id],
+                            |row| row.get(0),
+                        )
+                        .optional()?,
+                    choice: approval.decided_at.map(|_| {
+                        match state {
+                            ApprovalState::Rejected => "rejected",
+                            _ => "accepted",
+                        }
+                        .to_owned()
+                    }),
+                    decided_at: approval.decided_at.map(at),
+                    decided_by: approval.decided_by,
+                    card: match &approval.card_id {
+                        Some(card) => thread_card(store, card)?,
+                        None => None,
+                    },
+                    pr: match &approval.pr_id {
+                        Some(pr) => thread_pr(store, pr)?,
+                        None => None,
+                    },
+                    head_sha: approval.head_sha,
+                    attention: None,
+                    id: approval.id,
+                })))
+            }
+            None => None,
+        },
+        "attention.opened" => match find::<Attention>(conn, "id = ?1", &[&id])? {
+            Some(item) => {
+                let state = match (&item.answered_at, &item.withdrawn_at) {
+                    (Some(_), _) => "answered",
+                    (None, Some(_)) => "withdrawn",
+                    (None, None) => "open",
+                };
+                Some(ThreadItem::Decision(Box::new(ThreadDecision {
+                    seq,
+                    at: when,
+                    source: "attention".into(),
+                    id: item.id.clone(),
+                    kind: item.kind.to_string(),
+                    state: state.into(),
+                    open: state == "open",
+                    question: Some(item.question.clone()),
+                    choice: item.answer.clone(),
+                    decided_at: item.answered_at.or(item.withdrawn_at).map(at),
+                    decided_by: None,
+                    card: thread_card(store, &item.card_id)?,
+                    pr: None,
+                    head_sha: None,
+                    attention: Some(attention_item(store, &item)?),
+                })))
+            }
+            None => None,
+        },
+        "session.started" => {
+            let index = orchestrators.iter().position(|session| session.id == id);
+            index.map(|index| {
+                ThreadItem::Checkpoint(ThreadCheckpoint {
+                    seq,
+                    at: when,
+                    session_id: id.to_owned(),
+                    restarted: index > 0,
+                })
+            })
+        }
+        _ => None,
+    })
+}
+
+/// One orchestrator event as an activity step, with the card and PR it is
+/// about.
+fn thread_step(store: &Store, event: &Event) -> Result<ThreadStep> {
+    let card = match &event.card_id {
+        Some(card) => thread_card(store, card)?,
+        None => None,
+    };
+    let pr_id = match event.entity.as_str() {
+        "pr" => Some(event.entity_id.as_str()),
+        _ => event.payload.get("pr_id").and_then(Value::as_str),
+    };
+    let pr = match pr_id {
+        Some(pr) => thread_pr(store, pr)?,
+        None => None,
+    };
+    Ok(ThreadStep {
+        seq: event.seq,
+        at: at(event.at),
+        kind: event.kind.clone(),
+        label: timeline_text(event),
+        system: is_system_event(event),
+        card,
+        pr,
+        payload: event.payload.clone(),
+    })
+}
+
+fn thread_card(store: &Store, id: &str) -> Result<Option<ThreadCard>> {
+    Ok(
+        find::<Card>(store.conn(), "id = ?1", &[&id])?.map(|card| ThreadCard {
+            id: card.id,
+            display_id: card.display_id,
+            title: card.title,
+        }),
+    )
+}
+
+fn thread_pr(store: &Store, id: &str) -> Result<Option<ThreadPr>> {
+    Ok(
+        find::<Pr>(store.conn(), "id = ?1", &[&id])?.map(|pr| ThreadPr {
+            id: pr.id,
+            number: pr.number,
+            url: pr.url,
+        }),
+    )
 }
 
 /// The owner acting through the CLI, this board or a paired board host.

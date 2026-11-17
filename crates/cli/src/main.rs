@@ -23,7 +23,7 @@ use app::{App, Done, Failure};
 use cmd::elsewhere::{self, Elsewhere};
 use cmd::{
     admin, approval, ask, attention, backup, bug, card, doctor, health, import, later, learn, mem,
-    peer, read, recap, records, reply, review, run, spawn,
+    peer, read, recap, records, reply, review, run, spawn, thread,
 };
 
 #[derive(Parser)]
@@ -65,6 +65,9 @@ enum Command {
     /// Recap and walk through the open decisions (the owner's `/recap`)
     #[command(alias = "ahoy")]
     Recap(recap::Recap),
+    /// A project's orchestrator chat: asks, what the orchestrator did, its
+    /// replies, decisions and restarts, oldest first
+    Thread(thread::Thread),
     /// Questions waiting for the owner
     #[command(subcommand)]
     Attention(attention::Cmd),
@@ -197,6 +200,7 @@ fn dispatch(app: &App, command: Command) -> Done {
         Command::Bug(cmd) => bug::run(app, cmd),
         Command::Reply(args) => reply::run(app, args),
         Command::Recap(args) => recap::run(app, args),
+        Command::Thread(args) => thread::run(app, args),
         Command::Attention(cmd) => attention::run(app, cmd),
         Command::Approval(cmd) => approval::run_request(app, cmd),
         Command::Approve(args) => approval::approve(app, args),

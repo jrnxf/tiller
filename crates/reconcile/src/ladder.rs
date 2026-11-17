@@ -198,6 +198,9 @@ mod tests {
             activity_observed_at: Some(Timestamp::now()),
             activity_source: Some(ObservationSource::Hook),
             rev: 1,
+            context_used: None,
+            context_window: None,
+            context_at: None,
         }
     }
 

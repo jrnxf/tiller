@@ -159,6 +159,9 @@ record!(Session in "sessions" {
     activity_observed_at: Option<Timestamp>,
     activity_source: Option<ObservationSource>,
     rev: i64,
+    context_used: Option<i64>,
+    context_window: Option<i64>,
+    context_at: Option<Timestamp>,
 });
 
 record!(Ask in "asks" {

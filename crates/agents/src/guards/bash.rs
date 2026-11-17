@@ -3558,6 +3558,11 @@ impl Walker<'_, '_> {
                         arg.text == "--mark-read" || arg.text.starts_with("--mark-read=")
                     })
             }
+            // Any role may read a project's thread; marking its replies read
+            // is the owner's, as on `ask show`.
+            "thread" => args
+                .iter()
+                .any(|arg| arg.text == "--mark-read" || arg.text.starts_with("--mark-read=")),
             // Every retro command is the owner's or the curator's: the CLI
             // refuses `list` and `show` to any session, core takes `sweep`
             // and `run` only from the owner or the daemon, and `finish` only
