@@ -116,6 +116,7 @@ const PHRASE_TEXT: Record<string, string> = {
   "run.reown": "moved a run to a new owner",
   "run.start": "started a run",
   "run.status": "changed a run",
+  "session.context": "recorded context use",
   "session.end": "ended a session",
   "session.restart_queue": "queued a session restart",
   "session.resume": "resumed a session",
@@ -123,6 +124,7 @@ const PHRASE_TEXT: Record<string, string> = {
   "session.start": "started a session",
   "test.propose": "proposed a test",
   "test.record": "recorded a test",
+  "thread.read": "marked a chat read",
 };
 
 const PHRASES = new Map(Object.entries(PHRASE_TEXT));
