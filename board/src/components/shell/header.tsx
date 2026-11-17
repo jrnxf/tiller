@@ -111,7 +111,13 @@ export function Header({
           <Section label="Projects" fallback={nothing}>
             <ScopeCrumb activeHost={activeHost} />
           </Section>
-          <h1>{pathname.startsWith("/cards/") ? "Card" : (TITLES[pathname] ?? "Tiller")}</h1>
+          <h1>
+            {pathname.startsWith("/cards/")
+              ? "Card"
+              : pathname.startsWith("/chat/")
+                ? "Chat"
+                : (TITLES[pathname] ?? "Tiller")}
+          </h1>
         </div>
         {activeHost ? (
           <Link

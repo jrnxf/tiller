@@ -47,11 +47,22 @@ const POP_HEIGHT = 260;
 
 const enabled = (item: MentionOption) => item.off === null;
 
+// What starts a chip and how its list reads: `@` for projects by default.
+export interface MentionTrigger {
+  char: string;
+  // The list's accessible name.
+  label: string;
+  // What the list says when nothing matches.
+  empty: string;
+}
+
+const PROJECTS: MentionTrigger = { char: "@", label: "Projects", empty: "No project matches" };
+
 const firstEnabled = (items: MentionOption[]) => Math.max(0, items.findIndex(enabled));
 
-// The list of projects under the caret: plain DOM, so the editor owns the
+// The list of options under the caret: plain DOM, so the editor owns the
 // keys and the list needs no React tree of its own.
-function popupList(onOpen: (open: boolean) => void): Popup {
+function popupList(trigger: MentionTrigger, onOpen: (open: boolean) => void): Popup {
   let el: HTMLDivElement | null = null;
   let current: PopupProps | null = null;
   let index = 0;
@@ -76,7 +87,7 @@ function popupList(onOpen: (open: boolean) => void): Popup {
     if (current.items.length === 0) {
       const empty = document.createElement("div");
       empty.className = "ask-pop-empty";
-      empty.textContent = "No project matches";
+      empty.textContent = trigger.empty;
       el.append(empty);
       return;
     }
@@ -94,6 +105,12 @@ function popupList(onOpen: (open: boolean) => void): Popup {
       name.className = "ask-pop-name";
       name.textContent = item.name;
       row.append(dot, name);
+      if (item.detail) {
+        const detail = document.createElement("span");
+        detail.className = "ask-pop-detail";
+        detail.textContent = item.detail;
+        row.append(detail);
+      }
       if (item.off) {
         const off = document.createElement("span");
         off.className = "ask-pop-off";
@@ -125,7 +142,7 @@ function popupList(onOpen: (open: boolean) => void): Popup {
       el = document.createElement("div");
       el.className = "ask-pop";
       el.setAttribute("role", "listbox");
-      el.setAttribute("aria-label", "Projects");
+      el.setAttribute("aria-label", trigger.label);
       document.body.append(el);
       onOpen(true);
       show(props, true);
@@ -169,8 +186,10 @@ interface Props {
   editorRef: RefObject<Editor | null>;
   onChange: (pieces: AskPiece[]) => void;
   onSubmit: () => void;
-  // The list of projects opened or closed.
+  // The list of options opened or closed.
   onListOpen: (open: boolean) => void;
+  // What the chips are; projects after `@` when not given.
+  trigger?: MentionTrigger;
 }
 
 // The ask text with @project chips: a Tiptap editor with the Mention node.
@@ -197,7 +216,7 @@ export function AskEditor(props: Props) {
         Text,
         Placeholder.configure({ placeholder: latest.current.placeholder }),
         Mention.configure({
-          // A chip carries the project name alone, with no "@".
+          // A chip carries the name alone, with no "@" or "#".
           renderHTML: ({ node }) => [
             "span",
             mergeAttributes({ class: "ask-chip", "data-type": "mention" }),
@@ -205,7 +224,7 @@ export function AskEditor(props: Props) {
           ],
           renderText: ({ node }) => String(node.attrs.label ?? node.attrs.id),
           suggestion: {
-            char: "@",
+            char: (latest.current.trigger ?? PROJECTS).char,
             allowedPrefixes: null,
             items: ({ query }) => {
               const { options, used } = latest.current;
@@ -215,7 +234,7 @@ export function AskEditor(props: Props) {
               );
             },
             render: () =>
-              popupList((open) => {
+              popupList(latest.current.trigger ?? PROJECTS, (open) => {
                 listOpen = open;
                 latest.current.onListOpen(open);
               }),

@@ -21,6 +21,7 @@ import { formatAgo, formatWhen } from "../attention/format";
 import { useAction } from "../attention/use-action";
 import "../attention/inbox.css";
 import { CloseIcon } from "../shell/icons";
+import { openChatDrawer } from "../chat/chat-drawer-store";
 import { askPrefillStore } from "../shell/ask-prefill";
 import { HostChip, PeerNote } from "./host-chip";
 import { ChevronRightIcon } from "./icons";
@@ -167,6 +168,15 @@ function Body({
         </p>
       )}
       <div className="acts reply-acts">
+        <button
+          type="button"
+          className="btn"
+          disabled={!listed}
+          data-testid="ask-chat"
+          onClick={() => openChatDrawer({ project: ask.project_id, owner: ownerOf(who) })}
+        >
+          Open the chat
+        </button>
         <button
           type="button"
           className="btn"

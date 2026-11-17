@@ -48,6 +48,7 @@ import { memoryResource } from "./fixtures-memory.ts";
 import { retrosResource, settleRetros } from "./fixtures-retros.ts";
 import { recapFor } from "./fixtures-recap.ts";
 import { askDetailFor, isCancelledAsk, repliesFor } from "./fixtures-replies.ts";
+import { threadFor } from "./fixtures-thread.ts";
 import { signalsFor } from "./fixtures-signals.ts";
 import { isPeerRow } from "./peers.ts";
 import {
@@ -1999,6 +2000,22 @@ export function fixtureResource(
         project.id === id && (host === undefined ? !isPeerRow(project) : project.host === host),
     );
     return repliesFor(served, id, host, known, now);
+  }
+  const thread = /^\/api\/v1\/projects\/([^/]+)\/thread$/.exec(url.pathname);
+  if (thread?.[1]) {
+    const id = thread[1];
+    const host = url.searchParams.get("host") ?? undefined;
+    const known = projectsFor(served, now).projects.some(
+      (project) =>
+        project.id === id && (host === undefined ? !isPeerRow(project) : project.host === host),
+    );
+    const open = (responses[attentionPath] as AttentionResponse).items;
+    const before = Number(url.searchParams.get("before") ?? Number.NaN);
+    const limit = Number(url.searchParams.get("limit") ?? Number.NaN);
+    return threadFor(served, id, host, known, open, now, {
+      before: Number.isFinite(before) ? before : undefined,
+      limit: Number.isFinite(limit) ? limit : undefined,
+    });
   }
   const ask = /^\/api\/v1\/asks\/([^/]+)$/.exec(url.pathname);
   if (ask?.[1]) {

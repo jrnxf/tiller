@@ -997,6 +997,125 @@ export interface AskDetail {
   host?: string;
 }
 
+// `GET /api/v1/projects/{id}/thread`: the project's orchestrator chat, oldest
+// first. `next_before` is the `before` of the next older page; null on the
+// oldest. Reading it marks nothing read: the chat calls
+// `POST /api/v1/projects/{id}/thread/read` once when it opens.
+export interface ThreadResponse {
+  items: ThreadItem[];
+  // The live orchestrator's context use; null when it has none.
+  context?: ThreadContext | null;
+  next_before?: number | null;
+}
+
+export interface ThreadContext {
+  used: number;
+  // The model's window; null when the daemon does not know it.
+  window?: number | null;
+}
+
+export type ThreadItem =
+  | ({ type: "ask" } & ThreadAsk)
+  | ({ type: "activity" } & ThreadActivity)
+  | ({ type: "reply" } & ThreadReply)
+  | ({ type: "decision" } & ThreadDecision)
+  | ({ type: "checkpoint" } & ThreadCheckpoint);
+
+// What the owner sent.
+export interface ThreadAsk {
+  seq: number;
+  at: string;
+  id: string;
+  text: string;
+  source: AskSource;
+  disposition: AskDisposition;
+  cards: ReplyCard[];
+  // Null when no note went to the orchestrator.
+  delivery?: AskDelivery | null;
+}
+
+// What the orchestrator did between two other items, oldest step first.
+export interface ThreadActivity {
+  seq: number;
+  at: string;
+  session_id: string;
+  ended_at: string;
+  duration_seconds: number;
+  steps: ThreadStep[];
+}
+
+// One event of an activity: its kind (`card.created`), its timeline words,
+// and the card and pull request it is about.
+export interface ThreadStep {
+  seq: number;
+  at: string;
+  kind: string;
+  label: string;
+  // The daemon's own bookkeeping, not the orchestrator's choice.
+  system: boolean;
+  payload: Record<string, unknown>;
+  card?: ThreadCard | null;
+  pr?: ThreadPr | null;
+}
+
+export interface ThreadReply {
+  seq: number;
+  at: string;
+  reply: ReplyItem;
+}
+
+// An approval or attention item of the project, open or resolved. A merge
+// approval and its attention item are one decision.
+export interface ThreadDecision {
+  seq: number;
+  at: string;
+  source: "approval" | "attention";
+  id: string;
+  // The approval kind (`merge`, `land_direct`) or the attention kind.
+  kind: string;
+  // An approval's state, or an attention item's `open`, `answered` or `withdrawn`.
+  state: string;
+  open: boolean;
+  // The full attention item, which the board answers from.
+  attention?: AttentionItem | null;
+  card?: ThreadCard | null;
+  // `accepted` or `rejected` for an approval, the exact answer for an
+  // attention item. Null while open or withdrawn.
+  choice?: string | null;
+  decided_at?: string | null;
+  decided_by?: string | null;
+  head_sha?: string | null;
+  pr?: ThreadPr | null;
+  // An attention item's question, or the merge item's for an approval.
+  question?: string | null;
+}
+
+// An orchestrator session started; `restarted` after the first.
+export interface ThreadCheckpoint {
+  seq: number;
+  at: string;
+  session_id: string;
+  restarted: boolean;
+}
+
+export interface ThreadCard {
+  id: string;
+  display_id: string;
+  title: string;
+}
+
+export interface ThreadPr {
+  id: string;
+  number: number;
+  url: string;
+}
+
+// `POST /api/v1/projects/{id}/thread/read`: the replies it marked read,
+// newest first.
+export interface ThreadRead {
+  replies: ReplyItem[];
+}
+
 export interface MutationResponse<T = unknown> {
   ok: true;
   replayed: boolean;

@@ -56,7 +56,8 @@ import {
 import { backupsFor, takeBackup } from "./fixtures-backups.ts";
 import { anyUnpaired, peerLinkMutation, peersFor, withoutUnpaired } from "./fixtures-peers.ts";
 import { recapFor } from "./fixtures-recap.ts";
-import { cancelAsk, markReplyRead } from "./fixtures-replies.ts";
+import { cancelAsk, markProjectRead, markReplyRead } from "./fixtures-replies.ts";
+import { recordThreadAsk, recordThreadDecision } from "./fixtures-thread.ts";
 import {
   agentsPath,
   attentionPath,
@@ -1601,6 +1602,7 @@ function handle(
   }
   const answer = /^\/api\/v1\/attention\/([^/]+)\/answer$/.exec(path);
   if (method === "POST" && answer) {
+    recordThreadDecision(answer[1] ?? "", String(body.answer));
     const outbox = fakeId("01JOUTB");
     return {
       reply: recorded({ id: answer[1], answer: body.answer }, outbox, null),
@@ -1621,6 +1623,7 @@ function handle(
       };
     }
     const item = attentionFor(decide[1]);
+    recordThreadDecision(decide[1], String(body.decision));
     return {
       reply: recorded({ id: decide[1], state: "accepted" }, null, decide[1]),
       followUps: [
@@ -1647,6 +1650,10 @@ function handle(
     const id = fakeId("01JASK");
     const outbox = live ? fakeId("01JOUTB") : null;
     const at = new Date().toISOString();
+    if (typeof body.text === "string") {
+      const host = typeof body.host === "string" ? body.host : undefined;
+      recordThreadAsk(project, host, { id, text: body.text, live: live || host !== undefined });
+    }
     return {
       reply: recorded(
         {
@@ -1901,6 +1908,26 @@ function handle(
           },
         },
       ],
+    };
+  }
+  const threadRead = /^\/api\/v1\/projects\/([^/]+)\/thread\/read$/.exec(path);
+  if (method === "POST" && threadRead?.[1]) {
+    const host = typeof body.host === "string" ? body.host : undefined;
+    const read = markProjectRead(threadRead[1], host, Date.now());
+    return {
+      reply: recorded({ replies: read }, null, null),
+      followUps: read.map((reply) => ({
+        delayMs: 200,
+        event: {
+          kind: "reply.read",
+          txn: "thread.read",
+          entity: "reply",
+          entity_id: reply.id,
+          rev_after: reply.rev,
+          card_id: null,
+          entity_state: null,
+        },
+      })),
     };
   }
   const replyRead = /^\/api\/v1\/replies\/([^/]+)\/read$/.exec(path);

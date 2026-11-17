@@ -17,6 +17,7 @@ import { Route as InboxRouteImport } from './routes/inbox'
 import { Route as MemoryRouteImport } from './routes/memory'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as CardsCardIdRouteImport } from './routes/cards.$cardId'
+import { Route as ChatProjectRouteImport } from './routes/chat.$project'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -58,6 +59,11 @@ const CardsCardIdRoute = CardsCardIdRouteImport.update({
   path: '/cards/$cardId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ChatProjectRoute = ChatProjectRouteImport.update({
+  id: '/chat/$project',
+  path: '/chat/$project',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -68,6 +74,7 @@ export interface FileRoutesByFullPath {
   '/memory': typeof MemoryRoute
   '/settings': typeof SettingsRoute
   '/cards/$cardId': typeof CardsCardIdRoute
+  '/chat/$project': typeof ChatProjectRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -78,6 +85,7 @@ export interface FileRoutesByTo {
   '/memory': typeof MemoryRoute
   '/settings': typeof SettingsRoute
   '/cards/$cardId': typeof CardsCardIdRoute
+  '/chat/$project': typeof ChatProjectRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -89,6 +97,7 @@ export interface FileRoutesById {
   '/memory': typeof MemoryRoute
   '/settings': typeof SettingsRoute
   '/cards/$cardId': typeof CardsCardIdRoute
+  '/chat/$project': typeof ChatProjectRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -101,6 +110,7 @@ export interface FileRouteTypes {
     | '/memory'
     | '/settings'
     | '/cards/$cardId'
+    | '/chat/$project'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -111,6 +121,7 @@ export interface FileRouteTypes {
     | '/memory'
     | '/settings'
     | '/cards/$cardId'
+    | '/chat/$project'
   id:
     | '__root__'
     | '/'
@@ -121,6 +132,7 @@ export interface FileRouteTypes {
     | '/memory'
     | '/settings'
     | '/cards/$cardId'
+    | '/chat/$project'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -132,6 +144,7 @@ export interface RootRouteChildren {
   MemoryRoute: typeof MemoryRoute
   SettingsRoute: typeof SettingsRoute
   CardsCardIdRoute: typeof CardsCardIdRoute
+  ChatProjectRoute: typeof ChatProjectRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -192,6 +205,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof CardsCardIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/chat/$project': {
+      id: '/chat/$project'
+      path: '/chat/$project'
+      fullPath: '/chat/$project'
+      preLoaderRoute: typeof ChatProjectRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -204,6 +224,7 @@ const rootRouteChildren: RootRouteChildren = {
   MemoryRoute: MemoryRoute,
   SettingsRoute: SettingsRoute,
   CardsCardIdRoute: CardsCardIdRoute,
+  ChatProjectRoute: ChatProjectRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

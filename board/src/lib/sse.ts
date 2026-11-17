@@ -246,6 +246,19 @@ const PROJECT_REPLIES_PATH = /^\/api\/v1\/projects\/[^/?]+\/replies(\?host=[^&]+
 // `/api/v1/asks/<id>`, the ask panel's read, whatever the ask.
 const ASK_PATH = /^\/api\/v1\/asks\/[^/?]+(\?host=[^&]+)?$/;
 
+// `/api/v1/projects/<id>/thread`, whatever the project, and a peer's with its
+// `?host=`. An event names its entity, not always its project, so every open
+// chat reads again; only the open one is on screen.
+const PROJECT_THREAD_PATH = /^\/api\/v1\/projects\/[^/?]+\/thread(\?host=[^&]+)?$/;
+const isThread = (path: string) => PROJECT_THREAD_PATH.test(path);
+
+// What a chat shows at once: what the owner sent and how far it went, the
+// orchestrator's replies, and the decisions it asked for.
+const THREAD_NOW = new Set(["ask", "reply", "outbox", "attention", "approval"]);
+// What its activity steps and context show. These come in runs, so an open
+// chat reads them at most once a second.
+const THREAD_SOON = new Set(["card", "run", "session", "pr"]);
+
 // The list read of each entity the board writes in place from `entity_state`.
 // The daemon sends no state when it could not read the entity (one bad row
 // never stalls the stream), and then only a fetch can say what it is.
@@ -285,6 +298,9 @@ export function applyChange(
   const gone = event.kind === "project.deleted" || event.kind === "project.retired";
   const list = ENTITY_LISTS[event.entity];
   if (!state && list !== undefined && !gone) refetchPaths(queryClient, list);
+
+  if (THREAD_NOW.has(event.entity)) refetchMatching(queryClient, isThread);
+  else if (THREAD_SOON.has(event.entity)) refetchSoon(queryClient, "thread", isThread);
 
   // Health numbers are this host's own (protocol.md section 7.3).
   if (!peer && SIGNAL_ENTITIES.has(event.entity)) refetchSoon(queryClient, "signals", isSignals);
@@ -570,12 +586,14 @@ function applyPeerReset(queryClient: QueryClient, event: PeerResetEvent): void {
   queryClient.setQueryData<ProjectsResponse | undefined>(queryKeyFor(projectsPath), (old) =>
     old ? { projects: replaceHost(old.projects, host, at("/api/v1/projects").projects) } : old,
   );
-  // The peer's unread replies and its open ask: the daemon answers both from
-  // what the link carries, which this snapshot just renewed.
+  // The peer's unread replies, its open ask and its chat: the daemon answers
+  // them from what the link carries, which this snapshot just renewed.
   const ofPeer = `?${new URLSearchParams({ host }).toString()}`;
   refetchMatching(
     queryClient,
-    (path) => (PROJECT_REPLIES_PATH.test(path) || ASK_PATH.test(path)) && path.endsWith(ofPeer),
+    (path) =>
+      (PROJECT_REPLIES_PATH.test(path) || ASK_PATH.test(path) || isThread(path)) &&
+      path.endsWith(ofPeer),
   );
   // A filtered board list may need a card to enter or leave.
   queryClient.invalidateQueries({
