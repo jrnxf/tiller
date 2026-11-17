@@ -376,6 +376,37 @@ impl Store {
             view(tx.conn(), get(tx.conn(), "reply", &reply.id)?)
         })
     }
+
+    /// `thread.read` (the owner opens a project's orchestrator chat): every
+    /// unread reply of the project is marked read in one transaction, with
+    /// one `reply.read` event each. Returns the replies it marked, newest
+    /// first; with none unread it writes nothing.
+    pub fn thread_read(&mut self, ctx: &Ctx, project: &str) -> Result<Applied<Vec<ReplyView>>> {
+        super::projects::require_owner(&ctx.actor, "thread.read")?;
+        self.write(ctx, "thread.read", None, |tx| {
+            let project: crate::domain::Project = get(tx.conn(), "project", project)?;
+            let unread: Vec<Reply> = list(
+                tx.conn(),
+                "project_id = ?1 AND read_at IS NULL ORDER BY replied_at DESC, id DESC",
+                &[&project.id],
+            )?;
+            let now: Timestamp = tx.now();
+            let mut marked = Vec::with_capacity(unread.len());
+            for reply in unread {
+                tx.conn().execute(
+                    "UPDATE replies SET read_at = ?2, rev = rev + 1 WHERE id = ?1",
+                    params![reply.id, now],
+                )?;
+                tx.event(
+                    NewEvent::new("reply", &reply.id, "reply.read")
+                        .rev(reply.rev + 1)
+                        .payload(json!({"project_id": reply.project_id})),
+                )?;
+                marked.push(view(tx.conn(), get(tx.conn(), "reply", &reply.id)?)?);
+            }
+            Ok(marked)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -471,6 +502,34 @@ mod tests {
         assert!(unread(store.conn(), "alpha").unwrap().is_empty());
         let twice = store.reply_read(&owner(), &view.reply.id).unwrap();
         assert!(twice.events.is_empty(), "marking read again writes nothing");
+    }
+
+    #[test]
+    fn opening_the_thread_marks_every_unread_reply_read_in_one_mutation() {
+        let (mut store, orchestrator) = memory_store();
+        let me = Ctx::new(Actor::Session(orchestrator));
+        let (first, _) = board_ask(&mut store, "Status?");
+        let (second, _) = board_ask(&mut store, "And the export?");
+        for (ask, body) in [(&first, "Fine."), (&second, "Nightly.")] {
+            store.reply_send(&me, None, reply(&ask.id, body)).unwrap();
+        }
+        let refused = store.thread_read(&me, "alpha").unwrap_err();
+        assert!(matches!(refused, Error::Forbidden(_)), "{refused}");
+
+        let read = store.thread_read(&Ctx::new(Actor::Board), "alpha").unwrap();
+        let bodies: Vec<&str> = read
+            .value
+            .iter()
+            .map(|view| view.reply.body.as_str())
+            .collect();
+        assert_eq!(bodies, ["Nightly.", "Fine."]);
+        assert_eq!(read.events.len(), 2, "one reply.read event per reply");
+        assert!(unread(store.conn(), "alpha").unwrap().is_empty());
+
+        let twice = store.thread_read(&owner(), "alpha").unwrap();
+        assert!(twice.value.is_empty() && twice.events.is_empty());
+        let missing = store.thread_read(&owner(), "nope").unwrap_err();
+        assert!(matches!(missing, Error::NotFound { .. }), "{missing}");
     }
 
     #[test]

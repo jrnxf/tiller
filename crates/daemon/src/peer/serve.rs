@@ -589,6 +589,12 @@ impl Link<'_> {
                 self.acts()?;
                 serde_json::to_value(views::own_retired_projects(store, Timestamp::now())?)
             }
+            // The owner's asks and the orchestrator's replies, which only an
+            // `act` pairing reads, as `asks/{id}` is.
+            Query::Thread(id, before, limit) => {
+                self.acts()?;
+                serde_json::to_value(views::thread(store, &id, before, limit)?)
+            }
             // `run` hands the checks to `Checks`, off the link thread: they
             // never run here.
             Query::Doctor => {
@@ -839,6 +845,9 @@ enum Query {
     Checkout(Box<CheckoutQuery>),
     /// This host's retired projects, which the board deletes from.
     Retired,
+    /// A project's orchestrator chat, `before` and `limit` as the board
+    /// API reads them, for an `act` key only: it holds the owner's words.
+    Thread(String, Option<i64>, Option<i64>),
 }
 
 fn parse_query(path: &str) -> Result<Query, ApiError> {
@@ -850,35 +859,39 @@ fn parse_query(path: &str) -> Result<Query, ApiError> {
         "projects" if params == "retired=true" => return Ok(Query::Retired),
         _ => {}
     }
-    let mut before = None;
+    let (mut before, mut limit) = (None, None);
     for param in params.split('&').filter(|param| !param.is_empty()) {
         match param.split_once('=').unwrap_or((param, "")) {
             ("host", _) => return Err(usage("a peer serves only its own records")),
             ("before", seq) => {
                 before = Some(seq.parse().map_err(|_| usage("before is a seq"))?);
             }
+            ("limit", count) => {
+                limit = Some(count.parse().map_err(|_| usage("limit is a count"))?);
+            }
             (name, _) => return Err(usage(&format!("unknown query parameter {name:?}"))),
         }
     }
+    // Only the timeline pages by `before`, and only the thread by both.
+    let plain = before.is_none() && limit.is_none();
     let segments: Vec<&str> = route.trim_start_matches('/').split('/').collect();
     let query = match segments.as_slice() {
-        ["cards", id] if before.is_none() => Query::Card((*id).to_owned()),
-        ["cards", id, "timeline"] => Query::Timeline((*id).to_owned(), before),
-        ["runs", id] if before.is_none() => Query::Run((*id).to_owned()),
-        ["asks", id] if before.is_none() => Query::Ask((*id).to_owned()),
-        ["doctor"] if before.is_none() => Query::Doctor,
-        ["away", "brief"] if before.is_none() => Query::AwayBrief,
-        ["agents", session, "terminal", "tail"] if before.is_none() => {
-            Query::Tail((*session).to_owned())
-        }
-        ["agents", session, "prompt"] if before.is_none() => Query::Prompt((*session).to_owned()),
-        ["projects", id] if before.is_none() => Query::Project((*id).to_owned()),
-        ["projects", id, "retire"] if before.is_none() => Query::RetirePreview((*id).to_owned()),
-        ["projects", id, "delete"] if before.is_none() => Query::DeletePreview((*id).to_owned()),
-        ["projects", id, "grants"] if before.is_none() => Query::Grants((*id).to_owned()),
+        ["cards", id] if plain => Query::Card((*id).to_owned()),
+        ["cards", id, "timeline"] if limit.is_none() => Query::Timeline((*id).to_owned(), before),
+        ["runs", id] if plain => Query::Run((*id).to_owned()),
+        ["asks", id] if plain => Query::Ask((*id).to_owned()),
+        ["doctor"] if plain => Query::Doctor,
+        ["away", "brief"] if plain => Query::AwayBrief,
+        ["agents", session, "terminal", "tail"] if plain => Query::Tail((*session).to_owned()),
+        ["agents", session, "prompt"] if plain => Query::Prompt((*session).to_owned()),
+        ["projects", id] if plain => Query::Project((*id).to_owned()),
+        ["projects", id, "retire"] if plain => Query::RetirePreview((*id).to_owned()),
+        ["projects", id, "delete"] if plain => Query::DeletePreview((*id).to_owned()),
+        ["projects", id, "grants"] if plain => Query::Grants((*id).to_owned()),
+        ["projects", id, "thread"] => Query::Thread((*id).to_owned(), before, limit),
         _ => {
             return Err(usage(
-                "a query is cards/{id}, cards/{id}/timeline, runs/{id}, asks/{id}, doctor, agents/{session}/terminal/tail, agents/{session}/prompt, projects/{id}, projects/{id}/retire, projects/{id}/delete, projects/{id}/grants, projects/checkout, projects?retired=true or away/brief",
+                "a query is cards/{id}, cards/{id}/timeline, runs/{id}, asks/{id}, doctor, agents/{session}/terminal/tail, agents/{session}/prompt, projects/{id}, projects/{id}/retire, projects/{id}/delete, projects/{id}/grants, projects/{id}/thread, projects/checkout, projects?retired=true or away/brief",
             ));
         }
     };
@@ -893,6 +906,7 @@ fn parse_query(path: &str) -> Result<Query, ApiError> {
         | Query::RetirePreview(id)
         | Query::DeletePreview(id)
         | Query::Grants(id)
+        | Query::Thread(id, _, _)
             if id.is_empty() =>
         {
             Err(usage("the query names no id"))
@@ -1030,6 +1044,19 @@ mod tests {
             Some(Query::Grants("alpha".into()))
         );
         assert_eq!(parse_query("away/brief").ok(), Some(Query::AwayBrief));
+        assert_eq!(
+            parse_query("projects/alpha/thread?before=90&limit=20").ok(),
+            Some(Query::Thread("alpha".into(), Some(90), Some(20)))
+        );
+        assert_eq!(
+            parse_query("projects/alpha/thread").ok(),
+            Some(Query::Thread("alpha".into(), None, None))
+        );
+        assert!(parse_query("projects//thread").is_err());
+        assert!(parse_query("projects/alpha/thread?limit=many").is_err());
+        // Only the thread takes a limit.
+        assert!(parse_query("cards/alpha-1/timeline?limit=5").is_err());
+        assert!(parse_query("asks/01JA?limit=5").is_err());
         for refused in [
             "projects?retired=false",
             "projects?retired=true&host=other",

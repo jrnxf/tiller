@@ -1,0 +1,187 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "context": {
+      "used": 82771,
+      "window": 1000000
+    },
+    "items": [
+      {
+        "at": "<time>",
+        "restarted": false,
+        "seq": "<seq>",
+        "session_id": "<id1>",
+        "type": "checkpoint"
+      },
+      {
+        "at": "<time>",
+        "cards": [
+          {
+            "display_id": "alpha-1",
+            "id": "<id3>",
+            "relation": "created",
+            "short": "<id3.short>",
+            "title": "Run the export nightly"
+          }
+        ],
+        "delivery": {
+          "delivered_at": null,
+          "failed_at": null,
+          "failure_reason": null,
+          "seen_at": null,
+          "sent_at": "<time>",
+          "state": "pending"
+        },
+        "disposition": "new",
+        "id": "<id5>",
+        "seq": "<seq>",
+        "short": "<id5.short>",
+        "source": "script",
+        "text": "Can the export run nightly?",
+        "type": "ask"
+      },
+      {
+        "at": "<time>",
+        "duration_seconds": 0,
+        "ended_at": "<time>",
+        "seq": "<seq>",
+        "session_id": "<id1>",
+        "steps": [
+          {
+            "at": "<time>",
+            "card": null,
+            "kind": "ask.resolved",
+            "label": "resolved an ask",
+            "payload": {
+              "disposition": "new",
+              "reason": null
+            },
+            "pr": null,
+            "seq": "<seq>",
+            "system": false
+          },
+          {
+            "at": "<time>",
+            "card": {
+              "display_id": "alpha-1",
+              "id": "<id3>",
+              "short": "<id3.short>",
+              "title": "Run the export nightly"
+            },
+            "kind": "card.created",
+            "label": "created the card",
+            "payload": {
+              "ask_id": "<id5>",
+              "display_id": "alpha-1",
+              "kind": "ship",
+              "legacy_id": null,
+              "project_id": "alpha",
+              "title": "Run the export nightly"
+            },
+            "pr": null,
+            "seq": "<seq>",
+            "system": false
+          },
+          {
+            "at": "<time>",
+            "card": {
+              "display_id": "alpha-1",
+              "id": "<id3>",
+              "short": "<id3.short>",
+              "title": "Run the export nightly"
+            },
+            "kind": "card.linked",
+            "label": "linked the card to an ask",
+            "payload": {
+              "ask_id": "<id5>",
+              "relation": "created"
+            },
+            "pr": null,
+            "seq": "<seq>",
+            "system": true
+          },
+          {
+            "at": "<time>",
+            "card": {
+              "display_id": "alpha-1",
+              "id": "<id3>",
+              "short": "<id3.short>",
+              "title": "Run the export nightly"
+            },
+            "kind": "outbox.enqueued",
+            "label": "queued a message",
+            "payload": {
+              "kind": "note",
+              "reply_to": null,
+              "target_session_id": "<id1>"
+            },
+            "pr": null,
+            "seq": "<seq>",
+            "system": true
+          }
+        ],
+        "type": "activity"
+      },
+      {
+        "at": "<time>",
+        "attention": null,
+        "card": {
+          "display_id": "alpha-1",
+          "id": "<id3>",
+          "short": "<id3.short>",
+          "title": "Run the export nightly"
+        },
+        "choice": "accepted",
+        "decided_at": "<time>",
+        "decided_by": "owner",
+        "head_sha": "0123456789abcdef0123456789abcdef01234567",
+        "id": "<id7>",
+        "kind": "merge",
+        "open": false,
+        "pr": {
+          "id": "<id9>",
+          "number": 7,
+          "short": "<id9.short>",
+          "url": "https://example.com/example/alpha/pull/7"
+        },
+        "question": "Merge alpha-1 at 0123456789ab (squash)?",
+        "seq": "<seq>",
+        "short": "<id7.short>",
+        "source": "approval",
+        "state": "accepted",
+        "type": "decision"
+      },
+      {
+        "at": "<time>",
+        "reply": {
+          "ask_id": "<id5>",
+          "asked_at": "<time>",
+          "body": "Yes. PR #7 runs it at 02:00; it waits for your merge.",
+          "card": {
+            "display_id": "alpha-1",
+            "id": "<id3>",
+            "relation": "created",
+            "short": "<id3.short>",
+            "title": "Run the export nightly"
+          },
+          "id": "<id11>",
+          "message_id": null,
+          "project": "alpha",
+          "question": "Can the export run nightly?",
+          "read_at": null,
+          "replied_at": "<time>",
+          "rev": 1,
+          "short": "<id11.short>",
+          "to": "ask"
+        },
+        "seq": "<seq>",
+        "type": "reply"
+      }
+    ],
+    "next_before": null
+  },
+  "ok": true
+}

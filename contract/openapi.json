@@ -6014,6 +6014,197 @@
         }
       }
     },
+    "/api/v1/projects/{id}/thread": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "project_thread",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "Only items older than this `seq`: the last page's `next_before`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "How many items, 1 to 200; 50 when absent.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "host",
+            "in": "query",
+            "description": "A peer's label for a peer's project; absent means this host.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: a `read` pairing (`read_scope`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{id}/thread/read": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "mark_thread_read",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MarkThreadRead"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`data.replies`: the replies it marked read, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`peer_unreachable`: nothing was sent or queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/quota": {
       "get": {
         "tags": [
@@ -9677,6 +9868,26 @@
               "null"
             ],
             "description": "A paired peer's reply: the mark is forwarded to that host."
+          },
+          "idempotency_key": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "MarkThreadRead": {
+        "type": "object",
+        "description": "`POST /api/v1/projects/{id}/thread/read`: marks every unread reply of\nthe project read, in one mutation. Marking them again changes nothing.",
+        "required": [
+          "idempotency_key"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's project: the mark is forwarded to that host."
           },
           "idempotency_key": {
             "type": "string"
@@ -13483,6 +13694,523 @@
           }
         },
         "additionalProperties": false
+      },
+      "ThreadActivity": {
+        "type": "object",
+        "description": "A run of the orchestrator's own events with no other item between them.\nA long run is split into items of at most 100 steps.",
+        "required": [
+          "seq",
+          "at",
+          "session_id",
+          "ended_at",
+          "duration_seconds",
+          "steps"
+        ],
+        "properties": {
+          "at": {
+            "type": "string"
+          },
+          "duration_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "From the first step to the last, in whole seconds."
+          },
+          "ended_at": {
+            "type": "string",
+            "description": "The time of the last step."
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ThreadStep"
+            },
+            "description": "Oldest first."
+          }
+        }
+      },
+      "ThreadAsk": {
+        "type": "object",
+        "required": [
+          "seq",
+          "at",
+          "id",
+          "text",
+          "source",
+          "disposition",
+          "cards"
+        ],
+        "properties": {
+          "at": {
+            "type": "string"
+          },
+          "cards": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReplyCard"
+            },
+            "description": "The cards the ask created or followed up, in the order linked."
+          },
+          "delivery": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AskDelivery",
+                "description": "The note the ask went as; null when none was sent."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "disposition": {
+            "type": "string",
+            "description": "`unresolved`, `new`, `followup`, `chat` or `cancelled`."
+          },
+          "id": {
+            "type": "string"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "source": {
+            "type": "string",
+            "description": "`prompt`, `board`, `script` or `import`."
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      },
+      "ThreadCard": {
+        "type": "object",
+        "required": [
+          "id",
+          "display_id",
+          "title"
+        ],
+        "properties": {
+          "display_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "ThreadCheckpoint": {
+        "type": "object",
+        "required": [
+          "seq",
+          "at",
+          "session_id",
+          "restarted"
+        ],
+        "properties": {
+          "at": {
+            "type": "string"
+          },
+          "restarted": {
+            "type": "boolean",
+            "description": "True when an earlier orchestrator session of the project ran: the\norchestrator restarted, with a fresh context."
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        }
+      },
+      "ThreadContext": {
+        "type": "object",
+        "description": "The live orchestrator's context use, in tokens.",
+        "required": [
+          "used"
+        ],
+        "properties": {
+          "used": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Input + cache read + cache creation tokens of its newest turn."
+          },
+          "window": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The model's context window; null for a model Tiller does not know."
+          }
+        }
+      },
+      "ThreadDecision": {
+        "type": "object",
+        "required": [
+          "seq",
+          "at",
+          "source",
+          "id",
+          "kind",
+          "state",
+          "open"
+        ],
+        "properties": {
+          "at": {
+            "type": "string"
+          },
+          "attention": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AttentionItem",
+                "description": "The full attention item, which the board answers from."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "card": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ThreadCard"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "choice": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The owner's choice: `accepted` or `rejected` for an approval, the\nexact answer for an attention item. Null while open or withdrawn."
+          },
+          "decided_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When it was decided, answered or withdrawn."
+          },
+          "decided_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Who decided an approval: `owner` or `grant:<id>`."
+          },
+          "head_sha": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The commit an approval is bound to."
+          },
+          "id": {
+            "type": "string",
+            "description": "The approval or attention item id."
+          },
+          "kind": {
+            "type": "string",
+            "description": "The approval kind (`merge`, `land_direct`, `memory`, `away`) or the\nattention kind (`decision`, `credential`, `merge` ...)."
+          },
+          "open": {
+            "type": "boolean",
+            "description": "Whether it still waits for the owner."
+          },
+          "pr": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ThreadPr"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "question": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An attention item's question; null for an approval."
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "source": {
+            "type": "string",
+            "description": "`approval` or `attention`."
+          },
+          "state": {
+            "type": "string",
+            "description": "An approval's state (`requested`, `accepted`, `stale` ...), or an\nattention item's: `open`, `answered` or `withdrawn`."
+          }
+        }
+      },
+      "ThreadItem": {
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ThreadAsk",
+                "description": "What the owner sent."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "ask"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "What the owner sent."
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ThreadActivity",
+                "description": "What the orchestrator did between two other items."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "activity"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "What the orchestrator did between two other items."
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ThreadReply",
+                "description": "The orchestrator's answer."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "reply"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "The orchestrator's answer."
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ThreadDecision",
+                "description": "An approval or attention item of the project, open or resolved."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "decision"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "An approval or attention item of the project, open or resolved."
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ThreadCheckpoint",
+                "description": "An orchestrator session started."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "checkpoint"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "An orchestrator session started."
+          }
+        ],
+        "description": "One item of a thread, tagged by `type`. Every item has `seq`, the event\nit starts at, and `at`, that event's time."
+      },
+      "ThreadPr": {
+        "type": "object",
+        "required": [
+          "id",
+          "number",
+          "url"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "number": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "ThreadReply": {
+        "type": "object",
+        "required": [
+          "seq",
+          "at",
+          "reply"
+        ],
+        "properties": {
+          "at": {
+            "type": "string"
+          },
+          "reply": {
+            "$ref": "#/components/schemas/ReplyItem",
+            "description": "The reply, its card and its read state (`read_at`)."
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "ThreadResponse": {
+        "type": "object",
+        "description": "`GET /api/v1/projects/{id}/thread`: the owner's chat with a project's\norchestrator as one list, oldest first, at most `limit` items (default\n50) older than `before`. With a peer `host`, the peer's thread, read over\nthe link (`act` scope).",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "context": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ThreadContext",
+                "description": "How full the live orchestrator's context window is, from the newest\nusage row of its transcript; null with no live orchestrator or no\nrow read yet. It is a cache: no event says it changed, so the board\nreads it again with the thread."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ThreadItem"
+            }
+          },
+          "next_before": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The `before` of the next older page: the oldest `seq` on this one.\nNull on the oldest page."
+          }
+        }
+      },
+      "ThreadStep": {
+        "type": "object",
+        "description": "One event of an activity item.",
+        "required": [
+          "seq",
+          "at",
+          "kind",
+          "label",
+          "system",
+          "payload"
+        ],
+        "properties": {
+          "at": {
+            "type": "string"
+          },
+          "card": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ThreadCard"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "description": "The event kind, such as `card.created` or `run.started`."
+          },
+          "label": {
+            "type": "string",
+            "description": "The step as a past-tense sentence, the card timeline's words."
+          },
+          "payload": {
+            "type": "object"
+          },
+          "pr": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ThreadPr"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "system": {
+            "type": "boolean",
+            "description": "True for a step of the machinery (message delivery, session\nbookkeeping), which the board may fold away."
+          }
+        }
       },
       "TimelineEntry": {
         "type": "object",

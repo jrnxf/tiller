@@ -392,6 +392,9 @@ mod tests {
             activity_observed_at: None,
             activity_source: None,
             rev: 1,
+            context_used: None,
+            context_window: None,
+            context_at: None,
         }
     }
 

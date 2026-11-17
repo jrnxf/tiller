@@ -1978,6 +1978,174 @@ pub struct AskDetail {
     pub host: Option<String>,
 }
 
+/// `GET /api/v1/projects/{id}/thread`: the owner's chat with a project's
+/// orchestrator as one list, oldest first, at most `limit` items (default
+/// 50) older than `before`. With a peer `host`, the peer's thread, read over
+/// the link (`act` scope).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ThreadResponse {
+    pub items: Vec<ThreadItem>,
+    /// How full the live orchestrator's context window is, from the newest
+    /// usage row of its transcript; null with no live orchestrator or no
+    /// row read yet. It is a cache: no event says it changed, so the board
+    /// reads it again with the thread.
+    pub context: Option<ThreadContext>,
+    /// The `before` of the next older page: the oldest `seq` on this one.
+    /// Null on the oldest page.
+    pub next_before: Option<i64>,
+}
+
+/// The live orchestrator's context use, in tokens.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ThreadContext {
+    /// Input + cache read + cache creation tokens of its newest turn.
+    pub used: i64,
+    /// The model's context window; null for a model Tiller does not know.
+    pub window: Option<i64>,
+}
+
+/// One item of a thread, tagged by `type`. Every item has `seq`, the event
+/// it starts at, and `at`, that event's time.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ThreadItem {
+    /// What the owner sent.
+    Ask(ThreadAsk),
+    /// What the orchestrator did between two other items.
+    Activity(ThreadActivity),
+    /// The orchestrator's answer.
+    Reply(ThreadReply),
+    /// An approval or attention item of the project, open or resolved.
+    Decision(Box<ThreadDecision>),
+    /// An orchestrator session started.
+    Checkpoint(ThreadCheckpoint),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ThreadAsk {
+    pub seq: i64,
+    pub at: String,
+    pub id: String,
+    pub text: String,
+    /// `prompt`, `board`, `script` or `import`.
+    pub source: String,
+    /// `unresolved`, `new`, `followup`, `chat` or `cancelled`.
+    pub disposition: String,
+    /// The note the ask went as; null when none was sent.
+    pub delivery: Option<AskDelivery>,
+    /// The cards the ask created or followed up, in the order linked.
+    pub cards: Vec<ReplyCard>,
+}
+
+/// A run of the orchestrator's own events with no other item between them.
+/// A long run is split into items of at most 100 steps.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ThreadActivity {
+    pub seq: i64,
+    pub at: String,
+    pub session_id: String,
+    /// The time of the last step.
+    pub ended_at: String,
+    /// From the first step to the last, in whole seconds.
+    pub duration_seconds: i64,
+    /// Oldest first.
+    pub steps: Vec<ThreadStep>,
+}
+
+/// One event of an activity item.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ThreadStep {
+    pub seq: i64,
+    pub at: String,
+    /// The event kind, such as `card.created` or `run.started`.
+    pub kind: String,
+    /// The step as a past-tense sentence, the card timeline's words.
+    pub label: String,
+    /// True for a step of the machinery (message delivery, session
+    /// bookkeeping), which the board may fold away.
+    pub system: bool,
+    pub card: Option<ThreadCard>,
+    pub pr: Option<ThreadPr>,
+    #[schema(value_type = Object)]
+    pub payload: Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ThreadCard {
+    pub id: String,
+    pub display_id: String,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ThreadPr {
+    pub id: String,
+    pub number: i64,
+    pub url: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ThreadReply {
+    pub seq: i64,
+    pub at: String,
+    /// The reply, its card and its read state (`read_at`).
+    pub reply: ReplyItem,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ThreadDecision {
+    pub seq: i64,
+    pub at: String,
+    /// `approval` or `attention`.
+    pub source: String,
+    /// The approval or attention item id.
+    pub id: String,
+    /// The approval kind (`merge`, `land_direct`, `memory`, `away`) or the
+    /// attention kind (`decision`, `credential`, `merge` ...).
+    pub kind: String,
+    /// An approval's state (`requested`, `accepted`, `stale` ...), or an
+    /// attention item's: `open`, `answered` or `withdrawn`.
+    pub state: String,
+    /// Whether it still waits for the owner.
+    pub open: bool,
+    /// An attention item's question; null for an approval.
+    pub question: Option<String>,
+    /// The owner's choice: `accepted` or `rejected` for an approval, the
+    /// exact answer for an attention item. Null while open or withdrawn.
+    pub choice: Option<String>,
+    /// When it was decided, answered or withdrawn.
+    pub decided_at: Option<String>,
+    /// Who decided an approval: `owner` or `grant:<id>`.
+    pub decided_by: Option<String>,
+    pub card: Option<ThreadCard>,
+    pub pr: Option<ThreadPr>,
+    /// The commit an approval is bound to.
+    pub head_sha: Option<String>,
+    /// The full attention item, which the board answers from.
+    pub attention: Option<AttentionItem>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ThreadCheckpoint {
+    pub seq: i64,
+    pub at: String,
+    pub session_id: String,
+    /// True when an earlier orchestrator session of the project ran: the
+    /// orchestrator restarted, with a fresh context.
+    pub restarted: bool,
+}
+
+/// `POST /api/v1/projects/{id}/thread/read`: marks every unread reply of
+/// the project read, in one mutation. Marking them again changes nothing.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MarkThreadRead {
+    pub idempotency_key: String,
+    /// A paired peer's project: the mark is forwarded to that host.
+    #[serde(default)]
+    pub host: Option<String>,
+}
+
 /// `POST /api/v1/interventions/{id}/label`: the developer's label for an
 /// intervention. Local to this host; it is not forwarded to a peer.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]

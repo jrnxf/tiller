@@ -182,6 +182,12 @@ CREATE TABLE sessions (
                            'errored', 'ended', 'unknown')),
   activity_observed_at  TEXT,
   activity_source       TEXT,
+  -- cache of the newest transcript usage row (migration 0022): prompt tokens
+  -- (input + cache read + cache creation), the model's window, the row's time.
+  -- The tailer writes them for an orchestrator, with no event and no rev bump.
+  context_used          INTEGER,
+  context_window        INTEGER,
+  context_at            TEXT,
   rev                   INTEGER NOT NULL DEFAULT 1
 ) STRICT;
 -- at most one live orchestrator per project
@@ -525,6 +531,9 @@ CREATE TABLE events (
 CREATE INDEX events_entity ON events(entity, entity_id, seq);
 CREATE INDEX events_card ON events(card_id, seq);
 CREATE INDEX events_kind ON events(kind, seq);
+-- the orchestrator chat thread reads a project's events by the sessions that
+-- wrote them (migration 0022)
+CREATE INDEX events_actor ON events(actor, seq);
 
 -- ---------------------------------------------------------------------------
 -- Obligations, artifacts, reviews, handoffs

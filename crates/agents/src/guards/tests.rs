@@ -2914,6 +2914,27 @@ fn tiller_rules_name_both_forms() {
     assert!(allow.contains(&format!("Bash({TILLER} *)").as_str()));
 }
 
+/// Any role reads a project's thread, but only the owner marks its replies
+/// read.
+#[test]
+fn thread_is_open_and_mark_read_is_the_owners() {
+    for role in Role::ALL {
+        for command in [
+            "tiller thread alpha",
+            "tiller thread alpha --before 40 --json",
+        ] {
+            assert!(bash(role, command).is_none(), "{role}: {command} is a read");
+        }
+        for command in [
+            "tiller thread alpha --mark-read",
+            "tiller thread --mark-read=true alpha",
+        ] {
+            let denial = bash(role, command).unwrap_or_else(|| panic!("{role}: {command} allowed"));
+            assert_eq!(denial.code, Code::OwnerOnly, "{role}: {command}");
+        }
+    }
+}
+
 /// UA-17: any role reads an ask, but only the owner marks its reply read.
 #[test]
 fn ask_show_is_open_and_mark_read_is_the_owners() {

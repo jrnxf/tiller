@@ -3,8 +3,10 @@
 //! It reads the lines appended to a session's Claude Code transcript and
 //! records what hooks cannot see: interrupts on every host (Stop does not
 //! fire on them), and on a host with `intake_source = transcript` the turn
-//! boundaries hooks would have given. The daemon drives [`Tailer::poll`] from
-//! a file watch. No transcript text is ever copied into a payload.
+//! boundaries hooks would have given. For an orchestrator it also keeps the
+//! context use of the newest assistant `usage` row on the session (the
+//! orchestrator chat's context ring). The daemon drives [`Tailer::poll`]
+//! from a file watch. No transcript text is ever copied into a payload.
 
 use std::collections::HashSet;
 use std::fs::File;
@@ -13,8 +15,9 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
-use tiller_core::domain::{Activity, AskSource, ObservationSource, Session};
+use tiller_core::domain::{Activity, AskSource, ObservationSource, Role, Session};
 use tiller_core::state::asks::NewAsk;
+use tiller_core::state::context::ContextUse;
 use tiller_core::state::get;
 use tiller_core::state::runs::NewObservation;
 use tiller_core::{Actor, Ctx, Store, Timestamp};
@@ -103,6 +106,70 @@ pub fn classify(entry: &Value, transcript_intake: bool) -> Option<Detected> {
     }
 }
 
+/// The context use of one transcript line: an assistant entry of the main
+/// conversation with a `usage` row, from a real model. Claude Code also
+/// writes `<synthetic>` entries (an error, a `/compact` note) with zero
+/// usage, and subagent entries (`isSidechain`) count against their own
+/// context, so both are skipped. `used` is input + cache read + cache
+/// creation tokens: the prompt the model saw.
+pub fn context_use(entry: &Value) -> Option<ContextUse> {
+    if entry.get("type").and_then(Value::as_str) != Some("assistant")
+        || entry.get("isSidechain").and_then(Value::as_bool) == Some(true)
+    {
+        return None;
+    }
+    let message = entry.get("message")?;
+    let model = message.get("model").and_then(Value::as_str)?;
+    if model.starts_with('<') {
+        return None;
+    }
+    let usage = message.get("usage")?;
+    let tokens = |name: &str| usage.get(name).and_then(Value::as_i64).unwrap_or(0);
+    let used = tokens("input_tokens")
+        + tokens("cache_read_input_tokens")
+        + tokens("cache_creation_input_tokens");
+    let at = entry
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(|text| text.parse::<Timestamp>().ok())?;
+    Some(ContextUse {
+        used,
+        window: context_window(model),
+        at,
+    })
+}
+
+/// The context window of a Claude model id, in tokens. A `[1m]` suffix asks
+/// for the 1M window. The models before the 4.6 generation have 200K, every
+/// later one 1M. Any other id (another vendor, a test stand-in) has no known
+/// window.
+pub fn context_window(model: &str) -> Option<i64> {
+    const OLDER: &[&str] = &[
+        "claude-3",
+        "claude-opus-4-5",
+        "claude-sonnet-4-5",
+        "claude-haiku-4-5",
+        "claude-opus-4-1",
+    ];
+    if model.ends_with("[1m]") {
+        return Some(1_000_000);
+    }
+    if !model.starts_with("claude-") {
+        return None;
+    }
+    // `claude-opus-4` and `claude-sonnet-4`, bare or with a date.
+    let first_four = ["claude-opus-4", "claude-sonnet-4"].iter().any(|base| {
+        model
+            .strip_prefix(base)
+            .is_some_and(|rest| rest.is_empty() || (rest.len() == 9 && rest.starts_with("-20")))
+    });
+    if first_four || OLDER.iter().any(|base| model.starts_with(base)) {
+        Some(200_000)
+    } else {
+        Some(1_000_000)
+    }
+}
+
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
@@ -140,6 +207,12 @@ pub struct Tailer {
     /// session's transcript rows have. They are read once, and each entry
     /// this tailer records is added.
     dedupe: Option<HashSet<String>>,
+    /// Whether this session's context use is kept: an orchestrator's.
+    context: bool,
+    /// The newest context use read and not yet stored. It is stored once
+    /// per poll, at the end of the file, and kept for the next poll when
+    /// that write fails.
+    pending_context: Option<ContextUse>,
 }
 
 impl Tailer {
@@ -178,6 +251,8 @@ impl Tailer {
             offset: offset.unwrap_or(0),
             transcript_intake,
             dedupe,
+            context: session.role == Role::Orchestrator,
+            pending_context: None,
         })
     }
 
@@ -210,15 +285,54 @@ impl Tailer {
             let read = reader.read_until(b'\n', &mut line).map_err(io)?;
             if read == 0 || line.last() != Some(&b'\n') {
                 // End of file, or a line Claude Code is still writing.
+                self.store_context(store)?;
                 return Ok(written);
             }
             let line_end = self.offset + read as u64;
+            self.note_context(&line);
             if self.record_line(store, &line, line_end)? {
                 written += 1;
             }
             // Only past a line once it is recorded (or needs nothing), so an
             // error mid-poll re-reads from the first line not yet written.
             self.offset = line_end;
+        }
+    }
+
+    /// Keeps the context use of `line` when it is the newest read so far.
+    /// The byte checks skip parsing every line that cannot carry one.
+    fn note_context(&mut self, line: &[u8]) {
+        if !self.context || !contains(line, b"\"usage\"") || !contains(line, b"\"assistant\"") {
+            return;
+        }
+        let Some(usage) = serde_json::from_slice::<Value>(line)
+            .ok()
+            .as_ref()
+            .and_then(context_use)
+        else {
+            return;
+        };
+        if self
+            .pending_context
+            .is_none_or(|pending| usage.at >= pending.at)
+        {
+            self.pending_context = Some(usage);
+        }
+    }
+
+    /// Stores the pending context use, if any. A busy database keeps it for
+    /// the next poll. Any other refusal drops it: it is a cache, and one bad
+    /// write must not stall the tailers.
+    fn store_context(&mut self, store: &mut Store) -> tiller_core::Result<()> {
+        let Some(usage) = self.pending_context else {
+            return Ok(());
+        };
+        match store.session_context_record(&Ctx::new(Actor::Daemon), &self.session_id, usage) {
+            Err(error @ tiller_core::Error::Unavailable(_)) => Err(error),
+            _ => {
+                self.pending_context = None;
+                Ok(())
+            }
         }
     }
 
@@ -898,5 +1012,148 @@ mod tests {
             path,
             Path::new("/home/user/.claude/projects/-home-user-my-app-v2/abc.jsonl")
         );
+    }
+
+    fn usage(uuid: &str, at: &str, model: &str, input: i64, read: i64, created: i64) -> Value {
+        json!({"type": "assistant", "uuid": uuid, "timestamp": at,
+               "message": {"role": "assistant", "model": model, "stop_reason": "tool_use",
+                           "content": [{"type": "text", "text": "a secret reply"}],
+                           "usage": {"input_tokens": input, "cache_read_input_tokens": read,
+                                     "cache_creation_input_tokens": created, "output_tokens": 216}}})
+    }
+
+    fn context(store: &Store, id: &str) -> (Option<i64>, Option<i64>) {
+        let session = session(store, id);
+        (session.context_used, session.context_window)
+    }
+
+    #[test]
+    fn the_newest_usage_row_is_the_orchestrators_context_use_on_a_hook_host() {
+        let mut store = Store::open_in_memory().unwrap();
+        let fleet = fleet(&mut store);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let orchestrator = session(&store, &fleet.orchestrator);
+        let mut sidechain = usage(
+            "a3",
+            "2026-11-02T10:00:03Z",
+            "claude-haiku-4-5",
+            9,
+            900_000,
+            0,
+        );
+        sidechain["isSidechain"] = json!(true);
+        append(
+            &path,
+            &[
+                usage(
+                    "a1",
+                    "2026-11-02T10:00:01Z",
+                    "claude-opus-5-5",
+                    2,
+                    80_000,
+                    500,
+                ),
+                usage(
+                    "a2",
+                    "2026-11-02T10:00:02Z",
+                    "claude-opus-5-5",
+                    2,
+                    82_183,
+                    586,
+                ),
+                sidechain,
+                usage("a4", "2026-11-02T10:00:04Z", "<synthetic>", 0, 0, 0),
+            ],
+        );
+        let mut tailer = Tailer::resume(&store, &orchestrator, &path, false).unwrap();
+        assert_eq!(
+            tailer.poll(&mut store).unwrap(),
+            0,
+            "usage is no observation"
+        );
+        assert_eq!(
+            context(&store, &fleet.orchestrator),
+            (Some(82_771), Some(1_000_000))
+        );
+
+        // A later row replaces it, and one written mid-line waits.
+        append(
+            &path,
+            &[usage(
+                "a5",
+                "2026-11-02T10:00:05Z",
+                "claude-opus-4-5",
+                1,
+                120_000,
+                0,
+            )],
+        );
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        write!(
+            file,
+            "{}",
+            usage("a6", "2026-11-02T10:00:06Z", "claude-opus-5-5", 1, 1, 1)
+        )
+        .unwrap();
+        tailer.poll(&mut store).unwrap();
+        assert_eq!(
+            context(&store, &fleet.orchestrator),
+            (Some(120_001), Some(200_000))
+        );
+
+        // A daemon restart reads the file again and keeps the stored row.
+        let mut again = Tailer::resume(&store, &orchestrator, &path, false).unwrap();
+        again.poll(&mut store).unwrap();
+        assert_eq!(
+            context(&store, &fleet.orchestrator),
+            (Some(120_001), Some(200_000))
+        );
+    }
+
+    #[test]
+    fn a_builder_keeps_no_context_use() {
+        let mut store = Store::open_in_memory().unwrap();
+        let fleet = fleet(&mut store);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let worker = session(&store, &fleet.worker);
+        append(
+            &path,
+            &[usage(
+                "a1",
+                "2026-11-02T10:00:01Z",
+                "claude-opus-5-5",
+                2,
+                80_000,
+                500,
+            )],
+        );
+        Tailer::resume(&store, &worker, &path, true)
+            .unwrap()
+            .poll(&mut store)
+            .unwrap();
+        assert_eq!(context(&store, &fleet.worker), (None, None));
+    }
+
+    #[test]
+    fn a_model_id_gives_its_context_window() {
+        for (model, window) in [
+            ("claude-opus-5-5", Some(1_000_000)),
+            ("claude-fable-5-1", Some(1_000_000)),
+            ("claude-sonnet-4-6", Some(1_000_000)),
+            ("claude-opus-4-6", Some(1_000_000)),
+            ("claude-opus-4-5", Some(200_000)),
+            ("claude-opus-4-5-20251101", Some(200_000)),
+            ("claude-sonnet-4-5[1m]", Some(1_000_000)),
+            ("claude-haiku-4-5-20251001", Some(200_000)),
+            ("claude-opus-4-1", Some(200_000)),
+            ("claude-opus-4", Some(200_000)),
+            ("claude-sonnet-4-20250514", Some(200_000)),
+            ("claude-3-7-sonnet-20250219", Some(200_000)),
+            ("test-model", None),
+        ] {
+            assert_eq!(context_window(model), window, "{model}");
+        }
     }
 }

@@ -122,6 +122,38 @@ impl Store {
         )
     }
 
+    /// The events of a project's orchestrator chat thread older than
+    /// `before`, newest first, `limit` at a time: every event an orchestrator
+    /// session of the project wrote, the start of each of those sessions, and
+    /// the project's asks, replies, approval requests and attention items as
+    /// they opened. An attention item bound to an approval is that
+    /// approval's question, so the approval stands for it. Each branch reads an index in `seq` order, so a page
+    /// stops early on a long log.
+    pub fn thread_events(&self, project_id: &str, before: i64, limit: i64) -> Result<Vec<Event>> {
+        list(
+            self.conn(),
+            "seq IN (
+               SELECT seq FROM events WHERE seq < ?2 AND actor IN
+                 (SELECT 'session:' || id FROM sessions WHERE project_id = ?1 AND role = 'orchestrator')
+               UNION SELECT seq FROM events WHERE kind = 'session.started' AND seq < ?2 AND entity_id IN
+                 (SELECT id FROM sessions WHERE project_id = ?1 AND role = 'orchestrator')
+               UNION SELECT seq FROM events WHERE kind = 'ask.recorded' AND seq < ?2 AND entity_id IN
+                 (SELECT id FROM asks WHERE project_id = ?1)
+               UNION SELECT seq FROM events WHERE kind = 'ask.replied' AND seq < ?2 AND entity_id IN
+                 (SELECT id FROM replies WHERE project_id = ?1)
+               UNION SELECT seq FROM events WHERE kind = 'approval.requested' AND seq < ?2 AND entity_id IN
+                 (SELECT id FROM approvals WHERE project_id = ?1)
+               UNION SELECT seq FROM events WHERE kind = 'attention.opened' AND seq < ?2 AND entity_id IN
+                 (SELECT attention.id FROM attention JOIN cards ON cards.id = attention.card_id
+                  WHERE cards.project_id = ?1
+                    AND NOT (json_valid(attention.evidence)
+                             AND json_extract(attention.evidence, '$.approval_id') IS NOT NULL))
+               ORDER BY seq DESC LIMIT ?3)
+             ORDER BY seq DESC",
+            &[&project_id, &before, &limit],
+        )
+    }
+
     /// When the daemon's ruleset check last moved a project's merge gate, or
     /// `None` when it never has (`tiller doctor`).
     pub fn merge_gate_changed_at(&self, project_id: &str) -> Result<Option<Timestamp>> {

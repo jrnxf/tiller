@@ -70,6 +70,7 @@ pub enum Op {
     AwayEnd,
     MarkReplyRead,
     CancelAsk,
+    MarkThreadRead,
 }
 
 /// Where the peer runs a forwarded op, which also sets how long the board
@@ -86,7 +87,7 @@ pub enum Lane {
 }
 
 impl Op {
-    pub const ALL: [Op; 37] = [
+    pub const ALL: [Op; 38] = [
         Op::CreateCard,
         Op::EditCard,
         Op::Comment,
@@ -124,6 +125,7 @@ impl Op {
         Op::AwayEnd,
         Op::MarkReplyRead,
         Op::CancelAsk,
+        Op::MarkThreadRead,
     ];
 
     /// The 7.4 endpoint, as a `mutate` frame's `op` names it.
@@ -166,6 +168,7 @@ impl Op {
             Op::AwayEnd => "DELETE /api/v1/away",
             Op::MarkReplyRead => "POST /api/v1/replies/{id}/read",
             Op::CancelAsk => "POST /api/v1/asks/{id}/cancel",
+            Op::MarkThreadRead => "POST /api/v1/projects/{id}/thread/read",
         }
     }
 
@@ -455,6 +458,7 @@ fn target_project(store: &Store, op: Op, frame: &Mutate) -> tiller_core::Result<
         },
         // The path names the project by its id, as the core calls read it.
         Op::AskNote
+        | Op::MarkThreadRead
         | Op::StartOrchestrator
         | Op::ProjectEdit
         | Op::ProjectRetire
