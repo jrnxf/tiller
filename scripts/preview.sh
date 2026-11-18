@@ -5,6 +5,10 @@
 # board/dist, which a debug daemon reads from disk). A Rust edit rebuilds the
 # binary and restarts both daemons on the same ports, so open tabs reconnect.
 # There is one preview per machine: `up` from another worktree moves it there.
+# Each `up` seeds fresh homes, but the owner's board sessions (`board-owner`,
+# 30 days each) are kept in $TILLER_PREVIEW_STATE (default
+# ~/.local/state/tiller-preview), so a browser signs in once, not after
+# every `up`. A sign-in link itself lasts one minute.
 #
 # Usage, inside `nix develop`:
 #   scripts/preview.sh up [--no-build]   build, seed, start, watch; print the sign-in link
@@ -38,6 +42,30 @@ export TILLER_BENCH_STOP="scripts/preview.sh down"
 dir=$TILLER_BENCH_DIR
 bench=$repo/scripts/usability-bench.sh
 log=$dir/watch.log
+state=${TILLER_PREVIEW_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/tiller-preview}
+
+# Copies each home's board sessions to $state, and back. A daemon reads its
+# `board-owner` again within a second of a change, so a restore needs no
+# restart.
+save_sessions() {
+  local host file
+  for host in main peer; do
+    file=$dir/$host/home/board-owner
+    [ -s "$file" ] || continue
+    cmp -s "$file" "$state/$host-board-owner" && continue
+    mkdir -p "$state"
+    chmod 700 "$state"
+    cp "$file" "$state/$host-board-owner.tmp" && mv "$state/$host-board-owner.tmp" "$state/$host-board-owner"
+  done
+}
+
+restore_sessions() {
+  local host
+  for host in main peer; do
+    [ -s "$state/$host-board-owner" ] || continue
+    install -m 600 "$state/$host-board-owner" "$dir/$host/home/board-owner"
+  done
+}
 
 alive() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
 
@@ -84,6 +112,7 @@ watch() {
   touch "$dir/rust.stamp"
   count=$(rust_inputs | wc -l)
   while sleep 2; do
+    save_sessions
     now=$(rust_inputs | wc -l)
     [ "$now" = "$count" ] && [ -z "$(rust_inputs -newer "$dir/rust.stamp" | head -n 1)" ] && continue
     count=$now
@@ -100,14 +129,17 @@ watch() {
 }
 
 up() {
+  save_sessions
   stop_watcher
   "$bench" up "$@"
+  restore_sessions
   start_watcher
   echo "the preview follows $repo"
   echo "build log: scripts/preview.sh log"
 }
 
 down() {
+  save_sessions
   stop_watcher
   "$bench" down
 }
@@ -124,7 +156,10 @@ case "$command" in
   up) up "$@" ;;
   down) down ;;
   status) status ;;
-  login) "$bench" login "${1:-main}" ;;
+  login)
+    "$bench" login "${1:-main}"
+    echo "it works once, within one minute; a signed-in browser stays signed in for 30 days" >&2
+    ;;
   log) tail -n 40 -f "$log" ;;
   watch) watch ;;
   bench) "$bench" "$@" ;;
