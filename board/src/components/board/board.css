@@ -469,16 +469,6 @@
 .card[data-attn="true"] {
   border-color: color-mix(in srgb, var(--orange) 38%, var(--line-1));
 }
-.card[data-attn="true"]::before {
-  content: "";
-  position: absolute;
-  left: -1px;
-  top: 8px;
-  bottom: 8px;
-  width: 3px;
-  border-radius: 0 3px 3px 0;
-  background: var(--orange);
-}
 /* A card between the steps of its work keeps its place: the ring goes dashed
    and the chip says what comes next. */
 .card[data-pending="true"] .si .ring {
