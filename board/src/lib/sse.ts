@@ -283,6 +283,24 @@ const SIGNAL_ENTITIES = new Set([
 
 // Entities whose API shape is a join of several tables: the event says
 // something moved, and the quiet refetch fetches the joined answer.
+const MEMORY_KINDS = new Set([
+  "memory.noted",
+  "memory.edited",
+  "memory.kept",
+  "memory.discarded",
+  "session.memory_loaded",
+]);
+
+const MEMORY_PATH = /^\/api\/v1\/(memory|retros)/;
+
+function refetchMemory(queryClient: QueryClient) {
+  queryClient.invalidateQueries({
+    queryKey: API_KEY_PREFIX,
+    predicate: (query) => MEMORY_PATH.test(String(query.queryKey[1] ?? "")),
+    refetchType: "active",
+  });
+}
+
 const REFETCH_ENTITIES = new Set(["session", "run", "pane", "observation", "worktree"]);
 
 // `peer` is set for a peer's change: the rules for this host's own reads (its
@@ -308,6 +326,11 @@ export function applyChange(
     // The contributions list names each PR with its card's title.
     refetchSoon(queryClient, "contributions", isContributions);
   }
+
+  // A pending note added, edited, kept or discarded, or a launch that read
+  // kb, moves every memory read (memory.md section 4). Matched by kind, as
+  // `session.memory_loaded` is a session event.
+  if (MEMORY_KINDS.has(event.kind)) refetchMemory(queryClient);
 
   switch (event.entity) {
     case "config":
@@ -412,23 +435,10 @@ export function applyChange(
         refetchType: "active",
       });
       break;
-    case "proposal":
-    case "memory":
-    case "memory_revision":
-    case "eval_run":
-    case "change_set":
-    case "memory_repo":
     case "retro":
-      // The memory view joins the file at `HEAD` with its rows, open
-      // proposals and their eval results, so any of them moving refetches
-      // every memory read. `memory_repo` is an edit made in the repo
-      // outside the board: an editor's save, a pull or a commit by hand. A
-      // retro and the proposal it filed show in the Retros list too.
-      queryClient.invalidateQueries({
-        queryKey: API_KEY_PREFIX,
-        predicate: (query) => /^\/api\/v1\/(memory|retros)/.test(String(query.queryKey[1] ?? "")),
-        refetchType: "active",
-      });
+      // A retro's curator may add a note to the pending queue, which shows
+      // in Memory with the Retros list.
+      refetchMemory(queryClient);
       break;
     default:
       if (REFETCH_ENTITIES.has(event.entity)) {

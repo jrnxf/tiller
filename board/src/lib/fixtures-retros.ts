@@ -1,9 +1,10 @@
 // The retros for the dev and preview servers and for tests (learning-loop.md
 // section 4): kept in memory, so Run again moves a retro that did not finish
 // to running and, a little later, to its result. No curator runs here: the
-// stand-in run ends by the clock and files a placeholder suggestion.
-import type { MemoryResponse, RetroView, RetrosResponse } from "./api-types.ts";
-import { curatorSuggestion, memoryResource } from "./fixtures-memory.ts";
+// stand-in run ends by the clock and puts one placeholder note in the
+// pending queue (memory.md section 5).
+import type { RetroView, RetrosResponse } from "./api-types.ts";
+import { curatorNote } from "./fixtures-memory.ts";
 
 const TIMEOUT_MINUTES = 20;
 // How long a stand-in curator runs before its retro is done.
@@ -31,29 +32,13 @@ function retro(
     curator_started_at: null,
     started_by: null,
     finished_at: null,
-    proposal: null,
     run_refusal: null,
     ...fields,
   };
 }
 
-// The open suggestion `card`'s curator filed in `project`'s document.
-function suggestionOf(project: string, card: string): { id: string; section: string } | null {
-  const url = new URL(`/api/v1/memory?scope=${project}`, "http://localhost");
-  const doc = (memoryResource(url) as MemoryResponse | undefined)?.doc;
-  for (const section of doc?.sections ?? []) {
-    const found = [
-      ...section.lines.flatMap((line) => (line.suggestion ? [line.suggestion] : [])),
-      ...section.suggestions,
-    ].find((sug) => sug.card === card);
-    if (found) return { id: found.proposal_id, section: section.title };
-  }
-  return null;
-}
-
 function seed(now: number): State {
   const cut = at(now, -11 * 60 - 20);
-  const waiting = suggestionOf("beta", "beta-28");
   return {
     runs: new Map(),
     retros: [
@@ -84,12 +69,11 @@ function seed(now: number): State {
         title: "Run the slow suite on one worker",
         project_id: "beta",
         status: "done",
-        outcome: waiting ? "proposed" : "nothing",
+        outcome: "noted",
         created_at: at(now, -DAY - 3 * 60),
         curator_started_at: at(now, -DAY - 2 * 60 - 50),
         started_by: "daemon",
         finished_at: at(now, -DAY - 2 * 60 - 41),
-        proposal: waiting ? { id: waiting.id, state: "proposed", section: waiting.section } : null,
       }),
       retro({
         id: "01JRETRO000000000000000012",
@@ -97,12 +81,11 @@ function seed(now: number): State {
         title: "Retry the export upload",
         project_id: "alpha",
         status: "done",
-        outcome: "proposed",
+        outcome: "noted",
         created_at: at(now, -DAY - 14 * 60),
         curator_started_at: at(now, -DAY - 13 * 60 - 50),
         started_by: "daemon",
         finished_at: at(now, -DAY - 13 * 60 - 38),
-        proposal: { id: "01JPROP0000000000000000412", state: "applied", section: "Watch out for" },
       }),
       retro({
         id: "01JRETRO000000000000000031",
@@ -110,8 +93,7 @@ function seed(now: number): State {
         title: "Cache the font files in the image build",
         project_id: "gamma",
         status: "done",
-        outcome: "evidence",
-        learning: "The font cache is cold on every new runner.",
+        outcome: "nothing",
         created_at: at(now, -2 * DAY - 5 * 60),
         curator_started_at: at(now, -2 * DAY - 4 * 60 - 55),
         started_by: "daemon",
@@ -133,8 +115,8 @@ function seed(now: number): State {
   };
 }
 
-// A stand-in curator that has run its time finishes its retro with one
-// suggestion, waiting for review in the document.
+// A stand-in curator that has run its time finishes its retro with one note,
+// waiting in the pending queue.
 function settle(s: State, now: number) {
   for (const [id, doneAt] of s.runs) {
     if (now < doneAt) continue;
@@ -142,20 +124,19 @@ function settle(s: State, now: number) {
     const found = s.retros.find((each) => each.id === id);
     if (!found) continue;
     const finished = new Date(doneAt).toISOString();
-    const section = "Watch out for";
-    const proposal = curatorSuggestion(
+    curatorNote(
       found.project_id,
-      found.card,
-      section,
-      "Drain the export queue before a worker is split; a split mid-run loses the jobs in flight.",
+      found.card_id,
+      found.id,
+      "Drain the export queue before a worker is split",
+      "A split mid-run loses the jobs in flight, so drain the queue first.",
       finished,
     );
     Object.assign(found, {
       status: "done",
-      outcome: proposal ? "proposed" : "nothing",
+      outcome: "noted",
       learning: null,
       finished_at: finished,
-      proposal: proposal ? { id: proposal, state: "proposed", section } : null,
     } satisfies Partial<RetroView>);
   }
 }
@@ -166,8 +147,8 @@ function current(now: number): State {
   return state;
 }
 
-// A stand-in run files its suggestion when it ends, whichever read comes
-// first: the memory view reads it too.
+// A stand-in run files its note when it ends, whichever read comes first:
+// the memory view reads it too.
 export function settleRetros(now: number = Date.now()): void {
   current(now);
 }
