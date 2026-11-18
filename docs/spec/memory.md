@@ -6,7 +6,7 @@ Rewritten Wednesday 2026-11-18, Lisbon time, by [ADR 0005](../adr/0005-kb-holds-
 
 ## 1. Principles
 
-1. **The owner writes notes in one place: kb.** kb is the owner's note store (`~/.kb`, or `KB_HOME`). tiller reads it and never writes it, except through Keep (section 4).
+1. **The owner writes notes in one place: kb.** kb is the owner's note store (`$HOME/.kb`, or `KB_HOME`). tiller reads it and never writes it, except through Keep (section 4).
 2. **Nothing an agent wrote loads before the owner keeps it.** A note from a fleet session, the curator or the migration waits in the pending queue in `state.db`. Nothing reads the queue into a session, a prompt, a hook output or a card.
 3. **A fleet role loads a rendered snapshot.** The daemon renders the role prompt (L3) at launch. Claude Code's own memory loading is off or excluded (L1, L2, L4, L5), so a file edited during a run changes nothing until the next launch renders it.
 4. **Each host has one boundary.** `memory.kb_scopes` names the kb scopes a host may load. A work host lists only work scopes, so a personal note never reaches a fleet role there.
@@ -34,7 +34,7 @@ At each launch (`run.start`, `run.relaunch`, a promotion, the orchestrator launc
 
 ### Where the store is
 
-`KB_HOME` in the daemon's environment, else `~/.kb`. A note is one file, `notes/<scope>/<id>.md`, where `<scope>` is `global` or a repo id such as `github.com/example/app`. The file is YAML front matter between `---` lines, then the body. The loader reads these fields: `id`, `title`, `scope`, `kind`, `indexed`, `last_verified`, and the body. It ignores other fields. `trash/` and `archive/` are never read.
+`KB_HOME` in the daemon's environment, else `$HOME/.kb`. A note is one file, `notes/<scope>/<id>.md`, where `<scope>` is `global` or a repo id such as `github.com/example/app`. The file is YAML front matter between `---` lines, then the body. The loader reads these fields: `id`, `title`, `scope`, `kind`, `indexed`, `last_verified`, and the body. It ignores other fields. `trash/` and `archive/` are never read.
 
 A fixture test pins this format (`kb_store_fixture_parses`). A note that does not parse is skipped with the reason `unreadable` and the file name, and the launch goes on.
 

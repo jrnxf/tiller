@@ -12,9 +12,9 @@ import { useAction } from "../attention/use-action";
 import { useTick } from "../board/ago";
 import { day, sentence, when } from "./parts";
 
-// The Retros list under a project's memory document (learning-loop.md section
-// 4): what each full retro of the last 30 days came to, every one whose
-// curator did not finish, why, with Run again. Nothing runs such a retro
+// The Retros list under the pending queue (learning-loop.md section 4): what
+// each full retro of the last 30 days came to, every one whose curator did
+// not finish, why, with Run again. Nothing runs such a retro
 // again by itself; the owner does, here or from Health.
 
 // A running retro is read again on this beat, besides its change events, so
@@ -62,24 +62,10 @@ export function Elapsed({ from }: { from: string | null }) {
   return <span className="r">{elapsed(from, serverNow())}</span>;
 }
 
-const PROPOSAL: Record<string, string> = {
-  accepted: "kept",
-  applied: "kept",
-  discarded: "discarded",
-  stale: "no longer applies",
-  failed: "could not be applied",
-};
-
 // What a done retro came to, without its date.
 function result(retro: RetroView): string {
-  if (retro.proposal) {
-    const where = retro.proposal.section
-      ? `waiting in ${retro.proposal.section}`
-      : "waiting for you";
-    return `1 suggestion, ${PROPOSAL[retro.proposal.state] ?? where}`;
-  }
-  if (retro.outcome === "evidence") return "1 learning noted, no suggestion";
-  return "No suggestions";
+  if (retro.outcome === "noted") return "1 note suggested";
+  return "No note";
 }
 
 // What `POST /api/v1/retros/{id}/run` answers with: the retro its key claimed.
@@ -156,18 +142,26 @@ export function useRunAgain(retro: RetroView) {
   };
 }
 
-export function RunAgain({ retro, run }: { retro: RetroView; run: RunAgainState }) {
+export function RunAgain({
+  retro,
+  run,
+  first = false,
+}: {
+  retro: RetroView;
+  run: RunAgainState;
+  first?: boolean;
+}) {
   return (
     <button
       type="button"
       className="btn primary sm"
       disabled={run.off}
       title={retro.run_refusal ?? undefined}
-      aria-label={`Run the retro of ${retro.card} again`}
+      aria-label={first ? `Run the retro of ${retro.card}` : `Run the retro of ${retro.card} again`}
       onClick={run.trigger}
     >
       <ReopenIcon />
-      Run again
+      {first ? "Run" : "Run again"}
     </button>
   );
 }
@@ -184,9 +178,6 @@ export function RunAgainNote({ run, className }: { run: RunAgainState; className
   );
 }
 
-// The command that runs a waiting retro's curator now, by the retro's short id.
-const runCommand = (retro: RetroView) => `tiller retro run ${retro.id.slice(-7).toLowerCase()}`;
-
 function Unfinished({ retro }: { retro: RetroView }) {
   const run = useRunAgain(retro);
   let meta = `${why(retro.learning)}, ${when(finishedAt(retro))}. Nothing runs it again by itself.`;
@@ -196,6 +187,20 @@ function Unfinished({ retro }: { retro: RetroView }) {
       <RowTitle retro={retro} label={{ text: "Did not finish", tone: " bad" }} />
       <span className="m">{meta}</span>
       <RunAgain retro={retro} run={run} />
+      <RunAgainNote run={run} className="h-refusal" />
+    </li>
+  );
+}
+
+// Nothing starts a waiting full retro's curator by itself: the owner does,
+// with Run. It is the same call as Run again.
+function Waiting({ retro }: { retro: RetroView }) {
+  const run = useRunAgain(retro);
+  return (
+    <li data-status={retro.status}>
+      <RowTitle retro={retro} label={{ text: "Waiting", tone: " mute" }} />
+      <span className="m">{`Waiting since ${when(retro.created_at)}. Nothing starts its curator by itself.`}</span>
+      <RunAgain retro={retro} run={run} first />
       <RunAgainNote run={run} className="h-refusal" />
     </li>
   );
@@ -224,25 +229,11 @@ function Row({ retro, limit }: { retro: RetroView; limit: number }) {
       right = <Elapsed from={retro.curator_started_at} />;
       break;
     case "pending":
-      // Nothing starts a waiting full retro's curator: the owner does.
-      label = { text: "Waiting", tone: " mute" };
-      meta = (
-        <>
-          Waiting since {when(retro.created_at)}. Nothing starts its curator by itself: run{" "}
-          <code>{runCommand(retro)}</code> in a terminal.
-        </>
-      );
-      right = <span className="r">{day(retro.created_at)}</span>;
-      break;
+      return <Waiting retro={retro} />;
     case "done":
       label = { text: "Done", tone: " ok" };
       meta = `${result(retro)} · ${when(finishedAt(retro))}`;
-      right =
-        retro.proposal?.state === "proposed" ? (
-          <Review proposal={retro.proposal.id} card={retro.card} />
-        ) : (
-          <span className="r">{day(finishedAt(retro))}</span>
-        );
+      right = <span className="r">{day(finishedAt(retro))}</span>;
       break;
   }
   return (
@@ -254,26 +245,6 @@ function Row({ retro, limit }: { retro: RetroView; limit: number }) {
   );
 }
 
-// The suggestion a done retro filed sits in the document above: Review goes
-// to its card there.
-function Review({ proposal, card }: { proposal: string; card: string }) {
-  const toCard = () => {
-    const target = document.getElementById(`sug-${proposal}`);
-    target?.scrollIntoView?.({ behavior: "smooth", block: "center" });
-    target?.focus({ preventScroll: true });
-  };
-  return (
-    <button
-      type="button"
-      className="btn sm"
-      aria-label={`Review the suggestion from ${card}`}
-      onClick={toCard}
-    >
-      Review
-    </button>
-  );
-}
-
 const WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 // A row the 30 days do not hold: an unfinished retro is listed however old.
@@ -282,7 +253,7 @@ function older(retro: RetroView, now: number): boolean {
   return Math.max(...times.map((at) => (at ? Date.parse(at) : 0))) < now - WINDOW_MS;
 }
 
-export function Retros({ project, doc }: { project: string; doc: string }) {
+export function Retros({ project, name }: { project?: string; name: string }) {
   const read = useQuery(retrosQueryWhileRunning(project));
   if (!read.data) return null;
   const { retros, curator_timeout_minutes: limit } = read.data;
@@ -294,7 +265,7 @@ export function Retros({ project, doc }: { project: string; doc: string }) {
     <section className="h-box rt-box" aria-labelledby="retros-title">
       <div className="h-head">
         <h2 id="retros-title">Retros</h2>
-        <span className="c">{`${doc} · ${span}`}</span>
+        <span className="c">{`${name} · ${span}`}</span>
       </div>
       {retros.length === 0 ? (
         <p className="h-none">No retros in the last 30 days.</p>

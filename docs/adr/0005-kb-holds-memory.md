@@ -3,7 +3,7 @@
 - **Status:** accepted (Wednesday 2026-11-18, Lisbon time). The owner chose each decision below on the review page of the same day.
 - **Date:** Wednesday 2026-11-18 (Lisbon time)
 - **Reopens:** [`docs/spec/memory.md`](../spec/memory.md) as approved at CP2, and [`docs/design/learning-loop.md`](../design/learning-loop.md) (the holdout gate, change sets and the measuring window)
-- **Sources:** kb, the owner's note store (`~/.kb`, or `KB_HOME`), and the leak fix of the same day (`crates/agents/src/spawn/plugins.rs`)
+- **Sources:** kb, the owner's note store (`$HOME/.kb`, or `KB_HOME`), and the leak fix of the same day (`crates/agents/src/spawn/plugins.rs`)
 
 ## Context
 
@@ -13,7 +13,7 @@ The second store carried 1 memory document, 3 revisions and 2 proposals (both th
 
 The CP2 contract still holds one rule that matters: text that an unwatched agent wrote loads into no fleet role until the owner approves it. kb cannot hold that gate:
 
-- A fleet pane may not write `~/.kb`: its sandbox denies the path.
+- A fleet pane may not write `$HOME/.kb`: its sandbox denies the path.
 - A flag inside a kb note (author, status) is one that an agent with write access could set.
 - kb commits with `git add -A` and short retries, so many writers at once can lose a write.
 
