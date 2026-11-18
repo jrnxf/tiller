@@ -14,6 +14,7 @@ import type { AskPiece } from "../../lib/ask-plan";
 import { untagged } from "../../lib/orchestrator-text";
 import { ownerKey, ownerOf, projectKey } from "../../lib/peers";
 import { agentActivity } from "../board/activity";
+import { plainText } from "./markdown";
 
 // What the chat shows, worked out from the reads with no React: the sidebar
 // groups, a note that was not delivered, the queue and the tool status.
@@ -89,7 +90,9 @@ export function chatRows(
       (best, reply) => (best === null || reply.replied_at > best.replied_at ? reply : best),
       null,
     );
-    const status = orchestrator?.last_status_line ? untagged(orchestrator.last_status_line) : null;
+    const status = orchestrator?.last_status_line
+      ? plainText(untagged(orchestrator.last_status_line))
+      : null;
     return {
       project,
       index,
@@ -98,7 +101,7 @@ export function chatRows(
       waiting: open,
       unread: own.length,
       snippet:
-        (newest ? untagged(newest.body) : null) ??
+        (newest ? plainText(untagged(newest.body)) : null) ??
         status ??
         (orchestrator ? "No status yet" : "No orchestrator running"),
       at:
@@ -135,6 +138,22 @@ export function unreadReplies(items: ThreadItem[]): string[] {
   return items.flatMap((item) =>
     item.type === "reply" && !item.reply.read_at ? [item.reply.id] : [],
   );
+}
+
+// Where the "New" line goes when the chat opens: above the first reply the
+// owner has not read, if anything comes before it. Null with nothing new.
+export function firstUnread(items: ThreadItem[]): number | null {
+  const at = items.findIndex((item) => item.type === "reply" && !item.reply.read_at);
+  return at > 0 ? (items[at]?.seq ?? null) : null;
+}
+
+// What the orchestrator says it is doing, for the Working line: its status
+// once it set one after the owner's message, on one line.
+export function workingStatus(orchestrator: AgentRow | null, since: string): string | null {
+  const line = orchestrator?.last_status_line;
+  const at = Date.parse(orchestrator?.last_status_at ?? "");
+  if (!line || Number.isNaN(at) || at < Date.parse(since)) return null;
+  return plainText(untagged(line)) || null;
 }
 
 // The project's cards as the orchestrator's queue: what runs now, what waits,
@@ -251,8 +270,9 @@ export function decisionText(
   decision: ThreadDecision,
   clock: (iso: string | null) => string | null,
 ): string {
+  // "at 18:02" for a bare time, but "· Yesterday 18:02", never "at Yesterday".
   const at = clock(decision.decided_at ?? null);
-  const when = at ? ` at ${at}` : "";
+  const when = at ? (/^\d/.test(at) ? ` at ${at}` : ` · ${at}`) : "";
   if (decision.state === "withdrawn") return "The orchestrator withdrew it";
   if (decision.choice) {
     const choice =

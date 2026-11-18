@@ -216,3 +216,45 @@ export function parseInline(source: string): Inline[] {
   parts.push(...textParts(source.slice(last)));
   return parts;
 }
+
+function inlineText(parts: Inline[]): string {
+  return parts
+    .map((part) => {
+      switch (part.kind) {
+        case "text":
+        case "code":
+          return part.text;
+        case "br":
+          return " ";
+        default:
+          return inlineText(part.children);
+      }
+    })
+    .join("");
+}
+
+function blockText(blocks: Block[]): string[] {
+  return blocks.flatMap((value) => {
+    switch (value.kind) {
+      case "p":
+      case "h":
+        return [inlineText(parseInline(value.text))];
+      case "code":
+        return [value.text];
+      case "quote":
+        return blockText(value.blocks);
+      case "list":
+        // Each item keeps its mark, so the steps still read as steps.
+        return value.items.map((item, at) =>
+          [value.ordered ? `${value.start + at}.` : "•", ...blockText(item)].join(" "),
+        );
+    }
+  });
+}
+
+// A message's words on one line with its Markdown taken out, as a preview
+// shows them: "Run `nix build` **now**" reads "Run nix build now", and a
+// list keeps its numbers.
+export function plainText(source: string): string {
+  return blockText(parseBlocks(source)).join(" ").replace(/\s+/g, " ").trim();
+}

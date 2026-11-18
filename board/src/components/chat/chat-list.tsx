@@ -3,7 +3,7 @@ import { Link } from "@tanstack/react-router";
 import { ownerOf, projectKey } from "../../lib/peers";
 import { GROUP_LABELS, groupRows } from "./model";
 import type { ChatRow } from "./model";
-import { stamp } from "./thread-items";
+import { Stamp } from "./thread-items";
 
 // The orchestrators down the left of the chat page, grouped by what they
 // need: Needs you, Working, Idle.
@@ -54,7 +54,7 @@ function ChatListRow({ row, current }: { row: ChatRow; current: boolean }) {
       <span className="chat-conv-body">
         <span className="r1">
           <span className="name">{project.name}</span>
-          <span className="when">{stamp(row.at)}</span>
+          <Stamp className="when" at={row.at} />
         </span>
         <span className="r2">
           <span className="snip">{row.snippet}</span>
