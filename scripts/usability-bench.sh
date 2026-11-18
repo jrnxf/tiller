@@ -37,6 +37,12 @@
 # The bench lives in $TILLER_BENCH_DIR (default /tmp/tiller-bench; keep it short,
 # the holder's socket path has a length limit).
 #
+# Two optional settings per host, for a bench served behind a reverse proxy
+# (scripts/preview.sh): TILLER_BENCH_MAIN_PORT and TILLER_BENCH_PEER_PORT fix
+# the daemon's port (default: a free one), and TILLER_BENCH_MAIN_HOSTS and
+# TILLER_BENCH_PEER_HOSTS are space-separated `--allow-host` names.
+# TILLER_BENCH_STOP is the stop command that `up` prints.
+#
 # The owner stand-in. A release `tiller` takes an owner command only from a
 # terminal with no agent behind it. The bench builds a debug binary with the
 # `test-owner` feature of the command tests, and sets TILLER_TEST_OWNER for its
@@ -161,13 +167,23 @@ start_holder() {
   exit 1
 }
 
+# The bench setting NAME of host $1, as TILLER_BENCH_<HOST>_NAME.
+setting() {
+  local var
+  var=TILLER_BENCH_$(echo "$1" | tr '[:lower:]' '[:upper:]')_$2
+  echo "${!var:-}"
+}
+
 start_daemon() {
-  local host=$1 port=0
+  local host=$1 port name args=()
   alive "$bench/$host/daemon.pid" && return 0
+  port=$(setting "$host" PORT)
+  port=${port:-0}
   # A restart keeps the port, so an open board tab finds the daemon again.
   [ -f "$bench/$host/port" ] && port=$(cat "$bench/$host/port")
+  for name in $(setting "$host" HOSTS); do args+=(--allow-host "$name"); done
   : >"$bench/$host/daemon.out"
-  detached "$host" daemon daemon --port "$port"
+  detached "$host" daemon daemon --port "$port" "${args[@]}"
   for _ in $(seq 1 150); do
     url=$(sed -n 's/^listening on //p' "$bench/$host/daemon.out")
     if [ -n "$url" ]; then
@@ -183,11 +199,14 @@ start_daemon() {
 
 url() { echo "http://127.0.0.1:$(cat "$bench/$1/port")"; }
 
+# The owner sign-in link of host $1: at its first `--allow-host` name when it
+# has one, else on loopback. With a second argument `loopback`, on loopback.
 login_link() {
-  local link
-  link=$(t "$1" board --login 2>&1 | grep -o '/login/[0-9a-f]*' | head -n 1)
+  local link path='.data.allowed_host_urls[0] // .data.url // empty'
+  [ "${2:-}" = loopback ] && path='.data.url // empty'
+  link=$(t "$1" --json board --login 2>/dev/null | jq -r "$path")
   [ -n "$link" ] || { echo "no login link from $1" >&2; exit 1; }
-  echo "$(url "$1")$link"
+  echo "$link"
 }
 
 # -- the fixed parts of a home -----------------------------------------------
@@ -416,7 +435,7 @@ up() {
   echo
   echo "main board (signed in): $(login_link main)"
   echo "peer board (signed in): $(login_link peer)"
-  echo "stop it with: scripts/usability-bench.sh down"
+  echo "stop it with: ${TILLER_BENCH_STOP:-scripts/usability-bench.sh down}"
 }
 
 # shots DIR [PATH...]: DIR/<page>-<width>-<theme>.png for each page of the
@@ -435,10 +454,10 @@ shots() {
   # Sign this browser in once; the session cookie covers every later page.
   # A browser with no selected tab makes the tab and then fails the `open`:
   # select the newest tab and open again.
-  if ! chrome-devtools-axi open "$(login_link main)" >/dev/null 2>&1; then
+  if ! chrome-devtools-axi open "$(login_link main loopback)" >/dev/null 2>&1; then
     last=$(chrome-devtools-axi pages | awk -F, '/^ *[0-9]+,/ { id = $1 } END { gsub(/ /, "", id); print id }')
     chrome-devtools-axi selectpage "$last" >/dev/null
-    chrome-devtools-axi open "$(login_link main)" >/dev/null
+    chrome-devtools-axi open "$(login_link main loopback)" >/dev/null
   fi
   for page in "$@"; do
     name=$(echo "${page#/}" | tr -c 'a-zA-Z0-9\n' '-')
