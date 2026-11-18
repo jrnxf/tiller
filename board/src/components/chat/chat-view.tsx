@@ -71,7 +71,7 @@ const VARIANTS = [
   { value: "drawer", label: "Drawer" },
 ] as const satisfies { value: ChatVariant; label: string }[];
 
-const GROUP_TONE: Record<ChatGroup, string> = { needs: "warn", working: "acc", idle: "mute" };
+const GROUP_TONE: Record<ChatGroup, string> = { needs: "mute", working: "acc", idle: "mute" };
 
 // The toBottom button shows once the view is this far up from the newest item.
 const BOTTOM_SLACK = 120;
