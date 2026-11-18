@@ -14284,6 +14284,128 @@ pub(crate) mod tests {
         assert_ne!(anonymous.status, StatusCode::OK, "{}", anonymous.body);
     }
 
+    /// An orchestrator that asks for a merge writes the approval and its
+    /// bound attention item under its own session. The thread still shows
+    /// one decision for it, open and then decided.
+    #[tokio::test]
+    async fn an_approval_the_orchestrator_asked_for_is_one_decision_in_the_thread() {
+        use tiller_core::domain::{ApprovalAction, ApprovalKind, AskSource, CardKind};
+        use tiller_core::state::approvals::{Decision, NewApproval, NewPr};
+        use tiller_core::state::asks::Resolution;
+
+        let mut fleet = Fleet::new();
+        let orchestrator = Ctx::new(Actor::Session(fleet.orchestrator_session.clone()));
+        let ask = fleet
+            .store
+            .ask_record(
+                &Ctx::new(Actor::Board),
+                Some("k-ask"),
+                NewAsk {
+                    project_id: "alpha".into(),
+                    session_id: None,
+                    source: AskSource::Board,
+                    text: "Can the export run nightly?".into(),
+                },
+            )
+            .unwrap()
+            .value
+            .ask;
+        let card = fleet
+            .store
+            .ask_resolve(
+                &orchestrator,
+                &ask.id,
+                Resolution::New(NewCard {
+                    kind: CardKind::Ship,
+                    title: "Run the export nightly".into(),
+                    ..NewCard::default()
+                }),
+            )
+            .unwrap()
+            .value
+            .card
+            .unwrap();
+        let pr = fleet
+            .store
+            .pr_link(
+                &Ctx::new(Actor::Daemon),
+                NewPr {
+                    card: card.id.clone(),
+                    run_id: None,
+                    number: 7,
+                    url: "https://example.com/example/alpha/pull/7".into(),
+                    head_sha: Some("1111222233334444".into()),
+                    base_ref: Some("main".into()),
+                },
+            )
+            .unwrap()
+            .value;
+        let approval = fleet
+            .store
+            .approval_request(
+                &orchestrator,
+                NewApproval {
+                    kind: ApprovalKind::Merge,
+                    card: card.id.clone(),
+                    run_id: None,
+                    pr_id: Some(pr.id),
+                    branch: None,
+                    head_sha: "1111222233334444".into(),
+                    action: ApprovalAction::Squash,
+                    memory_paths: None,
+                    grant_id: None,
+                },
+            )
+            .unwrap()
+            .value;
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let decisions = |thread: &Value| -> Vec<Value> {
+            thread["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| item["type"] == "decision")
+                .cloned()
+                .collect()
+        };
+
+        let answer = get(&app, "/api/v1/projects/alpha/thread").await;
+        assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+        let thread: Value = serde_json::from_str(&answer.body).unwrap();
+        let open = decisions(&thread);
+        assert_eq!(open.len(), 1, "{thread}");
+        assert_eq!(open[0]["source"], "approval", "{thread}");
+        assert_eq!(open[0]["id"], json!(approval.id), "{thread}");
+        assert_eq!(open[0]["open"], true, "{thread}");
+        assert!(open[0]["question"].is_string(), "{thread}");
+
+        // A page of one item still holds the decision, not its twin.
+        let page = get(&app, "/api/v1/projects/alpha/thread?limit=1").await;
+        let page: Value = serde_json::from_str(&page.body).unwrap();
+        assert_eq!(page["items"].as_array().unwrap().len(), 1, "{page}");
+
+        fleet
+            .store
+            .approval_decide(
+                &Ctx::new(Actor::Board),
+                Some("k-decide"),
+                &approval.id,
+                Decision {
+                    accept: true,
+                    via: AnsweredVia::Board,
+                    memory: Vec::new(),
+                    ask_id: None,
+                },
+            )
+            .unwrap();
+        let answer = get(&app, "/api/v1/projects/alpha/thread").await;
+        let thread: Value = serde_json::from_str(&answer.body).unwrap();
+        let closed = decisions(&thread);
+        assert_eq!(closed.len(), 1, "{thread}");
+        assert_eq!(closed[0]["open"], false, "{thread}");
+        assert_eq!(closed[0]["choice"], "accepted", "{thread}");
+    }
+
     /// UA-18: Cancel on the board's ask panel resolves an open ask as
     /// cancelled, with the reason the owner sees, and needs the owner.
     #[tokio::test]
