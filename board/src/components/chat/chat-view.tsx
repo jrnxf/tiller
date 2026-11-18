@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import type { Editor } from "@tiptap/core";
-import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties, RefObject } from "react";
 
 import type {
@@ -44,6 +44,7 @@ import {
   GROUP_LABELS,
   chatRows,
   firstRow,
+  firstUnread,
   contextShare,
   queueOf,
   quoteOf,
@@ -51,6 +52,7 @@ import {
   tokens,
   unreadReplies,
   waitingByProject,
+  workingStatus,
 } from "./model";
 import type { ChatGroup, ChatRow } from "./model";
 import {
@@ -60,7 +62,7 @@ import {
   DecisionBlock,
   PendingAsk,
   ReplyMessage,
-  stamp,
+  Stamp,
 } from "./thread-items";
 import { useChatSend } from "./use-chat-send";
 
@@ -114,7 +116,7 @@ function ContextRing({ context, since }: { context: ThreadContext; since: string
             />
           </svg>
         )}
-        <span>{share === null ? used : `${Math.round(share * 100)}%`}</span>
+        <span>{share === null ? `${used} tokens` : `${Math.round(share * 100)}%`}</span>
       </button>
       <span className="chat-ctx-tip" id={tipId} role="tooltip">
         <span className="row">
@@ -132,7 +134,9 @@ function ContextRing({ context, since }: { context: ThreadContext; since: string
         {since ? (
           <span className="row">
             <span>Session started</span>
-            <b>{stamp(since)}</b>
+            <b>
+              <Stamp at={since} />
+            </b>
           </span>
         ) : null}
       </span>
@@ -289,8 +293,17 @@ function ThreadBody({
   const [away, setAway] = useState(false);
   const stuck = useRef(true);
   const lastTop = useRef(0);
+  const newLine = useRef<HTMLDivElement>(null);
+  const jumped = useRef(false);
 
   const page = thread.data?.items;
+  // Both are fixed at the first read, before the chat marks its replies read:
+  // where the "New" line goes, and the newest item then, after which an item
+  // came in while the chat was open and eases in.
+  const [opened, setOpened] = useState<{ newFrom: number | null; last: number } | null>(null);
+  if (opened === null && page) {
+    setOpened({ newFrom: firstUnread(page), last: page.at(-1)?.seq ?? 0 });
+  }
   useMarkRead(project, page);
   // A page read earlier keeps only what the newest page no longer holds.
   const first = page?.[0]?.seq ?? Number.POSITIVE_INFINITY;
@@ -300,13 +313,28 @@ function ThreadBody({
   const view = row.orchestrator ? agentActivity(row.orchestrator) : null;
   const shownPending = pending !== null && !(last?.type === "ask" && last.text === pending);
   const working = view?.dot === "live" && last?.type === "ask" && !shownPending;
+  const status = working && last?.type === "ask" ? workingStatus(row.orchestrator, last.at) : null;
   const follow = followAt(items);
+  const fresh = (seq: number) => opened !== null && seq > opened.last;
 
   // A message sent from the box shows at the bottom, so the view goes there.
   useEffect(() => {
     if (pending !== null) stuck.current = true;
   }, [pending]);
 
+  // A chat opened with new replies starts at the "New" line, unless the
+  // newest item is in view from there anyway.
+  useLayoutEffect(() => {
+    const element = scroller.current;
+    const line = newLine.current;
+    if (jumped.current || !element || !line) return;
+    jumped.current = true;
+    const top = Math.max(0, line.offsetTop - 16);
+    if (top >= element.scrollHeight - element.clientHeight) return;
+    element.scrollTop = top;
+    lastTop.current = top;
+    stuck.current = false;
+  });
   // The newest item stays in view while the owner reads at the bottom: after
   // every render, as a new item, a step or an opened block can each grow it.
   useLayoutEffect(() => {
@@ -406,21 +434,47 @@ function ThreadBody({
           </button>
         ) : null}
         {items.map((item, index) => {
+          const next = items[index + 1];
+          const line =
+            item.seq === opened?.newFrom ? (
+              <div className="chat-new" ref={newLine} role="separator" data-testid="chat-new">
+                <span>New</span>
+              </div>
+            ) : null;
           switch (item.type) {
             case "ask":
-              return <AskMessage key={item.seq} ask={item} owner={owner} />;
+              return (
+                <AskMessage
+                  key={item.seq}
+                  ask={item}
+                  owner={owner}
+                  // One time under a run of the owner's messages, on the last.
+                  stamped={next ? next.type !== "ask" : !shownPending}
+                  fresh={fresh(item.seq)}
+                />
+              );
             case "activity":
-              return <ActivityBlock key={item.seq} activity={item} owner={owner} />;
+              return (
+                <ActivityBlock
+                  key={item.seq}
+                  activity={item}
+                  owner={owner}
+                  fresh={fresh(item.seq)}
+                />
+              );
             case "reply":
               return (
-                <ReplyMessage
-                  key={item.seq}
-                  item={item}
-                  owner={owner}
-                  follow={index === follow ? suggestionsFor(row.group) : []}
-                  onReply={(text) => fillEditor(editorRef.current, quoteOf(text))}
-                  onSuggest={(text) => fillEditor(editorRef.current, text)}
-                />
+                <Fragment key={item.seq}>
+                  {line}
+                  <ReplyMessage
+                    item={item}
+                    owner={owner}
+                    fresh={fresh(item.seq)}
+                    follow={index === follow ? suggestionsFor(row.group) : []}
+                    onReply={(text) => fillEditor(editorRef.current, quoteOf(text))}
+                    onSuggest={(text) => fillEditor(editorRef.current, text)}
+                  />
+                </Fragment>
               );
             case "decision":
               return (
@@ -435,6 +489,7 @@ function ThreadBody({
           <div className="chat-working" data-testid="chat-working">
             <span className="chat-spin" aria-hidden="true" />
             Working
+            {status ? <span className="st">{status}</span> : null}
           </div>
         ) : null}
       </>

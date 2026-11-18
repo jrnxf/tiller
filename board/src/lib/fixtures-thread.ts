@@ -306,6 +306,18 @@ function alphaThread(now: number, replies: ReplyItem[], attention: AttentionItem
       cards: [{ ...merge, relation: null }],
       delivery: delivery(now, 9, "delivered"),
     },
+    // A second note straight after: the run shows one time, under it.
+    {
+      type: "ask",
+      seq: 0,
+      at: at(now, 8.8),
+      id: "01JASK000000000000000000B3",
+      text: "And tell me when it lands.",
+      source: "board",
+      disposition: "followup",
+      cards: [],
+      delivery: delivery(now, 8.8, "delivered"),
+    },
     activity(now, SESSION, [
       step(now, 8.5, "run.status", "reported checks failed", {
         card: merge,
