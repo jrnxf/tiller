@@ -109,7 +109,7 @@ test("offers a reload when a part of this board is gone from the daemon", async 
   await failToLoad();
   const banner = await screen.findByTestId("reload-banner");
   expect(banner.textContent).toContain(
-    "Tiller was updated since this tab opened. Part of the board could not load. Reload to get the new board.",
+    "tiller was updated since this tab opened. Part of the board could not load. Reload to get the new board.",
   );
   stop();
   unload();

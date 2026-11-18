@@ -71,12 +71,12 @@ type Line =
   | { type: "unfit"; message: string };
 
 const UNREACHABLE_TITLE = "Can't reach the terminal";
-const UNREACHABLE_DETAIL = "The agent may still be running. Tiller tries again on its own, or now.";
+const UNREACHABLE_DETAIL = "The agent may still be running. tiller tries again on its own, or now.";
 const UNREACHABLE_MARK = "terminal unreachable";
 // The daemon could not reach the terminal holder.
 const HOLDER_TITLE = "Can't reach the terminal holder on this machine";
 const HOLDER_DETAIL =
-  "The agent may still be running. Run tiller holder to start the holder. Tiller tries again on its own, or now.";
+  "The agent may still be running. Run tiller holder to start the holder. tiller tries again on its own, or now.";
 const HOLDER_MARK = "holder unreachable";
 // Tries in a row with no live screen before the mirror says the terminal is
 // gone rather than that the stream dropped.
@@ -372,7 +372,7 @@ export class TerminalStream implements Mirror {
       return {
         next: "retry",
         title: `Can't reach ${this.peer ?? "the peer host"}`,
-        detail: "The agent may still be running. Tiller tries again on its own, or now.",
+        detail: "The agent may still be running. tiller tries again on its own, or now.",
         mark: `${this.peer ?? "peer"} unreachable`,
       };
     }

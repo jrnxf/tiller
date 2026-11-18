@@ -105,7 +105,7 @@ function BugRoute({ bugProject, line }: { bugProject: Project | undefined; line?
   return (
     <span className={`bug-route${line ? " line" : ""}`} data-none={bugProject ? undefined : "true"}>
       {bugProject ? <RouteIcon /> : <WarnIcon />}
-      {bugProject ? `Tiller bugs go to ${bugProject.name}` : "No project takes Tiller bugs here"}
+      {bugProject ? `tiller bugs go to ${bugProject.name}` : "No project takes tiller bugs here"}
     </span>
   );
 }
@@ -132,7 +132,7 @@ function WaitingBugs({
     project: bugProject,
     label: `${owner.label} · ${bugProject.name}`,
   };
-  const n = rows.length === 1 ? "1 Tiller bug waits" : `${rows.length} Tiller bugs wait`;
+  const n = rows.length === 1 ? "1 tiller bug waits" : `${rows.length} tiller bugs wait`;
   return (
     <div className="lane-bugs" data-testid="waiting-bugs">
       <WarnIcon />
@@ -313,7 +313,7 @@ export function Lane({
           <span className="nm">{project.name}</span>
         </button>
         <span className="c">{openCount(tiles)} open</span>
-        {takesBugs ? <span className="lab sm acc takes-bugs">Takes Tiller bugs</span> : null}
+        {takesBugs ? <span className="lab sm acc takes-bugs">Takes tiller bugs</span> : null}
         {remoteHost ? (
           <span className="host-t">
             <ServerIcon />

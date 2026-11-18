@@ -20,7 +20,7 @@ import { useMachineRows } from "./peer-state";
 import { showToast } from "./toast";
 
 // "Close as not a bug" closes the card with this outcome and reason.
-const NOT_A_BUG = { outcome: "cancelled", reason: "Not a Tiller bug" } as const;
+const NOT_A_BUG = { outcome: "cancelled", reason: "Not a tiller bug" } as const;
 
 const PICK_IS_LOCAL =
   "A bug project is picked on the host that owns it: run tiller host edit --bug-project there.";
@@ -112,7 +112,7 @@ export function BugTriage({
   const close = useAction({
     binding: `not-a-bug:${row.id}:${row.rev}`,
     send: sendClose,
-    onRecorded: () => showToast("ok", `Closed ${source}`, "Closed as not a Tiller bug."),
+    onRecorded: () => showToast("ok", `Closed ${source}`, "Closed as not a tiller bug."),
   });
 
   const busy = moving !== null || close.pending;
@@ -129,8 +129,8 @@ export function BugTriage({
       </div>
       <p>
         {ownBugProject
-          ? `${host} files Tiller bugs into ${ownBugProject.name} now, but this card waits in ${hostName(hostLabel)} from before. Move it there, or close it.`
-          : `${host} has no project that takes Tiller bugs, so this card waits for you. Move it to a host that has one, or close it.`}
+          ? `${host} files tiller bugs into ${ownBugProject.name} now, but this card waits in ${hostName(hostLabel)} from before. Move it there, or close it.`
+          : `${host} has no project that takes tiller bugs, so this card waits for you. Move it to a host that has one, or close it.`}
       </p>
       <div className="acts">
         {targets.map((target) => (
@@ -154,7 +154,7 @@ export function BugTriage({
           type="button"
           className="btn"
           disabled={busy || close.recorded || off !== null}
-          title={off ?? "Close this card: it is not a Tiller bug"}
+          title={off ?? "Close this card: it is not a tiller bug"}
           onClick={close.trigger}
         >
           {close.pending ? "Closing..." : "Close as not a bug"}
@@ -164,7 +164,7 @@ export function BugTriage({
           type="button"
           className="btn"
           disabled={busy || !local}
-          title={local ? `Pick the project that takes Tiller bugs on ${host}` : PICK_IS_LOCAL}
+          title={local ? `Pick the project that takes tiller bugs on ${host}` : PICK_IS_LOCAL}
           onClick={() => setPicking(true)}
         >
           Pick a bug project for {host}
@@ -189,7 +189,7 @@ export function BugTriage({
         <div className="preview-l">What Move does</div>
         {preview
           ? `Makes a ${preview.project.name} card on ${preview.machine.label} with this title, text and a link back. Then closes ${source} as superseded by it.${preview.machine.label === hostLabel ? "" : ` Read the text first: it leaves ${host}.`}`
-          : "No host takes Tiller bugs yet, so there is nowhere to move this card. Pick a bug project first."}
+          : "No host takes tiller bugs yet, so there is nowhere to move this card. Pick a bug project first."}
       </div>
       {picking && owner ? (
         <PickBugProjectDialog
@@ -239,10 +239,10 @@ function PickBugProjectDialog({
       showToast(
         "ok",
         picked
-          ? `${picked.name} takes Tiller bugs on ${machine.label}`
-          : `No project takes Tiller bugs on ${machine.label}`,
+          ? `${picked.name} takes tiller bugs on ${machine.label}`
+          : `No project takes tiller bugs on ${machine.label}`,
         picked
-          ? `New Tiller bugs go there. Move the ones that wait in ${hostName(machine.label)}.`
+          ? `New tiller bugs go there. Move the ones that wait in ${hostName(machine.label)}.`
           : null,
       );
     },
@@ -259,7 +259,7 @@ function PickBugProjectDialog({
     <ProjectDialog name="bug-project" pending={action.pending} onClose={onClose} initial={first}>
       <h2 id="bug-project-dialog-title">Pick a bug project for {machine.label}</h2>
       <p id="bug-project-dialog-body">
-        <code>tiller bug file</code> files Tiller bugs into this project, and its orchestrator
+        <code>tiller bug file</code> files tiller bugs into this project, and its orchestrator
         triages them. With none, they wait in {hostName(machine.label)} for you.
       </p>
       <form
@@ -361,7 +361,7 @@ export function MoveBugsDialog({
       onClose();
       showToast(
         "ok",
-        `Moved ${next.length} Tiller bug${next.length === 1 ? "" : "s"} to ${target.label}`,
+        `Moved ${next.length} tiller bug${next.length === 1 ? "" : "s"} to ${target.label}`,
         "Each one closed here as superseded by its new card.",
       );
     }
@@ -369,7 +369,7 @@ export function MoveBugsDialog({
 
   return (
     <ProjectDialog name="move-bugs" pending={pending} onClose={onClose} initial={first}>
-      <h2 id="move-bugs-dialog-title">Move Tiller bugs to {target.label}</h2>
+      <h2 id="move-bugs-dialog-title">Move tiller bugs to {target.label}</h2>
       <p id="move-bugs-dialog-body">
         Each card becomes a {target.project.name} card with its title, text and a link back, then
         closes here as superseded by it. Its orchestrator triages them from there.

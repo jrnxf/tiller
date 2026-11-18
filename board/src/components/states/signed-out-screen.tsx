@@ -53,7 +53,7 @@ export function SignedOutScreen({ onSignedIn }: { onSignedIn: () => void }) {
         </div>
         <h1>Sign in to this board</h1>
         <p>
-          Run <code>tiller board --login</code> in a terminal on the machine running Tiller, then
+          Run <code>tiller board --login</code> in a terminal on the machine running tiller, then
           enter the 8-digit code it prints.
         </p>
         <form

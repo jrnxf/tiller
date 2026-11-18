@@ -1189,7 +1189,7 @@ function withTriage(pathname: string, body: unknown, scenario: Scenario): unknow
           seq: 4200,
           at: new Date().toISOString(),
           actor: "you",
-          text: `filed as a Tiller bug into ${moved.project_id}`,
+          text: `filed as a tiller bug into ${moved.project_id}`,
         },
       ],
       next_before: null,
@@ -1493,7 +1493,7 @@ function pickBugProject(body: Record<string, unknown>, scenario: Scenario): Muta
   }
   const project = typeof body.project === "string" ? body.project : null;
   if (project === "fleet") {
-    return refusal(422, "refused", "fleet cannot take Tiller bugs: pick another project");
+    return refusal(422, "refused", "fleet cannot take tiller bugs: pick another project");
   }
   const projects = (fixtureResponses(scenario)[projectsPath] as ProjectsResponse).projects;
   if (project && !projects.some((p) => p.id === project && !p.host && !gone(p.id))) {

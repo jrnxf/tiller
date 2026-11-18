@@ -272,7 +272,7 @@ export function StaleBanner() {
                 : `${unqueued.length} sessions run an older tiller`}
               {peers ? ` (${peers})` : ""}.
             </b>{" "}
-            {local ? `Tiller is now ${roster?.tiller_version ?? "newer"}. ` : ""}
+            {local ? `tiller is now ${roster?.tiller_version ?? "newer"}. ` : ""}
             {peerVersions.join(" ")}
             {peerVersions.length > 0 ? " " : ""}
             {actionable.length > 0

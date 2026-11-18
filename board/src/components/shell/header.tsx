@@ -117,7 +117,7 @@ export function Header({
               ? "Card"
               : pathname.startsWith("/chat/")
                 ? "Chat"
-                : (TITLES[pathname] ?? "Tiller")}
+                : (TITLES[pathname] ?? "tiller")}
           </h1>
         </div>
         {activeHost ? (
