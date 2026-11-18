@@ -2106,7 +2106,8 @@ a.card:hover {
   line-height: 1.5;
   color: var(--fg-2);
 }
-.cq .rec {
+/* The recommendation block, not a recommended option. */
+.cq div.rec {
   margin: 0 0 12px;
 }
 .cq-answer {

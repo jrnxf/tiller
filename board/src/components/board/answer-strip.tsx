@@ -171,6 +171,9 @@ export function AnswerStrip({
   useEffect(() => {
     if (host && !waiting) setOpen(openKey(host, sessionId), null);
   }, [host, sessionId, waiting]);
+  // The timer that folds a sent receipt, stopped when the strip goes.
+  const fold = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(fold.current), []);
   const read = useQuery({
     queryKey: ["prompt", host ?? null, sessionId, next],
     queryFn: async ({ signal }) => {
@@ -224,7 +227,8 @@ export function AnswerStrip({
     if (sent.ok) {
       setAnswer({ kind: "sent", at, seen, n, text, digit, folded: false });
       onSent?.(digit ? `${n} · ${text}` : text);
-      setTimeout(() => {
+      clearTimeout(fold.current);
+      fold.current = setTimeout(() => {
         setAnswer((now) =>
           now?.kind === "sent" && now.at === at ? { ...now, folded: true } : now,
         );
