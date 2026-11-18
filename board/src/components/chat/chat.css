@@ -338,7 +338,7 @@
   align-items: flex-end;
   justify-content: flex-start;
   gap: 8px;
-  max-width: 100%;
+  align-self: stretch;
 }
 .chat-ask-time {
   padding-bottom: 6px;
