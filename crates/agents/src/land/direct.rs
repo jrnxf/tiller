@@ -384,6 +384,62 @@ pub fn local_default(repo: &Path, default: &str) -> Result<String, String> {
     branch_head(repo, default)
 }
 
+/// The branch a worktree has checked out, or None on a detached HEAD.
+pub fn checked_out(repo: &Path) -> Result<Option<String>, String> {
+    let mut command = command();
+    command
+        .arg("-C")
+        .arg(repo)
+        .args(["symbolic-ref", "--quiet", "HEAD"]);
+    let output = run_status(command)?;
+    Ok(output.map(|name| name.strip_prefix("refs/heads/").unwrap_or(&name).to_owned()))
+}
+
+/// What a `git` call printed when it succeeded, None when it exited 1 (a
+/// `--quiet` "no"), or why it failed otherwise.
+fn run_status(mut command: Command) -> Result<Option<String>, String> {
+    command.env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null());
+    command.env("GIT_CONFIG_COUNT", HARDENED.len().to_string());
+    for (i, (key, value)) in HARDENED.iter().enumerate() {
+        command
+            .env(format!("GIT_CONFIG_KEY_{i}"), key)
+            .env(format!("GIT_CONFIG_VALUE_{i}"), value);
+    }
+    let output = command
+        .output()
+        .map_err(|error| format!("run git: {error}"))?;
+    match output.status.code() {
+        Some(0) => Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        )),
+        Some(1) => Ok(None),
+        _ => Err(String::from_utf8_lossy(&output.stderr).trim().to_owned()),
+    }
+}
+
+/// Points `refs/remotes/<remote>/<default>` at `sha`, as a `git fetch` of a
+/// named remote would, so `git log origin/main` in the checkout reads what
+/// was fetched. Nothing is written when `remote` is not one of the
+/// repository's remotes (a URL, say).
+pub fn track(repo: &Path, remote: &str, default: &str, sha: &str) -> Result<(), String> {
+    let remotes = git(repo, &["remote"], &Identity::Owner)?;
+    if !remotes.lines().any(|name| name == remote) {
+        return Ok(());
+    }
+    git(
+        repo,
+        &[
+            "update-ref",
+            "-m",
+            "tiller: fetch",
+            &format!("refs/remotes/{remote}/{default}"),
+            sha,
+        ],
+        &Identity::Owner,
+    )
+    .map(|_| ())
+}
+
 /// Fast-forwards the local `default` from `old` to `sha` (P12). A worktree
 /// that has `default` checked out merges it there with `--ff-only`, so its
 /// files follow the ref; otherwise the ref moves only if it still holds

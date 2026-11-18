@@ -180,6 +180,33 @@ pub fn require_local_binding_scope(
     }
 }
 
+/// Refuses `actor` a sync of `project_id`'s checkout unless the role matrix
+/// allows it (`authority.md` section 4, "Sync a project's checkout"): the
+/// owner, the board and a peer board may, and so may the project's own live
+/// orchestrator, which reads the checkout but may not write it (G15). The
+/// sync only fast-forwards a clean default branch, so it is no edit of
+/// project code. No other session, hook, script or the curator may.
+pub fn require_checkout_sync_scope(
+    conn: &Connection,
+    actor: &Actor,
+    project_id: &str,
+) -> Result<()> {
+    match actor {
+        Actor::Owner | Actor::Board | Actor::Peer(_) | Actor::Daemon => Ok(()),
+        Actor::Session(id) => match live_orchestrator(conn, project_id)? {
+            Some(live) if &live.id == id => Ok(()),
+            _ => Err(Error::Forbidden(format!(
+                "{actor} is not the live orchestrator of {project_id} and may not sync its checkout"
+            ))),
+        },
+        Actor::Hook | Actor::Import | Actor::Curator(_) | Actor::Script => {
+            Err(Error::Forbidden(format!(
+                "{actor} may not sync a checkout; the owner or the project's orchestrator does"
+            )))
+        }
+    }
+}
+
 /// The guard a decision by the wrong principal breaches: only the owner
 /// decides an approval, or a grant (G04).
 pub const DECISION_GUARD: &str = "G04";
@@ -1496,6 +1523,43 @@ mod tests {
         let project = fx.store.project("alpha").unwrap();
         assert!(project.local_binding);
         assert_eq!(project.rev, on.value.rev);
+    }
+
+    /// The owner and the project's own live orchestrator may sync its
+    /// checkout; a worker, another project's orchestrator, a superseded
+    /// orchestrator, a hook and a script may not.
+    #[test]
+    fn only_the_owner_and_the_projects_orchestrator_sync_its_checkout() {
+        let now = Timestamp::now();
+        let fx = fixture(now);
+        let conn = fx.store.conn();
+        let orchestrator = Actor::Session(fx.orchestrator.clone());
+        for actor in [
+            Actor::Owner,
+            Actor::Board,
+            Actor::Daemon,
+            orchestrator.clone(),
+        ] {
+            require_checkout_sync_scope(conn, &actor, "alpha").unwrap();
+        }
+        let error = require_checkout_sync_scope(conn, &orchestrator, "beta").unwrap_err();
+        assert_eq!(error.code(), "forbidden");
+        for (_, worker) in &fx.workers {
+            let error = require_checkout_sync_scope(conn, &Actor::Session(worker.clone()), "alpha")
+                .unwrap_err();
+            assert_eq!(error.code(), "forbidden", "{worker}");
+        }
+        for actor in [Actor::Hook, Actor::Script] {
+            let error = require_checkout_sync_scope(conn, &actor, "alpha").unwrap_err();
+            assert_eq!(error.code(), "forbidden", "{actor}");
+        }
+        conn.execute(
+            "UPDATE sessions SET ended_at = ?1 WHERE id = ?2",
+            rusqlite::params![now.to_string(), fx.orchestrator],
+        )
+        .unwrap();
+        let error = require_checkout_sync_scope(conn, &orchestrator, "alpha").unwrap_err();
+        assert!(error.to_string().contains("live orchestrator"), "{error}");
     }
 
     /// Local binding takes no rev: the last write wins, each change moves

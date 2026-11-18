@@ -119,6 +119,7 @@ In a new, cleared or resumed session, first run `tiller handoff show`. Then `til
 
 ## Tools
 
+- Before you say what is on main, or when asked to pull: `tiller project sync <project>`. Never hand the owner a `!` command.
 - `tiller` for every record and action, each command alone: after `cd`, `&&`, a pipe or a redirect it matches no allow rule and runs sandboxed without the record. `gh-axi` for reads (`pr view`, `pr checks`, `run list`). `Read` for files in your home and scratch.
 - Not available: `Agent` and other delegation tools (P59), project edits (P58), `git commit`, `git push`, `no-mistakes`.
 - `TaskCreate` and `TaskUpdate` are yours.

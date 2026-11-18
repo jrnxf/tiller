@@ -1158,6 +1158,35 @@ fn orchestrator_may_set_local_binding_and_nothing_else() {
     }
 }
 
+/// The orchestrator may run exactly `tiller project sync <id>` (`authority.md`
+/// section 4, "Sync a project's checkout"); `tiller` keeps it to its own
+/// project. No worker may.
+#[test]
+fn orchestrator_may_sync_a_checkout_and_nothing_more() {
+    for command in [
+        "tiller project sync alpha",
+        "tiller --json project sync alpha",
+        "tiller project sync alpha --json",
+    ] {
+        allowed(Role::Orchestrator, command);
+        for role in [Role::Scout, Role::Builder, Role::Reviewer, Role::Verifier] {
+            denied(role, command, Code::OwnerOnly);
+        }
+    }
+    for command in [
+        "tiller project sync",
+        "tiller project sync alpha beta",
+        "tiller project sync \"$PROJECT\"",
+        "tiller project sync alpha --db /home/user/other.db",
+        "tiller project sync alpha --key k1",
+        "tiller project sync --help",
+        "echo alpha | xargs tiller project sync",
+        "echo sync alpha | xargs tiller project",
+    ] {
+        denied(Role::Orchestrator, command, Code::OwnerOnly);
+    }
+}
+
 #[test]
 fn identity_stripping_denied() {
     for command in [

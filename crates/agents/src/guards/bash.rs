@@ -3544,7 +3544,7 @@ impl Walker<'_, '_> {
             "migrate" => unseen || second == "down",
             "config" => unseen || second == "set",
             "project" => {
-                if ctx.role == Role::Orchestrator && !appended && orchestrator_local_binding(args) {
+                if ctx.role == Role::Orchestrator && !appended && orchestrator_project(args) {
                     return None;
                 }
                 second != "list"
@@ -3616,11 +3616,12 @@ fn chat_approve(args: &[Arg]) -> bool {
     ids == 1 && asks == 1
 }
 
-/// `tiller project local-binding <id> on|off`, and nothing else but
-/// `--json`: the one project form the orchestrator may run (`authority.md`
-/// section 4, "Turn local binding on or off"). Core refuses it for any
-/// project but the orchestrator's own.
-fn orchestrator_local_binding(args: &[Arg]) -> bool {
+/// `tiller project local-binding <id> on|off` or `tiller project sync <id>`,
+/// and nothing else but `--json`: the two project forms the orchestrator may
+/// run (`authority.md` section 4, "Turn local binding on or off" and "Sync a
+/// project's checkout"). `tiller` refuses each for any project but the
+/// orchestrator's own.
+fn orchestrator_project(args: &[Arg]) -> bool {
     let mut words = Vec::new();
     for arg in args {
         if !arg.fixed {
@@ -3634,7 +3635,7 @@ fn orchestrator_local_binding(args: &[Arg]) -> bool {
     }
     matches!(
         words.as_slice(),
-        ["project", "local-binding", id, "on" | "off"] if !id.is_empty()
+        ["project", "local-binding", id, "on" | "off"] | ["project", "sync", id] if !id.is_empty()
     )
 }
 
