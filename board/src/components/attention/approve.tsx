@@ -300,7 +300,8 @@ function ApproveButtons({ item }: { item: AttentionItem }) {
       <p className="meta">
         {checksFailed
           ? "Approve is off until the checks pass."
-          : `Bound to ${shortSha(headSha)}. A new push asks again.`}
+          : // The button names the commit it binds.
+            "A new push asks again."}
       </p>
       <ActionFailure error={otherError} host={ownerOf(item)} />
     </div>

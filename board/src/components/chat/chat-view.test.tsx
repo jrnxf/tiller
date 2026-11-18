@@ -139,10 +139,12 @@ test("/chat on a wide screen opens the chat at the top of the list", async () =>
 test("a merge approval and its attention item are one decision, and Approve binds the head", async () => {
   await renderAt("/chat/alpha");
   const blocks = await screen.findAllByTestId("chat-confirm");
-  const merges = blocks.filter((block) => block.textContent?.includes("Merge PR #52"));
+  const merges = blocks.filter((block) => within(block).queryByText("Merge approval"));
   expect(merges).toHaveLength(1);
   const merge = merges[0] as HTMLElement;
-  expect(within(merge).getByText("Merge approval")).toBeTruthy();
+  // The card names it once, and the button names the commit it binds.
+  expect(merge.querySelectorAll("h5")).toHaveLength(1);
+  expect(within(merge).queryByText(/^Bound to/)).toBeNull();
   fireEvent.click(within(merge).getByRole("button", { name: /^Approve / }));
   await waitFor(() => expect(callsTo("/decide")).toHaveLength(1));
   const [decide] = callsTo("/decide");
