@@ -52,7 +52,7 @@ test("the screen is one numeric field, focused, that asks for the printed code",
   expect(input.inputMode).toBe("numeric");
   expect(input.autocomplete).toBe("one-time-code");
   expect(document.activeElement).toBe(input);
-  expect(screen.getByRole("heading", { name: "Sign in to this board" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Enter your sign-in code" })).toBeTruthy();
   expect(screen.getByText("tiller board --login")).toBeTruthy();
   expect(screen.getAllByRole("textbox")).toHaveLength(1);
 });

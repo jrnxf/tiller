@@ -53,15 +53,7 @@ export function SignedOutScreen({ onSignedIn }: { onSignedIn: () => void }) {
         <div className="ws">
           <Logo />
         </div>
-        <h1>Sign in to this board</h1>
-        <p>On the machine running Tiller, run:</p>
-        <pre className="signin-command">
-          <span className="signin-prompt" aria-hidden="true">
-            ${" "}
-          </span>
-          tiller board --login
-        </pre>
-        <p>Then enter the 8-digit code it prints.</p>
+        <h1>Enter your sign-in code</h1>
         <form
           className="signin-form"
           onSubmit={(event) => {
@@ -105,6 +97,9 @@ export function SignedOutScreen({ onSignedIn }: { onSignedIn: () => void }) {
             {withCode(error)}
           </p>
         ) : null}
+        <p className="sub signin-hint">
+          Get a code with <code>tiller board --login</code> on the machine running tiller.
+        </p>
       </div>
     </main>
   );

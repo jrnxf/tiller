@@ -1536,16 +1536,27 @@ kbd {
   color: var(--red-text);
 }
 
-/* The command to run, larger than the setup card's, and its "$ " prompt
-   stays out of a copy. */
-.setup-card .signin-command {
-  margin: 12px 0;
-  font-size: var(--fs-small);
+/* The sign-in card is narrow and centered: the code boxes lead, and the
+   command that prints a code is the hint under them. */
+.setup-card.signin-card {
+  justify-self: center;
+  width: 100%;
+  max-width: 380px;
+  text-align: center;
 }
 
-.signin-prompt {
-  color: var(--fg-4);
-  user-select: none;
+.signin-card .ws {
+  display: flex;
+  justify-content: center;
+}
+
+.signin-card .otp {
+  justify-content: center;
+}
+
+.setup-card .signin-hint {
+  margin-top: 16px;
+  font-size: var(--fs-small);
 }
 
 /* The one-time code boxes (components/ui/input-otp.tsx). The real input lies
