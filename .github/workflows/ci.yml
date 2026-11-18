@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+    # labeled: adding the `macos` label runs the macOS job on a pull request.
+    types: [opened, synchronize, reopened, labeled]
   workflow_call:
 
 permissions:
@@ -213,48 +215,45 @@ jobs:
         run: scripts/smoke.sh result/bin/tiller
 
   # The owner's Mac builds the same flake: a Linux-only API (pipe2 and the
-  # like) must fail here, not at a switch. The flake build runs in this job,
-  # and clippy and the holder tests run beside it in macos-rust.
+  # like) must fail here, not at a switch. macOS runners are scarce, so this
+  # is one job (one wait for a runner, one cache), and a pull request runs it
+  # only with the `macos` label. A push to main and a call from tag.yml always
+  # run it, so no release skips macOS.
   macos:
     name: macos
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: >-
+      needs.changes.outputs.code == 'true' &&
+      (github.event_name != 'pull_request' ||
+       contains(github.event.pull_request.labels.*.name, 'macos'))
     runs-on: macos-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+      # One store cache holds what both the flake build and the dev shell
+      # fetch and build.
       - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
         with:
-          primary-key: nix-build-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'rust-toolchain.toml', 'nix/patches/**', '**/Cargo.toml', 'Cargo.lock', 'board/bun.lock', 'board/bun.nix') }}
-          restore-prefixes-first-match: nix-build-${{ runner.os }}-
+          primary-key: nix-macos-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'rust-toolchain.toml', 'nix/patches/**', '**/Cargo.toml', 'Cargo.lock', 'board/bun.lock', 'board/bun.nix') }}
+          restore-prefixes-first-match: nix-macos-${{ runner.os }}-
           save: ${{ github.ref == 'refs/heads/main' }}
       - name: Build
         run: nix build --print-build-logs
       - name: Smoke test
         run: scripts/smoke.sh result/bin/tiller
-
-  macos-rust:
-    name: macos-rust
-    needs: changes
-    if: needs.changes.outputs.rust == 'true'
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
-      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
-        with:
-          primary-key: nix-devshell-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'rust-toolchain.toml', 'nix/patches/**') }}
-          restore-prefixes-first-match: nix-devshell-${{ runner.os }}-
-          save: ${{ github.ref == 'refs/heads/main' }}
       - name: Dev shell
+        if: needs.changes.outputs.rust == 'true'
         run: |
           # The dev shell, not this step's shell, expands the command.
           # shellcheck disable=SC2016
           nix develop -c bash -c 'dirname "$(command -v cargo)"' >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: needs.changes.outputs.rust == 'true'
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Clippy
+        if: needs.changes.outputs.rust == 'true'
         run: nix develop -c cargo clippy --workspace --all-targets -- -D warnings
       - name: Test the holder
+        if: needs.changes.outputs.rust == 'true'
         run: nix develop -c cargo nextest run -p tiller-holder
