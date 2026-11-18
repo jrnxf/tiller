@@ -16,7 +16,7 @@ test("a report that passes is one quiet line per topic", () => {
   expect(tools?.sub).toContain("git");
   const pollers = lines.find((line) => line.key === "pollers");
   expect(pollers?.tone).toBe("green");
-  expect(pollers?.sub).toBe("12 running");
+  expect(pollers?.sub).toBe("13 running");
   expect(lines.filter((line) => line.title === "Pollers")).toHaveLength(1);
 });
 

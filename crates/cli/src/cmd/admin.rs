@@ -56,6 +56,10 @@ pub enum ProjectCmd {
     /// ports in their sandbox, or stop them; running workers keep theirs
     /// until their next launch
     LocalBinding(ProjectLocalBinding),
+    /// Fetch the default branch and fast-forward the project's checkout to
+    /// it, when the checkout is on that branch with no uncommitted change;
+    /// the daemon also does this every few minutes and after each landing
+    Sync(ProjectSync),
     /// Retire a project
     Retire(ProjectRetire),
     /// Delete a project and every record of it on this host, its events
@@ -107,6 +111,12 @@ pub struct ProjectLocalBinding {
     pub id: String,
     /// on or off
     pub switch: Switch,
+}
+
+#[derive(Args, Debug)]
+pub struct ProjectSync {
+    /// The project's id (its slug, like alpha)
+    pub id: String,
 }
 
 /// `on` or `off`, for a setting with two states.
@@ -310,13 +320,18 @@ pub fn project(app: &App, cmd: ProjectCmd) -> Done {
             args.switch == Switch::On,
         )?));
     }
+    // So may the project's own orchestrator sync its checkout, which it
+    // reads but may not write (`authority.md` section 4).
+    if let ProjectCmd::Sync(args) = cmd {
+        return project_sync(app, &args);
+    }
     app.require_owner("tiller project")?;
     let mut store = app.write()?;
     match cmd {
-        ProjectCmd::List | ProjectCmd::LocalBinding(_) => Err(Failure::new(
+        ProjectCmd::List | ProjectCmd::LocalBinding(_) | ProjectCmd::Sync(_) => Err(Failure::new(
             "internal",
             1,
-            "project list and local-binding run before the owner check",
+            "project list, local-binding and sync run before the owner check",
         )),
         ProjectCmd::Add(args) => {
             let checks = args
@@ -473,6 +488,40 @@ fn project_delete(app: &App, store: &mut Store, args: ProjectDelete) -> Done {
         .collect();
     let warning = (!warnings.is_empty()).then(|| warnings.join("; "));
     Ok(Outcome::applied(applied).with_warning(warning))
+}
+
+/// `tiller project sync`: fetches the project's default branch and
+/// fast-forwards its checkout when that is safe (`tiller_agents::sync`).
+/// Writes no record, so it takes no key.
+fn project_sync(app: &App, args: &ProjectSync) -> Done {
+    let store = app.read()?;
+    let project = store.project(&args.id)?;
+    tiller_core::authority::require_checkout_sync_scope(store.conn(), app.actor(), &project.id)?;
+    if project.retired_at.is_some() {
+        return Err(Failure::refused(format!("{} is retired", project.id)));
+    }
+    if project.delivery == Delivery::LocalOnly {
+        return Err(Failure::refused(format!(
+            "{} is local-only: its checkout's {} is the branch itself, with no remote to fetch",
+            project.id, project.default_branch
+        )));
+    }
+    let config = load_config(app)?;
+    let Some(checkout) = checkout_of(&config, &project.id).map(PathBuf::from) else {
+        return Err(
+            Failure::refused(format!("config.toml names no checkout for {}", project.id)).hint(
+                format!("tiller config set checkouts.{} <folder>", project.id),
+            ),
+        );
+    };
+    let remote = project.remote.clone().unwrap_or_else(|| "origin".into());
+    let synced = tiller_agents::sync::sync(&checkout, &remote, &project.default_branch)
+        .map_err(|error| Failure::unavailable(format!("sync {}: {error}", project.id)))?;
+    let line = synced.line(&project.id, &project.default_branch);
+    let mut data = json!(synced);
+    data["project"] = json!(project.id);
+    data["checkout"] = json!(checkout);
+    Ok(Outcome::read(data).with_summary(line))
 }
 
 /// `checkouts.<project>` in a parsed config.toml.

@@ -19,3 +19,4 @@ pub mod review;
 pub mod roles;
 pub mod spawn;
 pub mod stale;
+pub mod sync;

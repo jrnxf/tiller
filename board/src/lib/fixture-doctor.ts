@@ -17,6 +17,7 @@ import type { Scenario } from "./fixtures.ts";
 const at = (now: number, minutes: number) => new Date(now + minutes * 60_000).toISOString();
 
 const SOURCES = [
+  "checkouts",
   "delivery",
   "holder",
   "land",

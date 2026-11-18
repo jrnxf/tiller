@@ -378,6 +378,8 @@ pub struct Land {
     lock: Arc<DaemonLock>,
     forge: GhForge,
     app: HostApp,
+    /// Woken after a landing, so the checkout sync runs at once.
+    registry: Registry,
 }
 
 impl Land {
@@ -474,6 +476,12 @@ impl Source for Land {
         let landed = lander
             .land_ready(&self.lock, &mut self.store)
             .map_err(|error| PollError::State(tiller_core::Error::Internal(error.to_string())))?;
+        if landed
+            .iter()
+            .any(|landed| matches!(landed, Landed::Succeeded { .. }))
+        {
+            self.registry.wake(CHECKOUTS);
+        }
         for landed in &landed {
             match landed {
                 Landed::Waiting { approval, why } => {
@@ -822,6 +830,72 @@ impl Source for MemoryLoads {
     }
 }
 
+// -- checkouts -----------------------------------------------------------------
+
+/// The checkout sync poller's name, which the land loop wakes.
+const CHECKOUTS: &str = "checkouts";
+
+/// Keeps each project's checkout on this host current
+/// (`tiller_agents::sync`): every five minutes, after each landing, and on
+/// the board's Run now. A checkout that is not safe to move (another
+/// branch, uncommitted changes, local commits) is left as it is and is no
+/// failure; a fetch or a move that fails is, and the health line names it.
+pub struct Checkouts {
+    home: PathBuf,
+    store: Store,
+    host_id: String,
+}
+
+impl Source for Checkouts {
+    fn name(&self) -> String {
+        CHECKOUTS.to_owned()
+    }
+
+    fn interval(&self) -> Duration {
+        Duration::from_secs(300)
+    }
+
+    fn poll(&mut self, _now: Timestamp) -> Result<(), PollError> {
+        // Read on each pass, so an edit to `[checkouts]` needs no restart.
+        let Some(paths) = checkouts(&self.home) else {
+            return Ok(());
+        };
+        let mut failed = Vec::new();
+        for project in self.store.projects()? {
+            if project.owner_host_id != self.host_id
+                || project.retired_at.is_some()
+                || project.delivery == tiller_core::domain::Delivery::LocalOnly
+            {
+                continue;
+            }
+            let Some(checkout) = paths.get(&project.id) else {
+                continue;
+            };
+            let remote = project.remote.as_deref().unwrap_or("origin");
+            match tiller_agents::sync::sync(checkout, remote, &project.default_branch) {
+                Ok(synced) => {
+                    let line = synced.line(&project.id, &project.default_branch);
+                    match synced {
+                        tiller_agents::sync::Synced::Advanced { .. } => tracing::info!("{line}"),
+                        _ => tracing::debug!("{line}"),
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(project = %project.id, %error, "checkout sync failed");
+                    failed.push(format!("{}: {error}", project.id));
+                }
+            }
+        }
+        match failed.first() {
+            None => Ok(()),
+            Some(first) => Err(PollError::State(tiller_core::Error::Internal(format!(
+                "{} checkout syncs failed; first: {first}",
+                failed.len()
+            )))),
+        }
+    }
+}
+
 // -- starting them --------------------------------------------------------------
 
 /// Spawns `poller` on the runtime until `stop` turns true.
@@ -954,6 +1028,12 @@ pub fn start(
         lock,
         forge: GhForge::new(tools.gh.clone()),
         app: HostApp::new(home),
+        registry: registry.clone(),
+    };
+    let checkouts = Checkouts {
+        home: home.to_owned(),
+        store: open()?,
+        host_id: local.clone(),
     };
     let transcripts = Transcripts {
         store: open()?,
@@ -995,6 +1075,7 @@ pub fn start(
     spawn(registry, reconcile, stop, &mut handles);
     spawn(registry, Gated::new(home, publish), stop, &mut handles);
     spawn(registry, Gated::new(home, land), stop, &mut handles);
+    spawn(registry, Gated::new(home, checkouts), stop, &mut handles);
     spawn(registry, Gated::new(home, deploys), stop, &mut handles);
     spawn(registry, Gated::new(home, gate), stop, &mut handles);
     spawn(registry, Gated::new(home, finished), stop, &mut handles);
