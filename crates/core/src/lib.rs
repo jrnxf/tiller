@@ -23,6 +23,7 @@ pub mod health;
 pub mod host_config;
 pub mod ids;
 pub mod import;
+pub mod kb;
 pub mod limits;
 pub mod memory;
 pub mod migrate;
