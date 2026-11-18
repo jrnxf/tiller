@@ -44,13 +44,19 @@ bench=$repo/scripts/usability-bench.sh
 log=$dir/watch.log
 state=${TILLER_PREVIEW_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/tiller-preview}
 
+# A bench host's board sessions: `board-owner` in its tiller home.
+owner_file() {
+  local home=$dir/$1/home
+  echo "$home/board-owner"
+}
+
 # Copies each home's board sessions to $state, and back. A daemon reads its
 # `board-owner` again within a second of a change, so a restore needs no
 # restart.
 save_sessions() {
   local host file
   for host in main peer; do
-    file=$dir/$host/home/board-owner
+    file=$(owner_file "$host")
     [ -s "$file" ] || continue
     cmp -s "$file" "$state/$host-board-owner" && continue
     mkdir -p "$state"
@@ -63,7 +69,7 @@ restore_sessions() {
   local host
   for host in main peer; do
     [ -s "$state/$host-board-owner" ] || continue
-    install -m 600 "$state/$host-board-owner" "$dir/$host/home/board-owner"
+    install -m 600 "$state/$host-board-owner" "$(owner_file "$host")"
   done
 }
 
