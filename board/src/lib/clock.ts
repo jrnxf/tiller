@@ -112,3 +112,22 @@ export function formatLisbonDate(iso: string | null): string | null {
   );
   return `${p.weekday} ${p.day} ${p.month}`;
 }
+
+// The Lisbon calendar day of a moment, "2026-11-12", and the day before one.
+const lisbonDayOf = (at: number) => lisbonField16(at).slice(0, 10);
+const dayBefore = (day: string) =>
+  new Date(Date.parse(`${day}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
+
+// "18:02" today, "Yesterday 18:02", "Tue 18:02" this week, and
+// "Thu 12 Nov, 18:00" before it: as near a time is, so short its words.
+export function formatLisbonNear(iso: string | null, now = serverNow()): string | null {
+  if (!iso) return null;
+  const at = Date.parse(iso);
+  if (Number.isNaN(at)) return null;
+  const day = lisbonDayOf(at);
+  const today = lisbonDayOf(now);
+  const time = lisbonField16(at).slice(11);
+  if (day === today) return time;
+  if (day === dayBefore(today)) return `Yesterday ${time}`;
+  return now - at > 6 * 86_400_000 ? formatLisbonDay(iso) : formatLisbon(iso);
+}

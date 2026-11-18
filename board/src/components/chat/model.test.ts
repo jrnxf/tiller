@@ -8,13 +8,16 @@ import type {
   Project,
   ReplyItem,
   ThreadAsk,
+  ThreadDecision,
   ThreadItem,
 } from "../../lib/api-types";
 import {
   activityText,
   chatRows,
   chatText,
+  decisionText,
   firstRow,
+  firstUnread,
   groupRows,
   modelName,
   queueChip,
@@ -23,6 +26,7 @@ import {
   undelivered,
   unreadReplies,
   waitingByProject,
+  workingStatus,
 } from "./model";
 
 const NOW = Date.parse("2026-11-17T18:00:00.000Z");
@@ -251,4 +255,44 @@ test("a quoted reply marks each line and cuts a long one", () => {
   expect(quoteOf("one\ntwo")).toBe("> one\n> two\n\n");
   const quote = quoteOf("x".repeat(400));
   expect(quote).toBe(`> ${"x".repeat(280)}…\n\n`);
+});
+
+test("a closed decision says when, and a day word never follows at", () => {
+  const decision = {
+    state: "decided",
+    choice: "Retry",
+    source: "attention",
+    decided_at: "2026-11-17T18:02:00.000Z",
+  } as unknown as ThreadDecision;
+  expect(decisionText(decision, () => "18:02")).toBe("You chose Retry at 18:02");
+  expect(decisionText(decision, () => "Yesterday 18:02")).toBe("You chose Retry · Yesterday 18:02");
+});
+
+const replyAt = (seq: number, read: boolean) =>
+  ({ type: "reply", seq, reply: { read_at: read ? recent : null } }) as unknown as ThreadItem;
+const askAt = (seq: number) => ({ type: "ask", seq }) as unknown as ThreadItem;
+
+test("the New line goes above the first unread reply, unless nothing comes before it", () => {
+  expect(
+    firstUnread([askAt(1), replyAt(2, true), askAt(3), replyAt(4, false), replyAt(5, false)]),
+  ).toBe(4);
+  expect(firstUnread([replyAt(1, false), askAt(2)])).toBeNull();
+  expect(firstUnread([askAt(1), replyAt(2, true)])).toBeNull();
+});
+
+const statusOf = (line: string, at: string) =>
+  ({ last_status_line: line, last_status_at: at }) as unknown as AgentRow;
+
+test("the Working line shows a status set after the owner's message, without its tag", () => {
+  const askedAt = "2026-11-17T18:00:00.000Z";
+  expect(
+    workingStatus(
+      statusOf("[chat] alpha: Reading `cutover.md`", "2026-11-17T18:00:05.000Z"),
+      askedAt,
+    ),
+  ).toBe("Reading cutover.md");
+  expect(
+    workingStatus(statusOf("Idle since lunch", "2026-11-17T17:59:00.000Z"), askedAt),
+  ).toBeNull();
+  expect(workingStatus(null, askedAt)).toBeNull();
 });

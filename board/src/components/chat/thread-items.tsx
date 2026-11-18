@@ -10,7 +10,7 @@ import type {
   ThreadReply,
   ThreadStep,
 } from "../../lib/api-types";
-import { formatLisbon, formatLisbonDay, minutesSince } from "../../lib/clock";
+import { formatLisbonDay, formatLisbonNear } from "../../lib/clock";
 import { untagged } from "../../lib/orchestrator-text";
 import { useStore } from "../../lib/store";
 import { AnswerForm } from "../attention/answer";
@@ -34,10 +34,21 @@ import {
 import { Markdown } from "./markdown-view";
 import { activityText, decisionText, stepFailed, stepTitle, undelivered } from "./model";
 
-// "Tue 18:02" this week, "Thu 12 Nov, 18:00" before it: Lisbon time, with the day.
-export function stamp(iso: string | null): string | null {
-  const minutes = minutesSince(iso);
-  return minutes !== null && minutes > 6 * 24 * 60 ? formatLisbonDay(iso) : formatLisbon(iso);
+// "18:02" today, "Yesterday 18:02", "Tue 18:02" this week, "Thu 12 Nov, 18:00"
+// before it: Lisbon time.
+function stamp(iso: string | null): string | null {
+  return formatLisbonNear(iso);
+}
+
+// A time as the chat shows it, with the full date when the pointer is on it.
+export function Stamp({ at, className }: { at: string | null; className?: string }) {
+  const shown = stamp(at);
+  if (!shown || !at) return null;
+  return (
+    <time className={className} dateTime={at} title={formatLisbonDay(at) ?? undefined}>
+      {shown}
+    </time>
+  );
 }
 
 // How the orchestrator tied a message to a card: it filed the card for it, or
@@ -76,13 +87,23 @@ function PrRef({ pr }: { pr: ThreadPr }) {
   );
 }
 
-// The owner's message, on the right, with when it was sent. It says more only
-// when it never reached the orchestrator.
-export function AskMessage({ ask, owner }: { ask: ThreadAsk; owner: string | undefined }) {
+// The owner's message, on the right, with when it was sent: under the last of
+// a run of them only. It says more when it never reached the orchestrator.
+export function AskMessage({
+  ask,
+  owner,
+  stamped,
+  fresh,
+}: {
+  ask: ThreadAsk;
+  owner: string | undefined;
+  stamped: boolean;
+  // It came in while the chat was open, so it eases in.
+  fresh: boolean;
+}) {
   const failed = undelivered(ask);
-  const at = stamp(ask.at);
   return (
-    <div className="chat-msg user" data-testid="chat-ask">
+    <div className="chat-msg user" data-testid="chat-ask" data-fresh={fresh || undefined}>
       <Markdown className="chat-bubble" text={ask.text} />
       {ask.cards.length > 0 ? (
         <div className="chat-refs">
@@ -96,11 +117,16 @@ export function AskMessage({ ask, owner }: { ask: ThreadAsk; owner: string | und
           <FailedIcon />
           {failed}
         </div>
-      ) : (
+      ) : ask.source === "prompt" ? (
         <div className="chat-meta">
-          {ask.source === "prompt" ? `Typed in the terminal ${at ?? ""}` : at}
+          Typed in the terminal
+          {stamped ? <Stamp at={ask.at} /> : null}
         </div>
-      )}
+      ) : stamped ? (
+        <div className="chat-meta">
+          <Stamp at={ask.at} />
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -118,12 +144,14 @@ export function PendingAsk({ text }: { text: string }) {
 export function ReplyMessage({
   item,
   owner,
+  fresh,
   follow,
   onReply,
   onSuggest,
 }: {
   item: ThreadReply;
   owner: string | undefined;
+  fresh: boolean;
   // The suggested follow-ups, under the latest answer only.
   follow: string[];
   onReply: (body: string) => void;
@@ -138,7 +166,7 @@ export function ReplyMessage({
     );
   };
   return (
-    <div className="chat-msg assistant" data-testid="chat-reply">
+    <div className="chat-msg assistant" data-testid="chat-reply" data-fresh={fresh || undefined}>
       <Markdown className="chat-prose" text={body} />
       {reply.card ? (
         <div className="chat-refs">
@@ -146,7 +174,7 @@ export function ReplyMessage({
         </div>
       ) : null}
       <div className="chat-acts">
-        <span className="stamp">{stamp(reply.replied_at)}</span>
+        <Stamp className="stamp" at={reply.replied_at} />
         <button type="button" className="chat-act" aria-label="Copy" title="Copy" onClick={copy}>
           <CopyIcon />
         </button>
@@ -219,7 +247,7 @@ function Step({ step, owner }: { step: ThreadStep; owner: string | undefined }) 
       <div className="txt">
         <div className="lbl">
           {stepTitle(step.label)}
-          <span className="when">{formatLisbon(step.at)}</span>
+          <Stamp className="when" at={step.at} />
         </div>
         {step.system ? <div className="desc">Recorded by Tiller</div> : null}
         {step.card || step.pr ? (
@@ -238,13 +266,15 @@ function Step({ step, owner }: { step: ThreadStep; owner: string | undefined }) 
 export function ActivityBlock({
   activity,
   owner,
+  fresh,
 }: {
   activity: ThreadActivity;
   owner: string | undefined;
+  fresh: boolean;
 }) {
   const count = activity.steps.length;
   return (
-    <details className="chat-cot" data-testid="chat-activity">
+    <details className="chat-cot" data-testid="chat-activity" data-fresh={fresh || undefined}>
       <summary>
         <StepsIcon />
         <span className="t">{activityText(activity.duration_seconds, count)}</span>
@@ -264,7 +294,7 @@ export function CheckpointLine({ checkpoint }: { checkpoint: ThreadCheckpoint })
     <div className="chat-checkpoint" data-testid="chat-checkpoint">
       <span>
         <RestartIcon />
-        Orchestrator restarted {stamp(checkpoint.at)}
+        Orchestrator restarted <Stamp at={checkpoint.at} />
       </span>
     </div>
   );
