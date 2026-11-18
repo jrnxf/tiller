@@ -3001,6 +3001,34 @@ fn project_checks_take_two_shapes_and_refuse_the_rest() {
     assert_eq!(store.project("zeta").unwrap().checks, json!(["cargo test"]));
 }
 
+/// A floor is in MB: a negative one or one past 100 TB is refused, so a unit
+/// mix-up cannot make the host refuse every run.
+#[test]
+fn host_edit_refuses_a_nonsense_floor() {
+    let (mut store, _) = memory_store();
+    let host = store.hosts().unwrap().remove(0);
+    for edit in [
+        HostEdit {
+            disk_floor_mb: Some(Some(900_000_000)),
+            ..HostEdit::default()
+        },
+        HostEdit {
+            ram_floor_mb: Some(Some(-1)),
+            ..HostEdit::default()
+        },
+    ] {
+        let error = store
+            .host_edit(&owner(), &host.id, host.rev, edit)
+            .unwrap_err();
+        assert!(matches!(error, Error::Usage(_)), "{error}");
+    }
+    let edit = HostEdit {
+        disk_floor_mb: Some(Some(40_000)),
+        ..HostEdit::default()
+    };
+    store.host_edit(&owner(), &host.id, host.rev, edit).unwrap();
+}
+
 fn bug(title: &str) -> NewBug {
     NewBug {
         title: title.into(),

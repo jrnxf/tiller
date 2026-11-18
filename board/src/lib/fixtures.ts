@@ -1519,7 +1519,7 @@ function timelineFor(
           seq: 4100,
           at: minutes(now, -40),
           actor: "system",
-          text: `filed as a Tiller bug${from} into ${into}`,
+          text: `filed as a tiller bug${from} into ${into}`,
         },
       ],
       next_before: null,

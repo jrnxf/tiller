@@ -194,25 +194,25 @@ function pollerLines(pollers: PollerHealth[], fixed: Record<string, PollerHealth
 // The owner marker and a second dispatching system, worded by the report's
 // code so the board names no other product.
 const OWNER: Record<string, { tone?: Tone; detail: Words }> = {
-  tiller: { detail: ["Tiller owns this host."] },
+  tiller: { detail: ["tiller owns this host."] },
   unset: {
     detail: [
-      "No owner is named, so Tiller dispatches here. Name the owner with ",
+      "No owner is named, so tiller dispatches here. Name the owner with ",
       { code: "tiller owner set <owner>" },
       ".",
     ],
   },
   other_system: {
-    detail: ["Another system owns this host, and the Tiller daemon is not running."],
+    detail: ["Another system owns this host, and the tiller daemon is not running."],
   },
   other_system_daemon_running: {
     detail: [
-      "Another system owns this host, but the Tiller daemon runs here. Stop the daemon, or hand the host over with ",
+      "Another system owns this host, but the tiller daemon runs here. Stop the daemon, or hand the host over with ",
       { code: "tiller owner set tiller" },
       ".",
     ],
   },
-  named_other: { detail: ["The owner marker names another owner, so Tiller is read only here."] },
+  named_other: { detail: ["The owner marker names another owner, so tiller is read only here."] },
 };
 
 const OTHER_SYSTEM: Record<string, { detail: Words }> = {
@@ -222,13 +222,13 @@ const OTHER_SYSTEM: Record<string, { detail: Words }> = {
   },
   both_dispatch: {
     detail: [
-      "Another dispatching system runs here, and Tiller would also dispatch, so both could start the same work. Stop one of them, or name the owner with ",
+      "Another dispatching system runs here, and tiller would also dispatch, so both could start the same work. Stop one of them, or name the owner with ",
       { code: "tiller owner set <owner>" },
       ".",
     ],
   },
   kept_read_only: {
-    detail: ["Another system runs here, and the owner marker keeps Tiller from dispatching."],
+    detail: ["Another system runs here, and the owner marker keeps tiller from dispatching."],
   },
 };
 

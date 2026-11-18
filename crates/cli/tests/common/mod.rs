@@ -67,6 +67,13 @@ pub fn isolate(command: &mut Command, root: &Path) {
             },
         );
     }
+    // The toolchain's `cargo` on macOS is a wrapper that exports
+    // `DYLD_LIBRARY_PATH` for its own libcurl, and every test child inherits
+    // it. With it set, dyld cannot use its prebuilt launch closure, so each
+    // `tiller` start costs about 24 ms more CPU, past the startup and hook
+    // budgets. `tiller` links no library from there, and no user's shell
+    // sets it, so the child runs as a user would.
+    command.env_remove("DYLD_LIBRARY_PATH");
 }
 
 /// The real `tiller` binary, with its home names [`isolate`]d under `root`,

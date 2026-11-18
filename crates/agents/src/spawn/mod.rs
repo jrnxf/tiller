@@ -30,6 +30,7 @@ pub mod launch;
 pub mod listeners;
 pub mod memory;
 pub mod orchestrator;
+pub mod plugins;
 pub mod pool;
 pub mod promote;
 pub mod readings;

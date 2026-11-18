@@ -61,12 +61,12 @@ export function ReloadBanner() {
       <div className="tx">
         {updated ? (
           <>
-            <b>Tiller was updated to {current}.</b> This tab still runs {loaded}. Reload to get the
+            <b>tiller was updated to {current}.</b> This tab still runs {loaded}. Reload to get the
             new board.
           </>
         ) : (
           <>
-            <b>Tiller was updated since this tab opened.</b> Part of the board could not load.
+            <b>tiller was updated since this tab opened.</b> Part of the board could not load.
             Reload to get the new board.
           </>
         )}

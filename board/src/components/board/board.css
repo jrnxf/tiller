@@ -469,16 +469,6 @@
 .card[data-attn="true"] {
   border-color: color-mix(in srgb, var(--orange) 38%, var(--line-1));
 }
-.card[data-attn="true"]::before {
-  content: "";
-  position: absolute;
-  left: -1px;
-  top: 8px;
-  bottom: 8px;
-  width: 3px;
-  border-radius: 0 3px 3px 0;
-  background: var(--orange);
-}
 /* A card between the steps of its work keeps its place: the ring goes dashed
    and the chip says what comes next. */
 .card[data-pending="true"] .si .ring {
@@ -829,8 +819,7 @@ button.colh:hover {
   display: block;
   margin: 4px 0 2px;
   padding: 6px 10px;
-  border-left: 2px solid color-mix(in srgb, var(--accent) 50%, var(--line-1));
-  border-radius: 0 var(--r6) var(--r6) 0;
+  border-radius: var(--r6);
   background: var(--bg-2);
   color: var(--fg-1);
   white-space: pre-wrap;
@@ -2064,14 +2053,18 @@ a.card:hover {
 .cq-item {
   padding: 12px 14px 14px;
   border-radius: var(--r8);
-  border: 1px solid color-mix(in srgb, var(--orange) 45%, var(--line-2));
-  background: color-mix(in srgb, var(--orange) 6%, var(--bg-card));
+  border: 1px solid var(--line-2);
+  background: var(--bg-card);
   min-width: 0;
 }
-/* Answered from here: the block stays for its receipt, and no longer calls. */
-.cq-item.done {
-  border-color: var(--line-2);
-  background: var(--bg-card);
+/* What still waits on the owner: one small dot, the card itself stays calm. */
+.cq-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin: 0 1px;
+  border-radius: 50%;
+  background: var(--orange);
 }
 .cq-meta {
   display: flex;
@@ -2087,9 +2080,10 @@ a.card:hover {
 }
 .cq-open {
   margin-left: auto;
-  color: var(--accent-text);
+  color: var(--fg-3);
 }
 .cq-open:hover {
+  color: var(--fg-1);
   text-decoration: underline;
 }
 .cq-q {

@@ -1426,7 +1426,8 @@ button.chip:active {
 .reply-q {
   margin: 0;
   padding: 10px 12px;
-  border-left: 2px solid var(--line-2);
+  border-radius: var(--r8);
+  background: var(--bg-2);
   color: var(--fg-2);
   font-size: 14px;
   line-height: 1.55;

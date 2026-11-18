@@ -47,7 +47,7 @@ const PHRASE_TEXT: Record<string, string> = {
   "host.add": "added a machine",
   "host.edit": "edited a machine",
   "import.apply": "imported records",
-  init: "set up Tiller",
+  init: "set up tiller",
   "learning.sweep": "swept the retros",
   "mem.discard": "discarded a pending note",
   "mem.edit": "edited a pending note",
