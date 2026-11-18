@@ -13,6 +13,7 @@ import { attentionCount, dialogWaits, scopedProjects } from "../../lib/scope";
 import { useStore } from "../../lib/store";
 import { useReplies } from "../attention/replies";
 import { PrIcon } from "../board/icons";
+import { ChatIcon } from "../chat/icons";
 import { showToast } from "../board/toast";
 import { countsByFilter, tilesInScope } from "../board/model";
 import { Section } from "../states/section";
@@ -31,16 +32,27 @@ import { ProjectsSection } from "./projects-section";
 import { QuotaFooter, QuotaUnavailable } from "./quota-footer";
 import { useNamedProjects } from "../board/peer-state";
 
+export type ScreenPath =
+  | "/"
+  | "/agents"
+  | "/chat"
+  | "/contributions"
+  | "/inbox"
+  | "/memory"
+  | "/health"
+  | "/settings";
+
 // Inbox comes first: what waits on the owner is the first thing to see.
 // `key` is the second key of the screen's chord: G, then that key.
 export const NAV: {
-  to: "/" | "/agents" | "/contributions" | "/inbox" | "/memory" | "/health" | "/settings";
+  to: ScreenPath;
   label: string;
   key: HotkeyChord;
   icon: ReactNode;
 }[] = [
   { to: "/inbox", label: "Inbox", key: "I", icon: <InboxIcon /> },
   { to: "/", label: "Board", key: "B", icon: <BoardIcon /> },
+  { to: "/chat", label: "Chat", key: "T", icon: <ChatIcon /> },
   { to: "/agents", label: "Agents", key: "A", icon: <AgentsIcon /> },
   { to: "/contributions", label: "Contributions", key: "C", icon: <PrIcon /> },
   { to: "/memory", label: "Memory", key: "M", icon: <MemoryIcon /> },
@@ -212,9 +224,10 @@ export function Sidebar({
             search={(prev) => ({ ...prev, owner: undefined })}
             className="nav"
             activeProps={{ className: "nav", "aria-current": "page" }}
-            activeOptions={{ exact: true }}
-            // The Agents view folds the sidebar to icons; the name stays on
-            // hover, with the screen's chord.
+            // Chat stays current on every project's chat under it.
+            activeOptions={{ exact: item.to !== "/chat" }}
+            // The Agents view and the chat page fold the sidebar to icons;
+            // the name stays on hover, with the screen's chord.
             title={`${item.label} (G then ${item.key})`}
           >
             {item.icon}

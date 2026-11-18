@@ -41,6 +41,7 @@ import { useAmbiguousIds, useNamedProjects } from "../board/peer-state";
 import { askPrefillStore } from "./ask-prefill";
 import { MoonIcon, awayRequestStore } from "./away";
 import { NAV } from "./sidebar";
+import type { ScreenPath } from "./sidebar";
 
 interface PaletteProps {
   open: boolean;
@@ -79,6 +80,8 @@ function iconFor(command: PaletteCommand) {
       return <BoardIcon />;
     case "go-agents":
       return <AgentsIcon />;
+    case "go-chat":
+      return <ChatIcon />;
     case "go-contributions":
       return <PrIcon />;
     case "go-inbox":
@@ -131,10 +134,7 @@ function useCommands(
   const prefs = useStore(prefsStore);
 
   return useMemo(() => {
-    const go =
-      (to: "/" | "/agents" | "/contributions" | "/inbox" | "/memory" | "/health" | "/settings") =>
-      () =>
-        void navigate({ to, search: (prev) => prev });
+    const go = (to: ScreenPath) => () => void navigate({ to, search: (prev) => prev });
     // The owner's jobs come first: they are what an empty palette offers.
     // One row per job; the row per project shows once a query names it.
     const commands: PaletteCommand[] = [
@@ -205,6 +205,14 @@ function useCommands(
         run: go("/inbox"),
       },
       { id: "go-board", group: "Go to", label: "Board", keys: chord("/"), run: go("/") },
+      {
+        id: "go-chat",
+        group: "Go to",
+        label: "Chat",
+        keywords: "orchestrators messages",
+        keys: chord("/chat"),
+        run: go("/chat"),
+      },
       {
         id: "go-agents",
         group: "Go to",

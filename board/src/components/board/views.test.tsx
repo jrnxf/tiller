@@ -1397,7 +1397,9 @@ test("a card that needs the owner shows its question and takes the answer in pla
   ).toContain("item=01JATTN0000000000000000000");
 
   // The Inbox's own answer control: one click sends the owner's pick.
-  const options = within(questions).getAllByRole("button");
+  const options = within(within(questions).getByRole("group", { name: "Answer" })).getAllByRole(
+    "button",
+  );
   expect(options.map((option) => option.querySelector(".o-name")?.textContent)).toEqual([
     "Exponential backoff, three attempts",
     "Fixed delay, five attempts",

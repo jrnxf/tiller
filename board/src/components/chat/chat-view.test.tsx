@@ -10,6 +10,7 @@ import { resetThreadFixture } from "../../lib/fixtures-thread";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
 import { receiptsStore } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
+import { toastStore } from "../board/toast";
 import { createTestQueryClient, loadAskEditor, loadRouteChunks } from "../../test-app";
 import { chatDrawerStore } from "./chat-drawer-store";
 
@@ -125,11 +126,14 @@ test("the list groups the orchestrators and marks the open chat", async () => {
     .filter((link) => link.ariaCurrent === "page");
   expect(current).toHaveLength(1);
   expect(current[0]?.textContent).toContain("alpha");
-  // `/` jumps to the search.
-  fireEvent.keyDown(window, { key: "/" });
-  expect(document.activeElement).toBe(
-    screen.getByRole("textbox", { name: "Search orchestrators" }),
-  );
+});
+
+test("/chat on a wide screen opens the chat at the top of the list", async () => {
+  const { router } = await renderAt("/chat");
+  await waitFor(() => expect(router.state.location.pathname).toMatch(/^\/chat\/[^/]+$/));
+  const groups = await screen.findByTestId("chat-groups");
+  const [top] = within(groups).getAllByRole("link");
+  expect(top?.ariaCurrent).toBe("page");
 });
 
 test("a merge approval and its attention item are one decision, and Approve binds the head", async () => {
@@ -150,13 +154,52 @@ test("a merge approval and its attention item are one decision, and Approve bind
   expect(decided.some((block) => block.textContent?.includes("You chose Approve"))).toBe(true);
 });
 
-test("a sent note shows its receipt, and a failed one says why", async () => {
+test("a sent note shows its time, a failed one says why, and a card chip says how it is tied", async () => {
   await renderAt("/chat/alpha");
   await screen.findAllByTestId("chat-reply");
-  const receipts = [...document.querySelectorAll(".chat-receipt")].map((node) => node.textContent);
-  expect(receipts.some((text) => text?.startsWith("Read by orchestrator"))).toBe(true);
-  expect(receipts.some((text) => text?.startsWith("Delivered"))).toBe(true);
-  expect(receipts).toContain("Not delivered: the orchestrator's pane was gone");
+  const failed = screen.getAllByTestId("chat-undelivered").map((node) => node.textContent);
+  expect(failed).toContain("Not delivered: the orchestrator's pane was gone");
+  // A note that arrived says nothing of it.
+  expect(screen.queryByText(/^(Read by orchestrator|Delivered|Sending)/)).toBeNull();
+  const chips = [...document.querySelectorAll(".chat-msg.user .chat-ref")];
+  expect(chips.some((chip) => chip.querySelector(".rel")?.textContent === "Filed")).toBe(true);
+});
+
+test("a send shows the message at once, and a refused one comes back to the box", async () => {
+  await renderAt("/chat/beta");
+  await screen.findAllByTestId("chat-reply");
+  await waitFor(() => expect(prose()).toBeTruthy());
+  vi.stubGlobal("fetch", async (_path: string, init?: RequestInit) => {
+    if ((init?.method ?? "GET") === "GET") return new Response("{}", { status: 404 });
+    return new Response(
+      JSON.stringify({ ok: false, error: { code: "invalid", message: "No room for it." } }),
+      { status: 409 },
+    );
+  });
+  act(() => prose().editor.commands.setContent("Ship it"));
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  expect(prose().editor.getText()).toBe("");
+  expect(screen.getByTestId("chat-pending").textContent).toBe("Ship it");
+  await waitFor(() => expect(screen.queryByTestId("chat-pending")).toBeNull());
+  expect(prose().editor.getText()).toBe("Ship it");
+  expect(toastStore.get()).toMatchObject({ tone: "bad", title: "Could not send your message" });
+});
+
+test("a decision takes the owner's own words under its options, sent with Send", async () => {
+  await renderAt("/chat/alpha");
+  const blocks = await screen.findAllByTestId("chat-confirm");
+  const block = blocks.find((node) => within(node).queryByRole("group", { name: "Answer" }));
+  if (!block) throw new Error("no open question");
+  const box = within(block).getByRole("textbox", { name: "Your own words" });
+  // The words sit under the options.
+  const options = within(block).getByRole("group", { name: "Answer" });
+  expect(options.compareDocumentPosition(box) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  const send = within(block).getByRole("button", { name: "Send" }) as HTMLButtonElement;
+  expect(send.disabled).toBe(true);
+  fireEvent.change(box, { target: { value: "Retry once, then page me" } });
+  fireEvent.click(send);
+  await waitFor(() => expect(callsTo("/answer")).toHaveLength(1));
+  expect(callsTo("/answer")[0]?.body).toMatchObject({ answer: "Retry once, then page me" });
 });
 
 test("a suggestion fills the box and Send posts it as an ask to the orchestrator", async () => {

@@ -1746,7 +1746,13 @@ fn thread_item(
     let (seq, when) = (event.seq, at(event.at));
     let id = event.entity_id.as_str();
     Ok(match event.kind.as_str() {
+        // Tiller's launch prompt, recorded as an ask by older builds, is not
+        // the owner's.
         "ask.recorded" => find::<tiller_core::domain::Ask>(conn, "id = ?1", &[&id])?
+            .filter(|ask| {
+                ask.source != tiller_core::domain::AskSource::Prompt
+                    || !tiller_core::state::asks::is_launch_prompt(&ask.text)
+            })
             .map(|ask| -> Result<ThreadItem> {
                 let mut stmt = conn.prepare(
                     "SELECT card_id, relation FROM ask_cards WHERE ask_id = ?1

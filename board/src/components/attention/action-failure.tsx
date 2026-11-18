@@ -6,7 +6,7 @@ import type { ActionError } from "./api";
 // Interrupt, stop, resume, relaunch and an answer wait 60 s for the peer's
 // proof, a project add, retire or delete 11 min for its clone and stops; every
 // other forwarded call waits 10 s (protocol.md 7.4, 10.3).
-function isSentUncertain(error: ActionError | null): boolean {
+export function isSentUncertain(error: ActionError | null): boolean {
   return error?.status === 504 && error.code === "forward_uncertain";
 }
 

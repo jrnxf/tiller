@@ -1224,51 +1224,51 @@ kbd {
   color: var(--fg-3);
 }
 
-/* The Agents view folds the sidebar to its icons, so the terminal gets the
-   room. */
+/* The Agents view and the chat page fold the sidebar to its icons, so the
+   terminal and the conversation get the room. */
 
 @media (min-width: 821px) {
-  .shell:has(.av-view) {
+  .shell:has(.av-view, .chat[data-variant="page"]) {
     --sidebar-width: 52px;
   }
 
-  .shell:has(.av-view) .side {
+  .shell:has(.av-view, .chat[data-variant="page"]) .side {
     align-items: center;
     padding: 10px 0;
   }
 
-  .shell:has(.av-view) .side > :not(.ws, .search, .navs) {
+  .shell:has(.av-view, .chat[data-variant="page"]) .side > :not(.ws, .search, .navs) {
     display: none;
   }
 
-  .shell:has(.av-view) .ws {
+  .shell:has(.av-view, .chat[data-variant="page"]) .ws {
     padding: 4px 0 10px;
   }
 
   /* The rail shows the leaf alone: the wordmark is clipped off. */
-  .shell:has(.av-view) .ws .logo {
+  .shell:has(.av-view, .chat[data-variant="page"]) .ws .logo {
     width: 20px;
   }
 
-  .shell:has(.av-view) .search span,
-  .shell:has(.av-view) .search kbd,
-  .shell:has(.av-view) .nav .lbl,
-  .shell:has(.av-view) .nav .count {
+  .shell:has(.av-view, .chat[data-variant="page"]) .search span,
+  .shell:has(.av-view, .chat[data-variant="page"]) .search kbd,
+  .shell:has(.av-view, .chat[data-variant="page"]) .nav .lbl,
+  .shell:has(.av-view, .chat[data-variant="page"]) .nav .count {
     display: none;
   }
 
-  .shell:has(.av-view) .search {
+  .shell:has(.av-view, .chat[data-variant="page"]) .search {
     width: 32px;
     margin: 0 0 8px;
     padding: 0;
     justify-content: center;
   }
 
-  .shell:has(.av-view) .navs {
+  .shell:has(.av-view, .chat[data-variant="page"]) .navs {
     align-items: center;
   }
 
-  .shell:has(.av-view) .nav {
+  .shell:has(.av-view, .chat[data-variant="page"]) .nav {
     position: relative;
     width: 32px;
     height: 32px;
@@ -1276,7 +1276,7 @@ kbd {
     justify-content: center;
   }
 
-  .shell:has(.av-view) .nav .badge {
+  .shell:has(.av-view, .chat[data-variant="page"]) .nav .badge {
     position: absolute;
     top: 1px;
     right: -2px;

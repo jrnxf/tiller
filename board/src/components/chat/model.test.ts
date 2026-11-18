@@ -11,13 +11,16 @@ import type {
   ThreadItem,
 } from "../../lib/api-types";
 import {
+  activityText,
   chatRows,
   chatText,
+  firstRow,
   groupRows,
+  modelName,
   queueChip,
   queueOf,
   quoteOf,
-  receiptOf,
+  undelivered,
   unreadReplies,
   waitingByProject,
 } from "./model";
@@ -103,14 +106,13 @@ test("the list puts a project under Needs you, Working or Idle by what it needs"
     ["gamma", "needs", 0],
     ["delta", "idle", 0],
   ]);
-  expect(groupRows(list, "").map(({ group, rows: members }) => [group, members.length])).toEqual([
+  expect(groupRows(list).map(({ group, rows: members }) => [group, members.length])).toEqual([
     ["needs", 2],
     ["working", 1],
     ["idle", 1],
   ]);
-  // A search drops the groups it empties.
-  expect(groupRows(list, " BET ").map(({ group }) => group)).toEqual(["working"]);
-  expect(groupRows(list, "zzz")).toEqual([]);
+  expect(firstRow(list)?.project.id).toBe("alpha");
+  expect(firstRow([])).toBeNull();
 });
 
 test("a peer's orchestrator of the same project id belongs to the peer's row only", () => {
@@ -170,24 +172,33 @@ const sent = (state: AskDelivery["state"], extra: Partial<AskDelivery> = {}): As
   ...extra,
 });
 
-const clock = (iso: string | null) => (iso ? "18:01" : null);
+test("a sent note says more only when it never arrived", () => {
+  expect(undelivered(ask(null))).toBeNull();
+  expect(undelivered(ask(sent("pending")))).toBeNull();
+  expect(undelivered(ask(sent("acked", { seen_at: recent })))).toBeNull();
+  expect(undelivered(ask(sent("failed", { failure_reason: "the pane is gone" })))).toBe(
+    "Not delivered: the pane is gone",
+  );
+  expect(undelivered(ask(sent("failed")))).toBe("Not delivered");
+});
 
-test("the receipt under a sent note follows its delivery", () => {
-  expect(receiptOf(ask(null), clock)).toBeNull();
-  expect(receiptOf(ask(sent("pending")), clock)).toEqual({ tone: "sending", text: "Sending" });
-  expect(receiptOf(ask(sent("delivered", { delivered_at: recent })), clock)).toEqual({
-    tone: "delivered",
-    text: "Delivered 18:01",
-  });
-  expect(receiptOf(ask(sent("acked", { seen_at: recent })), clock)).toEqual({
-    tone: "read",
-    text: "Read by orchestrator 18:01",
-  });
-  expect(receiptOf(ask(sent("failed", { failure_reason: "the pane is gone" })), clock)).toEqual({
-    tone: "failed",
-    text: "Not delivered: the pane is gone",
-  });
-  expect(receiptOf(ask(sent("failed")), clock)?.text).toBe("Not delivered");
+test("an activity under a second gives its steps alone", () => {
+  expect(activityText(0, 1)).toBe("1 step");
+  expect(activityText(0.4, 3)).toBe("3 steps");
+  expect(activityText(12, 3)).toBe("Worked for 12 seconds · 3 steps");
+  expect(activityText(150, 2)).toBe("Worked for 3 minutes · 2 steps");
+});
+
+test("the tag and the project name do not reach the list's snippet", () => {
+  const replied = { ...reply("r1", "alpha", recent), body: "[chat] alpha: tests pass" };
+  const [entry] = chatRows([project("alpha")], [], new Map(), [replied], NOW);
+  expect(entry?.snippet).toBe("tests pass");
+});
+
+test("a model id reads as its name", () => {
+  expect(modelName("opus")).toBe("Opus");
+  expect(modelName("claude-opus-5-5")).toBe("Opus 5.5");
+  expect(modelName("claude-sonnet-4-5-20250929")).toBe("Sonnet 4.5");
 });
 
 test("only the unread replies of a thread are marked read", () => {

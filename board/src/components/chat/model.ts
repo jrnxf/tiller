@@ -11,11 +11,12 @@ import type {
   ThreadStep,
 } from "../../lib/api-types";
 import type { AskPiece } from "../../lib/ask-plan";
+import { untagged } from "../../lib/orchestrator-text";
 import { ownerKey, ownerOf, projectKey } from "../../lib/peers";
 import { agentActivity } from "../board/activity";
 
 // What the chat shows, worked out from the reads with no React: the sidebar
-// groups, the receipt under a sent note, the queue and the tool status.
+// groups, a note that was not delivered, the queue and the tool status.
 
 export type ChatGroup = "needs" | "working" | "idle";
 
@@ -88,7 +89,7 @@ export function chatRows(
       (best, reply) => (best === null || reply.replied_at > best.replied_at ? reply : best),
       null,
     );
-    const status = orchestrator?.last_status_line ?? null;
+    const status = orchestrator?.last_status_line ? untagged(orchestrator.last_status_line) : null;
     return {
       project,
       index,
@@ -97,58 +98,35 @@ export function chatRows(
       waiting: open,
       unread: own.length,
       snippet:
-        newest?.body ?? status ?? (orchestrator ? "No status yet" : "No orchestrator running"),
+        (newest ? untagged(newest.body) : null) ??
+        status ??
+        (orchestrator ? "No status yet" : "No orchestrator running"),
       at:
         newest?.replied_at ?? orchestrator?.last_status_at ?? orchestrator?.last_output_at ?? null,
     };
   });
 }
 
-// The rows of each group, in list order, without the empty groups. A search
-// keeps the projects whose name holds the typed letters.
-export function groupRows(rows: ChatRow[], query: string): { group: ChatGroup; rows: ChatRow[] }[] {
-  const needle = query.trim().toLowerCase();
-  const shown = needle
-    ? rows.filter((row) => row.project.name.toLowerCase().includes(needle))
-    : rows;
+// The rows of each group, in list order, without the empty groups.
+export function groupRows(rows: ChatRow[]): { group: ChatGroup; rows: ChatRow[] }[] {
   return (["needs", "working", "idle"] as const).flatMap((group) => {
-    const members = shown.filter((row) => row.group === group);
+    const members = rows.filter((row) => row.group === group);
     return members.length > 0 ? [{ group, rows: members }] : [];
   });
 }
 
-// The line under a sent note: how far it got.
-export interface Receipt {
-  tone: "sending" | "delivered" | "read" | "failed";
-  text: string;
+// The chat the Chat screen opens first: the top of the list.
+export function firstRow(rows: ChatRow[]): ChatRow | null {
+  return groupRows(rows)[0]?.rows[0] ?? null;
 }
 
-export function receiptOf(
-  ask: ThreadAsk,
-  clock: (iso: string | null) => string | null,
-): Receipt | null {
-  const delivery = ask.delivery;
-  // Typed in the orchestrator's pane: no note went through the outbox.
-  if (!delivery) return null;
-  switch (delivery.state) {
-    case "pending":
-      return { tone: "sending", text: "Sending" };
-    case "delivered": {
-      const at = clock(delivery.delivered_at);
-      return { tone: "delivered", text: at ? `Delivered ${at}` : "Delivered" };
-    }
-    case "acked": {
-      const at = clock(delivery.seen_at);
-      return { tone: "read", text: at ? `Read by orchestrator ${at}` : "Read by orchestrator" };
-    }
-    case "failed":
-      return {
-        tone: "failed",
-        text: delivery.failure_reason
-          ? `Not delivered: ${delivery.failure_reason}`
-          : "Not delivered",
-      };
-  }
+// Why a sent note never reached the orchestrator; null while it is on its
+// way or once it got there. The chat says nothing of a note that arrived.
+export function undelivered(ask: ThreadAsk): string | null {
+  if (ask.delivery?.state !== "failed") return null;
+  return ask.delivery.failure_reason
+    ? `Not delivered: ${ask.delivery.failure_reason}`
+    : "Not delivered";
 }
 
 // The replies the thread shows that the owner has not read. Opening the
@@ -223,11 +201,24 @@ export function stepFailed(step: ThreadStep): boolean {
   return step.kind.includes("fail") || step.payload.outcome === "failed";
 }
 
-// "Worked for 12 seconds", "Worked for 3 minutes".
-export function workedFor(seconds: number): string {
-  if (seconds < 60) return `Worked for ${seconds} second${seconds === 1 ? "" : "s"}`;
+// "Worked for 12 seconds · 3 steps". Under a second is no time to speak of,
+// so it says the steps alone.
+export function activityText(seconds: number, steps: number): string {
+  const count = `${steps} step${steps === 1 ? "" : "s"}`;
+  if (seconds < 1) return count;
+  if (seconds < 60) return `Worked for ${seconds} second${seconds === 1 ? "" : "s"} · ${count}`;
   const minutes = Math.round(seconds / 60);
-  return `Worked for ${minutes} minute${minutes === 1 ? "" : "s"}`;
+  return `Worked for ${minutes} minute${minutes === 1 ? "" : "s"} · ${count}`;
+}
+
+// "claude-opus-5-5" reads "Opus 5.5", and "opus" reads "Opus".
+export function modelName(model: string): string {
+  const [name = model, ...version] = model
+    .replace(/^claude-/, "")
+    .replace(/-\d{8}$/, "")
+    .split("-");
+  const word = name.charAt(0).toUpperCase() + name.slice(1);
+  return version.length > 0 ? `${word} ${version.join(".")}` : word;
 }
 
 // "62k", the token count the context ring shows.

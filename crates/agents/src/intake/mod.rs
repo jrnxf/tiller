@@ -13,7 +13,7 @@ use std::path::Path;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use tiller_core::domain::{Ask, AskSource, Card, OutboxMessage, OutboxState, Role, Session};
-use tiller_core::state::asks::NewAsk;
+use tiller_core::state::asks::{NewAsk, is_launch_prompt};
 use tiller_core::state::replies::unreplied_asks;
 use tiller_core::state::{find, get, list};
 use tiller_core::{Actor, Ctx, Store, ids};
@@ -171,7 +171,11 @@ impl Intake for Hooks {
     ) -> tiller_core::Result<Reply> {
         // On a transcript host the tailer records the ask; a hook that fires
         // anyway must not make it two.
-        if self.config.intake_source == IntakeSource::Transcript || prompt.trim().is_empty() {
+        // Tiller's own launch prompt is not the owner's ask either.
+        if self.config.intake_source == IntakeSource::Transcript
+            || prompt.trim().is_empty()
+            || is_launch_prompt(prompt)
+        {
             return Ok(Reply::default());
         }
         let recorded = store.ask_record(

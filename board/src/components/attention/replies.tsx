@@ -4,6 +4,7 @@ import { useCallback } from "react";
 import type { CSSProperties, ReactNode } from "react";
 
 import type { MutationResponse, Project, RepliesResponse, ReplyItem } from "../../lib/api-types";
+import { untagged } from "../../lib/orchestrator-text";
 import { hostField, ownerKey, ownerOf, projectIndex } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import { queryKeyFor, repliesPath, repliesQuery } from "../../lib/queries";
@@ -180,7 +181,7 @@ export function ReplyDetail({
           <span className="hint">{formatWhen(reply.replied_at)}</span>
         </div>
         <div className="reply-a" data-testid="reply-body">
-          {reply.body}
+          {untagged(reply.body)}
         </div>
       </div>
       {card ? (

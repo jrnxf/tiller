@@ -39,7 +39,7 @@ const BRIEF_HEADING: &str = "# Your brief\n\n";
 const BRIEF_FILE: &str = "brief.md";
 
 /// The first prompt a worker gets; the brief itself is in its instructions.
-pub const FIRST_PROMPT: &str = "Start on the brief at the end of your instructions.";
+pub use tiller_core::state::asks::FIRST_PROMPT;
 
 /// The directories only the orchestrator's fragment names (`<home>`,
 /// `<pool>`, `<checkouts>`).

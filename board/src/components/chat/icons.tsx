@@ -59,20 +59,7 @@ export const StepsIcon = () => (
 
 export const HashIcon = () => (
   <Glyph>
-    <path d="M3 6h10.5M2.5 10H13M6.8 2.5 5.3 13.5M10.7 2.5 9.2 13.5" {...stroke} />
-  </Glyph>
-);
-
-// A tick, then two: delivered, then read by the orchestrator.
-export const TickIcon = () => (
-  <Glyph>
-    <path d="m3 8.5 3 3 7-7" {...stroke} />
-  </Glyph>
-);
-
-export const TicksIcon = () => (
-  <Glyph>
-    <path d="m1.5 8.5 3 3 7-7M9 11l.5.5 5-5" {...stroke} />
+    <path d="M3 6h10M3 10h10M6.5 2.5l-1 11M10.5 2.5l-1 11" {...stroke} />
   </Glyph>
 );
 
