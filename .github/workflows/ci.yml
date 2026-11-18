@@ -15,6 +15,13 @@ concurrency:
   group: ci-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+# Caches. The Nix store cache holds what the dev shell or the flake build
+# fetches and builds besides this repo's own crates: the toolchain, the
+# patched bun2nix, and for the flake build the crane dependency build.
+# rust-cache holds cargo's registry and the dependency artifacts in target/,
+# never the workspace crates. Each is saved only when no cache with its exact
+# key exists, so a run that changes no lock file saves nothing new.
+
 jobs:
   rust:
     name: rust
@@ -22,16 +29,58 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-devshell-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'rust-toolchain.toml', 'nix/patches/**') }}
+          restore-prefixes-first-match: nix-devshell-${{ runner.os }}-
+      # rust-cache reads the toolchain from PATH, so the dev shell's cargo
+      # and rustc go on it. Every step below still runs in the dev shell.
+      - name: Dev shell
+        run: nix develop -c bash -c 'dirname "$(command -v cargo)"' >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Format
         run: nix develop -c cargo fmt --all --check
       - name: Clippy
         run: nix develop -c cargo clippy --workspace --all-targets -- -D warnings
       - name: Clippy with the recorder
         run: nix develop -c cargo clippy -p tiller-cli --all-targets --features record -- -D warnings
-      - name: Test
-        run: nix develop -c cargo nextest run --workspace
       - name: Test the recorder
         run: nix develop -c cargo nextest run -p tiller-cli --features record --test holder_record
+
+  # `cargo nextest run --workspace`, in three parts that together run every
+  # test once. The `wall-clock` group (.config/nextest.toml) runs one test at
+  # a time with no other test beside it, so in one run each of its tests
+  # stalled all the others. The main part runs every test outside the group.
+  # The group runs in two parts of its own, on runners of their own: the
+  # soak, its longest binary, and the rest of the group. The group's
+  # overrides apply in each part.
+  test:
+    name: test (${{ matrix.part }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: main
+            filter: not group(wall-clock)
+          - part: soak
+            filter: group(wall-clock) & binary_id(tiller-cli::soak)
+          - part: wall-clock
+            filter: group(wall-clock) & not binary_id(tiller-cli::soak)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-devshell-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'rust-toolchain.toml', 'nix/patches/**') }}
+          restore-prefixes-first-match: nix-devshell-${{ runner.os }}-
+      - name: Dev shell
+        run: nix develop -c bash -c 'dirname "$(command -v cargo)"' >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Build the tests
+        run: nix develop -c cargo nextest run --workspace --no-run
+      - name: Test
+        run: nix develop -c cargo nextest run --workspace -E '${{ matrix.filter }}'
 
   board:
     name: board
@@ -39,6 +88,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-devshell-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'rust-toolchain.toml', 'nix/patches/**') }}
+          restore-prefixes-first-match: nix-devshell-${{ runner.os }}-
+      - name: Dev shell
+        run: nix develop -c true
       - name: Install
         run: nix develop -c bun install --cwd board --frozen-lockfile
       - name: Lint
@@ -76,7 +131,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
-      # clippy, fmt, nextest and the board checks run in the rust and board jobs.
+      # The key covers every input of the crane dependency build, so a new
+      # cache is saved only when a manifest or a lock file changes.
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-build-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'rust-toolchain.toml', 'nix/patches/**', '**/Cargo.toml', 'Cargo.lock', 'board/bun.lock', 'board/bun.nix') }}
+          restore-prefixes-first-match: nix-build-${{ runner.os }}-
+      # clippy, fmt, nextest and the board checks run in the rust, test and
+      # board jobs.
       - name: Generated bun.nix is fresh
         run: nix build --print-build-logs .#checks.x86_64-linux.bunNixFresh
       - name: Vendored alacritty_terminal is the crate plus its patch
@@ -91,17 +153,36 @@ jobs:
         run: scripts/smoke.sh result/bin/tiller
 
   # The owner's Mac builds the same flake: a Linux-only API (pipe2 and the
-  # like) must fail here, not at a switch.
+  # like) must fail here, not at a switch. The flake build runs in this job,
+  # and clippy and the holder tests run beside it in macos-rust.
   macos:
     name: macos
     runs-on: macos-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-build-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'rust-toolchain.toml', 'nix/patches/**', '**/Cargo.toml', 'Cargo.lock', 'board/bun.lock', 'board/bun.nix') }}
+          restore-prefixes-first-match: nix-build-${{ runner.os }}-
       - name: Build
         run: nix build --print-build-logs
       - name: Smoke test
         run: scripts/smoke.sh result/bin/tiller
+
+  macos-rust:
+    name: macos-rust
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-devshell-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'rust-toolchain.toml', 'nix/patches/**') }}
+          restore-prefixes-first-match: nix-devshell-${{ runner.os }}-
+      - name: Dev shell
+        run: nix develop -c bash -c 'dirname "$(command -v cargo)"' >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Clippy
         run: nix develop -c cargo clippy --workspace --all-targets -- -D warnings
       - name: Test the holder
