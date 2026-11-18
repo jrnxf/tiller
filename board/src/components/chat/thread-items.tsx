@@ -87,24 +87,25 @@ function PrRef({ pr }: { pr: ThreadPr }) {
   );
 }
 
-// The owner's message, on the right, with when it was sent: under the last of
-// a run of them only. It says more when it never reached the orchestrator.
+// The owner's message, on the right. When it was sent shows beside it while
+// the pointer is on it. It says more when it never reached the orchestrator.
 export function AskMessage({
   ask,
   owner,
-  stamped,
   fresh,
 }: {
   ask: ThreadAsk;
   owner: string | undefined;
-  stamped: boolean;
   // It came in while the chat was open, so it eases in.
   fresh: boolean;
 }) {
   const failed = undelivered(ask);
   return (
     <div className="chat-msg user" data-testid="chat-ask" data-fresh={fresh || undefined}>
-      <Markdown className="chat-bubble" text={ask.text} />
+      <div className="chat-ask-row">
+        <Stamp className="chat-ask-time" at={ask.at} />
+        <Markdown className="chat-bubble" text={ask.text} />
+      </div>
       {ask.cards.length > 0 ? (
         <div className="chat-refs">
           {ask.cards.map((card) => (
@@ -118,14 +119,7 @@ export function AskMessage({
           {failed}
         </div>
       ) : ask.source === "prompt" ? (
-        <div className="chat-meta">
-          Typed in the terminal
-          {stamped ? <Stamp at={ask.at} /> : null}
-        </div>
-      ) : stamped ? (
-        <div className="chat-meta">
-          <Stamp at={ask.at} />
-        </div>
+        <div className="chat-meta">Typed in the terminal</div>
       ) : null}
     </div>
   );

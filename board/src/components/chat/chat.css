@@ -323,9 +323,28 @@
 .chat-msg.user {
   align-items: flex-end;
 }
-/* A run of the owner's messages sits close, with one time under the last. */
+/* A run of the owner's messages sits close. */
 .chat-msg.user + .chat-msg.user {
   margin-top: -16px;
+}
+/* When it was sent, beside the bubble while the pointer is on it. */
+.chat-ask-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: 8px;
+  max-width: 100%;
+}
+.chat-ask-time {
+  padding-bottom: 6px;
+  font-size: 11.5px;
+  color: var(--fg-4);
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity var(--fast) var(--ease);
+}
+.chat-msg.user:hover .chat-ask-time {
+  opacity: 1;
 }
 .chat-bubble {
   max-width: min(560px, 85%);
@@ -790,23 +809,24 @@
   overflow-wrap: anywhere;
 }
 
-/* A decision answered here: the Inbox's own controls, actions on the right. */
-.chat-confirm {
+/* A decision answered here: the Inbox's own controls, actions on the right.
+   The Inbox's .cq margins would add to the thread's gap, so they go. Decisions
+   in a row sit closer, as one group. */
+.chat-thread > .chat-confirm {
   margin: 0;
+}
+.chat-thread > .chat-confirm + .chat-confirm {
+  margin-top: -12px;
 }
 .chat-confirm .cq-item .chat-refs {
   margin: 4px 0;
 }
-/* In the thread a decision is compact: a card with an orange edge, and its
-   options one numbered list with each consequence in small words under it. */
+/* In the thread a decision is compact: a plain card, and its options one
+   numbered list with each consequence in small words under it. */
 .chat-confirm .cq-item {
   padding: 12px 14px;
   border: 1px solid var(--line-2);
-  border-left: 3px solid var(--orange);
   background: var(--bg-card);
-}
-.chat-confirm .cq-item.done {
-  border-left-color: var(--line-2);
 }
 .chat-confirm .cq-q {
   margin: 6px 0 4px;
@@ -1076,7 +1096,7 @@ button.chat-tbtn:hover {
   background: var(--bg-hover);
   color: var(--fg-1);
 }
-.chat-tbtn.icon {
+.chat-tbtn.sq {
   width: 28px;
   padding: 0;
   justify-content: center;
