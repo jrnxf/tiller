@@ -339,7 +339,10 @@ fn an_upgrade_keeps_the_pids_the_instance_and_every_pane_field_by_field() {
         &client,
         &world,
         "input",
-        r"stty raw -echo; echo input-ready; while [ ! -e go ]; do sleep 0.05; done; head -c 300000 | cksum; sleep 3600",
+        // `-iexten` too: GNU `stty raw` leaves it on, and on macOS it makes
+        // `^O` (discard) and `^V` (literal next) act on raw input, so the
+        // bytes would not reach the app as sent.
+        r"stty raw -iexten -echo; echo input-ready; while [ ! -e go ]; do sleep 0.05; done; head -c 300000 | cksum; sleep 3600",
     );
     for (pane, marker) in [
         (&alt, "alt-text"),
@@ -655,13 +658,22 @@ fn a_close_under_way_at_the_upgrade_still_kills_a_child_that_outlives_its_grace(
     let wrapper = wrapper(&world);
 
     // A child that lets go of its terminal, so the pane's output ends, and
-    // outlives the close's `SIGHUP`.
-    let lingers = spawn(
-        &client,
-        &world,
-        "lingers",
-        r"trap 'touch hupped' HUP; echo lingers-ready; exec </dev/null >/dev/null 2>&1; while :; do sleep 0.05; done",
-    );
+    // outlives the close's `SIGHUP`. On macOS the shell is dash: there
+    // `/bin/sh` is bash, which opens `/dev/tty` at its start, and once a
+    // process of the session has opened `/dev/tty` the kernel keeps the
+    // terminal open until the session ends, so the output would not end.
+    let shell = if cfg!(target_os = "macos") {
+        "/bin/dash"
+    } else {
+        "/bin/sh"
+    };
+    let script = r"trap 'touch hupped' HUP; echo lingers-ready; exec </dev/null >/dev/null 2>&1; while :; do sleep 0.05; done";
+    let lingers = client
+        .spawn(&Spawn {
+            argv: vec![shell.into(), "-c".into(), script.into()],
+            ..spawn_of(&world, "lingers", script)
+        })
+        .unwrap();
     shows(&holder, &client, &lingers, Read::Visible, "lingers-ready");
     let closer = {
         let client = holder.client(&world);
