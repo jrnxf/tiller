@@ -427,7 +427,9 @@ function ThreadBody({
                 <DecisionBlock key={item.seq} decision={item} attention={attention} owner={owner} />
               );
             case "checkpoint":
-              return <CheckpointLine key={item.seq} checkpoint={item} />;
+              // A first start says nothing the thread's top does not: only a
+              // restart, where the orchestrator lost what is above, gets a line.
+              return item.restarted ? <CheckpointLine key={item.seq} checkpoint={item} /> : null;
           }
         })}
         {shownPending ? <PendingAsk text={pending} /> : null}

@@ -264,8 +264,7 @@ export function CheckpointLine({ checkpoint }: { checkpoint: ThreadCheckpoint })
     <div className="chat-checkpoint" data-testid="chat-checkpoint">
       <span>
         <RestartIcon />
-        {checkpoint.restarted ? "Orchestrator restarted" : "Orchestrator started"}{" "}
-        {stamp(checkpoint.at)}
+        Orchestrator restarted {stamp(checkpoint.at)}
       </span>
     </div>
   );

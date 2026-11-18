@@ -760,10 +760,12 @@
   margin-left: auto;
 }
 
+/* The thread's 24px gap is too much for one gray line: half of it here. */
 .chat-checkpoint {
   display: flex;
   align-items: center;
   gap: 12px;
+  margin: -12px 0;
   font-size: 11.5px;
   color: var(--fg-4);
 }
