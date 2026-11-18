@@ -30,6 +30,15 @@ beforeEach(() => {
     addEventListener: () => {},
     removeEventListener: () => {},
   }));
+  // jsdom has no layout: what the input-otp boxes measure with.
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      disconnect() {}
+    },
+  );
+  document.elementFromPoint = () => null;
 });
 
 afterEach(() => {
@@ -43,7 +52,7 @@ test("the screen is one numeric field, focused, that asks for the printed code",
   expect(input.inputMode).toBe("numeric");
   expect(input.autocomplete).toBe("one-time-code");
   expect(document.activeElement).toBe(input);
-  expect(screen.getByRole("heading", { name: "Sign in to this board" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Enter your sign-in code" })).toBeTruthy();
   expect(screen.getByText("tiller board --login")).toBeTruthy();
   expect(screen.getAllByRole("textbox")).toHaveLength(1);
 });
@@ -66,7 +75,7 @@ test("a pasted code with a space or dash is read as its eight digits", async () 
   const onSignedIn = vi.fn();
   render(<SignedOutScreen onSignedIn={onSignedIn} />);
 
-  fireEvent.change(field(), { target: { value: "1234 5678" } });
+  fireEvent.paste(field(), { clipboardData: { getData: () => "1234 5678" } });
   await waitFor(() => expect(onSignedIn).toHaveBeenCalled());
   expect(sent(fetch)).toEqual(['{"code":"12345678"}']);
 });

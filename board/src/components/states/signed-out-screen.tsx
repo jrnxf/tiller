@@ -1,8 +1,10 @@
+import { REGEXP_ONLY_DIGITS } from "input-otp";
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import { CODE_LENGTH, codeDigits, signIn } from "../../lib/session";
 import { Logo } from "../shell/logo";
+import { InputOTP, InputOTPGroup, InputOTPSeparator, InputOTPSlot } from "../ui/input-otp";
 import { useAppearance } from "../shell/shell";
 
 // `text` with each `command` span set as code.
@@ -15,7 +17,7 @@ function withCode(text: string): ReactNode[] {
 }
 
 // A browser without the owner cookie sees only this, on loopback as at an
-// `--allow-host` name: one field for the 8-digit code `tiller board --login` prints. It sends
+// `--allow-host` name: eight boxes for the code `tiller board --login` prints. It sends
 // the code as the eighth digit lands, typed or pasted, and opens the board once
 // the daemon has set the cookie. The link and QR code that command prints sign
 // in the same way.
@@ -51,11 +53,7 @@ export function SignedOutScreen({ onSignedIn }: { onSignedIn: () => void }) {
         <div className="ws">
           <Logo />
         </div>
-        <h1>Sign in to this board</h1>
-        <p>
-          Run <code>tiller board --login</code> in a terminal on the machine running tiller, then
-          enter the 8-digit code it prints.
-        </p>
+        <h1>Enter your sign-in code</h1>
         <form
           className="signin-form"
           onSubmit={(event) => {
@@ -63,35 +61,44 @@ export function SignedOutScreen({ onSignedIn }: { onSignedIn: () => void }) {
             submit(code);
           }}
         >
-          <input
+          <InputOTP
             ref={field}
-            className="signin-code"
+            maxLength={CODE_LENGTH}
+            pattern={REGEXP_ONLY_DIGITS}
+            pasteTransformer={codeDigits}
             aria-label="Sign-in code"
             aria-invalid={error ? true : undefined}
             aria-describedby={error ? "signin-error" : undefined}
-            inputMode="numeric"
             autoComplete="one-time-code"
-            pattern="[0-9]*"
-            spellCheck={false}
-            placeholder="········"
             value={code}
             readOnly={pending}
-            onChange={(event) => {
-              const digits = codeDigits(event.target.value);
+            onChange={(value) => {
+              const digits = codeDigits(value);
               setCode(digits);
               if (digits.length > 0) setError(null);
               submit(digits);
             }}
-          />
+          >
+            <InputOTPGroup>
+              {[0, 1, 2, 3].map((index) => (
+                <InputOTPSlot key={index} index={index} />
+              ))}
+            </InputOTPGroup>
+            <InputOTPSeparator />
+            <InputOTPGroup>
+              {[4, 5, 6, 7].map((index) => (
+                <InputOTPSlot key={index} index={index} />
+              ))}
+            </InputOTPGroup>
+          </InputOTP>
         </form>
         {error ? (
           <p className="signin-error" id="signin-error" role="alert">
             {withCode(error)}
           </p>
         ) : null}
-        <p className="sub signin-alt">
-          It also prints a link and a QR code that sign in the same way. Each works once, within a
-          minute.
+        <p className="sub signin-hint">
+          Get a code with <code>tiller board --login</code> on the machine running tiller.
         </p>
       </div>
     </main>
