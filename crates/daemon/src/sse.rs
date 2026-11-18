@@ -490,7 +490,7 @@ mod tests {
             initialized: crate::api::Initialized::default(),
             streams: crate::sse::Streams::default(),
             ssh: vec!["ssh".into()],
-            evals: crate::memory::eval::Evals::default(),
+            kb_home: None,
             backups: crate::backups::BackupJobs::default(),
             retros: crate::retros::Retros::default(),
         })));

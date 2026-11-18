@@ -1,9 +1,9 @@
 //! The pending queue (`memory.md` section 4): notes agents suggest wait in
 //! `memory_pending` until the owner keeps or discards them.
 //!
-//! Nothing here runs the kb CLI. Keep runs `kb add` before its transaction
-//! ([`crate::kb::add`]) and passes the note id it got to [`Store::mem_keep`],
-//! so a row goes only after kb accepted the note.
+//! Keep runs `kb add` before its transaction ([`Store::mem_keep_with`]) and
+//! passes the note id it got to [`Store::mem_keep`], so a row goes only
+//! after kb accepted the note.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -320,6 +320,52 @@ impl Store {
             )?;
             Ok(kept.clone())
         })
+    }
+
+    /// Keep, whole (`memory.md` section 4, How Keep writes to kb): checks the
+    /// row, runs `add` with the note in the project's repo scope, then
+    /// `mem.keep` with the id kb gave. A refused or failed `add` leaves the
+    /// row in place. A request whose key is already recorded replays and
+    /// runs no `add`. The key comes from `ctx`.
+    pub fn mem_keep_with(
+        &mut self,
+        ctx: &Ctx,
+        id: &str,
+        rev: i64,
+        add: impl FnOnce(&Value) -> std::result::Result<kb::Added, String>,
+    ) -> Result<Applied<Kept>> {
+        require_owner(&ctx.actor, "mem.keep")?;
+        if self.key_recorded(ctx)? {
+            let replay = Kept {
+                note_id: String::new(),
+                scope: String::new(),
+            };
+            return self.mem_keep(ctx, None, id, rev, &replay);
+        }
+        let note = pending(self.conn(), id)?;
+        check_rev(
+            "pending note",
+            &note.id,
+            note.rev,
+            rev,
+            None,
+            note.edited_at,
+        )?;
+        let project: Project = get(self.conn(), "project", &note.project_id)?;
+        let scope = repo_scope_of(&project).ok_or_else(|| {
+            Error::refused(
+                "project",
+                &project.id,
+                "it has no repo, so its notes have no kb scope to keep to",
+            )
+        })?;
+        let added = add(&keep_input(&note, &scope))
+            .map_err(|message| Error::refused("pending note", &note.id, message))?;
+        let kept = Kept {
+            note_id: added.id,
+            scope,
+        };
+        self.mem_keep(ctx, None, &note.id, rev, &kept)
     }
 
     /// `mem.discard` (the owner): deletes the row. Its event keeps the note.

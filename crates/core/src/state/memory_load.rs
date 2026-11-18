@@ -5,7 +5,7 @@
 //! Nothing here reads the kb store. The launcher renders the notes
 //! ([`crate::kb::render`]); this module records which ones a session got.
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -143,6 +143,31 @@ impl Store {
                 loaded_at: at,
                 notes: written,
             })
+        })
+    }
+
+    /// Health's kb warning (`memory.md` section 3): the newest launch found
+    /// the kb store missing or unreadable. `None` when it read the store, or
+    /// no launch has run.
+    pub fn kb_warning(&self) -> Result<Option<String>> {
+        let state: Option<String> = self
+            .conn()
+            .query_row(
+                "SELECT json_extract(payload, '$.kb') FROM events
+                 WHERE kind = 'session.memory_loaded' AND json_extract(payload, '$.kb') IS NOT NULL
+                 ORDER BY seq DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(match state.as_deref() {
+            Some("missing") => {
+                Some("the kb store is missing: fleet launches load no notes".to_owned())
+            }
+            Some("unreadable") => {
+                Some("the kb store cannot be read: fleet launches load no notes".to_owned())
+            }
+            _ => None,
         })
     }
 
@@ -1020,6 +1045,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(kb, "missing");
+        // Health warns until a launch reads the store again.
+        let warning = store.kb_warning().unwrap().unwrap();
+        assert!(warning.contains("missing"), "{warning}");
+        store
+            .mem_load(&daemon, &session, &rendered(&["a-note"]))
+            .unwrap();
+        assert_eq!(store.kb_warning().unwrap(), None);
         observe(
             &mut store,
             &session,

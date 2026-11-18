@@ -14,7 +14,7 @@ use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tiller_agents::land::{DaemonLock, LandError};
@@ -107,23 +107,6 @@ pub enum Ended {
     /// Starting the workers panicked. The CLI exits 1, so the service
     /// manager restarts the daemon (and gives up after its start limit).
     WorkersFailed,
-}
-
-/// Stops the curators and holdout evals the board started, each with
-/// everything it started, and waits up to `wait` in all for them to say how
-/// they ended. A curator's retro ends `unfinished`, so it can run again; an
-/// eval records nothing. Both are told to stop before either is waited
-/// for, so a slow curator does not keep an eval spending quota.
-pub(crate) fn stop_board_runs(
-    retros: &crate::retros::Retros,
-    evals: &crate::memory::eval::Evals,
-    wait: Duration,
-) {
-    retros.signal();
-    evals.signal();
-    let deadline = Instant::now() + wait;
-    retros.wait(deadline);
-    evals.wait(deadline);
 }
 
 /// Why a daemon stopped itself.
@@ -424,7 +407,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         initialized: crate::api::Initialized::default(),
         streams: crate::sse::Streams::default(),
         ssh: config.ssh.clone(),
-        evals: crate::memory::eval::Evals::default(),
+        kb_home: tiller_core::kb::home_from_env(),
         backups: crate::backups::BackupJobs::default(),
         retros: crate::retros::Retros::default(),
     });
@@ -497,7 +480,6 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         let _ = stopping.send(true);
     };
     let retros = state.0.retros.clone();
-    let evals = state.0.evals.clone();
     // The owner CLI socket (`authority.md` section 7): without it the
     // board still serves, and the CLI says it lists this host only.
     let owner_socket = match crate::socket::bind(&config.home) {
@@ -523,7 +505,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
     };
     let server = axum::serve(listener, api::router(state)).with_graceful_shutdown(shutdown);
     let mut stopped = stop.clone();
-    // A serve error is returned only once the curators and evals the board
+    // A serve error is returned only once the curators the board
     // started are stopped, the stop is recorded and the info file is gone.
     let served = tokio::select! {
         served = server => served.map_err(DaemonError::Serve),
@@ -546,7 +528,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
             let _ = tokio::time::timeout(DRAIN, handle).await;
         }
     }
-    let _ = tokio::task::spawn_blocking(move || stop_board_runs(&retros, &evals, DRAIN)).await;
+    let _ = tokio::task::spawn_blocking(move || retros.stop(DRAIN)).await;
     // An older binary never writes to a newer database, not even its stop
     // event.
     let fatal = *fatal.lock().unwrap_or_else(PoisonError::into_inner);

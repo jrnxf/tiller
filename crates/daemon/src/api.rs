@@ -120,8 +120,9 @@ pub struct Inner {
     /// `ssh`, or `TILLER_SSH` split on whitespace: what Add a host runs to
     /// reach the new host (`protocol.md` 10.1).
     pub ssh: Vec<OsString>,
-    /// The holdout evals the board started, running or failed.
-    pub evals: memory::eval::Evals,
+    /// The kb store the memory view reads (`memory.md` section 3):
+    /// `KB_HOME`, else `~/.kb`; none in a test that sets no store.
+    pub kb_home: Option<std::path::PathBuf>,
     /// The backup the board started, if one runs, and the last that failed.
     pub backups: crate::backups::BackupJobs,
     /// The curator runs the board started (Run again), stopped with the
@@ -1286,20 +1287,14 @@ fn routes() -> Router<AppState> {
             post(relabel_intervention),
         )
         .route("/api/v1/memory", get(memory::view))
-        .route("/api/v1/memory/edits", post(memory::edit))
-        .route("/api/v1/memory/proposals/decide", post(memory::decide))
         .route(
-            "/api/v1/memory/proposals/{id}/repropose",
-            post(memory::repropose),
+            "/api/v1/memory/pending/{id}",
+            axum::routing::patch(memory::edit),
         )
-        .route(
-            "/api/v1/memory/proposals/{id}/eval",
-            get(memory::eval::eval_plan).post(memory::eval::eval_start),
-        )
-        .route("/api/v1/memory/changes/{proposal}/undo", post(memory::undo))
+        .route("/api/v1/memory/pending/{id}/keep", post(memory::keep))
+        .route("/api/v1/memory/pending/{id}/discard", post(memory::discard))
         .route("/api/v1/retros", get(crate::retros::list_retros))
         .route("/api/v1/retros/{id}/run", post(crate::retros::run_retro))
-        .route("/api/v1/memory/revisions/{id}", get(memory::revision))
         .route("/api/v1/recap", get(recap))
         .route("/api/v1/recap/seen", post(mark_recap_seen))
         .route("/api/v1/projects/{id}/replies", get(project_replies))
@@ -1790,7 +1785,7 @@ async fn full_health(state: &AppState) -> Health {
     let home = state.0.home.clone();
     let (seq, warnings, merge_app) = tokio::task::spawn_blocking(move || {
         let (seq, warnings) = match db.exists().then(|| Store::open_current(&db)) {
-            Some(Ok(store)) => (Some(store.last_seq()), health_warnings(&store)),
+            Some(Ok(store)) => (Some(store.last_seq()), health_warnings(&store, &home)),
             Some(Err(error)) => (Some(Err(error)), Vec::new()),
             None => (None, Vec::new()),
         };
@@ -1831,16 +1826,41 @@ async fn full_health(state: &AppState) -> Health {
     }
 }
 
-/// Health's warnings: a holder upgrade the holder refused (R22). A read
-/// that fails shows no warning; the pollers carry a failing database.
-fn health_warnings(store: &Store) -> Vec<String> {
+/// Health's warnings: a holder upgrade the holder refused (R22), a kb
+/// store the newest launch could not read, and a host with no kb command
+/// for Keep (`memory.md` section 3). A read that fails shows no warning;
+/// the pollers carry a failing database.
+fn health_warnings(store: &Store, home: &std::path::Path) -> Vec<String> {
+    let mut warnings = Vec::new();
     match store.host_degraded(tiller_reconcile::holder::UPGRADE_CHECK) {
-        Ok(problem) => problem.into_iter().collect(),
-        Err(error) => {
-            tracing::warn!(%error, "health warnings not read");
-            Vec::new()
-        }
+        Ok(problem) => warnings.extend(problem),
+        Err(error) => tracing::warn!(%error, "health warnings not read"),
     }
+    match store.kb_warning() {
+        Ok(problem) => warnings.extend(problem),
+        Err(error) => tracing::warn!(%error, "the kb warning not read"),
+    }
+    let claude_home = tiller_agents::spawn::trust::ClaudeConfig::from_env().home_dir();
+    warnings.extend(kb_command_warning(home, claude_home.as_deref()));
+    warnings
+}
+
+/// [`kb::NO_COMMAND`](tiller_core::kb::NO_COMMAND) when `config.toml` under
+/// `home` names no kb command and the Claude config home lists no kb plugin.
+fn kb_command_warning(
+    home: &std::path::Path,
+    claude_home: Option<&std::path::Path>,
+) -> Option<String> {
+    let table = std::fs::read_to_string(home.join("config.toml"))
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok())
+        .unwrap_or_default();
+    let command = tiller_core::kb::KbConfig::from_table(&table)
+        .ok()
+        .and_then(|config| config.command(claude_home));
+    command
+        .is_none()
+        .then(|| tiller_core::kb::NO_COMMAND.to_owned())
 }
 
 /// How long Run now waits for the poll it asked for.
@@ -4721,28 +4741,14 @@ fn host_config_of(home: &std::path::Path, boundary: Option<String>) -> HostConfi
             .and_then(toml::Value::as_str)
             .map(str::to_owned)
     };
-    let (learning, learning_error) =
-        match tiller_core::state::learning::Learning::from_table(&table) {
-            Ok(learning) => (learning, None),
-            Err(error) => (Default::default(), Some(error.to_string())),
-        };
     HostConfig {
         attach_terminal: text(host_config::ATTACH_TERMINAL),
         stop_hook_mode: text(host_config::STOP_HOOK_MODE)
             .filter(|mode| host_config::STOP_HOOK_MODES.contains(&mode.as_str()))
             .unwrap_or_else(|| "observe".to_owned()),
         accept_peers: crate::peer::federation_accept(home),
-        memory_remote: text(host_config::MEMORY_REMOTE).filter(|remote| !remote.is_empty()),
         boundary,
-        learning: LearningConfig {
-            sample_every: i64::try_from(learning.sample_every).unwrap_or(i64::MAX),
-            window_cards: learning.window_cards,
-            curator_model: learning.curator_model,
-            curator_timeout_minutes: i64::try_from(learning.curator_timeout_minutes)
-                .unwrap_or(i64::MAX),
-            evals_dir: learning.evals_dir,
-        },
-        config_error: config_error.or(learning_error),
+        config_error,
     }
 }
 
@@ -4785,15 +4791,7 @@ async fn set_config(
             // other settable key is judged by its own rule, into the TOML its
             // reader takes.
             let (typed, warnings) = if host_config::is_key(&setting) {
-                let boundary = meta(store.conn(), "boundary")?;
-                let typed = host_config::check(
-                    &setting,
-                    &value,
-                    host_config::Host {
-                        boundary: boundary.as_deref(),
-                    },
-                )
-                .map_err(Error::Usage)?;
+                let typed = host_config::check(&setting, &value).map_err(Error::Usage)?;
                 (typed, Vec::new())
             } else {
                 if let Some(project) = setting.strip_prefix("checkouts.") {
@@ -7023,9 +7021,8 @@ async fn app_shell(
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, add_dep, remove_dep, close,
         cancel, reopen, start_card_run, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, steer_agent, interrupt_agent, stop_agent, pause_agent, unpause_agent, resume_agent, relaunch_agent, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, project_fields, edit_project, start_settings, host_config_read, set_config,
         project_grants, create_grant, revoke_grant,
-        away_start, away_edit, away_end, away_brief, host_fields, edit_host, crate::backups::list, crate::backups::take, pick_bug_project, recap, mark_recap_seen, project_replies, mark_reply_read, project_thread, mark_thread_read, ask_detail, cancel_ask, relabel_intervention, memory::view, memory::revision,
-        memory::edit, memory::decide, memory::undo, memory::repropose, memory::eval::eval_plan,
-        memory::eval::eval_start, crate::retros::list_retros, crate::retros::run_retro,
+        away_start, away_edit, away_end, away_brief, host_fields, edit_host, crate::backups::list, crate::backups::take, pick_bug_project, recap, mark_recap_seen, project_replies, mark_reply_read, project_thread, mark_thread_read, ask_detail, cancel_ask, relabel_intervention, memory::view,
+        memory::edit, memory::keep, memory::discard, crate::retros::list_retros, crate::retros::run_retro,
         crate::pairings::list, crate::pairings::unpair, crate::pairings::revoke, session, login_code, logout
     ),
     components(schemas(ChangeEvent, ResetEvent, PeerEvent, LinkEvent, PeerResetEvent, TerminalLine, ErrorBody, ErrorDetail)),
@@ -7104,42 +7101,33 @@ pub(crate) mod tests {
         terminal: Option<Arc<dyn Terminal>>,
         ssh: Vec<OsString>,
     ) -> Router {
-        app_evals(
-            home,
-            assets,
-            damage,
-            peers,
-            terminal,
-            ssh,
-            memory::eval::Evals::default(),
-        )
+        app_kb(home, assets, damage, peers, terminal, ssh, None)
     }
 
-    /// The board API with `evals` as its holdout evals, so a test can stop
-    /// them the way the daemon does when it stops.
-    pub(crate) fn app_with_evals(home: &std::path::Path, evals: memory::eval::Evals) -> Router {
-        app_evals(
+    /// The board API whose memory view reads the kb store at `kb_home`.
+    pub(crate) fn app_with_kb(home: &std::path::Path, kb_home: &std::path::Path) -> Router {
+        app_kb(
             home,
             Assets::of::<Fixture>(),
             Damage::default(),
             Peers::idle(),
             None,
             vec!["ssh".into()],
-            evals,
+            Some(kb_home.to_owned()),
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn app_evals(
+    fn app_kb(
         home: &std::path::Path,
         assets: Assets,
         damage: Damage,
         peers: Arc<Peers>,
         terminal: Option<Arc<dyn Terminal>>,
         ssh: Vec<OsString>,
-        evals: memory::eval::Evals,
+        kb_home: Option<std::path::PathBuf>,
     ) -> Router {
-        app_holding(home, assets, damage, peers, terminal, ssh, evals, None)
+        app_holding(home, assets, damage, peers, terminal, ssh, kb_home, None)
     }
 
     /// The board API with `holder` as its terminal holder.
@@ -7161,7 +7149,7 @@ pub(crate) mod tests {
             Peers::idle(),
             terminal,
             vec!["ssh".into()],
-            memory::eval::Evals::default(),
+            None,
             Some(Arc::new(holder.clone())),
         )
     }
@@ -7174,7 +7162,7 @@ pub(crate) mod tests {
         peers: Arc<Peers>,
         terminal: Option<Arc<dyn Terminal>>,
         ssh: Vec<OsString>,
-        evals: memory::eval::Evals,
+        kb_home: Option<std::path::PathBuf>,
         holder: Option<Arc<dyn Holder>>,
     ) -> Router {
         let (_newest_tx, newest) = watch::channel(0);
@@ -7202,7 +7190,7 @@ pub(crate) mod tests {
             initialized: Initialized::default(),
             streams: sse::Streams::default(),
             ssh,
-            evals,
+            kb_home,
             backups: crate::backups::BackupJobs::default(),
             retros: crate::retros::Retros::default(),
         })))
@@ -7939,11 +7927,43 @@ pub(crate) mod tests {
         assert!(!root.body.contains("tiller-boot"));
     }
 
+    /// Health warns when Keep has no kb command to run (`memory.md`
+    /// section 3), whichever way the host names one.
+    #[test]
+    fn health_warns_of_a_missing_kb_command() {
+        let home = tempfile::tempdir().unwrap();
+        let claude = tempfile::tempdir().unwrap();
+        assert_eq!(
+            kb_command_warning(home.path(), Some(claude.path())).as_deref(),
+            Some(tiller_core::kb::NO_COMMAND)
+        );
+        assert!(kb_command_warning(home.path(), None).is_some());
+        std::fs::create_dir(claude.path().join("plugins")).unwrap();
+        std::fs::write(
+            claude.path().join("plugins/installed_plugins.json"),
+            r#"{"plugins": {"kb@example": [{"installPath": "/home/user/kb"}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(kb_command_warning(home.path(), Some(claude.path())), None);
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(
+            other.path().join("config.toml"),
+            "[memory]\nkb_command = [\"kb\"]\n",
+        )
+        .unwrap();
+        assert_eq!(kb_command_warning(other.path(), None), None);
+    }
+
     /// R22: a refused holder upgrade is a Health warning until an upgrade
     /// succeeds.
     #[tokio::test]
     async fn health_warns_of_a_refused_holder_upgrade_until_one_succeeds() {
         let mut fleet = Fleet::new();
+        std::fs::write(
+            fleet.dir.path().join("config.toml"),
+            "[memory]\nkb_command = [\"kb\"]\n",
+        )
+        .unwrap();
         let app = app(fleet.dir.path(), Assets::of::<Fixture>());
         let warnings = async |app: &Router| {
             let health: Value =
@@ -12435,7 +12455,7 @@ pub(crate) mod tests {
             initialized: Initialized::default(),
             streams: sse::Streams::default(),
             ssh: vec!["ssh".into()],
-            evals: memory::eval::Evals::default(),
+            kb_home: None,
             backups: crate::backups::BackupJobs::default(),
             retros,
         })))
@@ -12602,6 +12622,10 @@ pub(crate) mod tests {
             "owner_guard.endpoint",
             "intake_source",
             "learning",
+            // Keys of the old memory store and learning loop.
+            "memory.remote",
+            "learning.sample_every",
+            "learning.evals_dir",
             // The key `attach.terminal` replaced.
             "herdr.terminal",
         ] {
@@ -12621,12 +12645,6 @@ pub(crate) mod tests {
             ("attach.terminal", ""),
             ("stop_hook_mode", "block once"),
             ("federation.accept", "yes"),
-            ("memory.remote", "http://example.com/memory.git"),
-            ("learning.sample_every", "0"),
-            ("learning.window_cards", "many"),
-            ("learning.curator_model", "--help"),
-            ("learning.curator_timeout_minutes", "0"),
-            ("learning.evals_dir", "/nonexistent/evals"),
         ] {
             let answer = send(&app, set(setting, value)).await;
             assert_eq!(
@@ -12665,33 +12683,15 @@ pub(crate) mod tests {
             ("stop_hook_mode", "off"),
             ("stop_hook_mode", "observe"),
             ("federation.accept", "false"),
-            ("memory.remote", "git@example.com:team/memory.git"),
-            ("learning.sample_every", "3"),
-            ("learning.window_cards", "12"),
-            ("learning.curator_model", "opus"),
-            ("learning.curator_timeout_minutes", "30"),
             ("attach.terminal", "WezTerm"),
         ] {
             let sent = send(&app, set(setting, value)).await;
             assert_eq!(sent.status, StatusCode::OK, "{setting}: {}", sent.body);
         }
-        let evals = tempfile::tempdir().unwrap();
-        std::fs::create_dir(evals.path().join("evals")).unwrap();
-        std::fs::write(evals.path().join("evals/run.sh"), "#!/bin/sh\n").unwrap();
-        let dir = evals.path().to_str().unwrap();
-        let sent = send(&app, set("learning.evals_dir", dir)).await;
-        assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
         let table: toml::Table = std::fs::read_to_string(&config).unwrap().parse().unwrap();
         assert_eq!(table["stop_hook_mode"].as_str(), Some("observe"));
         assert_eq!(table["attach"]["terminal"].as_str(), Some("WezTerm"));
         assert_eq!(table["federation"]["accept"].as_bool(), Some(false));
-        assert_eq!(table["learning"]["sample_every"].as_integer(), Some(3));
-        assert_eq!(table["learning"]["window_cards"].as_integer(), Some(12));
-        assert_eq!(table["learning"]["curator_model"].as_str(), Some("opus"));
-        assert_eq!(
-            table["learning"]["curator_timeout_minutes"].as_integer(),
-            Some(30)
-        );
         let events: Vec<(String, String)> = {
             let store = fleet.open();
             let mut stmt = store
@@ -12703,7 +12703,7 @@ pub(crate) mod tests {
                 .map(Result::unwrap)
                 .collect()
         };
-        assert_eq!(events.len(), 10, "{events:?}");
+        assert_eq!(events.len(), 4, "{events:?}");
         assert_eq!(events[0].0, "stop_hook_mode");
         assert!(events[0].1.contains("\"off\""), "{}", events[0].1);
         assert_eq!(events[2].0, "federation.accept");
@@ -12711,7 +12711,7 @@ pub(crate) mod tests {
         assert!(!events.iter().any(|(_, payload)| payload.contains("<set>")));
 
         // The same value again records nothing.
-        let again = send(&app, set("learning.sample_every", "3")).await;
+        let again = send(&app, set("federation.accept", "false")).await;
         let again: Value = serde_json::from_str(&again.body).unwrap();
         assert_eq!(again["data"]["changed"], false, "{again}");
 
@@ -12721,31 +12721,10 @@ pub(crate) mod tests {
         assert_eq!(read["stop_hook_mode"], "observe", "{read}");
         assert_eq!(read["attach_terminal"], "WezTerm", "{read}");
         assert_eq!(read["accept_peers"], false, "{read}");
-        assert_eq!(
-            read["memory_remote"], "git@example.com:team/memory.git",
-            "{read}"
-        );
-        assert_eq!(read["learning"]["sample_every"], 3, "{read}");
-        assert_eq!(read["learning"]["curator_model"], "opus", "{read}");
-        assert_eq!(read["learning"]["evals_dir"], dir, "{read}");
         assert_eq!(read["boundary"], "personal", "{read}");
         assert!(read["config_error"].is_null(), "{read}");
         assert!(!read.to_string().contains("decider"), "{read}");
-
-        // A work host never pushes its memory repo, but may clear the remote.
-        fleet
-            .open()
-            .conn()
-            .execute("UPDATE meta SET value = 'work' WHERE key = 'boundary'", [])
-            .unwrap();
-        let pushed = send(&app, set("memory.remote", "git@example.com:team/other.git")).await;
-        assert_eq!(pushed.status, StatusCode::BAD_REQUEST, "{}", pushed.body);
-        assert!(pushed.body.contains("work host"), "{}", pushed.body);
-        let cleared = send(&app, set("memory.remote", "")).await;
-        assert_eq!(cleared.status, StatusCode::OK, "{}", cleared.body);
-        let read: Value =
-            serde_json::from_str(&get(&app, "/api/v1/host-config").await.body).unwrap();
-        assert!(read["memory_remote"].is_null(), "{read}");
+        assert!(read.get("memory_remote").is_none(), "{read}");
     }
 
     /// Services whose checks report one failed required check and the owner

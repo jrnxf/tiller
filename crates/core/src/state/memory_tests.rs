@@ -276,3 +276,85 @@ fn keep_input_names_the_scope_and_the_source() {
     project.repo = Some("/home/user/alpha".into());
     assert_eq!(repo_scope_of(&project), None);
 }
+
+/// Keep deletes the row only after kb accepted the note: a refused `add`
+/// leaves it, a project with no repo scope runs no `add`, and a retry with
+/// the same key replays without running `add` again.
+#[test]
+fn keep_runs_add_before_it_deletes_the_row() {
+    let (mut store, orchestrator) = memory_store();
+    let (ctx, _) = builder(&mut store, &orchestrator, "one");
+    let row = store
+        .mem_note(&ctx, None, &new("gotcha", "Keep me"))
+        .unwrap()
+        .value;
+    let never = |_: &Value| -> std::result::Result<kb::Added, String> {
+        panic!("add runs only for a project with a repo scope")
+    };
+
+    // No repo scope: refused before kb runs.
+    store
+        .conn()
+        .execute(
+            "UPDATE projects SET repo = NULL, remote = NULL WHERE id = 'alpha'",
+            [],
+        )
+        .unwrap();
+    let error = store
+        .mem_keep_with(&owner(), &row.id, 1, never)
+        .unwrap_err();
+    assert!(matches!(error, Error::Refused { .. }), "{error}");
+    store
+        .conn()
+        .execute(
+            "UPDATE projects SET remote = 'git@example.com:example/alpha.git' WHERE id = 'alpha'",
+            [],
+        )
+        .unwrap();
+
+    // A refused add keeps the row and says why.
+    let error = store
+        .mem_keep_with(&owner(), &row.id, 1, |_| {
+            Err("kb refused the note: dup".into())
+        })
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("kb refused the note: dup"),
+        "{error}"
+    );
+    assert_eq!(store.pending_note(&row.id).unwrap().id, row.id);
+
+    // A fleet session may not keep.
+    assert!(matches!(
+        store.mem_keep_with(&ctx, &row.id, 1, never),
+        Err(Error::Forbidden(_))
+    ));
+
+    // Kept: the input names the repo scope, and the row goes.
+    let keyed = owner().with_key("k1".to_owned());
+    let mut seen = None;
+    let done = store
+        .mem_keep_with(&keyed, &row.id, 1, |input| {
+            seen = Some(input.clone());
+            Ok(kb::Added {
+                id: "keep-me".into(),
+                existed: false,
+            })
+        })
+        .unwrap();
+    assert_eq!(
+        done.value,
+        Kept {
+            note_id: "keep-me".into(),
+            scope: "example.com/example/alpha".into(),
+        }
+    );
+    assert_eq!(seen.unwrap()["scope"], "example.com/example/alpha");
+    assert!(matches!(
+        store.pending_note(&row.id),
+        Err(Error::NotFound { .. })
+    ));
+    let again = store.mem_keep_with(&keyed, &row.id, 1, never).unwrap();
+    assert!(again.replayed);
+    assert_eq!(again.value, done.value);
+}
