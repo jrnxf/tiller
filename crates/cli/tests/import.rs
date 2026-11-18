@@ -107,7 +107,7 @@ fn dry_run_prints_the_plan_then_import_writes_it_once() {
     );
     assert_eq!(
         plan["memory"][0]["placement"],
-        json!({"as": "proposal", "target": "fleet.md", "section": "How we work here"})
+        json!({"as": "pending", "kind": "convention"})
     );
     assert_eq!(
         plan["memory"][1]["placement"],

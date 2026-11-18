@@ -501,9 +501,14 @@ pub fn relaunch(
             )));
         }
     }
-    // Memory that cannot be read refuses the launch: read it before the
-    // stop, so the refusal leaves the old session running.
-    let memory = memory::render(store, world.tiller_home, &project.id, role)?;
+    // The role file is read before the stop, so a refusal leaves the old
+    // session running. A kb store that cannot be read loads nothing.
+    let memory = memory::render(
+        &world.config.memory,
+        world.config.kb_home.as_deref(),
+        &project,
+        role,
+    )?;
     let model = match &request.asked {
         Some((model, effort)) => {
             let resolved = dispatch::resolve(

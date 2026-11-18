@@ -135,7 +135,9 @@ pub fn lavish_from_config(table: &toml::Table) -> Result<(Vec<OsString>, Vec<Str
 
 impl Tools {
     pub fn load(app: &App) -> Result<Self, Failure> {
-        let config = SpawnConfig::from_table(&load_config(app)?).map_err(failure)?;
+        let mut config = SpawnConfig::from_table(&load_config(app)?).map_err(failure)?;
+        // The kb store a launch renders from: `KB_HOME`, else `.kb` in the home folder.
+        config.kb_home = tiller_core::kb::home_from_env();
         let scratch = config.spawn.scratch_dir().map_err(failure)?;
         let tiller_home = absolute_home(&app.home)?;
         // A home whose holder has made no socket launches nothing.

@@ -1,53 +1,28 @@
-//! What a launch loads and the record of it (`memory.md` sections 2 and 7):
-//! the approved Tiller documents a session of a role in a project gets, and
-//! `session_loads`, the rows `mem.load` writes for each launch and copies on
-//! a resume, `/clear` or `/compact`.
+//! The record of what a launch loaded (`memory.md` section 3): `mem.load`
+//! writes `session_notes`, one row per kb note the launch rendered, and
+//! copies the newest set on a resume, `/clear` or `/compact`.
 //!
-//! Nothing here reads a file. The launcher reads each blob from the memory
-//! repo by its SHA and renders the prompt; this module only picks the
-//! revisions and records which ones a session got.
+//! Nothing here reads the kb store. The launcher renders the notes
+//! ([`crate::kb::render`]); this module records which ones a session got.
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::get;
-use super::memory::host_boundary;
 use crate::domain::{Run, Session};
 use crate::error::{Error, Result};
-use crate::ids::FLEET_PROJECT;
-use crate::import::EMPTY_BLOB;
+use crate::kb::Rendered;
 use crate::store::{Applied, Ctx, NewEvent, Store, Tx};
 use crate::time::Timestamp;
 
-/// One approved revision a launch renders: the current approved revision
-/// of one live Tiller document.
+/// One note a session loaded: its kb id and the SHA-256 of its rendered
+/// section.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Loadable {
-    pub source_id: String,
-    pub revision_id: String,
-    pub project_id: String,
-    /// The repo as `memory_sources` records it (`~/.tiller/memory`).
-    pub canonical_repo: String,
-    /// The document's path in that repo, such as `projects/alpha.md`.
-    pub canonical_path: String,
-    pub blob_sha: String,
+pub struct LoadedNote {
+    pub id: String,
+    pub sha256: String,
 }
-
-/// A Tiller document a launch went on without (`memory.md` section 9, step
-/// 4): it would load for the session's role and project, but has no
-/// approved text to render.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Skipped {
-    pub source_id: String,
-    pub project_id: String,
-    /// The document's path in the memory repo, such as `projects/alpha.md`.
-    pub path: String,
-    pub reason: String,
-}
-
-/// Why a launch skips a document: the one reason a launch skips one today.
-pub const NO_APPROVED_REVISION: &str = "it has no approved revision";
 
 /// What `mem.load` recorded for one session.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,8 +30,8 @@ pub struct Loaded {
     pub session_id: String,
     pub trigger: String,
     pub loaded_at: Timestamp,
-    /// The revisions, in the order they were rendered or copied.
-    pub revision_ids: Vec<String>,
+    /// The notes, in the order they were rendered or copied.
+    pub notes: Vec<LoadedNote>,
 }
 
 /// What one [`Store::mem_load_owed`] pass did.
@@ -95,12 +70,12 @@ pub struct FailedCopy {
     pub error: Error,
     /// This was the copy's last try: its observation was recorded, or its
     /// session ended, [`COPY_WINDOW_MINUTES`] or more before the pass, so
-    /// no later pass reads it again, and `session_loads` keeps no row for
+    /// no later pass reads it again, and `session_notes` keeps no row for
     /// it.
     pub given_up: bool,
 }
 
-/// The `session_loads.trigger` values a `SessionStart` observation copies
+/// The `session_notes.trigger` values a `SessionStart` observation copies
 /// the newest set under. The launch writes `startup` itself.
 const COPY_TRIGGERS: &[&str] = &["resume", "clear", "compact"];
 
@@ -123,55 +98,76 @@ type OwedCopy = (String, String, Timestamp, Timestamp, Option<Timestamp>);
 const EPOCH: Timestamp = Timestamp::UNIX_EPOCH;
 
 impl Store {
-    /// The approved revisions a launch of `role` in `project` renders, in
-    /// prompt order: the `fleet` document first, then the project's. A
-    /// source loads when it is a live Tiller document of this host's
-    /// boundary, its `roles` name the role, and it has an approved
-    /// revision; the current one is the approved revision recorded last (an
-    /// undo records its earlier blob again). A source with no approved
-    /// revision yet loads nothing: the launch goes on without it, and
-    /// [`Self::mem_skipped`] names it. A state.db with no live Tiller
-    /// document loads nothing either, so only a launch with memory to load
-    /// needs `meta.boundary`.
-    pub fn mem_loadable(&self, project: &str, role: &str) -> Result<Vec<Loadable>> {
-        loadable(self.conn(), project, role)
-    }
-
-    /// The documents a launch of `role` in `project` skips, in prompt
-    /// order: each live Tiller document that would load (as
-    /// [`Self::mem_loadable`] picks them) but has no approved revision. One
-    /// whose newest revision is the empty file is not skipped, since it has
-    /// no text to load.
-    pub fn mem_skipped(&self, project: &str, role: &str) -> Result<Vec<Skipped>> {
-        skipped(self.conn(), Some((project, role)))
-    }
-
-    /// Every live Tiller document of this host's boundary that launches
-    /// skip, in any project and for any role it names (one that names no
-    /// role loads nowhere), fleet first: the Health warning.
-    pub fn mem_skipped_all(&self) -> Result<Vec<Skipped>> {
-        skipped(self.conn(), None)
-    }
-
     /// `mem.load` (the launcher, once a launch's line went in): one
-    /// `startup` row per revision it rendered for the session, at this
-    /// moment, and the `session.memory_loaded` event naming them and the
-    /// documents the launch `skipped`. A launch that rendered and skipped
-    /// nothing writes nothing and opens no transaction.
+    /// `startup` row per note it rendered for the session, at this moment,
+    /// and the `session.memory_loaded` event with the store's state, the
+    /// notes, the ones it skipped and the hash of the rendered section. A
+    /// launch that loaded nothing still writes its event, so Health reads
+    /// the newest state of the store.
     pub fn mem_load(
         &mut self,
         ctx: &Ctx,
         session: &str,
-        revisions: &[String],
-        skipped: &[Skipped],
+        rendered: &Rendered,
     ) -> Result<Applied<Loaded>> {
-        if revisions.is_empty() && skipped.is_empty() {
-            return Ok(nothing(session, "startup", ctx.now));
-        }
         self.write(ctx, "mem.load", None, |tx| {
             let session: Session = get(tx.conn(), "session", session)?;
             let at = tx.now();
-            insert(tx, &session, "startup", at, revisions, Some(skipped))
+            let notes: Vec<LoadedNote> = rendered
+                .loaded()
+                .map(|e| LoadedNote {
+                    id: e.id.clone(),
+                    sha256: e.sha256.clone(),
+                })
+                .collect();
+            let written = insert(tx, &session.id, "startup", at, &notes)?;
+            let skipped: Vec<_> = rendered
+                .skipped()
+                .map(|e| json!({"id": e.id, "reason": e.reason}))
+                .collect();
+            let card = card_of(tx, &session)?;
+            tx.event(
+                NewEvent::new("session", &session.id, "session.memory_loaded")
+                    .card_opt(card)
+                    .payload(json!({
+                        "trigger": "startup",
+                        "kb": rendered.kb.as_str(),
+                        "notes": written,
+                        "skipped": skipped,
+                        "hash": rendered.hash,
+                    })),
+            )?;
+            Ok(Loaded {
+                session_id: session.id,
+                trigger: "startup".to_owned(),
+                loaded_at: at,
+                notes: written,
+            })
+        })
+    }
+
+    /// Health's kb warning (`memory.md` section 3): the newest launch found
+    /// the kb store missing or unreadable. `None` when it read the store, or
+    /// no launch has run.
+    pub fn kb_warning(&self) -> Result<Option<String>> {
+        let state: Option<String> = self
+            .conn()
+            .query_row(
+                "SELECT json_extract(payload, '$.kb') FROM events
+                 WHERE kind = 'session.memory_loaded' AND json_extract(payload, '$.kb') IS NOT NULL
+                 ORDER BY seq DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(match state.as_deref() {
+            Some("missing") => {
+                Some("the kb store is missing: fleet launches load no notes".to_owned())
+            }
+            Some("unreadable") => {
+                Some("the kb store cannot be read: fleet launches load no notes".to_owned())
+            }
+            _ => None,
         })
     }
 
@@ -180,7 +176,7 @@ impl Store {
     /// newest set at `at` with the new trigger at `at`, so a copy made late
     /// copies the set the session had then, not one recorded after. It
     /// renders and hashes nothing, since the appended prompt is the one the
-    /// session launched with. A session that loaded nothing by `at` writes
+    /// session launched with. A session that loaded no note by `at` writes
     /// nothing and opens no transaction; a copy already recorded at `at`
     /// writes nothing either.
     pub fn mem_load_again(
@@ -200,8 +196,22 @@ impl Store {
         }
         self.write(ctx, "mem.load", None, |tx| {
             let session: Session = get(tx.conn(), "session", session)?;
-            let revisions = set_as_of(tx.conn(), &session.id, Some(at))?;
-            insert(tx, &session, trigger, at, &revisions, None)
+            let notes = set_as_of(tx.conn(), &session.id, Some(at))?;
+            let written = insert(tx, &session.id, trigger, at, &notes)?;
+            if !written.is_empty() {
+                let card = card_of(tx, &session)?;
+                tx.event(
+                    NewEvent::new("session", &session.id, "session.memory_loaded")
+                        .card_opt(card)
+                        .payload(json!({"trigger": trigger, "notes": written})),
+                )?;
+            }
+            Ok(Loaded {
+                session_id: session.id,
+                trigger: trigger.to_owned(),
+                loaded_at: at,
+                notes: written,
+            })
         })
     }
 
@@ -254,7 +264,7 @@ impl Store {
                 continue;
             }
             match self.mem_load_again(ctx, &session, &trigger, at) {
-                Ok(copied) if copied.value.revision_ids.is_empty() => {}
+                Ok(copied) if copied.value.notes.is_empty() => {}
                 Ok(copied) => pass.made.push(copied.value),
                 Err(error) => {
                     // The next floor is the mark less the slack, so this
@@ -308,13 +318,13 @@ impl Store {
                  JOIN sessions s ON s.id = o.session_id
                  WHERE o.recorded_at > ?2
                    AND (s.ended_at IS NULL OR s.ended_at > ?1)
-                   AND EXISTS (SELECT 1 FROM session_loads l
+                   AND EXISTS (SELECT 1 FROM session_notes l
                                WHERE l.session_id = s.id AND l.loaded_at <= o.observed_at)
                    AND o.source = 'hook'
                    AND o.event IN ({events})
                    AND json_extract(o.payload, '$.bind_refused') IS NULL
                    AND NOT EXISTS (
-                       SELECT 1 FROM session_loads l
+                       SELECT 1 FROM session_notes l
                        WHERE l.session_id = o.session_id AND l.loaded_at = o.observed_at
                          AND l.trigger = substr(o.event, length('SessionStart:') + 1))
                  ORDER BY o.observed_at, o.id"
@@ -331,96 +341,22 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// The session's newest load set: the revisions of its latest
-    /// `session_loads` moment.
+    /// The ids of the session's newest load set: the notes of its latest
+    /// `session_notes` moment.
     pub fn mem_loaded(&self, session: &str) -> Result<Vec<String>> {
-        newest_set_in(self.conn(), session)
+        Ok(set_as_of(self.conn(), session, None)?
+            .into_iter()
+            .map(|n| n.id)
+            .collect())
     }
 }
 
-/// Whether state.db has a live Tiller document, so a host with none needs
-/// no `meta.boundary` to load nothing.
-fn any_document(conn: &rusqlite::Connection) -> Result<bool> {
-    Ok(conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM memory_sources
-                        WHERE kind = 'tiller_doc' AND retired_at IS NULL)",
-        [],
-        |row| row.get(0),
-    )?)
-}
-
-/// [`Store::mem_loadable`] on `conn`, for a read inside a transaction.
-pub(super) fn loadable(
-    conn: &rusqlite::Connection,
-    project: &str,
-    role: &str,
-) -> Result<Vec<Loadable>> {
-    if !any_document(conn)? {
-        return Ok(Vec::new());
-    }
-    let boundary = host_boundary(conn)?;
-    let mut stmt = conn.prepare(
-        "SELECT s.id, r.id, s.project_id, s.canonical_repo, s.canonical_path, r.blob_sha
-         FROM memory_sources s
-         JOIN memory_revisions r ON r.id = (
-             SELECT id FROM memory_revisions
-             WHERE source_id = s.id AND review = 'approved'
-             ORDER BY recorded_at DESC, id DESC LIMIT 1)
-         WHERE s.kind = 'tiller_doc' AND s.retired_at IS NULL
-           AND s.boundary = ?3
-           AND s.project_id IN (?1, ?2)
-           AND EXISTS (SELECT 1 FROM json_each(s.roles) WHERE value = ?4)
-           AND s.canonical_repo IS NOT NULL AND s.canonical_path IS NOT NULL
-         ORDER BY s.project_id != ?1, s.canonical_path, s.id",
-    )?;
-    let rows = stmt.query_map(params![FLEET_PROJECT, project, boundary, role], |row| {
-        Ok(Loadable {
-            source_id: row.get(0)?,
-            revision_id: row.get(1)?,
-            project_id: row.get(2)?,
-            canonical_repo: row.get(3)?,
-            canonical_path: row.get(4)?,
-            blob_sha: row.get(5)?,
-        })
-    })?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
-}
-
-/// The documents with no approved revision whose newest revision has text:
-/// those a launch of the role in the project would load (`Some`), or every
-/// one on the host (`None`).
-fn skipped(conn: &rusqlite::Connection, scope: Option<(&str, &str)>) -> Result<Vec<Skipped>> {
-    if !any_document(conn)? {
-        return Ok(Vec::new());
-    }
-    let boundary = host_boundary(conn)?;
-    let (project, role) = scope.unzip();
-    let mut stmt = conn.prepare(
-        "SELECT s.id, s.project_id, s.canonical_path
-         FROM memory_sources s
-         WHERE s.kind = 'tiller_doc' AND s.retired_at IS NULL
-           AND s.boundary = ?2
-           AND s.canonical_repo IS NOT NULL AND s.canonical_path IS NOT NULL
-           AND (?3 IS NULL OR s.project_id IN (?1, ?3))
-           AND EXISTS (SELECT 1 FROM json_each(s.roles) WHERE ?4 IS NULL OR value = ?4)
-           AND NOT EXISTS (SELECT 1 FROM memory_revisions
-                           WHERE source_id = s.id AND review = 'approved')
-           AND (SELECT blob_sha FROM memory_revisions WHERE source_id = s.id
-                ORDER BY recorded_at DESC, id DESC LIMIT 1) != ?5
-         ORDER BY s.project_id != ?1, s.project_id, s.canonical_path, s.id",
-    )?;
-    let rows = stmt.query_map(
-        params![FLEET_PROJECT, boundary, project, role, EMPTY_BLOB],
-        |row| {
-            Ok(Skipped {
-                source_id: row.get(0)?,
-                project_id: row.get(1)?,
-                path: row.get(2)?,
-                reason: NO_APPROVED_REVISION.to_owned(),
-            })
-        },
-    )?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+/// The card of the session's run, for the event's timeline.
+fn card_of(tx: &Tx<'_>, session: &Session) -> Result<Option<String>> {
+    Ok(match &session.run_id {
+        Some(run) => Some(get::<Run>(tx.conn(), "run", run)?.card_id),
+        None => None,
+    })
 }
 
 /// A load that wrote nothing, with no transaction opened.
@@ -430,83 +366,58 @@ fn nothing(session: &str, trigger: &str, at: Timestamp) -> Applied<Loaded> {
             session_id: session.to_owned(),
             trigger: trigger.to_owned(),
             loaded_at: at,
-            revision_ids: Vec::new(),
+            notes: Vec::new(),
         },
         events: Vec::new(),
         replayed: false,
     }
 }
 
-/// The revisions of the session's latest `session_loads` moment, each once
-/// in the order first written: two triggers can record the same set in
-/// one millisecond.
-fn newest_set_in(conn: &rusqlite::Connection, session: &str) -> Result<Vec<String>> {
-    set_as_of(conn, session, None)
-}
-
-/// The revisions of the session's latest `session_loads` moment at or
-/// before `at` (`None`: its latest), as [`newest_set_in`] orders them.
+/// The notes of the session's latest `session_notes` moment at or before
+/// `at` (`None`: its latest), each once in the order first written: two
+/// triggers can record the same set in one millisecond.
 fn set_as_of(
     conn: &rusqlite::Connection,
     session: &str,
     at: Option<Timestamp>,
-) -> Result<Vec<String>> {
+) -> Result<Vec<LoadedNote>> {
     let mut stmt = conn.prepare(
-        "SELECT revision_id FROM session_loads
+        "SELECT note_id, sha256 FROM session_notes
          WHERE session_id = ?1
-           AND loaded_at = (SELECT max(loaded_at) FROM session_loads
+           AND loaded_at = (SELECT max(loaded_at) FROM session_notes
                             WHERE session_id = ?1 AND (?2 IS NULL OR loaded_at <= ?2))
-         GROUP BY revision_id
+         GROUP BY note_id
          ORDER BY min(rowid)",
     )?;
-    let rows = stmt.query_map(params![session, at], |row| row.get(0))?;
+    let rows = stmt.query_map(params![session, at], |row| {
+        Ok(LoadedNote {
+            id: row.get(0)?,
+            sha256: row.get(1)?,
+        })
+    })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// The rows and event of one load. `skipped` is the launch's skipped
-/// documents, on a `startup` load only: a copy renders nothing, so it
-/// skips nothing either.
+/// The rows of one load: the notes it wrote, skipping a row already there.
 fn insert(
     tx: &mut Tx<'_>,
-    session: &Session,
+    session: &str,
     trigger: &str,
     at: Timestamp,
-    revisions: &[String],
-    skipped: Option<&[Skipped]>,
-) -> Result<Loaded> {
+    notes: &[LoadedNote],
+) -> Result<Vec<LoadedNote>> {
     let mut written = Vec::new();
-    for revision in revisions {
+    for note in notes {
         let rows = tx.conn().execute(
-            "INSERT OR IGNORE INTO session_loads (session_id, revision_id, trigger, loaded_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![session.id, revision, trigger, at],
+            "INSERT OR IGNORE INTO session_notes (session_id, note_id, sha256, trigger, loaded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![session, note.id, note.sha256, trigger, at],
         )?;
         if rows > 0 {
-            written.push(revision.clone());
+            written.push(note.clone());
         }
     }
-    let skipped = skipped.unwrap_or_default();
-    if !written.is_empty() || !skipped.is_empty() {
-        let card = match &session.run_id {
-            Some(run) => Some(get::<Run>(tx.conn(), "run", run)?.card_id),
-            None => None,
-        };
-        let mut payload = json!({"trigger": trigger, "revision_ids": written});
-        if trigger == "startup" {
-            payload["skipped"] = json!(skipped);
-        }
-        tx.event(
-            NewEvent::new("session", &session.id, "session.memory_loaded")
-                .card_opt(card)
-                .payload(payload),
-        )?;
-    }
-    Ok(Loaded {
-        session_id: session.id.clone(),
-        trigger: trigger.to_owned(),
-        loaded_at: at,
-        revision_ids: written,
-    })
+    Ok(written)
 }
 
 #[cfg(test)]
@@ -519,23 +430,27 @@ mod tests {
     use crate::state::tests::memory_store;
     use crate::store::Actor;
 
-    /// One approved alpha document, revision `R-alpha`.
-    fn document(store: &Store) {
-        store
-            .conn()
-            .execute_batch(
-                r#"INSERT INTO memory_sources (id, project_id, boundary, kind, loaded_path,
-                       canonical_repo, canonical_path, apply_method, load_mode, roles, added_at)
-                   VALUES ('S-alpha', 'alpha', 'personal', 'tiller_doc',
-                       '~/.tiller/memory/projects/alpha.md', '~/.tiller/memory',
-                       'projects/alpha.md', 'tiller_commit', 'rendered', '["orchestrator"]',
-                       '2026-11-02T09:00:00.000Z');
-                   INSERT INTO memory_revisions (id, source_id, blob_sha, review, provenance,
-                       scrub, recorded_at, recorded_by)
-                   VALUES ('R-alpha', 'S-alpha', 'abc', 'approved', 'baseline', 'passed',
-                       '2026-11-02T09:00:00.000Z', 'daemon');"#,
-            )
-            .unwrap();
+    /// A render that loaded the given notes.
+    fn rendered(ids: &[&str]) -> crate::kb::Rendered {
+        crate::kb::Rendered {
+            kb: crate::kb::KbState::Ok,
+            text: String::new(),
+            hash: "hash".into(),
+            entries: ids
+                .iter()
+                .map(|id| crate::kb::Entry {
+                    id: (*id).into(),
+                    title: (*id).into(),
+                    kind: Some("gotcha".into()),
+                    scope: "global".into(),
+                    tokens: 1,
+                    loaded: true,
+                    reason: None,
+                    sha256: format!("sha-{id}"),
+                })
+                .collect(),
+            used: 1,
+        }
     }
 
     fn observe(store: &mut Store, session: &str, event: &str, at: Timestamp) {
@@ -570,7 +485,7 @@ mod tests {
         store
             .conn()
             .prepare(
-                "SELECT trigger FROM session_loads WHERE session_id = ?1 ORDER BY loaded_at, rowid",
+                "SELECT trigger FROM session_notes WHERE session_id = ?1 ORDER BY loaded_at, rowid",
             )
             .unwrap()
             .query_map([session], |row| row.get(0))
@@ -579,31 +494,15 @@ mod tests {
             .unwrap()
     }
 
-    /// A home with no `meta.boundary` launches while it has no memory to
-    /// load; a Tiller document makes the boundary needed again.
-    #[test]
-    fn a_home_with_no_boundary_launches_while_it_has_no_memory() {
-        let (store, _) = memory_store();
-        store
-            .conn()
-            .execute("DELETE FROM meta WHERE key = 'boundary'", [])
-            .unwrap();
-        assert_eq!(store.mem_loadable("alpha", "builder").unwrap(), Vec::new());
-        document(&store);
-        let error = store.mem_loadable("alpha", "orchestrator").unwrap_err();
-        assert!(error.to_string().contains("no boundary"), "{error}");
-    }
-
     /// The daemon's pass copies the set once per owed observation, in
     /// order, and a second pass owes nothing. Startup, fork and a session
     /// that loaded nothing owe no copy.
     #[test]
     fn the_copy_pass_makes_each_owed_copy_once() {
         let (mut store, session) = memory_store();
-        document(&store);
         let daemon = Ctx::new(Actor::Daemon);
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
+            .mem_load(&daemon, &session, &rendered(&["R-alpha"]))
             .unwrap();
         let start = Timestamp::now();
         for (n, event) in [
@@ -637,10 +536,9 @@ mod tests {
     #[test]
     fn a_refused_bind_owes_no_copy() {
         let (mut store, session) = memory_store();
-        document(&store);
         let daemon = Ctx::new(Actor::Daemon);
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
+            .mem_load(&daemon, &session, &rendered(&["R-alpha"]))
             .unwrap();
         let at = Timestamp::now().plus_minutes(1);
         observe_with(
@@ -659,16 +557,15 @@ mod tests {
     #[test]
     fn a_copy_in_the_launch_millisecond_is_recorded_once() {
         let (mut store, session) = memory_store();
-        document(&store);
         let at = Timestamp::now();
         let daemon = Ctx::at(Actor::Daemon, at);
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
+            .mem_load(&daemon, &session, &rendered(&["R-alpha"]))
             .unwrap();
         observe(&mut store, &session, "SessionStart:clear", at);
         let made = owed(&mut store, &daemon);
         assert_eq!(made.len(), 1);
-        assert_eq!(made[0].revision_ids, ["R-alpha"]);
+        assert_eq!(made[0].notes[0].id, "R-alpha");
         assert_eq!(triggers(&store, &session), ["startup", "clear"]);
         assert_eq!(store.mem_loaded(&session).unwrap(), ["R-alpha"]);
         assert!(owed(&mut store, &daemon).is_empty());
@@ -679,15 +576,14 @@ mod tests {
     #[test]
     fn a_failing_copy_does_not_block_the_others() {
         let (mut store, session) = memory_store();
-        document(&store);
         let daemon = Ctx::new(Actor::Daemon);
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
+            .mem_load(&daemon, &session, &rendered(&["R-alpha"]))
             .unwrap();
         store
             .conn()
             .execute_batch(
-                "CREATE TEMP TRIGGER no_clear BEFORE INSERT ON session_loads
+                "CREATE TEMP TRIGGER no_clear BEFORE INSERT ON session_notes
                  WHEN NEW.trigger = 'clear'
                  BEGIN SELECT RAISE(ABORT, 'no clear copies'); END;",
             )
@@ -728,10 +624,9 @@ mod tests {
     #[test]
     fn a_marked_pass_reads_only_new_observations() {
         let (mut store, session) = memory_store();
-        document(&store);
         let daemon = Ctx::new(Actor::Daemon);
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
+            .mem_load(&daemon, &session, &rendered(&["R-alpha"]))
             .unwrap();
         let mark = store.mem_load_owed(&daemon, None).unwrap().mark;
         assert_eq!(mark.read_from, daemon.now);
@@ -779,15 +674,14 @@ mod tests {
     #[test]
     fn a_failed_copy_is_tried_again_on_every_later_pass() {
         let (mut store, session) = memory_store();
-        document(&store);
         let daemon = Ctx::new(Actor::Daemon);
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
+            .mem_load(&daemon, &session, &rendered(&["R-alpha"]))
             .unwrap();
         store
             .conn()
             .execute_batch(
-                "CREATE TEMP TRIGGER no_clear BEFORE INSERT ON session_loads
+                "CREATE TEMP TRIGGER no_clear BEFORE INSERT ON session_notes
                  WHEN NEW.trigger = 'clear'
                  BEGIN SELECT RAISE(ABORT, 'no clear copies'); END;",
             )
@@ -829,15 +723,14 @@ mod tests {
     #[test]
     fn a_failed_copy_past_the_window_is_given_up_at_once() {
         let (mut store, session) = memory_store();
-        document(&store);
         let daemon = Ctx::new(Actor::Daemon);
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
+            .mem_load(&daemon, &session, &rendered(&["R-alpha"]))
             .unwrap();
         store
             .conn()
             .execute_batch(
-                "CREATE TEMP TRIGGER no_clear BEFORE INSERT ON session_loads
+                "CREATE TEMP TRIGGER no_clear BEFORE INSERT ON session_notes
                  WHEN NEW.trigger = 'clear'
                  BEGIN SELECT RAISE(ABORT, 'no clear copies'); END;",
             )
@@ -861,15 +754,14 @@ mod tests {
     #[test]
     fn a_failed_copy_is_given_up_an_hour_after_its_observation() {
         let (mut store, session) = memory_store();
-        document(&store);
         let daemon = Ctx::new(Actor::Daemon);
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
+            .mem_load(&daemon, &session, &rendered(&["R-alpha"]))
             .unwrap();
         store
             .conn()
             .execute_batch(
-                "CREATE TEMP TRIGGER no_clear BEFORE INSERT ON session_loads
+                "CREATE TEMP TRIGGER no_clear BEFORE INSERT ON session_notes
                  WHEN NEW.trigger = 'clear'
                  BEGIN SELECT RAISE(ABORT, 'no clear copies'); END;",
             )
@@ -914,15 +806,14 @@ mod tests {
     #[test]
     fn a_copy_given_up_is_not_reported_again() {
         let (mut store, session) = memory_store();
-        document(&store);
         let daemon = Ctx::new(Actor::Daemon);
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
+            .mem_load(&daemon, &session, &rendered(&["R-alpha"]))
             .unwrap();
         store
             .conn()
             .execute_batch(
-                "CREATE TEMP TRIGGER no_clear BEFORE INSERT ON session_loads
+                "CREATE TEMP TRIGGER no_clear BEFORE INSERT ON session_notes
                  WHEN NEW.trigger = 'clear'
                  BEGIN SELECT RAISE(ABORT, 'no clear copies'); END;",
             )
@@ -975,15 +866,14 @@ mod tests {
     #[test]
     fn a_failed_copy_of_an_ended_session_is_given_up_when_reported() {
         let (mut store, session) = memory_store();
-        document(&store);
         let daemon = Ctx::new(Actor::Daemon);
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
+            .mem_load(&daemon, &session, &rendered(&["R-alpha"]))
             .unwrap();
         store
             .conn()
             .execute_batch(
-                "CREATE TEMP TRIGGER no_clear BEFORE INSERT ON session_loads
+                "CREATE TEMP TRIGGER no_clear BEFORE INSERT ON session_notes
                  WHEN NEW.trigger = 'clear'
                  BEGIN SELECT RAISE(ABORT, 'no clear copies'); END;",
             )
@@ -1029,10 +919,9 @@ mod tests {
     #[test]
     fn a_stalled_pass_gives_up_a_copy_whose_session_hour_passed() {
         let (mut store, session) = memory_store();
-        document(&store);
         let daemon = Ctx::new(Actor::Daemon);
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
+            .mem_load(&daemon, &session, &rendered(&["R-alpha"]))
             .unwrap();
         let mark = store.mem_load_owed(&daemon, None).unwrap().mark;
         observe(
@@ -1063,7 +952,6 @@ mod tests {
     #[test]
     fn an_observation_before_the_first_load_owes_no_copy() {
         let (mut store, session) = memory_store();
-        document(&store);
         let daemon = Ctx::new(Actor::Daemon);
         observe(
             &mut store,
@@ -1072,7 +960,7 @@ mod tests {
             daemon.now.plus_minutes(-1),
         );
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
+            .mem_load(&daemon, &session, &rendered(&["R-alpha"]))
             .unwrap();
         assert_eq!(store.owed_copies(daemon.now, None).unwrap(), Vec::new());
         assert!(owed(&mut store, &daemon).is_empty());
@@ -1084,19 +972,9 @@ mod tests {
     #[test]
     fn a_late_copy_copies_the_set_of_its_moment() {
         let (mut store, session) = memory_store();
-        document(&store);
-        store
-            .conn()
-            .execute_batch(
-                "INSERT INTO memory_revisions (id, source_id, blob_sha, review, provenance,
-                     scrub, recorded_at, recorded_by)
-                 VALUES ('R-beta', 'S-alpha', 'def', 'approved', 'baseline', 'passed',
-                     '2026-11-02T10:00:00.000Z', 'daemon');",
-            )
-            .unwrap();
         let daemon = Ctx::new(Actor::Daemon);
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
+            .mem_load(&daemon, &session, &rendered(&["R-alpha"]))
             .unwrap();
         observe(
             &mut store,
@@ -1106,14 +984,14 @@ mod tests {
         );
         let relaunch = Ctx::at(Actor::Daemon, daemon.now.plus_minutes(3));
         store
-            .mem_load(&relaunch, &session, &["R-beta".to_owned()], &[])
+            .mem_load(&relaunch, &session, &rendered(&["R-beta"]))
             .unwrap();
         let later = Ctx::at(Actor::Daemon, daemon.now.plus_minutes(5));
         assert_eq!(owed(&mut store, &later).len(), 1);
         let copied: Vec<String> = store
             .conn()
             .prepare(
-                "SELECT revision_id FROM session_loads WHERE session_id = ?1 AND trigger = 'clear'",
+                "SELECT note_id FROM session_notes WHERE session_id = ?1 AND trigger = 'clear'",
             )
             .unwrap()
             .query_map([&session], |row| row.get(0))
@@ -1122,5 +1000,64 @@ mod tests {
             .unwrap();
         assert_eq!(copied, ["R-alpha"]);
         assert_eq!(store.mem_loaded(&session).unwrap(), ["R-beta"]);
+    }
+
+    /// The launch's event names the store's state, each note with its
+    /// hash, each skipped note with its reason, and the section's hash; a
+    /// launch that loaded nothing still records the state, and owes no
+    /// copy.
+    #[test]
+    fn a_launch_records_the_kb_state_and_what_it_skipped() {
+        let (mut store, session) = memory_store();
+        let daemon = Ctx::new(Actor::Daemon);
+        let mut render = rendered(&["a-note", "too-big"]);
+        render.entries[1].loaded = false;
+        render.entries[1].reason = Some(crate::kb::OVER_BUDGET.into());
+        let loaded = store.mem_load(&daemon, &session, &render).unwrap();
+        assert_eq!(loaded.value.notes.len(), 1);
+        let payload: Value = serde_json::from_str(
+            &store
+                .conn()
+                .query_row(
+                    "SELECT payload FROM events WHERE kind = 'session.memory_loaded'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            payload,
+            json!({"trigger": "startup", "kb": "ok", "hash": "hash",
+                   "notes": [{"id": "a-note", "sha256": "sha-a-note"}],
+                   "skipped": [{"id": "too-big", "reason": "over budget"}]})
+        );
+
+        let (mut store, session) = memory_store();
+        let missing = crate::kb::render(&crate::kb::Read::missing(None), &[], 0, 7_500);
+        store.mem_load(&daemon, &session, &missing).unwrap();
+        let kb: String = store
+            .conn()
+            .query_row(
+                "SELECT json_extract(payload, '$.kb') FROM events WHERE kind = 'session.memory_loaded'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kb, "missing");
+        observe(
+            &mut store,
+            &session,
+            "SessionStart:clear",
+            daemon.now.plus_minutes(1),
+        );
+        assert!(owed(&mut store, &daemon).is_empty());
+        // Health warns until a launch reads the store again.
+        let warning = store.kb_warning().unwrap().unwrap();
+        assert!(warning.contains("missing"), "{warning}");
+        store
+            .mem_load(&daemon, &session, &rendered(&["a-note"]))
+            .unwrap();
+        assert_eq!(store.kb_warning().unwrap(), None);
     }
 }

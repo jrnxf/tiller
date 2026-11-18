@@ -1334,187 +1334,64 @@ export interface MergeAppHealth {
   detail: string;
 }
 
-// `GET /api/v1/memory?scope=`: the document list and the chosen document
-// (memory.md section 7, protocol.md section 7.3).
-export interface MemoryDocSummary {
-  // `fleet` for "All projects (shared)".
+// A note kind an agent may suggest (memory.md section 4). kb has more kinds,
+// such as `open-work`, which a live note may show.
+export type MemoryKind = "convention" | "decision" | "gotcha" | "how-to";
+
+// Whether the daemon could read the kb store on this host.
+export type KbState = "ok" | "missing" | "unreadable";
+
+// A note an agent suggested, waiting for the owner (memory.md section 4).
+export interface PendingNote {
+  id: string;
   project_id: string;
-  name: string;
-  lines: number;
-  // Open agent proposals against it.
-  suggestions: number;
-  // Why a launch goes on without it, such as "it has no approved revision";
-  // null when a launch loads it or it has nothing to load.
-  skipped: string | null;
-}
-
-// The revision that last changed a line.
-export interface MemoryProvenance {
-  revision_id: string;
-  card: string | null;
-  // `you`, `carried over`, `outside Tiller` or the proposing session.
-  note: string | null;
-  at: string;
-}
-
-// `learning.gate` on a proposal, with one made against another text refused
-// as stale.
-interface MemoryGate {
-  proposal: string;
-  ok: boolean;
-  // The failing step, when not ok.
-  reason: string | null;
-  // The command that clears it.
-  hint: string | null;
-  change_set: string | null;
-  eval_run: string | null;
-  // The set that is measuring and blocks every other, with cards to go.
-  measuring: {
-    change_set: string;
-    name: string;
-    cards_closed: number;
-    window_cards: number;
-  } | null;
-}
-
-export interface MemorySuggestion {
-  proposal_id: string;
-  op: "add" | "rewrite" | "retire";
-  // The new text, for `add` and `rewrite`.
-  text: string | null;
-  by: string;
-  card: string | null;
-  at: string;
-  why: string | null;
-  // Tokens each role's prompt would carry once it is kept.
-  token_budget_after: Record<string, number> | null;
-  // The holdout gate's verdict on keeping it; Keep waits until it passes.
-  gate: MemoryGate;
-  // The current text of the line a rewrite or removal names, while the file
-  // has it.
-  target: string | null;
-  // The document changed after it was proposed: "Re-propose on current text"
-  // clears it.
-  moved: boolean;
-  // When Tiller recorded the text that moved it, if it did.
-  moved_at: string | null;
-  // A holdout run is the next step: the board offers "Run holdout eval...".
-  eval_clears: boolean;
-  // The newest holdout run of its change set.
-  holdout: MemoryHoldout | null;
-}
-
-// The newest holdout run of a suggestion's change set.
-export interface MemoryHoldout {
-  eval_run: string;
-  change_set: string;
-  cases_passed: number;
-  cases_total: number;
-  passed: boolean;
-  partial: boolean;
-  // The run was made with the set's current members.
-  current: boolean;
-  ran_at: string;
-}
-
-export interface MemoryLine {
-  // Its position in the section, as edits name it.
-  index: number;
-  text: string;
-  memory_id: string | null;
-  provenance: MemoryProvenance | null;
-  // A rewrite or removal of this line.
-  suggestion: MemorySuggestion | null;
-}
-
-export interface MemorySection {
+  kind: MemoryKind;
   title: string;
-  class: string;
-  lines: MemoryLine[];
-  // New lines, and suggestions whose line is gone.
-  suggestions: MemorySuggestion[];
+  body: string;
+  // `fleet` for a fleet session, `curator` for a retro, `migration` for the
+  // old store.
+  source: "fleet" | "curator" | "migration";
+  // The session's role, for `fleet`.
+  role: string | null;
+  card_id: string | null;
+  run_id: string | null;
+  retro_id: string | null;
+  created_at: string;
+  // Set when the owner edited it.
+  edited_at: string | null;
+  // Every edit, Keep and Discard sends it back; a stale one is refused.
+  rev: number;
 }
 
-// One entry in a document's "Change history": a change applied or discarded
-// in the last 30 days, newest first, undone or not.
-export interface MemoryChange {
-  proposal_id: string;
-  kind: "added" | "kept" | "edit" | "remove" | "discard";
-  text: string | null;
-  // The card it came from, else who wrote it.
-  from: string;
-  // Who wrote it: `you`, `the curator` or the proposing session.
-  by: string;
-  card: string | null;
-  section: string;
-  // The text an edit replaced.
-  old_text: string | null;
-  at: string;
-  // When it was undone: its reverse applied, or its discard proposed again.
-  undone_at: string | null;
+// One kb note as a launch of the chosen role would see it now.
+export interface LiveNote {
+  id: string;
+  title: string;
+  kind: string;
+  scope: string;
+  tokens: number;
+  loaded: boolean;
+  // Why it was skipped, such as `over budget`; null when it loads.
+  reason: string | null;
 }
 
-export interface MemoryDocument {
-  project_id: string;
-  name: string;
-  path: string;
-  // The blob at `HEAD`; every change sends it back as `base_blob`.
-  blob: string;
-  // The working tree differs from `HEAD`: changes are refused until it is
-  // committed or reset.
-  dirty: boolean;
-  sections: MemorySection[];
-  changes: MemoryChange[];
-}
-
+// `GET /api/v1/memory?project=&role=` (memory.md section 4).
 export interface MemoryResponse {
-  // Fleet first.
-  docs: MemoryDocSummary[];
-  doc: MemoryDocument;
-  // The holdout evals the board started that are running, or that failed
-  // with no later recorded run of their change set, across restarts.
-  evals: MemoryEvalJob[];
+  // Null when no project was asked for: `live` is empty and `pending` lists
+  // every project.
+  project_id: string | null;
+  role: string;
+  kb: { state: KbState; home: string; scopes: string[] };
+  // The role's startup tokens: the role file and the notes that load.
+  budget: { used: number; limit: number };
+  live: LiveNote[];
+  pending: PendingNote[];
 }
 
-// A holdout eval the board started.
-export interface MemoryEvalJob {
-  proposal_id: string;
-  change_set: string;
-  cases: number;
-  started_at: string;
-  // The estimated minutes it runs.
-  minutes: number;
-  // Why it recorded nothing; absent while it runs.
-  error: string | null;
-  finished_at: string | null;
-}
-
-// `GET /api/v1/memory/proposals/{id}/eval`: what the holdout eval will cost,
-// and why it will not start, before the owner starts it.
-export interface MemoryEvalPlan {
-  proposal_id: string;
-  // The proposal's open change set, or the one-member set a start makes.
-  change_set: string;
-  cases: number;
-  case_runs: number;
-  judge_runs: number;
-  model_runs: number;
-  // The weekly quota percent it will probably take (an estimate).
-  percent: number;
-  // The minutes it will probably run (an estimate).
-  minutes: number;
-  quota: {
-    // The weekly window with the least left.
-    label: string | null;
-    left: number | null;
-    // This host's floor for new work; absent with no quota feed.
-    floor: number | null;
-    left_after: number | null;
-    resets_at: string | null;
-    fetched_at: string | null;
-  };
-  // Why a start is refused now; absent when it can start.
-  refusal: string | null;
+// What `POST /api/v1/memory/pending/{id}/keep` answers.
+export interface KeptNote {
+  note_id: string;
+  scope: string;
 }
 
 // One full retro, as Memory's Retros list and Health's Learning panel show it
@@ -1527,16 +1404,16 @@ export interface RetroView {
   title: string;
   project_id: string;
   status: "running" | "unfinished" | "done" | "pending";
-  // `nothing`, `evidence`, `proposed` or `unfinished`, once done.
+  // `nothing`, `noted` (one note in the pending queue) or `unfinished`,
+  // once done.
   outcome: string | null;
-  // The learning it kept, or for an unfinished retro why it did not finish.
+  // For an unfinished retro, why it did not finish.
   learning: string | null;
   created_at: string;
   curator_started_at: string | null;
   // `owner`, `board` or `daemon`.
   started_by: string | null;
   finished_at: string | null;
-  proposal: { id: string; state: string; section: string | null } | null;
   // Why Run again is refused now; absent when it would start.
   run_refusal: string | null;
 }
@@ -1545,42 +1422,6 @@ export interface RetrosResponse {
   // The last 30 days and every unfinished one, newest first.
   retros: RetroView[];
   curator_timeout_minutes: number;
-}
-
-// A session that loaded a revision.
-interface MemoryLoad {
-  session_id: string;
-  role: string;
-  project_id: string;
-  run_id: string | null;
-  card: string | null;
-  trigger: string;
-  loaded_at: string;
-}
-
-// `GET /api/v1/memory/revisions/{id}`.
-export interface MemoryRevision {
-  id: string;
-  project_id: string;
-  path: string;
-  blob_sha: string;
-  commit_sha: string | null;
-  review: "approved" | "unreviewed" | "revoked";
-  provenance: string;
-  recorded_at: string;
-  approval: Record<string, unknown> | null;
-  proposal_id: string | null;
-  card: string | null;
-  sessions: MemoryLoad[];
-  // The file's text at this revision; absent once the blob is gone.
-  text: string | null;
-}
-
-// What one memory change came to.
-export interface MemoryLanded {
-  proposal_id: string;
-  approval_id: string | null;
-  blob: string;
 }
 
 // What an away contract allowed on the merge side: `"none"`, `"grants"`, or

@@ -580,8 +580,9 @@ record!(
         state: RetroState,
         outcome: Option<RetroOutcome>,
         learning: Option<String>,
-        evidence_id: Option<String>,
-        proposal_id: Option<String>,
+        /// The `memory_pending` row the curator added; the row goes when
+        /// the owner keeps or discards it.
+        pending_id: Option<String>,
         curator_session: Option<String>,
         curator_started_at: Option<Timestamp>,
         finished_at: Option<Timestamp>,
@@ -592,47 +593,24 @@ record!(
 );
 
 record!(
-    /// One change, or a named bundle, measured as one (learning-loop.md,
-    /// section 6).
-    ChangeSet in "change_sets" {
+    /// One note an agent suggested, waiting for the owner (`memory.md`
+    /// section 4).
+    PendingNote in "memory_pending" {
         id: String,
-        name: String,
-        state: ChangeSetState,
-        window_cards: i64,
-        opened_at: Timestamp,
-        opened_by: String,
-        measuring_from: Option<Timestamp>,
-        closed_at: Option<Timestamp>,
-        close_reason: Option<ChangeSetClose>,
+        project_id: String,
+        kind: String,
+        title: String,
+        body: String,
+        source: String,
+        role: Option<String>,
+        card_id: Option<String>,
+        run_id: Option<String>,
+        #[serde(skip)]
+        session_id: Option<String>,
+        retro_id: Option<String>,
+        created_at: Timestamp,
+        edited_at: Option<Timestamp>,
         rev: i64,
-    }
-);
-
-record!(ChangeSetMember in "change_set_members" {
-    change_set_id: String,
-    proposal_id: String,
-    added_at: Timestamp,
-});
-
-record!(
-    /// One holdout run recorded for a change set (learning-loop.md, section 7).
-    EvalRun in "eval_runs" {
-        id: String,
-        change_set_id: String,
-        split: String,
-        members_sha256: String,
-        candidate_sha256: Option<String>,
-        cases_total: i64,
-        cases_passed: i64,
-        overall_score: Option<f64>,
-        cost_usd: Option<f64>,
-        partial: i64,
-        passed: i64,
-        claude_version: Option<String>,
-        judge_model: Option<String>,
-        result_path: Option<String>,
-        ran_at: Timestamp,
-        recorded_by: String,
     }
 );
 

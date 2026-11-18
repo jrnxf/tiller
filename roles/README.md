@@ -2,7 +2,7 @@
 
 The five roles Tiller launches: one `orchestrator` per project and four worker roles (`scout`, `builder`, `reviewer`, `verifier`) that run on one card each. Each role is one prompt file and one settings fragment template here; `crates/agents/src/roles.rs` embeds them so a launch reads nothing from disk, and `tiller spawn` (T4.2) renders them per run.
 
-`curator.md` and `curator.settings.json` are not a fleet role: the curator is the headless session `tiller retro run` launches for one full retro (`docs/design/learning-loop.md`, section 4). It has no run, no pane and no hooks, reads what fleet roles never see, and is embedded by `crates/agents/src/curator.rs`. It sits here so the evals cover it like the rest.
+`curator.md` and `curator.settings.json` are not a fleet role: the curator is the headless session `tiller retro run` launches for one full retro (`docs/spec/memory.md`, section 5). It has no run, no pane and no hooks, reads what fleet roles never see, and is embedded by `crates/agents/src/curator.rs`. It sits here so the evals cover it like the rest.
 
 Specs: `docs/spec/authority.md` (role matrix, launch form, deny rules), `docs/spec/memory.md` (what a role loads), `docs/spec/protocol.md` (status lines, `tiller` commands), `docs/spec/recovery.md` (what the orchestrator does when a worker goes quiet, blocks or reports done). The role standard is `docs/design/plan.md` section 12, amended by `docs/design/plan-v2.md` points 24, 30 and 31.
 
@@ -10,7 +10,7 @@ Specs: `docs/spec/authority.md` (role matrix, launch form, deny rules), `docs/sp
 
 | File | What it is |
 |---|---|
-| `<role>.md` | The role: YAML frontmatter (`name`, `description`, `model`, `effort`, `permissionMode`) and the prompt body. Spawn appends the body to the default system prompt with `--append-system-prompt-file`, followed by the approved memory it renders (`memory.md` L3). The frontmatter is metadata for spawn and never reaches the model |
+| `<role>.md` | The role: YAML frontmatter (`name`, `description`, `model`, `effort`, `permissionMode`) and the prompt body. Spawn appends the body to the default system prompt with `--append-system-prompt-file`, followed by the kb notes it renders (`memory.md` L3). The frontmatter is metadata for spawn and never reaches the model |
 | `<role>.settings.json` | The settings fragment template: permission mode, deny and allow rules, `claudeMdExcludes`, hooks, sandbox. Placeholders in angle brackets are filled per run (below). Passed with `--settings`, never written into a project's `.claude/` |
 | `mcp.json` | The one MCP config every role launches with: no servers. Passed with `--strict-mcp-config --mcp-config` |
 | `check-launch.sh` | The acceptance check: launches each role through the real launch form and verifies instructions, tools, model and memory at startup and on resume |
@@ -56,7 +56,7 @@ Rule paths are written `/<worktree>/**` in the template so the filled rule is `E
 ## What the fragments hold
 
 - The common deny list of `authority.md` section 8, "Every fleet role", in order, then the role's extra deny rules and its allow rules from the "Per role" table. One addition: `Agent(isolation:*)`, because no fleet role uses native worktree isolation (treehouse owns worktrees) and a deny rule is cheaper than the backstop for the canonical form.
-- `claudeMdExcludes` for every memory file kind (`**/CLAUDE.md`, `**/CLAUDE.local.md`, `**/AGENTS.md`, `**/.claude/rules/**`), so nothing loads natively and spawn renders the approved revisions instead (`memory.md` section 2). Spawn appends per-run paths when the launch check finds one these globs miss.
+- `claudeMdExcludes` for every memory file kind (`**/CLAUDE.md`, `**/CLAUDE.local.md`, `**/AGENTS.md`, `**/.claude/rules/**`), so nothing loads natively (`memory.md` section 2). Spawn appends per-run paths when the launch check finds one these globs miss.
 - `autoMemoryEnabled: false` and the `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` variable, `disableClaudeAiConnectors`, `remoteControlAtStartup: false`, and `disableRemoteControl` for workers (P68; the orchestrator keeps it available because the owner may want to reach it from the Claude app).
 - Hooks: `tiller hook <event>` for every event `protocol.md` 4.2 maps to a handler, and `tiller guard pretool --role <role>` on `PreToolUse` for every tool. The guard also rewrites a lone `tiller ...` to `<tiller> '...'`, the form the sandbox exempts, with each argument quoted so the Bash tool's zsh cannot expand a global alias in it. Each `Bash(tiller ...)` rule has a `Bash(<tiller> ...)` twin and the orchestrator's allow is `Bash(<tiller> *)` (`authority.md` section 7, "How roles reach the exempt binary").
 - The sandbox: on, failing closed, with no unsandboxed retry; sandboxed Bash auto-approved for workers (they hold a bare `Bash` allow rule anyway) and not for the orchestrator, whose `auto` mode leaves a command outside `tiller` and the `gh-axi` reads to the classifier; the role's write set; `~/.tiller` and `~/.claude` unwritable and `~/.tiller` unreadable from the shell; `<tiller>` the only excluded command, by its absolute path; the network allow list per project, and `allowLocalBinding` off except where a builder or verifier fragment fills `<local_binding>` from the project's opt-in (`authority.md` section 8, "Amended: local binding opt-in").
@@ -65,7 +65,7 @@ What the fragments do not hold, by design: the Read deny globs (`**/*.pem`, `**/
 
 ## Tests
 
-`cargo nextest run -p tiller-agents` checks, from the embedded files: the frontmatter defaults, no `memory` field (`memory.md` section 9), the description as a trigger, the size and token budget (P42), the browser CLI and `gh-axi` in the builder's tools (P63, P64), the status contract in every worker, the common deny list and the per-role table of `authority.md` section 8, the launch guards, the hook registration, the MCP config, and the rendering of placeholders in both path syntaxes.
+`cargo nextest run -p tiller-agents` checks, from the embedded files: the frontmatter defaults, no `memory` field (`memory.md` section 2, L2), the description as a trigger, the size and token budget (P42), the browser CLI and `gh-axi` in the builder's tools (P63, P64), the status contract in every worker, the common deny list and the per-role table of `authority.md` section 8, the launch guards, the hook registration, the MCP config, and the rendering of placeholders in both path syntaxes.
 
 ## The launch check
 
