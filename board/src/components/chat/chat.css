@@ -797,16 +797,12 @@
 .chat-confirm .cq-item .chat-refs {
   margin: 4px 0;
 }
-/* In the thread a decision is compact: a card with an orange edge, and its
-   options one numbered list with each consequence in small words under it. */
+/* In the thread a decision is compact: a neutral card, and its options one
+   numbered list with each consequence in small words under it. */
 .chat-confirm .cq-item {
   padding: 12px 14px;
   border: 1px solid var(--line-2);
-  border-left: 3px solid var(--orange);
   background: var(--bg-card);
-}
-.chat-confirm .cq-item.done {
-  border-left-color: var(--line-2);
 }
 .chat-confirm .cq-q {
   margin: 6px 0 4px;
