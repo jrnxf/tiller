@@ -2,7 +2,7 @@
 //! session starts from, written into its scratch directory, and the
 //! script the new pane runs.
 //!
-//! The role body, the approved memory and the brief go into one file
+//! The role body, the kb notes and the brief go into one file
 //! passed with `--append-system-prompt-file`, so the brief and the memory
 //! survive compaction and a resume passes them again with the same flags. The orchestrator has no
 //! brief and no first prompt: it starts at its composer, waiting for the
@@ -10,8 +10,7 @@
 //! role's template rendered for this run (T4.1). The run's `config_hash` is
 //! the SHA-256 of a manifest over the role file, the fragment, the MCP
 //! config, the model, the effort, the tiller and Claude Code versions and the
-//! memory revisions rendered (`docs/design/learning-loop.md`, section 5),
-//! so two runs can be compared part by part. The MCP config is the packaged
+//! hash of the rendered kb notes (`memory.md` section 3), so two runs can be compared part by part. The MCP config is the packaged
 //! one (G35). Once the files are written, the launch directory's Claude
 //! Code workspace trust is recorded ([`super::trust`]), so the session
 //! reaches its composer instead of the trust dialog.
@@ -98,9 +97,9 @@ pub struct LaunchSpec<'a> {
     pub claude_config: &'a ClaudeConfig,
     /// The Claude Code version, for the manifest ([`claude_version`]).
     pub claude_version: Option<&'a str>,
-    /// The approved memory rendered into the prompt after the role body
-    /// ([`super::memory::render`]); its `(source id, blob sha)` pairs enter
-    /// the manifest (`memory.md` section 7).
+    /// The kb notes rendered into the prompt after the role body
+    /// ([`super::memory::render`]); the hash of the rendered text enters the
+    /// manifest (`memory.md` section 3).
     pub memory: &'a Memory,
     /// The relaunch note of a new attempt, which goes into its first prompt.
     pub note: Option<&'a str>,
@@ -159,21 +158,16 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The manifest behind a run's `config_hash` (learning-loop.md, section 5).
+/// The manifest behind a run's `config_hash`; `memory` is the hash of the
+/// rendered kb notes.
 pub fn manifest(
     role: Role,
     fragment: &[u8],
     model: &str,
     effort: Effort,
     claude_version: Option<&str>,
-    memory: &[(String, String)],
+    memory: &str,
 ) -> Value {
-    let mut pairs: Vec<String> = memory
-        .iter()
-        .map(|(source, blob)| format!("{source} {blob}"))
-        .collect();
-    pairs.sort();
-    pairs.dedup();
     json!({
         "role": sha256_hex(role.file().as_bytes()),
         "settings": sha256_hex(fragment),
@@ -182,7 +176,7 @@ pub fn manifest(
         "effort": effort.as_str(),
         "tiller": env!("CARGO_PKG_VERSION"),
         "claude": claude_version.unwrap_or("unknown"),
-        "memory": sha256_hex(pairs.join("\n").as_bytes()),
+        "memory": memory,
     })
 }
 
@@ -526,7 +520,7 @@ fn render(spec: &LaunchSpec<'_>) -> Result<Rendered, SpawnError> {
         spec.model,
         spec.effort,
         spec.claude_version,
-        &spec.memory.pairs,
+        &spec.memory.hash,
     );
     let config_hash = hash_of(&manifest);
     Ok(Rendered {

@@ -171,7 +171,12 @@ pub fn start(
             front.effort
         ))
     })?;
-    let memory = memory::render(store, world.tiller_home, &project.id, role)?;
+    let memory = memory::render(
+        &world.config.memory,
+        world.config.kb_home.as_deref(),
+        &project,
+        role,
+    )?;
     // Every check comes before the stop: a restart refused by a check
     // leaves the live one running. The writes after the stop (the home, the
     // launch files, the manifest, the holder pane) can still fail and

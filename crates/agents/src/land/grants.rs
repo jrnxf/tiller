@@ -17,8 +17,7 @@ use super::forge::PullView;
 
 /// The paths every grant excludes, whatever its `exclude_paths` says: what a
 /// fleet role loads (`memory.md` section 3), so a change to it always reaches
-/// the owner as a memory change (CP2, S01). The project's source-map rows are
-/// added to these.
+/// the owner as a memory change (CP2, S01).
 const LOADED_PATHS: &[&str] = &[
     "AGENTS.md",
     "**/AGENTS.md",
@@ -237,7 +236,6 @@ pub fn evaluate(
     }
     let mut excluded: Vec<String> = LOADED_PATHS.iter().map(|path| (*path).to_owned()).collect();
     excluded.extend(conditions.exclude_paths.iter().cloned());
-    excluded.extend(source_map(conn, &approval.project_id)?);
     if let Some(path) = view
         .files
         .iter()
@@ -251,16 +249,6 @@ pub fn evaluate(
 /// The first 12 characters of a SHA, for a miss the board shows.
 fn short(sha: &str) -> &str {
     sha.get(..12).unwrap_or(sha)
-}
-
-/// The project-relative loaded paths of the project's live source-map rows.
-fn source_map(conn: &Connection, project: &str) -> Result<Vec<String>> {
-    let mut statement = conn.prepare(
-        "SELECT loaded_path FROM memory_sources
-         WHERE project_id IN (?1, 'fleet') AND retired_at IS NULL AND loaded_path NOT LIKE '~%'",
-    )?;
-    let rows = statement.query_map([project], |row| row.get::<_, String>(0))?;
-    Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
 /// Whether the forge's checks let a grant land: a grant naming no `checks`

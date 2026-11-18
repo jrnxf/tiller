@@ -574,7 +574,12 @@ fn launch_in(
         brief.push_str(&delivery_line(project));
     }
     let claude_version = launch::claude_version(&world.config.spawn.claude);
-    let memory = memory::render(store, world.tiller_home, &project.id, role)?;
+    let memory = memory::render(
+        &world.config.memory,
+        world.config.kb_home.as_deref(),
+        project,
+        role,
+    )?;
     let launched = launch::write(&LaunchSpec {
         role,
         session_id: &session.id,

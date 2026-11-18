@@ -1,5 +1,5 @@
-//! The curator (`docs/design/learning-loop.md`, section 4): the headless
-//! session `tiller retro run` launches for one full retro. It is not a fleet
+//! The curator (`memory.md` section 5): the headless session `tiller retro
+//! run` launches for one full retro, which runs only for an incident. It is not a fleet
 //! role, so it is not in [`crate::roles::Role`]: it has no run, no pane and
 //! no hooks, and its settings fragment carries only the `<tiller>` and
 //! `<scratch>` placeholders. The files are embedded like the roles', so a
@@ -216,9 +216,11 @@ mod tests {
         // No hook rewrites a bare `tiller` here, so the allow rules name only
         // the packaged path the sandbox exempts, and each deny has both forms.
         assert!(allow.contains(&"Bash(/nix/store/x/bin/tiller retro *)"));
-        assert!(allow.contains(&"Bash(/nix/store/x/bin/tiller mem propose *)"));
+        // Its one note goes through `retro finish`: every `mem` command is
+        // denied, so a retro adds at most one note.
         assert!(!allow.iter().any(|rule| rule.starts_with("Bash(tiller ")
-            || rule.starts_with("Bash(/nix/store/x/bin/tiller mem *")));
+            || rule.starts_with("Bash(/nix/store/x/bin/tiller mem ")));
+        assert!(deny.contains(&"Bash(/nix/store/x/bin/tiller mem *)"));
         assert!(deny.contains(&"Bash(tiller learn *)"));
         assert!(deny.contains(&"Bash(/nix/store/x/bin/tiller learn *)"));
         // The curator reads untrusted transcripts, so every dot directory

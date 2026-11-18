@@ -94,6 +94,16 @@ impl ClaudeConfig {
         self.var.as_deref()
     }
 
+    /// The Claude config home: `CLAUDE_CONFIG_DIR`, else `$HOME/.claude`.
+    /// The plugin list Keep finds the kb command in is under it.
+    pub fn home_dir(&self) -> Option<PathBuf> {
+        match (&self.var, &self.home) {
+            (Some(var), _) => Some(var.clone()),
+            (None, Some(home)) => Some(home.join(".claude")),
+            (None, None) => None,
+        }
+    }
+
     /// The file Claude Code reads its user config from: `.claude.json` in
     /// `CLAUDE_CONFIG_DIR` or `$HOME`, unless an older install's
     /// `.config.json` in the config home (`CLAUDE_CONFIG_DIR`, or else
@@ -499,6 +509,21 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    /// The config home is `CLAUDE_CONFIG_DIR`, else `~/.claude`.
+    #[test]
+    fn the_config_home_follows_the_variable() {
+        assert_eq!(
+            ClaudeConfig::at("/home/user/cc").home_dir(),
+            Some(PathBuf::from("/home/user/cc"))
+        );
+        let home = ClaudeConfig {
+            var: None,
+            home: Some("/home/user".into()),
+        };
+        assert_eq!(home.home_dir(), Some(PathBuf::from("/home/user/.claude")));
+        assert_eq!(ClaudeConfig::default().home_dir(), None);
+    }
 
     /// A temp `CLAUDE_CONFIG_DIR` and a launch directory, never the real
     /// `~/.claude.json`.
