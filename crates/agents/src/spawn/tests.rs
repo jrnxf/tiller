@@ -1812,6 +1812,50 @@ fn launch_keeps_the_developers_skills_callable() {
     }
 }
 
+/// L6: a developer plugin with hooks could put unapproved text into a
+/// role's context, so the launch switches it off; a plugin with only skills
+/// stays on (P67).
+#[test]
+fn launch_switches_off_the_developers_plugins_with_hooks() {
+    let mut rig = Rig::new();
+    let home = rig.fleet.dir.path().join("claude");
+    let notes = home.join("plugins/cache/notes");
+    let skills = home.join("plugins/cache/skills");
+    for (folder, name) in [(&notes, "notes"), (&skills, "skills")] {
+        std::fs::create_dir_all(folder.join(".claude-plugin")).unwrap();
+        std::fs::write(
+            folder.join(".claude-plugin/plugin.json"),
+            format!(r#"{{"name": "{name}"}}"#),
+        )
+        .unwrap();
+    }
+    std::fs::create_dir_all(notes.join("hooks")).unwrap();
+    std::fs::write(
+        notes.join("hooks/hooks.json"),
+        r#"{"hooks": {"SessionStart": []}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        home.join("plugins/installed_plugins.json"),
+        serde_json::to_vec(&serde_json::json!({"version": 2, "plugins": {
+            "notes@shop": [{"scope": "user", "installPath": notes}],
+            "skills@shop": [{"scope": "user", "installPath": skills}],
+        }}))
+        .unwrap(),
+    )
+    .unwrap();
+    let card = rig.card(CardKind::Ship, None);
+    let spawned = rig.spawn(&card, RunRole::Builder);
+    let settings: Value = serde_json::from_slice(
+        &std::fs::read(rig.scratch.join(&spawned.run.id).join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        settings["enabledPlugins"],
+        serde_json::json!({"notes@shop": false})
+    );
+}
+
 #[test]
 fn worker_launch_has_remote_control_off() {
     let mut rig = Rig::new();
