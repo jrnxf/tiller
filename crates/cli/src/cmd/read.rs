@@ -167,9 +167,10 @@ pub fn board(app: &App, args: BoardArgs) -> Done {
 /// `--allow-host` names it reads from `daemon.json`; the one token is printed
 /// for loopback and for each allowed host. The link and the code are one
 /// login: either works once, at any of those names, until `LOGIN_MINUTES`
-/// pass, so each call mints a new pair. On a terminal each allowed host's
-/// link is also drawn as a QR code on stderr, for a phone to scan, and the
-/// code follows; stdout stays the response alone.
+/// pass, so each call mints a new pair. A person at a terminal reads the code
+/// and the links as a short answer, and on a terminal each allowed host's link
+/// is also drawn as a QR code on stderr, for a phone to scan; stdout stays the
+/// response alone.
 fn login(app: &App) -> Done {
     app.require_owner("tiller board --login")?;
     let running = tiller_agents::land::DaemonLock::held(&app.home)
@@ -184,6 +185,7 @@ fn login(app: &App) -> Done {
     let tiller_daemon::auth::Login { token, code } =
         tiller_daemon::auth::mint_login(&app.home, tiller_core::Timestamp::now())
             .map_err(|error| Failure::from(tiller_core::Error::Internal(error.to_string())))?;
+    let local = format!("http://127.0.0.1:{}/login/{token}", running.port);
     let allowed: Vec<String> = running
         .allowed_hosts
         .iter()
@@ -191,23 +193,43 @@ fn login(app: &App) -> Done {
         .collect();
     if std::io::stderr().is_terminal() {
         let mut stderr = std::io::stderr().lock();
-        for url in &allowed {
+        for (host, url) in running.allowed_hosts.iter().zip(&allowed) {
             // A failed write to the terminal loses only the picture.
-            let _ = write!(stderr, "{url}\n{}\n", qr(url));
+            let _ = write!(stderr, "scan to sign in at {host}\n{}\n", qr(url));
         }
-        let _ = writeln!(
-            stderr,
-            "Or enter this code on the board: {} {}",
-            &code[..4],
-            &code[4..]
-        );
     }
+    let summary = login_summary(&code, &local, &allowed);
     Ok(Outcome::read(json!({
-        "url": format!("http://127.0.0.1:{}/login/{token}", running.port),
+        "url": local,
         "allowed_host_urls": allowed,
         "code": code,
         "expires_in_minutes": tiller_daemon::auth::LOGIN_MINUTES,
-    })))
+    }))
+    .with_summary(summary))
+}
+
+/// The short answer of `tiller board --login`: the code split in two halves
+/// as the board's boxes show it, then a link for each name, the loopback one
+/// as `local` when an allowed host has the plain `link`.
+fn login_summary(code: &str, local: &str, allowed: &[String]) -> String {
+    let (head, tail) = code.split_at(code.len() / 2);
+    let mut lines = vec![
+        format!(
+            "sign in to the board with this code or a link. each works once, within {} minute{}.",
+            tiller_daemon::auth::LOGIN_MINUTES,
+            if tiller_daemon::auth::LOGIN_MINUTES == 1 {
+                ""
+            } else {
+                "s"
+            },
+        ),
+        String::new(),
+        format!("  code   {head}-{tail}"),
+    ];
+    lines.extend(allowed.iter().map(|url| format!("  link   {url}")));
+    let label = if allowed.is_empty() { "link " } else { "local" };
+    lines.push(format!("  {label}  {local}"));
+    lines.join("\n")
 }
 
 /// `text` as a QR code drawn in half blocks, black on white with its quiet
@@ -681,5 +703,34 @@ mod tests {
         assert!(widths.iter().all(|width| *width == widths[0]), "{widths:?}");
         // Half blocks pack two module rows a line, quiet zone included.
         assert!(widths[0] >= rows.len() * 2 - 1, "{widths:?} {}", rows.len());
+    }
+
+    /// The code reads as the board's two groups of boxes, and every link
+    /// lines up under it: the loopback one is `local` beside an allowed host.
+    #[test]
+    fn the_login_summary_splits_the_code_and_labels_each_link() {
+        let local = "http://127.0.0.1:7421/login/t";
+        let allowed = ["https://tiller.example.com/login/t".to_owned()];
+        let summary = login_summary("12345678", local, &allowed);
+        let lines: Vec<&str> = summary.lines().skip(2).collect();
+        assert_eq!(
+            lines,
+            [
+                "  code   1234-5678",
+                "  link   https://tiller.example.com/login/t",
+                "  local  http://127.0.0.1:7421/login/t",
+            ]
+        );
+    }
+
+    /// With no allowed host the loopback link is the only one, so it is the
+    /// plain `link`.
+    #[test]
+    fn the_login_summary_without_allowed_hosts_has_one_link() {
+        let summary = login_summary("12345678", "http://127.0.0.1:7421/login/t", &[]);
+        assert!(
+            summary.ends_with("\n  link   http://127.0.0.1:7421/login/t"),
+            "{summary}"
+        );
     }
 }
