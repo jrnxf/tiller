@@ -2064,14 +2064,18 @@ a.card:hover {
 .cq-item {
   padding: 12px 14px 14px;
   border-radius: var(--r8);
-  border: 1px solid color-mix(in srgb, var(--orange) 45%, var(--line-2));
-  background: color-mix(in srgb, var(--orange) 6%, var(--bg-card));
+  border: 1px solid var(--line-2);
+  background: var(--bg-card);
   min-width: 0;
 }
-/* Answered from here: the block stays for its receipt, and no longer calls. */
-.cq-item.done {
-  border-color: var(--line-2);
-  background: var(--bg-card);
+/* What still waits on the owner: one small dot, the card itself stays calm. */
+.cq-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin: 0 1px;
+  border-radius: 50%;
+  background: var(--orange);
 }
 .cq-meta {
   display: flex;
@@ -2087,9 +2091,10 @@ a.card:hover {
 }
 .cq-open {
   margin-left: auto;
-  color: var(--accent-text);
+  color: var(--fg-3);
 }
 .cq-open:hover {
+  color: var(--fg-1);
   text-decoration: underline;
 }
 .cq-q {

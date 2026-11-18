@@ -18,7 +18,7 @@ import { answeredStore } from "../attention/answered";
 import { ApprovalFacts } from "../attention/approval-facts";
 import { ApproveActions } from "../attention/approve";
 import { KIND_LABELS } from "../attention/format";
-import { NeedsIcon } from "../attention/icons";
+import { OkIcon } from "../attention/icons";
 import { Ago } from "../board/ago";
 import { ChevronDownIcon, PrIcon, TerminalIcon } from "../board/icons";
 import { showToast } from "../board/toast";
@@ -294,8 +294,7 @@ export function CheckpointLine({ checkpoint }: { checkpoint: ThreadCheckpoint })
     <div className="chat-checkpoint" data-testid="chat-checkpoint">
       <span>
         <RestartIcon />
-        {checkpoint.restarted ? "Orchestrator restarted" : "Orchestrator started"}{" "}
-        <Stamp at={checkpoint.at} />
+        Orchestrator restarted <Stamp at={checkpoint.at} />
       </span>
     </div>
   );
@@ -351,7 +350,7 @@ export function DecisionBlock({
     <div className="cq chat-confirm" data-testid="chat-confirm">
       <div className={sent ? "cq-item done" : "cq-item"}>
         <div className="cq-meta">
-          <NeedsIcon />
+          {sent ? <OkIcon /> : <span className="cq-dot" />}
           <b>{sent ? "Answered" : "Needs you"}</b>
           <span className="lab sm">{kindLabel(decision)}</span>
           <Ago at={item?.opened_at ?? decision.at} prefix="asked" />

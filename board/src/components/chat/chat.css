@@ -62,7 +62,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 6px;
+  padding: 4px 6px;
   border-radius: var(--r6);
   color: inherit;
   text-decoration: none;
@@ -84,8 +84,8 @@
   flex: none;
   display: grid;
   place-items: center;
-  width: 24px;
-  height: 24px;
+  width: 20px;
+  height: 20px;
   border-radius: var(--r6);
   background: var(--bg-3);
   color: var(--fg-2);
@@ -100,8 +100,8 @@
   position: absolute;
   right: -2px;
   bottom: -2px;
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   box-shadow: 0 0 0 2px var(--bg-sidebar);
 }
@@ -111,20 +111,6 @@
 .chat-av .st.need {
   background: var(--orange);
 }
-.chat-conv-body {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-}
-.chat-conv .r1,
-.chat-conv .r2 {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
 .chat-conv .name {
   flex: 1;
   min-width: 0;
@@ -133,24 +119,11 @@
   white-space: nowrap;
   font-size: var(--fs-small);
   font-weight: var(--w-medium);
+  color: var(--fg-2);
 }
-.chat-conv .when {
-  flex: none;
-  font-size: 11px;
-  color: var(--fg-4);
-}
-.chat-conv .snip {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11.5px;
-  line-height: 1.45;
-  color: var(--fg-3);
-}
-.chat-conv.unread .snip {
+.chat-conv.unread .name {
   color: var(--fg-1);
+  font-weight: var(--w-semibold);
 }
 .chat-conv .cnt {
   flex: none;
@@ -158,8 +131,8 @@
   height: 16px;
   padding: 0 4px;
   border-radius: var(--round);
-  background: var(--orange);
-  color: var(--bg-1);
+  background: var(--bg-3);
+  color: var(--fg-2);
   font-size: 10.5px;
   font-weight: var(--w-semibold);
   line-height: 16px;
@@ -824,16 +797,12 @@
 .chat-confirm .cq-item .chat-refs {
   margin: 4px 0;
 }
-/* In the thread a decision is compact: a card with an orange edge, and its
-   options one numbered list with each consequence in small words under it. */
+/* In the thread a decision is compact: a neutral card, and its options one
+   numbered list with each consequence in small words under it. */
 .chat-confirm .cq-item {
   padding: 12px 14px;
   border: 1px solid var(--line-2);
-  border-left: 3px solid var(--orange);
   background: var(--bg-card);
-}
-.chat-confirm .cq-item.done {
-  border-left-color: var(--line-2);
 }
 .chat-confirm .cq-q {
   margin: 6px 0 4px;
@@ -945,10 +914,12 @@
   margin-left: auto;
 }
 
+/* The thread's 24px gap is too much for one gray line: half of it here. */
 .chat-checkpoint {
   display: flex;
   align-items: center;
   gap: 12px;
+  margin: -12px 0;
   font-size: 11.5px;
   color: var(--fg-4);
 }

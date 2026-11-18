@@ -73,7 +73,7 @@ const VARIANTS = [
   { value: "drawer", label: "Drawer" },
 ] as const satisfies { value: ChatVariant; label: string }[];
 
-const GROUP_TONE: Record<ChatGroup, string> = { needs: "warn", working: "acc", idle: "mute" };
+const GROUP_TONE: Record<ChatGroup, string> = { needs: "mute", working: "acc", idle: "mute" };
 
 // The toBottom button shows once the view is this far up from the newest item.
 const BOTTOM_SLACK = 120;
@@ -481,7 +481,9 @@ function ThreadBody({
                 <DecisionBlock key={item.seq} decision={item} attention={attention} owner={owner} />
               );
             case "checkpoint":
-              return <CheckpointLine key={item.seq} checkpoint={item} />;
+              // A first start says nothing the thread's top does not: only a
+              // restart, where the orchestrator lost what is above, gets a line.
+              return item.restarted ? <CheckpointLine key={item.seq} checkpoint={item} /> : null;
           }
         })}
         {shownPending ? <PendingAsk text={pending} /> : null}
