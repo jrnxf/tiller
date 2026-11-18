@@ -208,8 +208,12 @@ seed() {
   # The owner returns: the away period ends, and its brief names what happened.
   q main away end
 
-  # The unhealthy host: the peer's disk floor is far above its free disk, so
-  # it refuses every new run until the owner lowers the floor or frees disk.
-  # No read command prints the host's rev; it is 1 until the first edit.
-  q peer host edit --rev 1 --disk-floor-mb 900000000
+  # The unhealthy host: the peer's disk floor is 50 GB above the disk free on
+  # this machine, so it refuses every new run until the owner lowers the floor
+  # or frees disk. The floor is in MB. No read command prints the host's rev;
+  # it is 1 until the first edit.
+  local free_mb
+  free_mb=$(df -Pk "$bench" | awk 'NR == 2 { print int($4 / 1024) }')
+  [[ $free_mb =~ ^[0-9]+$ ]] || free_mb=100000
+  q peer host edit --rev 1 --disk-floor-mb $((free_mb + 51200))
 }

@@ -277,6 +277,21 @@ fn non_negative(name: &str, value: Option<i64>) -> Result<()> {
     }
 }
 
+/// The most a RAM or disk floor may be, in MB (100 TB). A floor is in MB, so a
+/// larger number is almost surely a unit mix-up, and it would refuse every run.
+const MAX_FLOOR_MB: i64 = 100_000_000;
+
+/// A host floor in MB: not negative and not past `MAX_FLOOR_MB`.
+fn floor_mb(name: &str, value: Option<i64>) -> Result<()> {
+    non_negative(name, value)?;
+    match value {
+        Some(n) if n > MAX_FLOOR_MB => Err(Error::Usage(format!(
+            "{name} is in MB and must be at most {MAX_FLOOR_MB}, got {n}"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// `project.edit` inside a mutation, after the caller checked the owner.
 pub(crate) fn edit_project(
     tx: &mut Tx<'_>,
@@ -419,8 +434,8 @@ impl Store {
         require_owner(&ctx.actor, "tiller init")?;
         required("host label", &init.host_label)?;
         positive("lane capacity", init.lane_capacity)?;
-        non_negative("ram floor", init.ram_floor_mb)?;
-        non_negative("disk floor", init.disk_floor_mb)?;
+        floor_mb("ram floor", init.ram_floor_mb)?;
+        floor_mb("disk floor", init.disk_floor_mb)?;
         self.write(ctx, "init", None, |tx| {
             if let Some(host_id) = meta(tx.conn(), "host_id")? {
                 let host: Host = get(tx.conn(), "host", &host_id)?;
@@ -566,8 +581,8 @@ impl Store {
         if let Some(n) = edit.lane_capacity {
             positive("lane capacity", n)?;
         }
-        non_negative("ram floor", edit.ram_floor_mb.flatten())?;
-        non_negative("disk floor", edit.disk_floor_mb.flatten())?;
+        floor_mb("ram floor", edit.ram_floor_mb.flatten())?;
+        floor_mb("disk floor", edit.disk_floor_mb.flatten())?;
         let home = self.home().map(std::path::Path::to_path_buf);
         self.write(ctx, "host.edit", None, |tx| {
             let host: Host = get(tx.conn(), "host", host_id)?;
