@@ -751,7 +751,6 @@ fn an_allow_host_that_is_not_a_plain_name_is_refused() {
 /// A home whose `spawn.claude` is a stand-in curator with `body`, and one
 /// full retro of a closed card. Returns the stand-in's path and the retro.
 fn curator_home(world: &World, body: &str) -> (std::path::PathBuf, String) {
-    world.must(&["config", "set", "learning.sample_every", "1"]);
     let scratch = world.dir.path().join("scratch");
     world.must(&[
         "config",
@@ -778,7 +777,7 @@ fn curator_home(world: &World, body: &str) -> (std::path::PathBuf, String) {
         .store()
         .conn()
         .execute(
-            "UPDATE cards SET state = 'closed', outcome = 'landed', closed_at = '2026-11-03T10:00:00.000Z',
+            "UPDATE cards SET state = 'closed', outcome = 'failed', closed_at = '2026-11-03T10:00:00.000Z',
                  created_at = '2026-11-03T08:00:00.000Z', closed_by = 'owner' WHERE id = ?1",
             [&id],
         )

@@ -1,7 +1,7 @@
-//! `tiller retro ...` and `tiller learn ...`: the learning loop
-//! (`docs/design/learning-loop.md`, section 10). The record work is in
-//! `tiller_core::state::learning`; this module adds the curator launch, the
-//! candidate rendering and the holdout run.
+//! `tiller retro ...` and `tiller learn config`: retros and the curator
+//! (`docs/spec/memory.md` section 5, `docs/design/learning-loop.md`). The
+//! record work is in `tiller_core::state::learning`; this module adds the
+//! curator launch.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -10,24 +10,22 @@ use std::time::{Duration, Instant};
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
 use tiller_agents::curator;
-use tiller_agents::holdout::{self, HoldoutError};
 use tiller_core::domain::{
-    Attention, Card, ChangeSet, ConfigManifest, EvalRun, Event, Project, Retro, RetroOutcome,
-    Review, Run, Session,
+    Attention, Card, ConfigManifest, Event, Project, Retro, RetroOutcome, Review, Run, Session,
 };
-use tiller_core::state::learning::{self, Finish, Learning};
-use tiller_core::state::{find, get, list, resolve_id};
+use tiller_core::state::learning::{self, CURATOR_MODEL, CURATOR_TIMEOUT_MINUTES, Finish};
+use tiller_core::state::memory::NewNote;
+use tiller_core::state::{find, get, list};
 use tiller_core::{Actor, Store};
 use tiller_panes::process::{self, Interrupt};
 
 use super::KeyArg;
-use super::admin::load_config;
 use super::spawn::Tools;
 use crate::app::{App, Done, Failure, Outcome};
 
 #[derive(Subcommand, Debug)]
 pub enum RetroCmd {
-    /// Schedule a retro for every closed card without one, and move change sets along
+    /// Schedule a retro for every closed card without one
     Sweep,
     /// List retros
     List {
@@ -45,7 +43,7 @@ pub enum RetroCmd {
     },
     /// Launch the curator on a pending full retro
     Run(RetroRun),
-    /// Finish a full retro: nothing, one learning, or a proposal
+    /// Finish a full retro: nothing, or one note for the pending queue
     Finish(RetroFinish),
 }
 
@@ -66,52 +64,21 @@ pub struct RetroFinish {
     /// Nothing worth saving: the normal result
     #[arg(long, group = "verdict")]
     pub nothing: bool,
-    /// The one learning kept, as evidence
-    #[arg(long, group = "verdict")]
-    pub learning: Option<String>,
-    /// JSON pointers into the record that back the learning
-    #[arg(long, requires = "learning")]
-    pub evidence: Option<String>,
-    /// The proposal filed for it
-    #[arg(long, group = "verdict")]
-    pub proposed: Option<String>,
+    /// The one note's kind: `convention`, `decision`, `gotcha` or `how-to`
+    #[arg(long, group = "verdict", requires_all = ["title", "body"])]
+    pub kind: Option<String>,
+    /// The one note's title: one line that says the fact
+    #[arg(long, requires = "kind")]
+    pub title: Option<String>,
+    /// The one note's detail
+    #[arg(long, requires = "kind")]
+    pub body: Option<String>,
     #[command(flatten)]
     pub key: KeyArg,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum LearnCmd {
-    /// Open a change set: one change, or a named bundle of proposals
-    Bundle {
-        /// The change set's name
-        name: String,
-        /// The memory proposals in the set, by id; one proposal makes a change of one
-        proposals: Vec<String>,
-        /// Cards the set is measured over; default `learning.window_cards`
-        #[arg(long)]
-        window: Option<i64>,
-    },
-    /// Add a proposal to an open change set
-    Add {
-        /// The change set, by name or id
-        set: String,
-        /// The memory proposal to add, by id
-        proposal: String,
-    },
-    /// Close a change set without measuring it
-    Abandon {
-        /// The change set, by name or id
-        set: String,
-    },
-    /// Run the holdout on a change set's candidate and record the result
-    Eval(LearnEval),
-    /// The gate's verdict on a proposal: what mem.decide checks
-    Gate {
-        /// The memory proposal, by id
-        proposal: String,
-    },
-    /// Retros, pending work, change sets and the measuring window
-    Status,
     /// The manifest behind a config hash, or the parts in which two differ
     Config {
         /// A config hash, as `tiller config hash` or a run's record shows it
@@ -119,29 +86,6 @@ pub enum LearnCmd {
         /// A second hash; shows the parts in which the two differ
         other: Option<String>,
     },
-}
-
-#[derive(Args, Debug)]
-pub struct LearnEval {
-    /// The change set, by name or id
-    #[arg(required_unless_present = "proposal")]
-    pub set: Option<String>,
-    /// A lone proposal: opens a set of one named after it
-    #[arg(long, conflicts_with = "set")]
-    pub proposal: Option<String>,
-    /// Record a holdout result.json made elsewhere instead of running one
-    #[arg(long)]
-    pub result: Option<PathBuf>,
-    /// The rendered candidate text to append, instead of rendering the set's members
-    #[arg(long)]
-    pub candidate_file: Option<PathBuf>,
-    /// Where the run's results go; default a new temp dir
-    #[arg(long)]
-    pub out: Option<PathBuf>,
-}
-
-fn learning_config(app: &App) -> Result<Learning, Failure> {
-    Ok(Learning::from_table(&load_config(app)?)?)
 }
 
 /// A database error as the core reports it.
@@ -153,7 +97,7 @@ fn count(conn: &rusqlite::Connection, sql: &str, param: &str) -> Result<i64, Fai
     conn.query_row(sql, [param], |row| row.get(0)).map_err(db)
 }
 
-/// `retro show` and the curator's brief carry evidence rows and the owner's
+/// `retro show` and the curator's brief carry the owner's
 /// exact answers, so a fleet session never gets them (learning-loop.md,
 /// section 10).
 fn refuse_fleet(app: &App, what: &str) -> Result<(), Failure> {
@@ -184,9 +128,8 @@ pub fn retro(app: &App, cmd: RetroCmd) -> Done {
 }
 
 fn sweep(app: &App) -> Done {
-    let config = learning_config(app)?;
     let mut store = app.write()?;
-    let applied = store.learning_sweep(&app.ctx(), &config)?;
+    let applied = store.learning_sweep(&app.ctx())?;
     Ok(Outcome::applied(applied))
 }
 
@@ -242,27 +185,6 @@ fn brief(store: &Store, retro: &Retro) -> Result<Value, Failure> {
         "SELECT COUNT(*) FROM events WHERE card_id = ?1",
         &card.id,
     )?;
-    let evidence: Vec<Value> = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, kind, ref, excerpt, captured_at, captured_by FROM evidence
-                 WHERE card_id = ?1 ORDER BY captured_at",
-            )
-            .map_err(db)?;
-        let rows = stmt
-            .query_map([&card.id], |row| {
-                Ok(json!({
-                    "id": row.get::<_, String>(0)?,
-                    "kind": row.get::<_, String>(1)?,
-                    "ref": row.get::<_, Value>(2)?,
-                    "excerpt": row.get::<_, Option<String>>(3)?,
-                    "captured_at": row.get::<_, String>(4)?,
-                    "captured_by": row.get::<_, String>(5)?,
-                }))
-            })
-            .map_err(db)?;
-        rows.collect::<rusqlite::Result<_>>().map_err(db)?
-    };
     let earlier: Vec<Retro> = list(
         conn,
         "card_id = ?1 AND id <> ?2 ORDER BY created_at",
@@ -292,12 +214,10 @@ fn brief(store: &Store, retro: &Retro) -> Result<Value, Failure> {
         "reviews": reviews,
         "events": events.iter().map(|e| json!({"seq": e.seq, "at": e.at, "kind": e.kind, "entity": e.entity, "entity_id": e.entity_id, "actor": e.actor})).collect::<Vec<_>>(),
         "events_truncated": events_total > events.len() as i64,
-        "evidence": evidence,
         "earlier_retros": earlier,
         "finish": {
             "nothing": format!("tiller retro finish {} --nothing", retro.id),
-            "learning": format!("tiller retro finish {} --learning <one sentence> --evidence '<json>'", retro.id),
-            "proposed": format!("tiller retro finish {} --proposed <proposal>", retro.id),
+            "noted": format!("tiller retro finish {} --kind <kind> --title <one line> --body <detail>", retro.id),
         },
     }))
 }
@@ -332,19 +252,18 @@ fn run_curator(app: &App, args: RetroRun) -> Done {
             Actor::Daemon => Ok(()),
             _ => Err(error),
         })?;
-    let config = learning_config(app)?;
     let tools = Tools::load(app)?;
     let mut store = app.write()?;
     let retro = learning::resolve_retro(store.conn(), &args.retro)?;
     if args.dry_run {
         // A dry run claims nothing but is refused by the same rule.
-        learning::check_start(&retro, app.ctx().now, timeout_minutes(&config))?;
+        learning::check_start(&retro, app.ctx().now, CURATOR_TIMEOUT_MINUTES)?;
         let session_id = new_session_id()?;
         // Its launch goes beside the real scratch directory, which may hold
         // an unfinished run's `output.json`: the warning sends the owner
         // there first.
         let scratch = scratch_of(&tools, &retro.id).with_file_name(format!("{}.dry-run", retro.id));
-        let launch = prepare(&tools, &config, &store, &retro, &session_id, &scratch)?;
+        let launch = prepare(&tools, &store, &retro, &session_id, &scratch)?;
         return Ok(Outcome::read(json!({
             "retro": retro.id,
             "argv": launch.argv,
@@ -364,7 +283,7 @@ fn run_curator(app: &App, args: RetroRun) -> Done {
             format!("cannot watch for interrupts: {error}"),
         )
     })?;
-    let claimed = claim(&tools, &config, &mut store, &app.ctx(), &retro.id)?;
+    let claimed = claim(&tools, &mut store, &app.ctx(), &retro.id)?;
     let ran = launch(&claimed, &interrupt);
     // The end is its own write, at the time the run ended: the claim's
     // context holds the claim's time and key.
@@ -399,15 +318,10 @@ fn run_curator(app: &App, args: RetroRun) -> Done {
     })))
 }
 
-fn timeout_minutes(config: &Learning) -> i64 {
-    i64::try_from(config.curator_timeout_minutes).unwrap_or(i64::MAX)
-}
-
 /// Writes the curator's launch files for `retro` in a fresh `scratch`
 /// directory: a second run of the same retro gets its own.
 fn prepare(
     tools: &Tools,
-    config: &Learning,
     store: &Store,
     retro: &Retro,
     session_id: &str,
@@ -429,7 +343,7 @@ fn prepare(
         tiller: tools.tiller(),
         tiller_home: tools.tiller_home(),
         claude: &tools.config.spawn.claude,
-        model: &config.curator_model,
+        model: CURATOR_MODEL,
         brief: &brief_text,
         claude_config: &tiller_agents::spawn::trust::ClaudeConfig::from_env(),
     })
@@ -462,14 +376,13 @@ pub(crate) struct Claimed {
 /// be prepared ends `unfinished`, so it can start again at once.
 pub(crate) fn claim(
     tools: &Tools,
-    config: &Learning,
     store: &mut Store,
     ctx: &tiller_core::Ctx,
     retro: &str,
 ) -> Result<Claimed, ClaimError> {
     let session_id = new_session_id()?;
     let claimed = store
-        .retro_start(ctx, retro, Some(&session_id), timeout_minutes(config))
+        .retro_start(ctx, retro, Some(&session_id), CURATOR_TIMEOUT_MINUTES)
         .map_err(ClaimError::State)?;
     if claimed.replayed {
         // A replayed key claimed this retro before. Its run was launched
@@ -482,7 +395,7 @@ pub(crate) fn claim(
         .into());
     }
     let scratch = scratch_of(tools, &claimed.value.id);
-    let launch = match prepare(tools, config, store, &claimed.value, &session_id, &scratch) {
+    let launch = match prepare(tools, store, &claimed.value, &session_id, &scratch) {
         Ok(launch) => launch,
         Err(failure) => {
             // The end is its own write, at the time it ended. The claim
@@ -515,7 +428,7 @@ pub(crate) fn claim(
         argv: launch.argv,
         env: launch.env,
         // The curator is cut after at least a minute.
-        timeout_minutes: config.curator_timeout_minutes.max(1),
+        timeout_minutes: u64::try_from(CURATOR_TIMEOUT_MINUTES.max(1)).unwrap_or(1),
     })
 }
 
@@ -666,8 +579,7 @@ pub(crate) fn unfinished(
         Finish {
             outcome: RetroOutcome::Unfinished,
             learning: Some(note.to_owned()),
-            evidence: None,
-            proposal: None,
+            note: None,
         },
     )?;
     Ok(finished.value)
@@ -683,9 +595,8 @@ pub(crate) fn board_run(
     ctx: &tiller_core::Ctx,
     retro: &str,
 ) -> Result<tiller_daemon::api::CuratorRun, ClaimError> {
-    let config = learning_config(app)?;
     let tools = Tools::load(app)?;
-    let claimed = claim(&tools, &config, store, ctx, retro)?;
+    let claimed = claim(&tools, store, ctx, retro)?;
     let (db, home) = (app.db.clone(), app.home.clone());
     Ok(tiller_daemon::api::CuratorRun {
         claimed: claimed.retro.clone(),
@@ -803,37 +714,27 @@ fn run_with_timeout(
 fn finish(app: &App, args: RetroFinish) -> Done {
     let mut store = app.write()?;
     let retro = learning::resolve_retro(store.conn(), &args.retro)?;
-    let evidence = args
-        .evidence
-        .as_deref()
-        .map(serde_json::from_str::<Value>)
-        .transpose()
-        .map_err(|error| Failure::usage(format!("--evidence is not JSON: {error}")))?;
-    let finish = if args.nothing {
-        Finish {
+    let finish = match (args.nothing, args.kind, args.title, args.body) {
+        (true, ..) => Finish {
             outcome: RetroOutcome::Nothing,
             learning: None,
-            evidence: None,
-            proposal: None,
-        }
-    } else if let Some(learning) = args.learning.clone() {
-        Finish {
-            outcome: RetroOutcome::Evidence,
-            learning: Some(learning),
-            evidence,
-            proposal: None,
-        }
-    } else if let Some(proposal) = args.proposed.clone() {
-        Finish {
-            outcome: RetroOutcome::Proposed,
+            note: None,
+        },
+        (false, Some(kind), Some(title), Some(body)) => Finish {
+            outcome: RetroOutcome::Noted,
             learning: None,
-            evidence: None,
-            proposal: Some(proposal),
+            note: Some(NewNote {
+                project: None,
+                kind,
+                title,
+                body,
+            }),
+        },
+        _ => {
+            return Err(Failure::usage(
+                "say how it ended: --nothing, or --kind, --title and --body for one note",
+            ));
         }
-    } else {
-        return Err(Failure::usage(
-            "say how it ended: --nothing, --learning <sentence> or --proposed <proposal>",
-        ));
     };
     let normalized = json!({"retro": retro.id, "finish": finish});
     let keyed = app.key(&store, "retro.finish", &normalized, &args.key.key)?;
@@ -843,53 +744,6 @@ fn finish(app: &App, args: RetroFinish) -> Done {
 
 pub fn learn(app: &App, cmd: LearnCmd) -> Done {
     match cmd {
-        LearnCmd::Bundle {
-            name,
-            proposals,
-            window,
-        } => {
-            let config = learning_config(app)?;
-            let mut store = app.write()?;
-            let applied = store.change_set_create(
-                &app.ctx(),
-                &name,
-                &proposals,
-                window.unwrap_or(config.window_cards),
-            )?;
-            Ok(Outcome::applied(applied))
-        }
-        LearnCmd::Add { set, proposal } => {
-            let mut store = app.write()?;
-            Ok(Outcome::applied(store.change_set_add(
-                &app.ctx(),
-                &set,
-                &proposal,
-            )?))
-        }
-        LearnCmd::Abandon { set } => {
-            let mut store = app.write()?;
-            Ok(Outcome::applied(
-                store.change_set_abandon(&app.ctx(), &set)?,
-            ))
-        }
-        LearnCmd::Eval(args) => eval(app, args),
-        LearnCmd::Gate { proposal } => {
-            let store = app.read()?;
-            let gate = store.learning_gate(&proposal)?;
-            let hint = gate.hint.clone();
-            let mut outcome = Outcome::read(gate);
-            if let Some(hint) = hint {
-                outcome = outcome.with_help(hint);
-            }
-            Ok(outcome)
-        }
-        LearnCmd::Status => {
-            refuse_fleet(app, "tiller learn status")?;
-            let store = app.read()?;
-            Ok(Outcome::read(
-                store.learning_status(tiller_core::Timestamp::now())?,
-            ))
-        }
         LearnCmd::Config { hash, other } => {
             let store = app.read()?;
             let manifest = |hash: &str| -> Result<ConfigManifest, Failure> {
@@ -917,117 +771,6 @@ pub fn learn(app: &App, cmd: LearnCmd) -> Done {
             }
         }
     }
-}
-
-/// A holdout error as the command reports it.
-fn holdout_failure(error: HoldoutError) -> Failure {
-    match error {
-        HoldoutError::Usage(message) => Failure::usage(message),
-        HoldoutError::Refused(message) => Failure::refused(message),
-        HoldoutError::Unavailable(message) => Failure::unavailable(message),
-        HoldoutError::Core(error) => Failure::from(error),
-        HoldoutError::Io(error) => Failure::from(error),
-    }
-}
-
-fn eval(app: &App, args: LearnEval) -> Done {
-    app.require_owner("tiller learn eval")?;
-    let config = learning_config(app)?;
-    let mut store = app.write()?;
-    let mut events = Vec::new();
-    let set: ChangeSet = match (&args.set, &args.proposal) {
-        (Some(set), _) => {
-            if let Some(found) = find::<ChangeSet>(
-                store.conn(),
-                "name = ?1 AND state <> 'closed' ORDER BY opened_at DESC",
-                &[&set],
-            )? {
-                found
-            } else {
-                let id = resolve_id(store.conn(), "change_sets", "change set", set)?;
-                get(store.conn(), "change set", &id)?
-            }
-        }
-        (None, Some(proposal)) => {
-            let id = resolve_id(store.conn(), "proposals", "proposal", proposal)?;
-            match learning::open_set_of(store.conn(), &id)? {
-                Some(set) => set,
-                None => {
-                    let created = store.change_set_create(
-                        &app.ctx(),
-                        tiller_core::ids::short(&id),
-                        std::slice::from_ref(&id),
-                        config.window_cards,
-                    )?;
-                    events.extend(created.events);
-                    created.value
-                }
-            }
-        }
-        (None, None) => return Err(Failure::usage("name a change set or --proposal")),
-    };
-
-    if args.result.is_some() && args.candidate_file.is_some() {
-        return Err(Failure::usage(
-            "--result records a run made elsewhere; it cannot be bound to a --candidate-file it did not test",
-        ));
-    }
-    let result = match &args.result {
-        Some(path) => holdout::parse_result(path).map_err(holdout_failure)?,
-        None => {
-            let evals_dir = config.evals_dir.as_deref().map(PathBuf::from).ok_or_else(|| {
-                Failure::usage("learning.evals_dir is not set; it names the checkout that holds evals/run.sh")
-                    .hint("tiller config set learning.evals_dir <path>, or record a run with --result")
-            })?;
-            // The members the candidate stands for, taken before the run:
-            // a member added meanwhile makes the record refuse.
-            let members = learning::members_sha256_of(store.conn(), &set.id)?;
-            let candidate = match &args.candidate_file {
-                Some(path) => std::fs::read_to_string(path)
-                    .map_err(|error| Failure::usage(format!("{}: {error}", path.display())))?,
-                None => holdout::render_candidate(store.conn(), &set, &app.home)
-                    .map_err(holdout_failure)?,
-            };
-            let out = match &args.out {
-                Some(dir) => dir.clone(),
-                None => tempfile::Builder::new()
-                    .prefix("tiller-learn-eval.")
-                    .tempdir()?
-                    .keep(),
-            };
-            // In its own group the runner no longer gets the terminal's
-            // Ctrl-C, so tiller catches it and stops the group itself.
-            let interrupt = Interrupt::catch().map_err(|error| {
-                Failure::new(
-                    "internal",
-                    1,
-                    format!("cannot watch for interrupts: {error}"),
-                )
-            })?;
-            holdout::run(&evals_dir, &out, &candidate, members, &interrupt).map_err(|error| {
-                // The error names the result relative to the run; the
-                // owner's terminal also gets where the run is.
-                holdout_failure(error).hint(format!("the run's files are in {}", out.display()))
-            })?
-        }
-    };
-    let recorded = store.eval_run_record(&app.ctx(), &set.id, result)?;
-    events.extend(recorded.events);
-    let run: EvalRun = recorded.value;
-    let passed = run.passed == 1;
-    Ok(Outcome::applied(tiller_core::Applied {
-        value: json!({"change_set": set, "eval_run": run}),
-        events,
-        replayed: false,
-    })
-    .with_help(if passed {
-        format!(
-            "the holdout passed; tiller learn gate <proposal> shows what else holds for {}",
-            set.name
-        )
-    } else {
-        "the holdout did not pass: write more tuning cases, then run it again".to_owned()
-    }))
 }
 
 #[cfg(test)]

@@ -1,282 +1,130 @@
-//! The memory view's wire shapes, for the contract. The core builds them;
-//! the routes pass its output through these types (unknown fields refused),
-//! so the contract cannot drift from what is served.
+//! The memory view's wire shapes, for the contract (`memory.md` section 4,
+//! API).
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use tiller_core::domain::PendingNote;
+use tiller_core::kb::{Entry, KbState};
 use utoipa::ToSchema;
 
-/// One document in the list.
+/// The kb store as the view read it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MemoryDocSummary {
-    /// `fleet` for "All projects (shared)".
-    pub project_id: String,
-    pub name: String,
-    pub lines: usize,
-    /// Open agent proposals against it.
-    pub suggestions: usize,
-    /// Why a launch goes on without it, such as "it has no approved
-    /// revision"; null when a launch loads it or it has nothing to load.
-    pub skipped: Option<String>,
+pub struct MemoryKb {
+    /// `ok`, `missing` or `unreadable`.
+    pub state: String,
+    /// Where the store is: `KB_HOME`, else `.kb` in the home folder; absent when neither is
+    /// known.
+    pub home: Option<String>,
+    /// The kb scopes a launch in the project loads, in load order; empty
+    /// without a project.
+    pub scopes: Vec<String>,
 }
 
-/// Where a line came from: the revision that last changed it.
+/// The role's startup budget: what the role file and the loaded notes take.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MemoryProvenance {
-    pub revision_id: String,
-    /// The card's display id, when a card is behind it.
-    pub card: Option<String>,
-    /// `you`, `carried over`, `outside Tiller` or the proposing session.
-    pub note: Option<String>,
-    pub at: String,
+pub struct MemoryBudget {
+    pub used: i64,
+    pub limit: i64,
 }
 
-/// An agent proposal shown inline.
+/// One kb note a launch would load now, or skip and why.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MemorySuggestion {
-    pub proposal_id: String,
-    /// `add`, `rewrite` or `retire`.
-    pub op: String,
-    pub text: Option<String>,
-    pub by: String,
-    pub card: Option<String>,
-    pub at: String,
-    pub why: Option<String>,
-    #[schema(value_type = Object)]
-    pub token_budget_after: Option<Value>,
-    /// The holdout gate's verdict on keeping it; Keep waits until it passes.
-    pub gate: MemoryGate,
-    /// The current text of the line a rewrite or removal names, while the
-    /// file has it.
-    pub target: Option<String>,
-    /// The document changed after it was proposed: "Re-propose on current
-    /// text" clears it.
-    pub moved: bool,
-    /// When Tiller recorded the text that moved it, if it did.
-    pub moved_at: Option<String>,
-    /// A holdout run is the next step, and the board offers "Run holdout
-    /// eval...".
-    pub eval_clears: bool,
-    /// The newest holdout run of its change set.
-    pub holdout: Option<MemoryHoldout>,
-}
-
-/// The newest holdout run of a suggestion's change set.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MemoryHoldout {
-    pub eval_run: String,
-    pub change_set: String,
-    pub cases_passed: i64,
-    pub cases_total: i64,
-    pub passed: bool,
-    pub partial: bool,
-    /// The run was made with the set's current members.
-    pub current: bool,
-    pub ran_at: String,
-}
-
-/// `learning.gate` on a proposal (learning-loop.md, section 7), with a
-/// proposal made against another text refused as stale.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MemoryGate {
-    pub proposal: String,
-    pub ok: bool,
-    /// The failing step, when not ok.
-    pub reason: Option<String>,
-    /// The command that clears it.
-    pub hint: Option<String>,
-    pub change_set: Option<String>,
-    pub eval_run: Option<String>,
-    /// The set that is measuring and blocks every other, with cards to go.
-    pub measuring: Option<MemoryMeasuring>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MemoryMeasuring {
-    pub change_set: String,
-    pub name: String,
-    pub cards_closed: i64,
-    pub window_cards: i64,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MemoryLine {
-    /// Its position in the section, as edits name it.
-    pub index: usize,
-    pub text: String,
-    pub memory_id: Option<String>,
-    pub provenance: Option<MemoryProvenance>,
-    /// A rewrite or removal of this line.
-    pub suggestion: Option<MemorySuggestion>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MemorySection {
+pub struct MemoryLive {
+    pub id: String,
     pub title: String,
-    /// `rule`, `note` or `preference`.
-    pub class: String,
-    pub lines: Vec<MemoryLine>,
-    /// New lines suggested for the section, and suggestions whose line is
-    /// gone.
-    pub suggestions: Vec<MemorySuggestion>,
+    /// Absent for a note that did not parse.
+    pub kind: Option<String>,
+    pub scope: String,
+    pub tokens: i64,
+    pub loaded: bool,
+    /// `over budget` or `unreadable`, for a skipped note.
+    pub reason: Option<String>,
 }
 
-/// One entry in a document's "Change history": a change applied or
-/// discarded in the last 30 days, newest first, undone or not.
+/// One note an agent suggested, waiting for the owner.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MemoryChange {
-    pub proposal_id: String,
-    /// `added`, `kept`, `edit`, `remove` or `discard`.
-    pub kind: String,
-    pub text: Option<String>,
-    /// The card it came from, else who wrote it.
-    pub from: String,
-    /// Who wrote it: `you`, `the curator` or the proposing session.
-    pub by: String,
-    pub card: Option<String>,
-    pub section: String,
-    /// The text an edit replaced.
-    pub old_text: Option<String>,
-    pub at: String,
-    /// When it was undone: its reverse applied, or its discard proposed
-    /// again.
-    pub undone_at: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MemoryDocument {
+pub struct MemoryPending {
+    pub id: String,
     pub project_id: String,
-    pub name: String,
-    pub path: String,
-    /// The blob at `HEAD`; every change sends it back as `base_blob`.
-    pub blob: String,
-    /// The working tree differs from `HEAD`: changes are refused until it is
-    /// committed or reset.
-    pub dirty: bool,
-    pub sections: Vec<MemorySection>,
-    pub changes: Vec<MemoryChange>,
+    /// `convention`, `decision`, `gotcha` or `how-to`.
+    pub kind: String,
+    pub title: String,
+    pub body: String,
+    /// `fleet`, `curator` or `migration`.
+    pub source: String,
+    /// The fleet role that suggested it.
+    pub role: Option<String>,
+    pub card_id: Option<String>,
+    pub run_id: Option<String>,
+    pub retro_id: Option<String>,
+    pub created_at: String,
+    pub edited_at: Option<String>,
+    pub rev: i64,
+}
+
+impl From<PendingNote> for MemoryPending {
+    fn from(note: PendingNote) -> Self {
+        Self {
+            id: note.id,
+            project_id: note.project_id,
+            kind: note.kind,
+            title: note.title,
+            body: note.body,
+            source: note.source,
+            role: note.role,
+            card_id: note.card_id,
+            run_id: note.run_id,
+            retro_id: note.retro_id,
+            created_at: note.created_at.to_string(),
+            edited_at: note.edited_at.map(|at| at.to_string()),
+            rev: note.rev,
+        }
+    }
+}
+
+impl From<&Entry> for MemoryLive {
+    fn from(entry: &Entry) -> Self {
+        Self {
+            id: entry.id.clone(),
+            title: entry.title.clone(),
+            kind: entry.kind.clone(),
+            scope: entry.scope.clone(),
+            tokens: entry.tokens,
+            loaded: entry.loaded,
+            reason: entry.reason.clone(),
+        }
+    }
 }
 
 /// `GET /api/v1/memory`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryResponse {
-    /// Fleet first.
-    pub docs: Vec<MemoryDocSummary>,
-    pub doc: MemoryDocument,
-    /// The holdout evals the board started that are running, or that failed
-    /// with no later recorded run of their change set, across restarts.
-    pub evals: Vec<MemoryEvalJob>,
-}
-
-/// A holdout eval the board started.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MemoryEvalJob {
-    pub proposal_id: String,
-    pub change_set: String,
-    pub cases: u64,
-    pub started_at: String,
-    /// The estimated minutes it runs.
-    pub minutes: f64,
-    /// Why it recorded nothing; absent while it runs.
-    pub error: Option<String>,
-    pub finished_at: Option<String>,
-}
-
-/// The weekly quota a holdout eval is checked against.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MemoryEvalQuota {
-    /// The weekly window with the least left.
-    pub label: Option<String>,
-    /// Percent left in it; absent when unknown.
-    pub left: Option<f64>,
-    /// This host's floor for new work; absent with no quota feed.
-    pub floor: Option<f64>,
-    /// `left` less the eval's estimate.
-    pub left_after: Option<f64>,
-    pub resets_at: Option<String>,
-    pub fetched_at: Option<String>,
-}
-
-/// `GET /api/v1/memory/proposals/{id}/eval`: what the holdout eval of a
-/// proposal will cost, and why it will not start, before the owner starts
-/// it.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MemoryEvalPlan {
-    pub proposal_id: String,
-    /// The change set it runs on: the proposal's open set, or the one-member
-    /// set a start makes.
-    pub change_set: String,
-    pub cases: u64,
-    /// Runs of the role's model, one per run of each case.
-    pub case_runs: u64,
-    /// Runs of the judge model.
-    pub judge_runs: u64,
-    pub model_runs: u64,
-    /// The weekly quota percent it will probably take (an estimate).
-    pub percent: f64,
-    /// The minutes it will probably run (an estimate).
-    pub minutes: f64,
-    pub quota: MemoryEvalQuota,
-    /// Why a start is refused now; absent when it can start.
-    pub refusal: Option<String>,
-}
-
-/// A session that loaded a revision.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MemoryLoad {
-    pub session_id: String,
+    /// Absent when no project was asked for.
+    pub project_id: Option<String>,
     pub role: String,
-    pub project_id: String,
-    pub run_id: Option<String>,
-    pub card: Option<String>,
-    pub trigger: String,
-    pub loaded_at: String,
+    pub kb: MemoryKb,
+    pub budget: MemoryBudget,
+    /// What a launch of `role` in the project would load now, skipped notes
+    /// with `loaded: false` and the reason; empty without a project.
+    pub live: Vec<MemoryLive>,
+    /// The project's pending notes, or every project's without one, oldest
+    /// first.
+    pub pending: Vec<MemoryPending>,
 }
 
-/// `GET /api/v1/memory/revisions/{id}`.
+/// What Keep wrote to kb.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MemoryRevision {
-    pub id: String,
-    pub project_id: String,
-    pub path: String,
-    pub blob_sha: String,
-    pub commit_sha: Option<String>,
-    /// `approved`, `unreviewed` or `revoked`.
-    pub review: String,
-    pub provenance: String,
-    pub recorded_at: String,
-    /// The approval row that applied it.
-    #[schema(value_type = Object)]
-    pub approval: Option<Value>,
-    pub proposal_id: Option<String>,
-    pub card: Option<String>,
-    pub sessions: Vec<MemoryLoad>,
-    /// The file's text at this revision; absent once the blob is gone.
-    pub text: Option<String>,
+pub struct MemoryKept {
+    pub note_id: String,
+    pub scope: String,
 }
 
-/// What one change came to.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
-pub struct MemoryLanded {
-    pub proposal_id: String,
-    /// Absent for a Discard.
-    pub approval_id: Option<String>,
-    /// The blob at `HEAD` after it.
-    pub blob: String,
+/// The kb state's wire name.
+pub fn state_name(state: KbState) -> String {
+    state.as_str().to_owned()
 }

@@ -1,6 +1,6 @@
-// U16: an edit made in the memory repo outside the board (an editor's save, a
-// pull, a commit by hand) arrives as one `memory_repo` change. The open page
-// reads the document again, and a draft in progress is never lost.
+// A note the fleet suggests, or an edit made elsewhere, arrives as one
+// `memory.*` change. The open Memory page reads the queue again, and a draft
+// in progress is never lost.
 
 import { QueryClientProvider } from "@tanstack/react-query";
 import type { QueryClient } from "@tanstack/react-query";
@@ -8,11 +8,11 @@ import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
-import type { ChangeEvent, MemoryResponse } from "./api-types";
+import type { ChangeEvent } from "./api-types";
 import { hydrateFromSnapshot } from "./boot";
 import { fixtureMutation } from "./fixture-mutations";
 import { fixtureResource, fixtureSnapshot } from "./fixtures";
-import { resetMemoryFixture } from "./fixtures-memory";
+import { curatorNote, resetMemoryFixture } from "./fixtures-memory";
 import { loadPrefs, prefsStore } from "./prefs";
 import { receiptsStore } from "./receipts";
 import { createAppRouter } from "./router";
@@ -22,8 +22,8 @@ import { createTestQueryClient, loadRouteChunks } from "../test-app";
 await loadRouteChunks();
 
 const NOW = Date.parse("2026-11-02T12:00:00Z");
-const FIRST = /^Before asking me to merge a sizeable PR/;
-const SECOND = /^Stop new worker dispatch/;
+const FIRST = "A new owner-only route also needs an authority test";
+const FIRST_ID = "01JPEND0000000000000000001";
 const DRAFT = "My unsaved wording";
 
 // The memory reads the page made, in order.
@@ -31,7 +31,7 @@ let reads: string[] = [];
 let writes = 0;
 
 // The stand-in daemon, backed by the same stateful fixture the dev server
-// uses, so a change made "on disk" shows on the next read.
+// uses, so a change made elsewhere shows on the next read.
 function stubDaemon() {
   vi.stubGlobal("fetch", async (path: string, init?: RequestInit) => {
     const method = init?.method ?? "GET";
@@ -75,99 +75,76 @@ afterEach(() => {
 async function renderMemory() {
   const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot("default", NOW));
-  const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: ["/memory"] }));
+  const router = createAppRouter(
+    queryClient,
+    createMemoryHistory({ initialEntries: ["/memory?project=alpha"] }),
+  );
   await router.load();
   render(
     <QueryClientProvider client={queryClient}>
       <RouterProvider router={router} />
     </QueryClientProvider>,
   );
-  // The page has its document before the test edits it.
-  await screen.findByText(FIRST, { selector: ".a-ln .tx" });
+  await screen.findByText(FIRST);
   return queryClient;
 }
 
-const page = () => within(screen.getByRole("article"));
+const pending = () => within(screen.getByRole("list", { name: "Pending notes" }));
 
-const lineOf = (text: string | RegExp) => {
-  const row = page().getByText(text, { selector: ".a-ln .tx" }).closest<HTMLElement>(".a-ln");
-  if (!row) throw new Error("no line row");
-  return row;
-};
-
-const draftBox = () =>
-  screen.getByRole("textbox", { name: "Edit this line" }) as HTMLTextAreaElement;
-
-// Someone rewrites a line of the shared document in the repo itself.
-let outside = 0;
-function rewriteOnDisk(index: number, text: string) {
-  outside += 1;
-  const doc = (fixtureResource("/api/v1/memory", "default", NOW) as MemoryResponse).doc;
-  fixtureMutation("POST", "/api/v1/memory/edits", {
-    idempotency_key: `outside-${outside}`,
-    project: "fleet",
-    base_blob: doc.blob,
-    section: "How we work here",
-    op: "rewrite",
-    index,
-    text,
-  });
-}
-
-// The watcher's event, as the change stream delivers it.
-const repoChanged = (seq: number): ChangeEvent => ({
+const changed = (seq: number, kind: string): ChangeEvent => ({
   seq,
   at: "2026-11-02T12:00:05.000Z",
-  kind: "memory_repo.changed",
-  txn: "mem.outside_edit",
-  entity: "memory_repo",
-  entity_id: "memory",
+  kind,
+  txn: kind.replace("memory.", "mem."),
+  entity: "memory_pending",
+  entity_id: "x",
   rev_after: null,
   card_id: null,
   entity_state: null,
 });
 
-async function streamDelivers(queryClient: QueryClient, seq: number) {
+async function streamDelivers(queryClient: QueryClient, event: ChangeEvent) {
   const before = reads.length;
-  act(() => applyChange(queryClient, repoChanged(seq)));
-  // The page reads its document again, and the screen has caught up.
+  act(() => applyChange(queryClient, event));
   await waitFor(() => expect(reads.length).toBeGreaterThan(before));
   await act(async () => {
     await new Promise((done) => setTimeout(done, 20));
   });
 }
 
-test("an outside edit to another line shows at once and the draft stays as typed", async () => {
+test("a note the curator suggests shows in Pending at once", async () => {
   const queryClient = await renderMemory();
-  fireEvent.click(lineOf(FIRST));
-  fireEvent.change(draftBox(), { target: { value: DRAFT } });
 
-  rewriteOnDisk(1, "Edited in the repo by hand.");
-  await streamDelivers(queryClient, 4200);
+  curatorNote(
+    "alpha",
+    "01JCARD0000000000000000014",
+    "01JRETRO000000000000000014",
+    "Drain the export queue first",
+    "A split mid-run loses the jobs in flight.",
+    new Date(NOW).toISOString(),
+  );
+  await streamDelivers(queryClient, changed(4200, "memory.noted"));
 
-  expect(reads.at(-1)).toMatch(/^\/api\/v1\/memory/);
-  expect(await page().findByText("Edited in the repo by hand.")).toBeTruthy();
-  expect(page().queryByText(SECOND)).toBeNull();
-  // The line being edited did not change, so nothing interrupts the draft.
-  expect(draftBox().value).toBe(DRAFT);
-  expect(screen.queryByRole("alert")).toBeNull();
+  expect(await pending().findByText("Drain the export queue first")).toBeTruthy();
   expect(writes).toBe(0);
 });
 
-test("an outside edit to the line being edited keeps the draft and offers Save over or Discard", async () => {
+test("an edit made elsewhere keeps the open draft, and its Save says the note changed", async () => {
   const queryClient = await renderMemory();
-  fireEvent.click(lineOf(FIRST));
-  fireEvent.change(draftBox(), { target: { value: DRAFT } });
+  fireEvent.click(screen.getByRole("button", { name: `Edit "${FIRST}"` }));
+  const title = screen.getByRole("textbox", { name: "Title" }) as HTMLInputElement;
+  fireEvent.change(title, { target: { value: DRAFT } });
 
-  rewriteOnDisk(0, "Rewritten in the repo by hand.");
-  await streamDelivers(queryClient, 4201);
+  fixtureMutation("PATCH", `/api/v1/memory/pending/${FIRST_ID}`, {
+    idempotency_key: "elsewhere-1",
+    rev: 1,
+    body: "Rewritten on another board.",
+  });
+  await streamDelivers(queryClient, changed(4201, "memory.edited"));
 
-  const notice = await screen.findByRole("alert");
-  expect(notice.textContent).toMatch(/This line changed while you were editing/);
-  expect(notice.textContent).toMatch(/Rewritten in the repo by hand\./);
-  expect(draftBox().value).toBe(DRAFT);
-  const editor = within(draftBox().closest(".ed") as HTMLElement);
-  expect(editor.getByRole("button", { name: "Save over" })).toBeTruthy();
-  expect(editor.getByRole("button", { name: "Discard" })).toBeTruthy();
-  expect(writes).toBe(0);
+  expect((screen.getByRole("textbox", { name: "Title" }) as HTMLInputElement).value).toBe(DRAFT);
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toMatch(/changed since you opened it/);
+  expect(writes).toBe(1);
 });

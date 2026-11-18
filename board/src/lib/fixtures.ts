@@ -2032,7 +2032,7 @@ export function fixtureResource(
   }
   if (url.pathname.startsWith("/api/v1/memory")) {
     settleRetros(now);
-    return memoryResource(url, quotaFor(served, now).windows, served);
+    return memoryResource(url, served);
   }
   if (url.pathname === "/api/v1/retros") return retrosResource(url, now);
   // No project starts archived; the stand-in server adds the ones archived since.

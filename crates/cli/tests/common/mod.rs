@@ -29,6 +29,7 @@ pub const CALLER_ENV: &[&str] = &[
     "TILLER_SSH",
     "TILLER_GH",
     "TILLER_TEST_OWNER",
+    "KB_HOME",
     "CLAUDECODE",
     "SSH_CONNECTION",
 ];
@@ -275,6 +276,11 @@ impl World {
 
     pub fn run_with_stdin(&self, args: &[&str], stdin: &str) -> Out {
         self.exec(None, args, Some(stdin))
+    }
+
+    /// [`World::run_with_stdin`] as a Tiller session.
+    pub fn run_with_stdin_as(&self, session: &str, args: &[&str], stdin: &str) -> Out {
+        self.exec(Some(session), args, Some(stdin))
     }
 
     /// Runs as the owner with arguments that need not be UTF-8, as a shell

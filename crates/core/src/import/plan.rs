@@ -18,13 +18,9 @@ use crate::state::find;
 use crate::state::projects::{detect_forge, first_card_seq, meta};
 use crate::time::Timestamp;
 
-/// The git blob of an empty file: the base every legacy placement diff is
-/// made against, since the importer runs before any Tiller document exists.
-pub const EMPTY_BLOB: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
-
-/// The document section a placed entry goes under (`memory.md` section 3).
-pub const RULE_SECTION: &str = "How we work here";
-pub const NOTE_SECTION: &str = "Watch out for";
+/// The longest title and body a pending note takes (`memory.md` section 4).
+const TITLE_MAX: usize = 120;
+const BODY_MAX: usize = 2000;
 
 /// What the bundle holds that the importer does not write, and where it goes.
 const NOT_IMPORTED: &[&str] = &[
@@ -175,8 +171,9 @@ pub struct MemoryPlan {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "as", rename_all = "snake_case")]
 pub enum Placement {
-    /// A proposal adding the entry to a Tiller document, for the owner to approve.
-    Proposal { target: String, section: String },
+    /// A pending note for the owner to keep in kb or discard: a rule is a
+    /// `convention`, a note a `gotcha`.
+    Pending { kind: String },
     /// A requirement on Tiller's own mechanics: a parity record row, not memory.
     Requirement,
     /// Listed and not placed.
@@ -225,7 +222,6 @@ pub fn plan(conn: &Connection, bundle: &Bundle, now: Timestamp) -> Result<Plan> 
     assign_display_ids(conn, &projects, &mut cards)?;
     resolve_dependencies(conn, bundle, &mut cards)?;
     let memory = plan_memory(conn, bundle, &slugs)?;
-    check_memory_targets(conn, &memory)?;
 
     let by_legacy: HashMap<&str, &CardPlan> = cards
         .iter()
@@ -255,7 +251,7 @@ pub fn plan(conn: &Connection, bundle: &Bundle, now: Timestamp) -> Result<Plan> 
     let counts = &bundle.manifest.counts;
     let placed = memory
         .iter()
-        .filter(|m| matches!(m.placement, Placement::Proposal { .. }))
+        .filter(|m| matches!(m.placement, Placement::Pending { .. }))
         .count();
     let requirements = memory
         .iter()
@@ -1062,14 +1058,21 @@ fn plan_memory(
             None => FLEET_PROJECT.to_owned(),
         };
         let placement = match entry.class.as_str() {
-            "rule" | "note" => Placement::Proposal {
-                target: document_path(&project_id),
-                section: if entry.class == "rule" {
-                    RULE_SECTION
-                } else {
-                    NOTE_SECTION
+            "rule" | "note" if entry.text.trim().chars().count() > BODY_MAX => {
+                Placement::NotPlaced {
+                    reason: format!(
+                        "longer than {BODY_MAX} characters, the most a pending note holds"
+                    ),
                 }
-                .to_owned(),
+            }
+            "rule" | "note" if entry.text.trim().is_empty() => Placement::NotPlaced {
+                reason: "empty".to_owned(),
+            },
+            "rule" => Placement::Pending {
+                kind: "convention".to_owned(),
+            },
+            "note" => Placement::Pending {
+                kind: "gotcha".to_owned(),
             },
             "requirement" => Placement::Requirement,
             "stale" => Placement::NotPlaced {
@@ -1083,12 +1086,7 @@ fn plan_memory(
                 reason: format!("class {other:?} is not rule, note, requirement or stale"),
             },
         };
-        let exists: bool = conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM evidence WHERE kind = 'legacy'
-                             AND json_extract(ref, '$.entry') = ?1 AND excerpt = ?2)",
-            params![entry.id, entry.text],
-            |row| row.get(0),
-        )?;
+        let exists = imported(conn, &entry.id, &placement)?;
         out.push(MemoryPlan {
             legacy_id: entry.id.clone(),
             class: entry.class.clone(),
@@ -1105,49 +1103,34 @@ fn plan_memory(
     Ok(out)
 }
 
-/// The Tiller document a project's entries are placed in, relative to the
-/// host's memory repo (`memory.md` section 3).
-pub fn document_path(project_id: &str) -> String {
-    if project_id == FLEET_PROJECT {
-        "fleet.md".to_owned()
-    } else {
-        format!("projects/{project_id}.md")
-    }
+/// Whether an earlier import wrote the entry: its pending note's
+/// `memory.noted` event, which outlives a keep or a discard, or its line in
+/// an `import.applied` event for an entry it lists and does not place.
+pub(crate) fn imported(conn: &Connection, legacy_id: &str, placement: &Placement) -> Result<bool> {
+    let sql = match placement {
+        Placement::Pending { .. } => {
+            "SELECT EXISTS (SELECT 1 FROM events WHERE kind = 'memory.noted'
+                             AND json_extract(payload, '$.legacy_id') = ?1)"
+        }
+        Placement::Requirement => {
+            "SELECT EXISTS (SELECT 1 FROM events e, json_each(e.payload, '$.requirements') r
+                             WHERE e.kind = 'import.applied' AND r.value = ?1)"
+        }
+        Placement::NotPlaced { .. } => {
+            "SELECT EXISTS (SELECT 1 FROM events e, json_each(e.payload, '$.not_placed') r
+                             WHERE e.kind = 'import.applied'
+                               AND json_extract(r.value, '$.legacy_id') = ?1)"
+        }
+    };
+    Ok(conn.query_row(sql, [legacy_id], |row| row.get(0))?)
 }
 
-/// Refuses a placement into a document that already has content: every
-/// placement diff is made against the empty file.
-fn check_memory_targets(conn: &Connection, memory: &[MemoryPlan]) -> Result<()> {
-    let targets: BTreeSet<(&str, &str)> = memory
-        .iter()
-        .filter(|m| m.action == Action::Create)
-        .filter_map(|m| match &m.placement {
-            Placement::Proposal { target, .. } => Some((m.project_id.as_str(), target.as_str())),
-            _ => None,
-        })
-        .collect();
-    for (project_id, target) in targets {
-        let blob: Option<String> = conn
-            .query_row(
-                "SELECT r.blob_sha FROM memory_sources s JOIN memory_revisions r ON r.source_id = s.id
-                 WHERE s.project_id = ?1 AND s.kind = 'tiller_doc' AND s.canonical_path = ?2
-                   AND s.retired_at IS NULL
-                 ORDER BY r.recorded_at DESC, r.id DESC LIMIT 1",
-                params![project_id, target],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(blob) = blob
-            && blob != EMPTY_BLOB
-        {
-            return Err(Error::refused(
-                "memory_source",
-                target,
-                "the document already has content; legacy placement diffs need the empty document",
-            ));
-        }
-    }
-    Ok(())
+/// The title of an imported note: its first line, cut to the most a title
+/// holds.
+pub(crate) fn note_title(text: &str) -> String {
+    let first = text.trim().lines().next().unwrap_or_default().trim();
+    let first = first.strip_prefix("- ").unwrap_or(first).trim();
+    first.chars().take(TITLE_MAX).collect()
 }
 
 /// A bundle date (`YYYY-MM-DD`, a Lisbon day) as 09:00 Lisbon that day, the

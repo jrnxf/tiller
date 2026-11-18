@@ -1912,29 +1912,14 @@ fn config_hash_covers_the_manifest() {
         "other-model",
         spawned.run.effort,
         None,
-        &[],
+        "",
     );
     let diff = tiller_core::state::learning::manifest_diff(&manifest.parts, &other);
     assert!(diff.contains_key("model") && diff.contains_key("settings"));
     assert!(!diff.contains_key("role") && !diff.contains_key("tiller"));
-    // The memory part follows the rendered revisions, in any order.
-    let a = launch::manifest(
-        Role::Builder,
-        b"{}",
-        "m",
-        Effort::High,
-        None,
-        &[("s1".into(), "b1".into()), ("s2".into(), "b2".into())],
-    );
-    let b = launch::manifest(
-        Role::Builder,
-        b"{}",
-        "m",
-        Effort::High,
-        None,
-        &[("s2".into(), "b2".into()), ("s1".into(), "b1".into())],
-    );
-    assert_eq!(a["memory"], b["memory"]);
+    // The memory part is the hash of the rendered notes.
+    let a = launch::manifest(Role::Builder, b"{}", "m", Effort::High, None, "h1");
+    assert_eq!(a["memory"], "h1");
     assert_ne!(a["memory"], other["memory"]);
 }
 
@@ -3314,117 +3299,72 @@ fn a_queued_restart_that_fails_is_dropped_and_shows_as_stale_again() {
     assert!(crate::stale::staleness(&session).is_some());
 }
 
-/// A worker launch renders the approved memory that loads for its role and
-/// project, fleet document first, and records what it rendered: a document
-/// of the other boundary, one scoped to another role, an unapproved
-/// revision and the working tree never reach the prompt (`memory.md`
-/// sections 2, 7 and 8).
+/// A worker launch renders the kb notes of the project's scopes into the
+/// prompt, repo scope first and before the brief, and records what it
+/// rendered: a note of another repo, an `open-work` note, an unindexed one
+/// and a pending note never reach the prompt (`memory.md` sections 2, 3
+/// and 7).
 #[test]
-fn spawn_renders_the_approved_memory_and_records_the_load() {
+fn spawn_renders_the_kb_notes_and_records_the_load() {
     let mut rig = Rig::new();
-    let home = rig.fleet.dir.path().join("tiller-home");
-    let repo = home.join("memory");
-    std::fs::create_dir_all(repo.join("projects")).unwrap();
-    git(&repo, &["init", "-q"]);
-    // Writes `text` at `path` in the memory repo and returns its blob.
-    let blob = |path: &str, text: &str| {
-        std::fs::write(repo.join(path), text).unwrap();
-        git(&repo, &["hash-object", "-w", path])
-    };
-    let fleet = blob("fleet.md", "## How we work here\n\n- Fleet line.\n");
-    let alpha = blob(
-        "projects/alpha.md",
-        "## How we work here\n\n- Alpha line.\n",
+    rig.sql(
+        "UPDATE projects SET remote = 'https://github.com/example/alpha.git' WHERE id = 'alpha'",
     );
-    let later = blob(
-        "projects/alpha.md",
-        "## How we work here\n\n- Unapproved line.\n",
+    rig.kb_note("global", "fleet-line", "convention", "Fleet line.", true);
+    rig.kb_note(
+        "github.com/example/alpha",
+        "alpha-line",
+        "gotcha",
+        "Alpha line.",
+        true,
     );
-    let work = blob("projects/alpha-work.md", "- Work line.\n");
-    let scoped = blob("projects/alpha-orch.md", "- Orchestrator line.\n");
-    // The working tree moved on after every blob was written.
-    std::fs::write(repo.join("projects/alpha.md"), "- Worktree line.\n").unwrap();
-    rig.tiller_home = home;
-
-    let source = |id: &str, project: &str, boundary: &str, path: &str, roles: &str| {
-        rig.sql(&format!(
-            "INSERT INTO memory_sources (id, project_id, boundary, kind, loaded_path, canonical_repo,
-                 canonical_path, apply_method, load_mode, roles, added_at)
-             VALUES ('{id}', '{project}', '{boundary}', 'tiller_doc', '~/.tiller/memory/{path}',
-                 '~/.tiller/memory', '{path}', 'tiller_commit', 'rendered', '{roles}',
-                 '2026-11-02T09:00:00.000Z')"
-        ));
-    };
-    let revision = |id: &str, source: &str, blob: &str, review: &str, at: &str| {
-        rig.sql(&format!(
-            "INSERT INTO memory_revisions (id, source_id, blob_sha, review, provenance, scrub,
-                 recorded_at, recorded_by)
-             VALUES ('{id}', '{source}', '{blob}', '{review}', 'baseline', 'passed', '{at}', 'daemon')"
-        ));
-    };
-    let all = r#"["orchestrator","scout","builder","reviewer","verifier"]"#;
-    source("S-fleet", "fleet", "personal", "fleet.md", all);
-    source("S-alpha", "alpha", "personal", "projects/alpha.md", all);
-    source("S-work", "alpha", "work", "projects/alpha-work.md", all);
-    source(
-        "S-orch",
-        "alpha",
-        "personal",
-        "projects/alpha-orch.md",
-        r#"["orchestrator"]"#,
+    rig.kb_note(
+        "github.com/example/other",
+        "other-line",
+        "gotcha",
+        "Other line.",
+        true,
     );
-    revision(
-        "R-fleet",
-        "S-fleet",
-        &fleet,
-        "approved",
-        "2026-11-02T09:00:00.000Z",
+    rig.kb_note(
+        "github.com/example/alpha",
+        "open-line",
+        "open-work",
+        "Open line.",
+        true,
     );
-    revision(
-        "R-alpha",
-        "S-alpha",
-        &alpha,
-        "approved",
-        "2026-11-02T09:00:00.000Z",
+    rig.kb_note(
+        "github.com/example/alpha",
+        "hidden-line",
+        "gotcha",
+        "Hidden line.",
+        false,
     );
-    revision(
-        "R-later",
-        "S-alpha",
-        &later,
-        "unreviewed",
-        "2026-11-02T10:00:00.000Z",
-    );
-    revision(
-        "R-work",
-        "S-work",
-        &work,
-        "approved",
-        "2026-11-02T09:00:00.000Z",
-    );
-    revision(
-        "R-orch",
-        "S-orch",
-        &scoped,
-        "approved",
-        "2026-11-02T09:00:00.000Z",
+    rig.sql(
+        "INSERT INTO memory_pending (id, project_id, kind, title, body, source, created_at)
+         VALUES ('P1', 'alpha', 'gotcha', 'Pending canary', 'PENDING-CANARY-7f3a', 'fleet',
+             '2026-11-10T09:00:00.000Z')",
     );
 
     let card = rig.card(CardKind::Ship, None);
     let spawned = rig.spawn(&card, RunRole::Builder);
     let prompt =
         std::fs::read_to_string(rig.scratch.join(&spawned.run.id).join("prompt.md")).unwrap();
-    let memory = prompt.find("\n# Memory\n\n## fleet.md\n\n## How we work here\n\n- Fleet line.\n");
-    let project = prompt.find("\n## projects/alpha.md\n\n## How we work here\n\n- Alpha line.\n");
+    let memory = prompt.find("\n# Memory\n\n");
+    let alpha = prompt.find(
+        "\n## alpha-line\ngotcha · github.com/example/alpha · kb:alpha-line\n\nAlpha line.\n",
+    );
+    let fleet =
+        prompt.find("\n## fleet-line\nconvention · global · kb:fleet-line\n\nFleet line.\n");
     let brief = prompt.find("\n# Your brief\n\n");
     assert!(
-        matches!((memory, project, brief), (Some(m), Some(p), Some(b)) if m < p && p < b),
+        matches!((memory, alpha, fleet, brief), (Some(m), Some(a), Some(f), Some(b)) if m < a && a < f && f < b),
         "{prompt}"
     );
     for absent in [
-        "Unapproved line",
-        "Worktree line",
-        "Work line",
-        "Orchestrator line",
+        "Other line",
+        "Open line",
+        "Hidden line",
+        "PENDING-CANARY-7f3a",
     ] {
         assert!(!prompt.contains(absent), "{absent}: {prompt}");
     }
@@ -3435,57 +3375,36 @@ fn spawn_renders_the_approved_memory_and_records_the_load() {
         Some(true)
     );
 
-    let loads: Vec<(String, String)> = rig
-        .fleet
-        .store
-        .conn()
-        .prepare(
-            "SELECT revision_id, trigger FROM session_loads WHERE session_id = ?1
-             ORDER BY revision_id",
+    assert_eq!(
+        rig.fleet.store.mem_loaded(&spawned.session.id).unwrap(),
+        ["alpha-line", "fleet-line"]
+    );
+    let payload = memory_loaded(&rig, &spawned.session.id);
+    assert_eq!(payload["trigger"], "startup");
+    assert_eq!(payload["kb"], "ok");
+    assert_eq!(payload["skipped"], serde_json::json!([]));
+
+    // The manifest's memory part is the hash of the rendered notes.
+    let rendered = super::memory::render(
+        &rig.config.memory,
+        rig.config.kb_home.as_deref(),
+        &tiller_core::state::find::<tiller_core::domain::Project>(
+            rig.fleet.store.conn(),
+            "id = ?1",
+            &[&"alpha"],
         )
         .unwrap()
-        .query_map([&spawned.session.id], |row| Ok((row.get(0)?, row.get(1)?)))
-        .unwrap()
-        .collect::<rusqlite::Result<_>>()
-        .unwrap();
-    assert_eq!(
-        loads,
-        [
-            ("R-alpha".to_owned(), "startup".to_owned()),
-            ("R-fleet".to_owned(), "startup".to_owned())
-        ]
-    );
-    assert_eq!(rig.events("session.memory_loaded", &spawned.session.id), 1);
-
-    // The manifest's memory part is the rendered pairs.
+        .unwrap(),
+        crate::roles::Role::Builder,
+    )
+    .unwrap();
+    assert_eq!(payload["hash"], rendered.hash);
     let hash = rig.run(&spawned.run.id).config_hash.unwrap();
     let manifest: tiller_core::domain::ConfigManifest =
         tiller_core::state::find(rig.fleet.store.conn(), "config_hash = ?1", &[&hash])
             .unwrap()
             .unwrap();
-    let rendered = launch::manifest(
-        crate::roles::Role::Builder,
-        b"{}",
-        "m",
-        Effort::High,
-        None,
-        &[("S-fleet".into(), fleet), ("S-alpha".into(), alpha)],
-    );
-    assert_eq!(manifest.parts["memory"], rendered["memory"]);
-
-    // On a work host the personal documents never load; the work one does.
-    rig.sql("UPDATE meta SET value = 'work' WHERE key = 'boundary'");
-    let second = rig.card(CardKind::Ship, None);
-    let spawned = rig.spawn(&second, RunRole::Builder);
-    let prompt =
-        std::fs::read_to_string(rig.scratch.join(&spawned.run.id).join("prompt.md")).unwrap();
-    assert!(
-        prompt.contains("\n# Memory\n\n## projects/alpha-work.md\n\n- Work line.\n"),
-        "{prompt}"
-    );
-    for absent in ["Fleet line", "Alpha line"] {
-        assert!(!prompt.contains(absent), "{absent}: {prompt}");
-    }
+    assert_eq!(manifest.parts["memory"], rendered.hash);
 }
 
 /// The payload of the session's `session.memory_loaded` event.
@@ -3503,149 +3422,45 @@ fn memory_loaded(rig: &Rig, session: &str) -> serde_json::Value {
     serde_json::from_str(&payload).unwrap()
 }
 
-/// A document with no approved revision does not refuse the launch: the
-/// session starts without it, and `session.memory_loaded` names the
-/// document it skipped and why (`memory.md` sections 2 and 9). An emptied
-/// baseline skips nothing, since it has no text to load.
+/// A host with no kb store, or a note that does not parse, does not stop
+/// the launch: the session starts with what loads, and
+/// `session.memory_loaded` names the store's state and each note skipped
+/// (`memory.md` section 3).
 #[test]
-fn spawn_skips_a_document_with_no_approved_revision_and_records_the_skip() {
+fn spawn_goes_on_without_the_kb_store_and_records_the_skip() {
     let mut rig = Rig::new();
-    let home = rig.fleet.dir.path().join("tiller-home");
-    let repo = home.join("memory");
-    std::fs::create_dir_all(repo.join("projects")).unwrap();
-    git(&repo, &["init", "-q"]);
-    let blob = |path: &str, text: &str| {
-        std::fs::write(repo.join(path), text).unwrap();
-        git(&repo, &["hash-object", "-w", path])
-    };
-    let fleet = blob("fleet.md", "## How we work here\n\n- Fleet line.\n");
-    let alpha = blob(
-        "projects/alpha.md",
-        "## How we work here\n\n- Unreviewed line.\n",
-    );
-    rig.tiller_home = home;
-    let all = r#"["orchestrator","scout","builder","reviewer","verifier"]"#;
-    for (id, project, path) in [
-        ("S-fleet", "fleet", "fleet.md"),
-        ("S-alpha", "alpha", "projects/alpha.md"),
-        ("S-empty", "alpha", "projects/alpha-empty.md"),
-    ] {
-        rig.sql(&format!(
-            "INSERT INTO memory_sources (id, project_id, boundary, kind, loaded_path, canonical_repo,
-                 canonical_path, apply_method, load_mode, roles, added_at)
-             VALUES ('{id}', '{project}', 'personal', 'tiller_doc', '~/.tiller/memory/{path}',
-                 '~/.tiller/memory', '{path}', 'tiller_commit', 'rendered', '{all}',
-                 '2026-11-02T09:00:00.000Z')"
-        ));
-    }
-    for (id, source, blob, review, provenance) in [
-        ("R-fleet", "S-fleet", fleet.as_str(), "approved", "baseline"),
-        (
-            "R-alpha",
-            "S-alpha",
-            alpha.as_str(),
-            "unreviewed",
-            "external",
-        ),
-        (
-            "R-empty",
-            "S-empty",
-            tiller_core::import::EMPTY_BLOB,
-            "unreviewed",
-            "baseline",
-        ),
-    ] {
-        rig.sql(&format!(
-            "INSERT INTO memory_revisions (id, source_id, blob_sha, review, provenance, scrub,
-                 recorded_at, recorded_by)
-             VALUES ('{id}', '{source}', '{blob}', '{review}', '{provenance}', 'passed',
-                 '2026-11-02T09:00:00.000Z', 'daemon')"
-        ));
-    }
-
     let card = rig.card(CardKind::Ship, None);
     let spawned = rig.spawn(&card, RunRole::Builder);
     let prompt =
         std::fs::read_to_string(rig.scratch.join(&spawned.run.id).join("prompt.md")).unwrap();
-    assert!(prompt.contains("- Fleet line."), "{prompt}");
-    assert!(!prompt.contains("Unreviewed line"), "{prompt}");
+    assert!(!prompt.contains("\n# Memory\n"), "{prompt}");
     let payload = memory_loaded(&rig, &spawned.session.id);
-    assert_eq!(payload["revision_ids"], serde_json::json!(["R-fleet"]));
-    assert_eq!(
-        payload["skipped"],
-        serde_json::json!([{
-            "source_id": "S-alpha",
-            "project_id": "alpha",
-            "path": "projects/alpha.md",
-            "reason": "it has no approved revision",
-        }])
-    );
+    assert_eq!(payload["kb"], "missing");
+    assert_eq!(payload["notes"], serde_json::json!([]));
 
-    // With nothing approved to load, the skip is still recorded.
-    rig.sql("UPDATE memory_revisions SET review = 'unreviewed' WHERE id = 'R-fleet'");
+    rig.kb_note("global", "fleet-line", "convention", "Fleet line.", true);
+    let broken = rig
+        .config
+        .kb_home
+        .clone()
+        .unwrap()
+        .join("notes/global/broken.md");
+    std::fs::write(
+        broken,
+        "---\nid: broken\n---\nno front matter to speak of\n",
+    )
+    .unwrap();
     let second = rig.card(CardKind::Ship, None);
     let spawned = rig.spawn(&second, RunRole::Builder);
+    let prompt =
+        std::fs::read_to_string(rig.scratch.join(&spawned.run.id).join("prompt.md")).unwrap();
+    assert!(prompt.contains("Fleet line."), "{prompt}");
     let payload = memory_loaded(&rig, &spawned.session.id);
-    assert_eq!(payload["revision_ids"], serde_json::json!([]));
-    let skipped: Vec<&str> = payload["skipped"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|s| s["path"].as_str().unwrap())
-        .collect();
-    assert_eq!(skipped, ["fleet.md", "projects/alpha.md"]);
-    let loads: i64 = rig
-        .fleet
-        .store
-        .conn()
-        .query_row(
-            "SELECT count(*) FROM session_loads WHERE session_id = ?1",
-            [&spawned.session.id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(loads, 0);
-}
-
-/// A blob the memory repo cannot give refuses the launch rather than start
-/// a session without text the record would say it got.
-#[test]
-fn spawn_refuses_an_approved_blob_it_cannot_read() {
-    let mut rig = Rig::new();
-    let home = rig.fleet.dir.path().join("tiller-home");
-    std::fs::create_dir_all(home.join("memory")).unwrap();
-    git(&home.join("memory"), &["init", "-q"]);
-    rig.tiller_home = home;
-    rig.sql(
-        "INSERT INTO memory_sources (id, project_id, boundary, kind, loaded_path, canonical_repo,
-             canonical_path, apply_method, load_mode, added_at)
-         VALUES ('S-alpha', 'alpha', 'personal', 'tiller_doc', '~/.tiller/memory/projects/alpha.md',
-             '~/.tiller/memory', 'projects/alpha.md', 'tiller_commit', 'rendered',
-             '2026-11-02T09:00:00.000Z')",
+    assert_eq!(payload["kb"], "ok");
+    assert_eq!(
+        payload["skipped"],
+        serde_json::json!([{"id": "global/broken.md", "reason": "unreadable"}])
     );
-    rig.sql(
-        "INSERT INTO memory_revisions (id, source_id, blob_sha, review, provenance, scrub,
-             recorded_at, recorded_by)
-         VALUES ('R-alpha', 'S-alpha', '0123456789abcdef0123456789abcdef01234567', 'approved',
-             'baseline', 'passed', '2026-11-02T09:00:00.000Z', 'daemon')",
-    );
-    let card = rig.card(CardKind::Ship, None);
-    let ctx = rig.orchestrator();
-    let error = rig
-        .try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
-        .unwrap_err();
-    assert!(
-        refusal(&error).contains("cannot be read"),
-        "{}",
-        refusal(&error)
-    );
-    let loads: i64 = rig
-        .fleet
-        .store
-        .conn()
-        .query_row("SELECT count(*) FROM session_loads", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(loads, 0);
 }
 
 /// T6: one board action has one actor. The board's stale restart queues a
@@ -3863,79 +3678,40 @@ fn a_restart_the_daemon_queued_drains_as_the_owner() {
 // -- memory a launch renders ---------------------------------------------------
 
 impl Rig {
-    /// Gives the rig a memory repo under its own Tiller home with one
-    /// approved alpha document for every role, its text `text`. Returns the
-    /// revision.
-    pub(crate) fn approved_memory(&mut self, text: &str) -> String {
-        let repo = self.memory_repo();
-        std::fs::write(repo.join("projects/alpha.md"), text).unwrap();
-        let blob = git(&repo, &["hash-object", "-w", "projects/alpha.md"]);
-        self.memory_revision(&blob)
+    /// Writes one kb note into the rig's own kb store, which it makes on
+    /// first use under the rig's directory (never the owner's).
+    pub(crate) fn kb_note(&mut self, scope: &str, id: &str, kind: &str, body: &str, indexed: bool) {
+        let home = self.fleet.dir.path().join("kb");
+        let dir = home.join("notes").join(scope);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{id}.md")),
+            format!(
+                "---\nid: {id}\ntitle: {id}\nscope: {scope}\nkind: {kind}\n\
+                 created: 2026-11-10T09:00:00Z\nlast_verified: 2026-11-10T09:00:00Z\n\
+                 confidence: medium\nindexed: {indexed}\n---\n{body}\n"
+            ),
+        )
+        .unwrap();
+        self.config.kb_home = Some(home);
     }
 
-    /// Records an approved alpha revision whose blob the memory repo does
-    /// not have, as after a gc or a re-clone.
-    pub(crate) fn unreadable_memory(&mut self) -> String {
-        self.memory_repo();
-        self.memory_revision("0123456789abcdef0123456789abcdef01234567")
-    }
-
-    fn memory_repo(&mut self) -> PathBuf {
-        let home = self.fleet.dir.path().join("tiller-home");
-        let repo = home.join("memory");
-        if !repo.join(".git").exists() {
-            std::fs::create_dir_all(repo.join("projects")).unwrap();
-            git(&repo, &["init", "-q"]);
-        }
-        self.tiller_home = home;
-        self.sql(
-            r#"INSERT OR IGNORE INTO memory_sources (id, project_id, boundary, kind, loaded_path,
-                 canonical_repo, canonical_path, apply_method, load_mode, roles, added_at)
-             VALUES ('S-alpha', 'alpha', 'personal', 'tiller_doc',
-                 '~/.tiller/memory/projects/alpha.md', '~/.tiller/memory', 'projects/alpha.md',
-                 'tiller_commit', 'rendered',
-                 '["orchestrator","scout","builder","reviewer","verifier"]',
-                 '2026-11-02T09:00:00.000Z')"#,
-        );
-        repo
-    }
-
-    /// Records the newest approved revision of alpha's document, at `blob`.
-    fn memory_revision(&self, blob: &str) -> String {
-        let count: i64 = self
-            .fleet
-            .store
-            .conn()
-            .query_row("SELECT count(*) FROM memory_revisions", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        let id = format!("R-{:04}", count + 1);
-        self.sql(&format!(
-            "INSERT INTO memory_revisions (id, source_id, blob_sha, review, provenance, scrub,
-                 recorded_at, recorded_by)
-             VALUES ('{id}', 'S-alpha', '{blob}', 'approved', 'baseline', 'passed',
-                 strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+{count} seconds'), 'daemon')"
-        ));
-        id
-    }
-
-    /// Every `session_loads` row in the store.
+    /// Every `session_notes` row in the store.
     pub(crate) fn all_loads(&self) -> i64 {
         self.fleet
             .store
             .conn()
-            .query_row("SELECT count(*) FROM session_loads", [], |row| row.get(0))
+            .query_row("SELECT count(*) FROM session_notes", [], |row| row.get(0))
             .unwrap()
     }
 }
 
 /// A spawn whose pane never opened records no load: "Loaded by"
-/// lists only sessions that got the prompt (`memory.md` section 7).
+/// lists only sessions that got the prompt (`memory.md` section 3).
 #[test]
 fn a_spawn_that_fails_after_the_render_records_no_load() {
     let mut rig = Rig::new();
-    rig.approved_memory("- Alpha line.\n");
+    rig.kb_note("global", "fleet-line", "convention", "Fleet line.", true);
     rig.holder.refuse("spawn");
     let card = rig.card(CardKind::Ship, None);
     let ctx = rig.orchestrator();
@@ -3951,62 +3727,12 @@ fn a_spawn_that_fails_after_the_render_records_no_load() {
 #[test]
 fn an_orchestrator_start_that_fails_after_the_render_records_no_load() {
     let (mut rig, homes) = orchestrator_rig();
-    rig.approved_memory("- Alpha line.\n");
+    rig.kb_note("global", "fleet-line", "convention", "Fleet line.", true);
     rig.holder.refuse("spawn");
     start_orchestrator(&mut rig, &homes, &owner())
         .map(|_| ())
         .unwrap_err();
     assert_eq!(rig.all_loads(), 0);
-}
-
-/// A restart whose memory cannot be rendered refuses before the stop, so
-/// the live orchestrator keeps running.
-#[test]
-fn orchestrator_restart_refused_by_its_memory_keeps_the_live_one() {
-    let (mut rig, homes) = orchestrator_rig();
-    let first = start_orchestrator(&mut rig, &homes, &owner())
-        .unwrap()
-        .value;
-    let pane = first.pane_id.clone().unwrap();
-    rig.fleet.bind(&first.session.id, &pane);
-    rig.unreadable_memory();
-
-    let waits = quick_waits();
-    let world = world!(rig);
-    let error = orchestrator::start(
-        &mut rig.fleet.store,
-        &owner(),
-        &world,
-        &homes,
-        "alpha",
-        Some(&waits),
-    )
-    .unwrap_err();
-    assert!(refusal(&error).contains("cannot be read"), "{error}");
-    let live = tiller_core::state::outbox::live_orchestrator(rig.fleet.store.conn(), "alpha")
-        .unwrap()
-        .unwrap();
-    assert_eq!(live.id, first.session.id);
-    assert!(
-        !rig.holder.calls().iter().any(|c| c.contains("/exit")),
-        "the live orchestrator was sent /exit: {:?}",
-        rig.holder.calls()
-    );
-}
-
-/// A first start whose memory cannot be rendered leaves no home behind.
-#[test]
-fn orchestrator_start_refused_by_its_memory_makes_no_home() {
-    let (mut rig, homes) = orchestrator_rig();
-    rig.unreadable_memory();
-    let error = start_orchestrator(&mut rig, &homes, &owner())
-        .map(|_| ())
-        .unwrap_err();
-    assert!(refusal(&error).contains("cannot be read"), "{error}");
-    let left: Vec<PathBuf> = std::fs::read_dir(&homes)
-        .map(|dir| dir.map(|e| e.unwrap().path()).collect())
-        .unwrap_or_default();
-    assert!(left.is_empty(), "{left:?}");
 }
 
 /// A rig whose world has the terminal holder in it, as a daemon or a CLI

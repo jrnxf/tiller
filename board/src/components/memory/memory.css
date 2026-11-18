@@ -1,14 +1,12 @@
-/* The Memory page, direction A "Margin": one document per tab, with an
-   aligned From / Changed column and suggestions where they would land,
-   centered at a reading width. Scoped to .docs so it cannot
-   restyle other screens. */
+/* The Memory page: a Pending and a Live tab at a reading width. Scoped to
+   .mem-root so it cannot restyle other screens. */
 
-.content:has(> .docs) {
+.content:has(> .mem-root) {
   padding: 0;
   overflow: hidden;
 }
 
-.docs {
+.mem-root {
   height: 100%;
   min-height: 0;
   overflow: auto;
@@ -16,117 +14,28 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Tabs */
-
-.docs .m2-tabs {
-  position: sticky;
-  top: 0;
-  z-index: 6;
-  display: flex;
-  gap: 2px;
-  padding: 8px 40px 0;
-  border-bottom: 1px solid var(--line-1);
-  background: var(--bg-1);
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.docs .m2-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  flex: none;
-  height: 36px;
-  padding: 0 12px;
-  margin-bottom: -1px;
-  border-bottom: 2px solid transparent;
-  color: var(--fg-3);
-  font-size: var(--fs-small);
-  font-weight: var(--w-medium);
-  text-decoration: none;
-  white-space: nowrap;
-}
-
-.docs .m2-tab:hover {
-  color: var(--fg-1);
-}
-
-.docs .m2-tab[aria-current="page"] {
-  color: var(--fg-1);
-  border-bottom-color: var(--fg-1);
-}
-
-.docs .m2-tab svg {
-  width: 15px;
-  height: 15px;
-  color: var(--fg-3);
-}
-
-.docs .m2-tab .pdot {
-  width: 8px;
-  height: 8px;
-  margin: 0 2px;
-}
-
-/* Every count is a pill: suggestions waiting in the accent, a line count
-   in a quiet tone. */
-.docs .m2-tab .n,
-.docs .m2-tab .s {
-  min-width: 18px;
-  height: 17px;
-  padding: 0 5px;
-  border-radius: var(--round);
-  display: inline-grid;
-  place-items: center;
-  font-size: 11px;
-  font-weight: var(--w-semibold);
-  color: var(--accent-fg);
-  background: var(--accent);
-}
-
-.docs .m2-tab .n {
-  color: var(--fg-2);
-  background: var(--bg-hover);
-}
-
-/* The page */
-
-.docs .m2-wrap {
+.mem-root .mem-wrap {
   max-width: 900px;
   margin: 0 auto;
   padding: 32px 40px 80px;
 }
 
-.docs .m2-doc {
+/* Header: the title and its line on the left, the project picker on the
+   right. */
+
+.mem-root .mem-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 0 20px;
+}
+
+.mem-root .mem-head-t {
   min-width: 0;
 }
 
-.docs .m2-doc[aria-busy="true"] {
-  cursor: progress;
-}
-
-.docs .m2-head {
-  margin: 0 0 28px;
-}
-
-.docs .m2-ti {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.docs .m2-ti svg {
-  width: 22px;
-  height: 22px;
-  color: var(--fg-3);
-}
-
-.docs .m2-ti .pdot {
-  width: 14px;
-  height: 14px;
-}
-
-.docs .m2-ti h1 {
+.mem-root h1 {
   margin: 0;
   font-size: 28px;
   line-height: 1.15;
@@ -135,7 +44,7 @@
   color: var(--fg-1);
 }
 
-.docs .m2-sub {
+.mem-root .mem-sub {
   margin: 8px 0 0;
   font-size: var(--fs-regular);
   line-height: 1.5;
@@ -143,45 +52,386 @@
   text-wrap: pretty;
 }
 
-.docs .m2-stats {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 14px;
-  margin-top: 14px;
-  font-size: 12.5px;
-  color: var(--fg-3);
+.mem-root .mem-project {
+  flex: none;
+  min-width: 168px;
 }
 
-.docs .m2-stats > span {
+/* Tabs */
+
+.mem-root .mem-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 0 0 16px;
+  border-bottom: 1px solid var(--line-1);
+}
+
+.mem-root .mem-tab {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  white-space: nowrap;
+  height: 36px;
+  padding: 0 10px;
+  margin-bottom: -1px;
+  border-bottom: 2px solid transparent;
+  color: var(--fg-3);
+  font-size: var(--fs-small);
+  text-decoration: none;
 }
 
-.docs .m2-stats svg {
-  width: 13px;
-  height: 13px;
+.mem-root .mem-tab:hover {
+  color: var(--fg-1);
 }
 
-.docs .m2-jump {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--accent-text);
-  font: inherit;
+.mem-root .mem-tab[aria-selected="true"] {
+  color: var(--fg-1);
+  border-bottom-color: var(--fg-1);
   font-weight: var(--w-medium);
-  cursor: pointer;
 }
 
-.docs .m2-jump:hover {
+.mem-root .mem-cnt {
+  color: var(--fg-4);
+  font-weight: normal;
+}
+
+/* A pending note: one card, its text on the left and its actions on the
+   right, Keep last. */
+
+.mem-root .mem-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.mem-root .mem-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px 20px;
+  align-items: end;
+  padding: 12px 14px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r8);
+  background: var(--bg-card);
+}
+
+.mem-root .mem-main {
+  min-width: 0;
+}
+
+.mem-root .mem-title {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.4;
+  font-weight: var(--w-medium);
+  color: var(--fg-1);
+  overflow-wrap: anywhere;
+}
+
+.mem-root .mem-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 0;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+
+.mem-root .mem-proj {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--fg-2);
+}
+
+.mem-root .mem-proj::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: var(--round);
+  background: var(--pc);
+}
+
+.mem-root .mem-body {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--fg-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.mem-root .mem-origin {
+  margin: 8px 0 0;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+
+.mem-root .mem-origin a {
+  color: var(--accent-text);
+  text-decoration: none;
+}
+
+.mem-root .mem-origin a:hover {
   text-decoration: underline;
-  text-underline-offset: 2px;
 }
 
-.docs .refusal {
-  margin: 14px 0 0;
+.mem-root .mem-acts {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.mem-root .mem-refusal {
+  grid-column: 1 / -1;
+}
+
+/* The inline editor takes the whole card. */
+
+.mem-root .mem-edit {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 10px;
+}
+
+.mem-root .mem-edit-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.mem-root .mem-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mem-root .mem-field-grow {
+  flex: 1;
+}
+
+.mem-root .mem-field > span {
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+
+.mem-root .mem-field input,
+.mem-root .mem-field textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 10px;
+  border: 1px solid var(--line-3);
+  border-radius: var(--r6);
+  background: var(--bg-card);
+  color: var(--fg-1);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.mem-root .mem-field input {
+  height: 32px;
+}
+
+.mem-root .mem-field textarea {
+  resize: vertical;
+  min-height: 84px;
+}
+
+.mem-root .mem-field input:focus,
+.mem-root .mem-field textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-tint);
+}
+
+.mem-root .mem-kind {
+  min-width: 140px;
+}
+
+/* Empty states and the kb warning. */
+
+.mem-root .mem-empty {
+  padding: 28px 16px;
+  border: 1px solid var(--line-1);
+  border-radius: var(--r8);
+  background: var(--bg-card);
+  text-align: center;
+  font-size: var(--fs-small);
+  color: var(--fg-3);
+}
+
+.mem-root .mem-empty p {
+  margin: 0;
+}
+
+.mem-root .mem-empty .mem-empty-t {
+  margin-bottom: 4px;
+  font-weight: var(--w-medium);
+  color: var(--fg-1);
+}
+
+.mem-root .mem-warn {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--yellow) 45%, var(--line-2));
+  border-radius: var(--r8);
+  background: color-mix(in srgb, var(--yellow) 9%, var(--bg-card));
+  font-size: var(--fs-small);
+  line-height: 1.5;
+  color: var(--fg-2);
+}
+
+.mem-root .mem-warn svg {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  color: var(--yellow);
+}
+
+.mem-root .mem-warn p {
+  margin: 0;
+}
+
+.mem-root .mem-warn .mem-warn-t {
+  font-weight: var(--w-medium);
+  color: var(--fg-1);
+}
+
+.mem-root .mem-warn code {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-1);
+  overflow-wrap: anywhere;
+}
+
+/* Live: one card, the budget and the role picker on top, then a row per
+   note. */
+
+.mem-root .mem-live {
+  border: 1px solid var(--line-2);
+  border-radius: var(--r8);
+  background: var(--bg-card);
+}
+
+.mem-root .mem-live-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line-1);
+}
+
+.mem-root .mem-budget {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+
+.mem-root .mem-budget-l {
+  flex: none;
+  color: var(--fg-2);
+}
+
+.mem-root .mem-bar {
+  flex: 1;
+  max-width: 260px;
+  min-width: 48px;
+  height: 6px;
+  border-radius: var(--round);
+  background: var(--line-1);
+  overflow: hidden;
+}
+
+.mem-root .mem-bar i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.mem-root .mem-budget-n {
+  flex: none;
+  font-family: var(--mono);
+}
+
+.mem-root .mem-role {
+  flex: none;
+  min-width: 136px;
+}
+
+.mem-root .mem-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.mem-root .mem-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 9px 14px;
+  border-top: 1px solid var(--line-1);
+}
+
+.mem-root .mem-row:first-child {
+  border-top: 0;
+}
+
+.mem-root .mem-row-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.mem-root .mem-row-t {
+  font-size: var(--fs-small);
+  line-height: 1.45;
+  color: var(--fg-1);
+  overflow-wrap: anywhere;
+}
+
+.mem-root .mem-row[data-loaded="false"] .mem-row-t {
+  color: var(--fg-3);
+}
+
+.mem-root .mem-row-m {
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+  overflow-wrap: anywhere;
+}
+
+.mem-root .mem-skip {
+  color: var(--fg-2);
+}
+
+.mem-root .mem-none,
+.mem-root .mem-foot {
+  margin: 0;
+  padding: 10px 14px;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+
+.mem-root .mem-foot {
+  border-top: 1px solid var(--line-1);
+}
+
+/* A refusal beside the control it is about. */
+
+.mem-root .refusal {
+  margin: 0;
   padding: 8px 12px;
   border-radius: var(--r8);
   border: 1px solid color-mix(in srgb, var(--red) 40%, var(--line-2));
@@ -191,579 +441,22 @@
   line-height: 1.5;
 }
 
-.docs .doc-dirty {
-  border-color: color-mix(in srgb, var(--yellow) 45%, var(--line-2));
-  background: color-mix(in srgb, var(--yellow) 9%, transparent);
-}
-
-/* A refusal beside the control it is about: in the editor, on a card, or under
-   a line. */
-.docs .refusal.inline {
-  margin: 8px 0 0;
-}
-
-.docs .a-item > .refusal.inline {
-  margin: 4px 12px 6px 36px;
-}
-
-.docs .ed > .refusal.inline {
-  margin: 0 12px;
-}
-
-.docs .a-sug > .refusal.inline {
-  margin: 10px 0 0;
-}
-
-/* A line that changed or went under an open draft: the draft stays, and the
-   choice is on the buttons. */
-.docs .ed-stale {
-  margin: 0 12px;
-  padding: 8px 12px;
-  border-radius: var(--r8);
-  border: 1px solid color-mix(in srgb, var(--yellow) 45%, var(--line-2));
-  background: color-mix(in srgb, var(--yellow) 9%, transparent);
-  color: var(--fg-1);
-  font-size: var(--fs-small);
-  line-height: 1.5;
-}
-
-.docs .ed-stale .was {
-  color: var(--fg-2);
-  overflow-wrap: anywhere;
-}
-
-.docs .refusal code {
+.mem-root .refusal code {
   font-family: var(--mono);
   font-size: 12px;
 }
 
-/* Who wrote a line and when: one unit that never breaks. */
-
-.docs .who {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  white-space: nowrap;
-}
-
-.docs .who .nm {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.docs .m2av {
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  display: inline-grid;
-  place-items: center;
-  flex: none;
-  font-size: 9.5px;
-  font-weight: var(--w-semibold);
-  line-height: 1;
-  color: var(--fg-3);
-  background: var(--bg-3);
-  box-shadow: inset 0 0 0 1px var(--line-2);
-}
-
-.docs .m2av svg {
-  width: 11px;
-  height: 11px;
-}
-
-.docs .m2av.you {
-  color: var(--accent-fg);
-  background: var(--accent-solid);
-  box-shadow: none;
-}
-
-.docs .m2av.card {
-  border-radius: 4px;
-  background:
-    radial-gradient(circle, var(--pc) 0 3px, transparent 3.5px),
-    color-mix(in srgb, var(--pc) 14%, var(--bg-card));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--pc) 30%, transparent);
-}
-
-.docs .m2av.bot {
-  color: var(--accent-text);
-  background: var(--accent-tint);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 28%, transparent);
-}
-
-.docs .mk-sep {
-  color: var(--fg-4);
-  padding: 0 2px;
-}
-
-/* Sections and lines */
-
-.docs .a-sec {
-  margin: 0 0 34px;
-}
-
-.docs .a-sec-h {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 118px 78px;
-  column-gap: 12px;
-  align-items: baseline;
-  padding: 0 12px 8px 36px;
-  margin: 0 0 4px;
-  border-bottom: 1px solid var(--line-1);
-}
-
-.docs .a-sec-h h2 {
-  margin: 0 0 0 -24px;
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  font-size: 16px;
-  line-height: 1.3;
-  letter-spacing: -0.01em;
-  font-weight: var(--w-semibold);
-  color: var(--fg-1);
-}
-
-.docs .a-sec-h h2 span {
-  font-size: 12px;
-  font-weight: var(--w-normal);
-  letter-spacing: 0;
-  color: var(--fg-4);
-}
-
-.docs .a-sec-h .col {
-  font-size: 11.5px;
-  color: var(--fg-4);
-}
-
-.docs .a-sec-h .col.r {
-  text-align: right;
-}
-
-.docs .a-ln {
-  position: relative;
-  display: grid;
-  grid-template-columns: 12px minmax(0, 1fr) 118px 78px;
-  column-gap: 12px;
-  padding: 8px 12px;
-  border-radius: var(--r8);
-  cursor: text;
-}
-
-.docs .a-ln[data-locked] {
-  cursor: default;
-}
-
-.docs .a-ln:hover {
-  background: var(--bg-hover);
-}
-
-.docs .a-ln .bul {
-  width: 5px;
-  height: 5px;
-  margin: 9px 0 0 4px;
-  border-radius: 50%;
-  background: var(--fg-4);
-}
-
-.docs .a-ln .tx {
-  font-size: 14.5px;
-  line-height: 22px;
-  color: var(--fg-1);
-  text-wrap: pretty;
-  overflow-wrap: anywhere;
-}
-
-.docs .a-ln .who,
-.docs .a-ln .day {
-  height: 22px;
-  font-size: 12px;
-  color: var(--fg-3);
-}
-
-.docs .a-ln .day {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  color: var(--fg-4);
-  white-space: nowrap;
-}
-
-/* On hover or focus, Edit and Remove take the place of the meta, so nothing
-   reflows. */
-.docs .a-ln .acts {
-  position: absolute;
-  top: 5px;
-  right: 6px;
-  display: flex;
-  gap: 2px;
-  opacity: 0;
-}
-
-.docs .a-ln .acts .ib svg {
-  width: 15px;
-  height: 15px;
-}
-
-.docs .a-ln .acts .ib.danger:hover {
-  color: var(--red-text);
-}
-
-.docs .a-ln:not([data-locked]):hover .acts,
-.docs .a-ln:focus-within .acts {
-  opacity: 1;
-}
-
-.docs .a-ln:not([data-locked]):hover > .who,
-.docs .a-ln:not([data-locked]):hover > .day,
-.docs .a-ln:focus-within > .who,
-.docs .a-ln:focus-within > .day {
-  visibility: hidden;
-}
-
-.docs .a-ln .acts .ib:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-
-.docs .a-empty {
-  margin: 8px 0 4px 36px;
-  font-size: 13.5px;
-  color: var(--fg-4);
-}
-
-.docs .a-add {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  height: 34px;
-  margin: 2px 0 0 4px;
-  padding: 0 8px;
-  border: 0;
-  border-radius: var(--r6);
-  background: transparent;
-  color: var(--fg-3);
-  font: inherit;
-  font-size: var(--fs-small);
-  cursor: pointer;
-}
-
-.docs .a-add:hover:not(:disabled) {
-  background: var(--bg-hover);
-  color: var(--fg-1);
-}
-
-.docs .a-add:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.docs .a-add svg {
-  width: 14px;
-  height: 14px;
-}
-
-/* The editor, in place of the line it edits */
-
-.docs .a-edrow {
-  padding: 4px 12px 8px 23px;
-}
-
-.docs .ed {
-  border: 1px solid color-mix(in srgb, var(--accent) 60%, var(--line-2));
-  border-radius: var(--r8);
-  background: var(--bg-card);
-  box-shadow:
-    0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent),
-    var(--shadow-high);
-}
-
-.docs .ed textarea {
-  display: block;
-  width: 100%;
-  min-height: 44px;
-  margin: 0;
-  padding: 10px 12px 6px;
-  border: 0;
-  outline: none;
-  resize: none;
-  overflow: hidden;
-  background: transparent;
-  font: inherit;
-  font-size: 14.5px;
-  line-height: 22px;
-  color: var(--fg-1);
-  field-sizing: content;
-}
-
-.docs .ed textarea::placeholder {
-  color: var(--fg-4);
-}
-
-.docs .ed-f {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-height: 42px;
-  padding: 6px 8px 8px 12px;
-}
-
-.docs .ed-meta {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  font-size: 12px;
-  color: var(--fg-3);
-  white-space: nowrap;
-  overflow: hidden;
-}
-
-.docs .ed-src {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--fg-3);
-  font: inherit;
-  text-decoration: underline;
-  text-decoration-color: var(--line-3);
-  text-underline-offset: 2px;
-  cursor: pointer;
-}
-
-.docs .ed-src:hover {
-  color: var(--fg-1);
-}
-
-.docs .ed-keys {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  margin-left: auto;
-  font-size: 11.5px;
-  color: var(--fg-4);
-  white-space: nowrap;
-}
-
-.docs .ed-keys .gap {
-  width: 6px;
-}
-
-.docs .ed-b {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: none;
-}
-
-.docs .ed-rm {
-  color: var(--fg-3);
-}
-
-.docs .ed-rm:hover {
-  color: var(--red-text);
-}
-
-/* Suggestions */
-
-.docs .a-sug {
-  margin: 4px 12px 10px 36px;
-  padding: 12px 14px;
-  border-radius: var(--r8);
-  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line-1));
-  background: color-mix(in srgb, var(--accent) 5%, var(--bg-card));
-  scroll-margin-top: 64px;
-}
-
-.docs .a-sug:focus {
-  outline: none;
-}
-
-.docs .a-sug:focus-visible {
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 50%, transparent);
-}
-
-.docs .a-sug-k {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 6px;
-  font-size: 12px;
-  color: var(--fg-3);
-}
-
-.docs .a-sug-k b {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-weight: var(--w-semibold);
-  color: var(--accent-text);
-}
-
-.docs .a-sug-k svg {
-  width: 13px;
-  height: 13px;
-}
-
-.docs .a-sug .tx {
-  font-size: 14.5px;
-  line-height: 24px;
-  color: var(--fg-1);
-  text-wrap: pretty;
-  overflow-wrap: anywhere;
-}
-
-.docs .ins {
-  color: var(--green-text);
-  background: color-mix(in srgb, var(--green) 13%, transparent);
-  border-radius: 3px;
-  padding: 1px 2px;
-  text-decoration: none;
-  box-decoration-break: clone;
-  -webkit-box-decoration-break: clone;
-}
-
-.docs .del {
-  color: var(--red-text);
-  background: color-mix(in srgb, var(--red) 9%, transparent);
-  border-radius: 3px;
-  padding: 1px 2px;
-  text-decoration: line-through;
-  text-decoration-color: color-mix(in srgb, var(--red) 55%, transparent);
-  box-decoration-break: clone;
-  -webkit-box-decoration-break: clone;
-}
-
-.docs .why {
-  margin-top: 6px;
-  font-size: 12.5px;
-  line-height: 1.5;
-  color: var(--fg-3);
-  text-wrap: pretty;
-}
-
-.docs .why .bud {
-  color: var(--fg-4);
-}
-
-.docs .gate {
-  display: flex;
-  gap: 7px;
-  margin-top: 8px;
-  padding: 7px 10px;
-  border-radius: var(--r6);
-  background: color-mix(in srgb, var(--yellow) 9%, transparent);
-  font-size: 12.5px;
-  line-height: 1.5;
-  color: var(--fg-2);
-}
-
-.docs .gate svg {
-  width: 14px;
-  height: 14px;
-  flex: none;
-  margin-top: 2px;
-  color: var(--yellow-text);
-}
-
-.docs .gate code {
-  font-family: var(--mono);
-  font-size: 11.5px;
-  color: var(--fg-1);
-  /* A long command wraps at any character, so the card never scrolls the
-     page sideways. */
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
-.docs .gate > span {
-  min-width: 0;
-}
-
-.docs .gate .gate-run {
-  display: block;
-  margin-top: 2px;
-  color: var(--fg-3);
-}
-
-.docs .sug-f {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 12px;
-}
-
-.docs .sug-f .note {
-  font-size: 12px;
-  color: var(--fg-4);
-}
-
-/* Discard and Keep stay together, on the right, whatever comes before. */
-.docs .sug-d {
-  display: flex;
-  gap: 6px;
-  margin-left: auto;
-}
-
-/* The holdout passed, or the text moved under the suggestion. */
-.docs .gate.ok {
-  background: color-mix(in srgb, var(--green) 8%, transparent);
-}
-
-.docs .gate.ok svg {
-  color: var(--green-text);
-}
-
-.docs .gate.stale {
-  background: color-mix(in srgb, var(--orange) 8%, transparent);
-}
-
-.docs .gate.stale svg {
-  color: var(--orange-text);
-}
-
-/* A running holdout eval: what it runs, a bar on its time estimate, and
-   what is left. */
-.docs .ev-run {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-top: 8px;
-  padding: 7px 10px;
-  border-radius: var(--r6);
-  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line-1));
-  background: var(--accent-tint);
-  font-size: var(--fs-mini);
-  color: var(--fg-2);
-}
-
-.docs .ev-run .bar {
-  flex: 1 1 120px;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--line-2);
-  overflow: hidden;
-}
-
-.docs .ev-run .bar i {
-  display: block;
-  height: 100%;
-  background: var(--accent-solid);
-  transition: width 0.4s ease;
-}
-
-/* The change history at the foot of the document: one card, a row per
-   change, its Undo... where it is read. */
-.docs .h-box {
-  margin: 8px 0 0;
+/* The Retros list under the pending queue: one card, a row per retro, the
+   card id in mono before the title. */
+
+.mem-root .h-box {
+  margin: 24px 0 0;
   border: 1px solid var(--line-1);
   border-radius: var(--r8);
   background: var(--bg-card);
 }
 
-.docs .h-head {
+.mem-root .h-head {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -772,32 +465,32 @@
   border-bottom: 1px solid var(--line-1);
 }
 
-.docs .h-head h2 {
+.mem-root .h-head h2 {
   margin: 0;
   font-size: var(--fs-small);
   font-weight: var(--w-semibold);
   color: var(--fg-1);
 }
 
-.docs .h-head .c {
+.mem-root .h-head .c {
   font-size: var(--fs-mini);
   color: var(--fg-3);
 }
 
-.docs .h-none {
+.mem-root .h-none {
   margin: 0;
   padding: 12px;
   font-size: var(--fs-small);
   color: var(--fg-3);
 }
 
-.docs .h-list {
+.mem-root .h-list {
   list-style: none;
   margin: 0;
   padding: 0;
 }
 
-.docs .h-list li {
+.mem-root .h-list li {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 2px 12px;
@@ -806,11 +499,11 @@
   border-top: 1px solid var(--line-1);
 }
 
-.docs .h-list li:first-child {
+.mem-root .h-list li:first-child {
   border-top: 0;
 }
 
-.docs .h-list .t {
+.mem-root .h-list .t {
   min-width: 0;
   font-size: var(--fs-small);
   line-height: 1.5;
@@ -818,406 +511,91 @@
   overflow-wrap: anywhere;
 }
 
-.docs .h-list .t .lab {
+.mem-root .h-list .t .lab {
   margin-right: 6px;
   vertical-align: 1px;
 }
 
-.docs .h-list .m {
+.mem-root .h-list .m {
   grid-column: 1;
   font-size: var(--fs-mini);
   line-height: 1.45;
   color: var(--fg-3);
 }
 
-.docs .h-list .btn,
-.docs .h-list .r {
+.mem-root .h-list .m code {
+  font-family: var(--mono);
+  font-size: var(--fs-mini);
+  color: var(--fg-1);
+}
+
+.mem-root .h-list .btn,
+.mem-root .h-list .r {
   grid-column: 2;
   grid-row: 1 / span 2;
 }
 
-.docs .h-list .r {
+.mem-root .h-list .r {
   font-size: var(--fs-mini);
   color: var(--fg-3);
 }
 
-.docs .h-mute {
-  color: var(--fg-3);
-}
-
-.docs .h-refusal {
+.mem-root .h-refusal {
   grid-column: 1 / -1;
 }
 
-/* The Retros list (learning-loop.md section 4): rows as the change history's,
-   the card id in mono before the title. */
-.docs .rt-box {
-  margin-top: 12px;
+.mem-root .h-refusal .refusal {
+  margin-top: 8px;
 }
 
-.docs .h-list .rt-card {
+.mem-root .h-list .rt-card {
   margin-right: 6px;
   font-family: var(--mono);
   font-size: var(--fs-mini);
   color: var(--fg-2);
 }
 
-/* The command that runs a waiting retro, inside its meta line. */
-.docs .h-list .m code {
-  font-family: var(--mono);
-  font-size: var(--fs-mini);
-  color: var(--fg-1);
-}
+/* A phone: the header stacks, a card's actions drop under its text, and the
+   budget takes its own line above the role picker. */
 
-.docs .h-list .r {
-  font-variant-numeric: tabular-nums;
-}
-
-/* The holdout eval's confirmation: what it costs, before it starts. */
-.dialog .ev-facts {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 6px 14px;
-  margin: 12px 0 0;
-  padding: 10px 12px;
-  border: 1px solid var(--line-1);
-  border-radius: var(--r8);
-  background: var(--bg-2);
-  font-size: var(--fs-small);
-}
-
-.dialog .ev-facts dt {
-  color: var(--fg-3);
-}
-
-.dialog .ev-facts dd {
-  margin: 0;
-  min-width: 0;
-  color: var(--fg-1);
-}
-
-.dialog .ev-facts dd[data-bad] {
-  color: var(--red-text);
-}
-
-.dialog .ev-facts .meta {
-  margin-left: 6px;
-  font-size: var(--fs-mini);
-  color: var(--fg-3);
-}
-
-.dialog .ev-wait {
-  margin-top: 12px;
-  font-size: var(--fs-small);
-  color: var(--fg-3);
-}
-
-/* Remove asks first: the line, quoted, under the question. The dialog is in
-   the body, outside .docs. */
-
-.dialog .rm-line {
-  margin: 12px 0 0;
-  padding: 8px 10px;
-  max-height: 30dvh;
-  overflow: auto;
-  border: 1px solid var(--line-2);
-  border-radius: var(--r8);
-  background: var(--bg-2);
-  font-size: 13.5px;
-  line-height: 1.5;
-  color: var(--fg-1);
-  overflow-wrap: anywhere;
-}
-
-/* A line's source, in a dialog over the page */
-
-.dialog.rev-dialog {
-  width: min(560px, calc(100vw - 32px));
-  max-height: calc(100dvh - 48px);
-  overflow: auto;
-}
-
-.rev-dialog .rev-ti {
-  margin: 4px 0 10px;
-  font-family: var(--mono);
-  font-size: 12.5px;
-  font-weight: var(--w-medium);
-  color: var(--fg-1);
-  overflow-wrap: anywhere;
-}
-
-.rev-dialog .rev-props {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 6px 12px;
-  margin: 0 0 18px;
-  font-size: 12.5px;
-  line-height: 1.45;
-}
-
-.rev-dialog .rev-props dt {
-  color: var(--fg-3);
-}
-
-.rev-dialog .rev-props dd {
-  margin: 0;
-  color: var(--fg-1);
-  overflow-wrap: anywhere;
-}
-
-.rev-dialog .rev-props code {
-  font-family: var(--mono);
-  font-size: 12px;
-}
-
-.rev-dialog .rev-h {
-  margin: 0 0 6px;
-  font-size: 12px;
-  font-weight: var(--w-medium);
-  color: var(--fg-3);
-}
-
-.rev-dialog p.rev-none {
-  margin: 0 0 18px;
-  font-size: 12.5px;
-  line-height: 1.5;
-  color: var(--fg-3);
-}
-
-.rev-dialog .rev-loads {
-  list-style: none;
-  margin: 0 0 18px;
-  padding: 0;
-}
-
-.rev-dialog .rev-loads li {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--line-soft);
-  font-size: 12.5px;
-  line-height: 1.4;
-}
-
-.rev-dialog .rev-loads b {
-  font-weight: var(--w-medium);
-  color: var(--fg-1);
-}
-
-.rev-dialog .rev-loads span {
-  font-size: 11.5px;
-  color: var(--fg-4);
-}
-
-.rev-dialog .rev-text {
-  margin: 0;
-  max-height: 240px;
-  overflow: auto;
-  padding: 10px 12px;
-  border: 1px solid var(--line-1);
-  border-radius: var(--r8);
-  background: var(--bg-2);
-  font-family: var(--mono);
-  font-size: 11.5px;
-  line-height: 1.55;
-  color: var(--fg-2);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-@media (min-width: 821px) {
-  .docs .a-ln .meta-m {
-    display: none;
-  }
-}
-
-/* Phone: the tabs scroll, the rail follows the document, and a line's meta
-   drops under its text as one unit. */
-@media (max-width: 820px) {
-  .docs .m2-tabs {
-    padding: 4px 8px 0;
-    mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+@media (max-width: 640px) {
+  .mem-root .mem-wrap {
+    padding: 20px 16px 64px;
   }
 
-  .docs .m2-tab {
-    padding: 0 10px;
-  }
-
-  .docs .m2-wrap {
-    padding: 22px 16px 96px;
-  }
-
-  .docs .m2-ti h1 {
+  .mem-root h1 {
     font-size: 24px;
   }
 
-  .docs .m2-head {
-    margin-bottom: 24px;
+  .mem-root .mem-head {
+    flex-direction: column;
+    align-items: stretch;
   }
 
-  .docs .a-sec-h {
-    display: flex;
-    padding: 0 4px 8px;
-  }
-
-  .docs .a-sec-h h2 {
-    margin: 0;
-  }
-
-  .docs .a-sec-h .col {
-    display: none;
-  }
-
-  .docs .a-ln {
-    grid-template-columns: 10px minmax(0, 1fr);
-    column-gap: 10px;
-    row-gap: 3px;
-    padding: 10px 4px;
-    border-radius: 0;
-  }
-
-  .docs .a-item + .a-item > .a-ln {
-    border-top: 1px solid var(--line-soft);
-  }
-
-  .docs .a-ln .bul {
-    margin-left: 2px;
-  }
-
-  .docs .a-ln .meta-m {
-    grid-column: 2;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-    height: 18px;
-    font-size: 12px;
-    color: var(--fg-3);
-    white-space: nowrap;
-  }
-
-  .docs .a-ln .meta-m .who,
-  .docs .a-ln .meta-m .day {
-    height: auto;
-  }
-
-  .docs .a-ln > .who,
-  .docs .a-ln > .day {
-    display: none;
-  }
-
-  /* A tap on the line edits it; Remove is in the editor. The buttons stay
-     for a screen reader. */
-  .docs .a-ln .acts {
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-  }
-
-  /* A keyboard on one of them shows both, in a row under the line, whole and
-     with their focus ring. A tap does not focus them, so touch never moves. */
-  .docs .a-ln:has(.acts :focus-visible) .acts {
-    position: static;
-    grid-column: 2;
-    width: auto;
-    height: auto;
-    margin: 4px 0 2px;
-    padding: 3px;
-    overflow: visible;
-    clip-path: none;
-    opacity: 1;
-    gap: 8px;
-  }
-
-  .docs .a-ln:has(.acts :focus-visible) .acts .ib {
-    border: 1px solid var(--line-2);
-    background: var(--bg-card);
-    box-shadow: 0 1px 1px #00000017;
-  }
-
-  .docs .a-sug {
-    margin: 2px 0 12px 20px;
-  }
-
-  .docs .a-empty {
-    margin-left: 4px;
-  }
-
-  .docs .a-add {
-    margin-left: 0;
-  }
-
-  .docs .a-edrow {
-    padding: 6px 0 10px;
-  }
-
-  .docs .gate .gate-run code {
-    display: block;
-  }
-
-  .docs .ed-keys {
-    display: none;
-  }
-
-  .docs .ed-f {
-    flex-wrap: wrap;
-  }
-
-  .docs .ed-meta {
-    flex: 1 1 100%;
-    order: -1;
-    padding-top: 2px;
-  }
-
-  .docs .ed-b {
-    width: 100%;
-  }
-
-  .docs .ed-b .grow {
-    margin-left: auto;
-  }
-
-  .docs .ed-b .btn,
-  .docs .sug-f .btn {
-    height: 32px;
-  }
-
-  /* No room beside the buttons: the note takes its own line above them, and
-     Discard and Keep drop under a step that leaves them no room. */
-  .docs .sug-f {
-    flex-wrap: wrap;
-    row-gap: 8px;
-  }
-
-  .docs .sug-f .note {
-    flex: 1 1 100%;
-    order: -1;
-  }
-}
-
-/* A narrow phone: a history row's action and an eval fact drop under their
-   text. */
-@media (max-width: 480px) {
-  .docs .h-list li {
+  .mem-root .mem-card {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .docs .h-list .btn,
-  .docs .h-list .r {
-    grid-column: 1;
+  .mem-root .mem-edit-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .mem-root .mem-live-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .mem-root .mem-bar {
+    max-width: none;
+  }
+
+  /* A date is short, so it stays on the right. A button goes under the row. */
+  .mem-root .h-list .btn {
+    grid-column: 1 / -1;
     grid-row: auto;
     justify-self: end;
     margin-top: 6px;
-  }
-
-  .dialog .ev-facts {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 2px;
-  }
-
-  .dialog .ev-facts dd {
-    margin-bottom: 6px;
   }
 }

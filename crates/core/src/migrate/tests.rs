@@ -750,3 +750,190 @@ fn an_unpaired_saved_machine_refuses_0020() {
         .unwrap();
     assert_eq!(machine.as_deref(), Some("machine-b"));
 }
+
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+/// Migration 23 (`memory.md` section 6): each line of the newest approved
+/// revision of a tiller document becomes one pending note, before the old
+/// tables go; a blob the repo cannot give is named in the event and does not
+/// stop the migration; it runs once.
+#[test]
+fn memory_moves_to_pending_notes_at_0023() {
+    let home = tempfile::tempdir().unwrap();
+    let repo = home.path().join("memory");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    let write_blob = |name: &str, text: &str| {
+        let file = repo.join(name);
+        std::fs::write(&file, text).unwrap();
+        git(&repo, &["hash-object", "-w", file.to_str().unwrap()])
+    };
+    let old = write_blob("old.md", "## How we work here\n\n- An old line\n");
+    let long = "x".repeat(130);
+    let new = write_blob(
+        "alpha.md",
+        &format!(
+            "# Alpha\n\nIntro text.\n\n## How we work here\n\n- Run the gate first\n\n\
+             ## Watch out for\n\n- The holder tests flake\n  under load\n- {long}\n"
+        ),
+    );
+
+    let mut conn = Connection::open(home.path().join("state.db")).unwrap();
+    conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+    to_version(&mut conn, 19).unwrap();
+    conn.execute_batch(&format!("BEGIN; {FIXTURE_V1} {PAIR_HOST_B} COMMIT;"))
+        .unwrap();
+    to_version(&mut conn, 22).unwrap();
+    conn.execute_batch(&format!(
+        "INSERT INTO memory_sources (id, project_id, boundary, kind, loaded_path, canonical_repo,
+                                     canonical_path, apply_method, load_mode, added_at)
+         VALUES ('01JC0000000000000000000MS2', 'alpha', 'personal', 'tiller_doc',
+                 '~/.tiller/memory/projects/alpha.md', '~/.tiller/memory', 'projects/alpha.md',
+                 'tiller_commit', 'rendered', '2026-11-02T09:00:00.000Z'),
+                ('01JC0000000000000000000MS3', 'fleet', 'personal', 'tiller_doc',
+                 '~/.tiller/memory/fleet.md', '~/.tiller/memory', 'fleet.md',
+                 'tiller_commit', 'rendered', '2026-11-02T09:00:00.000Z');
+         INSERT INTO memory_revisions (id, source_id, blob_sha, review, provenance, scrub, recorded_at, recorded_by)
+         VALUES ('01JC0000000000000000000MR2', '01JC0000000000000000000MS2', '{old}', 'approved',
+                 'baseline', 'passed', '2026-11-02T09:00:00.000Z', 'daemon'),
+                ('01JC0000000000000000000MR3', '01JC0000000000000000000MS2', '{new}', 'approved',
+                 'baseline', 'passed', '2026-11-03T09:00:00.000Z', 'daemon'),
+                ('01JC0000000000000000000MR4', '01JC0000000000000000000MS3',
+                 '1111111111111111111111111111111111111111', 'approved', 'baseline', 'passed',
+                 '2026-11-03T09:00:00.000Z', 'daemon');
+         INSERT INTO retros (id, card_id, project_id, closed_at, depth, reason, state, outcome, evidence_id,
+                             finished_at, finished_by, created_at)
+         VALUES ('01JC0000000000000000000RT2', '01JC0000000000000000000CA2', 'alpha',
+                 '2026-11-02T10:00:00.000Z', 'full', 'incident', 'done', 'evidence',
+                 '01JC0000000000000000000EI1', '2026-11-02T10:10:00.000Z', 'curator',
+                 '2026-11-02T10:00:05.000Z');"
+    ))
+    .unwrap();
+
+    up(&mut conn).unwrap();
+    assert_eq!(current_version(&conn).unwrap(), 23);
+    let pending = |conn: &Connection| -> Vec<(String, String, String, String, String)> {
+        conn.prepare(
+            "SELECT project_id, kind, title, body, source FROM memory_pending ORDER BY rowid",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+    };
+    let row = |kind: &str, title: &str, body: &str| {
+        (
+            "alpha".to_owned(),
+            kind.to_owned(),
+            title.to_owned(),
+            body.to_owned(),
+            "migration".to_owned(),
+        )
+    };
+    let rows = pending(&conn);
+    assert_eq!(
+        rows,
+        [
+            row("convention", "Run the gate first", "Run the gate first"),
+            row("gotcha", "The holder tests flake", "The holder tests flake"),
+            row("gotcha", "under load", "under load"),
+            row("gotcha", &long[..120], &long),
+        ]
+    );
+    let (txn, payload): (String, String) = conn
+        .query_row(
+            "SELECT txn, payload FROM events WHERE kind = 'memory.migrated'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(txn, "migrate");
+    let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(payload["pending"], 4);
+    assert_eq!(payload["skipped"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        payload["skipped"][0]["source_id"],
+        "01JC0000000000000000000MS3"
+    );
+    assert_eq!(payload["skipped"][0]["path"], "fleet.md");
+
+    for gone in [
+        "memory_sources",
+        "memory_revisions",
+        "evidence",
+        "proposals",
+        "session_loads",
+        "change_sets",
+        "eval_runs",
+    ] {
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name = ?1",
+                [gone],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "{gone} is dropped");
+    }
+    let outcome: String = conn
+        .query_row(
+            "SELECT outcome FROM retros WHERE id = '01JC0000000000000000000RT2'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(outcome, "noted");
+    assert_eq!(foreign_key_violations(&conn), 0);
+    assert!(
+        repo.join("alpha.md").exists(),
+        "the memory repo stays on disk"
+    );
+
+    // It runs once: a second start changes nothing.
+    drop(conn);
+    let mut conn = Connection::open(home.path().join("state.db")).unwrap();
+    up(&mut conn).unwrap();
+    assert_eq!(pending(&conn), rows);
+    let events: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind = 'memory.migrated'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(events, 1);
+}
+
+#[test]
+fn memory_document_lines_split_by_section() {
+    let lines = memory_export::lines(
+        "Preamble\n## How we work here\n- one\n\n### Sub\ntwo\n# Top\nnot this\n## Watch out for\n-  three \n",
+    );
+    let got: Vec<(&str, &str)> = lines.iter().map(|l| (l.kind, l.title.as_str())).collect();
+    assert_eq!(
+        got,
+        [
+            ("convention", "one"),
+            ("convention", "two"),
+            ("gotcha", "three")
+        ]
+    );
+}

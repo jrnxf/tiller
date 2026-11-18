@@ -532,15 +532,11 @@ text_enum!(
 text_enum!(RetroState { Pending = "pending", Done = "done" });
 
 text_enum!(
-    /// How a retro ended. `nothing` is the normal result.
+    /// How a retro ended. `nothing` is the normal result; `noted` added
+    /// one pending note.
     RetroOutcome {
         Nothing = "nothing",
-        Evidence = "evidence",
-        Proposed = "proposed",
+        Noted = "noted",
         Unfinished = "unfinished",
     }
 );
-
-text_enum!(ChangeSetState { Open = "open", Measuring = "measuring", Closed = "closed" });
-
-text_enum!(ChangeSetClose { WindowComplete = "window_complete", Abandoned = "abandoned" });

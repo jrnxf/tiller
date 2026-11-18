@@ -1,5 +1,5 @@
-//! Waiting for the threads the daemon's board runs (curators, holdout
-//! evals) run on, when it stops.
+//! Waiting for the threads the daemon's board runs (curators) on, when
+//! it stops.
 
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
