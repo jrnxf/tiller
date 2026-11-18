@@ -139,7 +139,12 @@ fn spawn_of(world: &World, argv: &[&str]) -> Spawn {
         key: format!("key-{}", argv.join(" ")),
         argv: argv.iter().map(|arg| (*arg).to_owned()).collect(),
         cwd: world.dir.path().display().to_string(),
-        env: BTreeMap::from([("PATH".to_owned(), common::pane_path())]),
+        // A prompt of its own: the default differs by shell, `$ ` from
+        // dash and `sh-3.2$ ` from macOS's `/bin/sh` (bash in POSIX mode).
+        env: BTreeMap::from([
+            ("PATH".to_owned(), common::pane_path()),
+            ("PS1".to_owned(), "$ ".to_owned()),
+        ]),
         size: None,
         meta: Meta::default(),
     }
@@ -1398,9 +1403,14 @@ fn a_slow_subscriber_is_held_up_to_its_queue_then_lagged_and_the_app_never_waits
     let world = World::new();
     let holder = Holder::start(&world);
     // The input goes only once the shell shows `ready`, so echo is off
-    // and the tty does not echo it into the output.
-    let numbers =
-        |last: u32| format!("stty -echo; echo ready; head -c 1 >/dev/null; exec seq 1 {last}");
+    // and the tty does not echo it into the output. The output is not
+    // mapped (`-onlcr`): the macOS tty writes the `\r` of a `\n` again
+    // when its output queue fills between the two, so a held-up reader
+    // would see `\r\r\n` at random places. The test is about the
+    // holder's bytes, not the tty's mapping.
+    let numbers = |last: u32| {
+        format!("stty -echo -onlcr; echo ready; head -c 1 >/dev/null; exec seq 1 {last}")
+    };
 
     // About 2 MiB, which the queue holds.
     let held = 300_000;
@@ -1422,7 +1432,7 @@ fn a_slow_subscriber_is_held_up_to_its_queue_then_lagged_and_the_app_never_waits
             other => panic!("unexpected {other:?}"),
         }
     }
-    let expected: String = (1..=held).map(|n| format!("{n}\r\n")).collect();
+    let expected: String = (1..=held).map(|n| format!("{n}\n")).collect();
     assert!(
         seen == expected.as_bytes(),
         "{} bytes of {} came, or not in order",
