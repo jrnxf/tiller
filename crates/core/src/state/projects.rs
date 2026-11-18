@@ -147,24 +147,11 @@ fn label_free(conn: &rusqlite::Connection, host: &Host, label: &str) -> Result<(
     Ok(())
 }
 
-/// What already records this host's boundary, if anything: a memory row
-/// stamped with it, or a backup or an export a restore or an import would
-/// check it against (`memory.md` section 8). Until one exists nothing has
-/// read the boundary, so the owner may still pick the one the host belongs
-/// to.
-fn boundary_record(
-    conn: &rusqlite::Connection,
-    home: Option<&std::path::Path>,
-) -> Result<Option<&'static str>> {
-    let stamped: bool = conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM memory_sources) OR EXISTS (SELECT 1 FROM evidence)
-             OR EXISTS (SELECT 1 FROM proposals)",
-        [],
-        |row| row.get(0),
-    )?;
-    if stamped {
-        return Ok(Some("memory"));
-    }
+/// What already records this host's boundary, if anything: a backup or an
+/// export a restore or an import would check it against. Until one exists
+/// nothing has read the boundary, so the owner may still pick the one the
+/// host belongs to.
+fn boundary_record(home: Option<&std::path::Path>) -> Result<Option<&'static str>> {
     Ok(match home {
         Some(home) => {
             crate::backup::Manifest::load(&crate::backup::Paths::in_home(home))?.records_boundary()
@@ -175,12 +162,7 @@ fn boundary_record(
 
 /// Refuses a boundary change on a remote host, or once anything records the
 /// boundary ([`boundary_record`]).
-fn boundary_unused(
-    conn: &rusqlite::Connection,
-    host: &Host,
-    home: Option<&std::path::Path>,
-    kept: &str,
-) -> Result<()> {
+fn boundary_unused(host: &Host, home: Option<&std::path::Path>, kept: &str) -> Result<()> {
     if host.kind == HostKind::Remote {
         return Err(Error::refused(
             "host",
@@ -188,12 +170,12 @@ fn boundary_unused(
             "a remote host keeps the boundary set on that host",
         ));
     }
-    match boundary_record(conn, home)? {
+    match boundary_record(home)? {
         Some(what) => Err(Error::refused(
             "host",
             &host.id,
             format!(
-                "{what} already records the {kept} boundary; it changes only before any memory, backup or export"
+                "{what} already records the {kept} boundary; it changes only before any backup or export"
             ),
         )),
         None => Ok(()),
@@ -539,10 +521,10 @@ impl Store {
     }
 
     /// What already records this host's boundary, so `host.edit` refuses to
-    /// change it: `memory`, `a backup` or `an export`; `None` while nothing
+    /// change it: `a backup` or `an export`; `None` while nothing
     /// does.
     pub fn boundary_recorded(&self) -> Result<Option<&'static str>> {
-        boundary_record(self.conn(), self.home())
+        boundary_record(self.home())
     }
 
     /// `host.edit`: the label, capacity, resource floors, the bug project and
@@ -621,7 +603,7 @@ impl Store {
                 label_free(tx.conn(), &host, label)?;
             }
             if changed.contains_key("boundary") {
-                boundary_unused(tx.conn(), &host, home.as_deref(), kept.as_deref().unwrap_or("unset"))?;
+                boundary_unused(&host, home.as_deref(), kept.as_deref().unwrap_or("unset"))?;
             }
             if host.kind == HostKind::Remote && changed.contains_key("lane_capacity") {
                 return Err(Error::refused("host", &host.id, "a remote host has no lane capacity here"));

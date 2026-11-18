@@ -634,5 +634,77 @@ pub fn render(read: &Read, scopes: &[String], role_tokens: i64, budget: i64) -> 
     }
 }
 
+/// What `kb add` said: the id of the note it wrote, or of the same note
+/// already in the store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Added {
+    pub id: String,
+    pub existed: bool,
+}
+
+/// Runs `<command> add --json` with `input` on stdin (`memory.md` section 4,
+/// How Keep writes to kb). With `repo`, the project's checkout, it runs
+/// there and passes `--repo`, so kb takes the repo scope as the project's own.
+/// Succeeds only on exit 0 with a JSON result that names an `id`; anything
+/// else is kb's message.
+pub fn add(
+    command: &[String],
+    repo: Option<&Path>,
+    input: &serde_json::Value,
+) -> Result<Added, String> {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+
+    let (program, args) = command.split_first().ok_or_else(|| NO_COMMAND.to_owned())?;
+    let mut cmd = Command::new(program);
+    cmd.args(args).args(["add", "--json"]);
+    if let Some(repo) = repo {
+        cmd.arg("--repo").arg(repo).current_dir(repo);
+    }
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot run {program}: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(input.to_string().as_bytes())
+            .map_err(|e| format!("cannot write to kb add: {e}"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("kb add did not finish: {e}"))?;
+    let result: Option<serde_json::Value> = serde_json::from_slice(&output.stdout).ok();
+    let id = result
+        .as_ref()
+        .and_then(|r| r.get("id"))
+        .and_then(|id| id.as_str())
+        .filter(|id| !id.is_empty());
+    match id {
+        Some(id) if output.status.success() => Ok(Added {
+            id: id.to_owned(),
+            existed: result
+                .as_ref()
+                .and_then(|r| r.get("status"))
+                .and_then(|s| s.as_str())
+                == Some("exists"),
+        }),
+        _ => {
+            let message = result
+                .as_ref()
+                .and_then(|r| r.get("error"))
+                .and_then(|e| e.as_str())
+                .map(str::to_owned)
+                .or_else(|| {
+                    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                    (!stderr.is_empty()).then_some(stderr)
+                })
+                .unwrap_or_else(|| format!("kb add gave no note id ({})", output.status));
+            Err(format!("kb refused the note: {message}"))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

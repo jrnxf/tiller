@@ -25,7 +25,6 @@ pub mod ids;
 pub mod import;
 pub mod kb;
 pub mod limits;
-pub mod memory;
 pub mod migrate;
 pub mod owner;
 pub mod quota_rule;

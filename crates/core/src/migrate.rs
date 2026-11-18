@@ -28,7 +28,7 @@ const PROJECT_ID_CHECK_V7: &str = "CHECK (id GLOB '[a-z]*' AND id NOT GLOB '*[^a
     AND length(id) BETWEEN 2 AND 32)";
 
 /// The schema version this binary writes: the length of [`list`].
-pub const LATEST: usize = 22;
+pub const LATEST: usize = 23;
 
 /// Every migration in version order. Add a new one at the end and bump
 /// [`LATEST`].
@@ -125,6 +125,11 @@ fn list() -> Vec<M<'static>> {
         .foreign_key_check(),
         M::up(include_str!("../migrations/0022_thread_context/up.sql"))
             .down(include_str!("../migrations/0022_thread_context/down.sql"))
+            .foreign_key_check(),
+        // The SQL runs inside the hook, after the export reads the old
+        // tables (`0023_kb_memory/up.sql`).
+        M::up_with_hook("", memory_export::up)
+            .down(include_str!("../migrations/0023_kb_memory/down.sql"))
             .foreign_key_check(),
     ]
 }
@@ -276,6 +281,8 @@ fn too_new(found: usize) -> Error {
         binary: env!("CARGO_PKG_VERSION").to_owned(),
     }
 }
+
+mod memory_export;
 
 #[cfg(test)]
 mod tests;

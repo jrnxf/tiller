@@ -4,8 +4,8 @@
 //! [`Bundle::read`] verifies it against its manifest, [`plan`] works out every
 //! row a real run would write, and [`Store::import_apply`](crate::Store::import_apply)
 //! writes exactly that plan in one transaction (`state.md`, `import.apply`).
-//! Memory becomes a placement plan for the owner to approve, never a write
-//! to a canonical file (`memory.md` section 10).
+//! Memory becomes pending notes for the owner to keep in kb or discard
+//! (`memory.md` section 4).
 
 mod apply;
 pub mod bundle;
@@ -15,4 +15,4 @@ pub mod plan;
 mod tests;
 
 pub use bundle::Bundle;
-pub use plan::{Action, EMPTY_BLOB, Placement, Plan, Wait, plan};
+pub use plan::{Action, Placement, Plan, Wait, plan};

@@ -265,3 +265,59 @@ fn front_matter_forms() {
         "an empty body"
     );
 }
+
+/// A fake kb command: a shell script that prints `out` and exits `code`,
+/// and saves its stdin and arguments next to itself.
+#[cfg(unix)]
+fn fake_kb(dir: &Path, out: &str, code: i32) -> Vec<String> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let script = dir.join("kb");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s' \"$*\" > \"$(dirname \"$0\")/args\"\ncat > \"$(dirname \"$0\")/stdin\"\nprintf '%s' '{out}'\nexit {code}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    vec![script.to_string_lossy().into_owned()]
+}
+
+/// Keep succeeds only when kb names an id: `created` and `exists` both do;
+/// an error result, a bad exit and a result with no id refuse with kb's
+/// message.
+#[cfg(unix)]
+#[test]
+fn kb_add_needs_an_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let input = serde_json::json!({"title": "T", "kind": "gotcha"});
+    let command = fake_kb(dir.path(), r#"{"status":"created","id":"t","path":"x"}"#, 0);
+    assert_eq!(
+        add(&command, Some(repo.path()), &input).unwrap(),
+        Added {
+            id: "t".into(),
+            existed: false
+        }
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("stdin")).unwrap(),
+        input.to_string()
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("args")).unwrap(),
+        format!("add --json --repo {}", repo.path().display())
+    );
+    let command = fake_kb(dir.path(), r#"{"status":"exists","id":"t"}"#, 0);
+    assert!(add(&command, None, &input).unwrap().existed);
+    let command = fake_kb(dir.path(), r#"{"error":"scope is not known"}"#, 1);
+    assert_eq!(
+        add(&command, None, &input).unwrap_err(),
+        "kb refused the note: scope is not known"
+    );
+    let command = fake_kb(dir.path(), r#"{"status":"created","id":"t"}"#, 2);
+    assert!(add(&command, None, &input).is_err());
+    let command = fake_kb(dir.path(), r#"{"status":"created"}"#, 0);
+    assert!(add(&command, None, &input).is_err());
+    assert!(add(&[], None, &input).is_err());
+}

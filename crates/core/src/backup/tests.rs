@@ -907,7 +907,7 @@ fn concurrent_first_open_of_an_old_database_succeeds_in_both() {
 }
 
 /// `host.edit --boundary`: allowed while nothing records the boundary,
-/// refused once memory, a backup or an export does (`memory.md` section 8).
+/// refused once a backup or an export does.
 #[test]
 fn a_boundary_changes_only_while_nothing_records_it() {
     let to = |boundary: Boundary| HostEdit {
@@ -982,28 +982,6 @@ fn a_boundary_changes_only_while_nothing_records_it() {
             .contains("a backup already records the personal boundary"),
         "{error}"
     );
-
-    // A memory row records it.
-    let third = self::host();
-    let mut store = Store::open(&third.paths.db).unwrap();
-    setup(&mut store, "test-host", Boundary::Personal);
-    store
-        .conn()
-        .execute_batch(
-            "INSERT INTO memory_sources (id, project_id, boundary, kind, loaded_path, canonical_repo,
-                                         canonical_path, apply_method, load_mode, added_at)
-             VALUES ('src', 'alpha', 'personal', 'tiller_doc', 'alpha.md', '/home/user/memory',
-                     'alpha.md', 'tiller_commit', 'rendered', '2026-11-01T00:00:00.000Z');",
-        )
-        .unwrap();
-    let error = edit(&mut store, Boundary::Work).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("memory already records the personal boundary"),
-        "{error}"
-    );
-    assert_eq!(boundary(&store).as_deref(), Some("personal"));
 }
 
 /// A nightly pass and a backup by hand (or two by hand) read the manifest,

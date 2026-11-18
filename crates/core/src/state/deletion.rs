@@ -28,10 +28,12 @@ use crate::error::{Error, Result};
 use crate::ids::FLEET_PROJECT;
 use crate::store::{Applied, Ctx, NewEvent, Store, Tx};
 
-/// Nullable foreign keys that still mean "belongs to": an observation of a
-/// removed session or run, a worktree cached for the project, and a reply to
+/// Nullable foreign keys that still mean "belongs to": a pending note or an
+/// observation of a removed card, session or run, a worktree cached for the project, and a reply to
 /// a removed ask or comment (both are of the reply's own project).
 pub(crate) const OWNED: &[(&str, &str)] = &[
+    ("memory_pending", "card_id"),
+    ("memory_pending", "run_id"),
     ("observations", "run_id"),
     ("observations", "session_id"),
     ("replies", "ask_id"),
@@ -56,30 +58,15 @@ pub(crate) const UNLINKED: &[(&str, &str)] = &[
     ("attention", "opened_by_session_id"),
     ("cards", "created_by_ask_id"),
     ("cards", "fixes_card_id"),
-    ("evidence", "superseded_by"),
-    ("evidence", "session_id"),
-    ("evidence", "run_id"),
-    ("evidence", "card_id"),
     ("hosts", "bug_project_id"),
-    ("memories", "retired_revision_id"),
-    ("memories", "authored_by_session_id"),
-    ("memory_revisions", "approval_id"),
-    ("memory_revisions", "parent_revision_id"),
     ("obligations", "met_by_event_seq"),
     ("obligations", "card_id"),
     ("outbox", "card_id"),
     ("panes", "session_id"),
-    ("proposals", "applied_revision_id"),
-    ("proposals", "approval_id"),
-    ("proposals", "card_id"),
-    ("proposals", "authored_by_session_id"),
-    ("proposals", "memory_id"),
     ("prs", "run_id"),
     ("publishes", "pr_id"),
     // A reply may link a card of another project that its ask followed up.
     ("replies", "card_id"),
-    ("retros", "proposal_id"),
-    ("retros", "evidence_id"),
     ("retros", "trigger"),
     ("review_passes", "obligation_id"),
     ("review_passes", "report_artifact_id"),
@@ -88,14 +75,11 @@ pub(crate) const UNLINKED: &[(&str, &str)] = &[
     ("worktrees", "run_id"),
 ];
 
-/// Id columns with no foreign key. `Unlink` ones are set to `NULL` like
-/// [`UNLINKED`]; `Remove` ones remove their row; `Keep` ones stay as they are.
+/// Id columns with no foreign key. `Remove` ones go with their row's
+/// project; `Keep` ones stay as they are. The walk handles each by name, so
+/// only the test that every column is sorted reads this list.
+#[cfg(test)]
 pub(crate) const SOFT: &[(&str, &str, Soft)] = &[
-    (
-        "evidence",
-        "contradicts_memory_id",
-        Soft::Unlink("memories"),
-    ),
     // The subject of an item that stays names a project or session that may
     // be gone: the page says what became of it.
     ("attention", "subject_project_id", Soft::Keep),
@@ -104,27 +88,21 @@ pub(crate) const SOFT: &[(&str, &str, Soft)] = &[
     ("events", "card_id", Soft::Remove),
     ("idempotency_keys", "entity_id", Soft::Remove),
     ("intervention_labels", "ref_id", Soft::Remove),
-    // A memory made from a proposal keeps naming it: its provenance check
-    // needs the id, and the memory's own revisions carry the text.
-    ("memories", "proposal_id", Soft::Keep),
+    // A pending note and its retro are of one project, so they go together.
+    ("memory_pending", "retro_id", Soft::Keep),
+    ("memory_pending", "session_id", Soft::Keep),
+    ("retros", "pending_id", Soft::Keep),
 ];
 
 /// Tables whose rows only tie two records together. A link between a removed
-/// row and one that stays (another project's card, a fleet memory or session)
+/// row and one that stays (another project's card or a fleet session)
 /// is removed with the project and reported under `unlinked`; any other row
 /// that needs a row of another project refuses the delete.
-pub(crate) const LINKS: &[&str] = &[
-    "ask_cards",
-    "card_deps",
-    "change_set_members",
-    "memory_evidence",
-    "proposal_evidence",
-    "session_loads",
-];
+pub(crate) const LINKS: &[&str] = &["ask_cards", "card_deps"];
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Soft {
-    Unlink(&'static str),
     Remove,
     Keep,
 }
@@ -833,16 +811,6 @@ fn unlinks(fks: &[ForeignKey]) -> Result<Vec<(String, String, String, String)>> 
             fk.to.clone(),
         ));
     }
-    for (table, column, soft) in SOFT {
-        if let Soft::Unlink(parent) = soft {
-            all.push((
-                table.to_string(),
-                column.to_string(),
-                parent.to_string(),
-                "id".into(),
-            ));
-        }
-    }
     Ok(all)
 }
 
@@ -908,12 +876,11 @@ mod tests {
         ("cards", "display_id"),
         ("cards", "legacy_id"),
         ("hosts", "peer_host_id"),
-        ("memories", "legacy_id"),
-        ("memories", "scope_value"),
         ("outbox", "target_pane_id"),
         ("panes", "pane_id"),
         ("peer_keys", "viewer_host_id"),
-        ("session_loads", "trigger"),
+        ("session_notes", "note_id"),
+        ("session_notes", "trigger"),
         ("sessions", "claude_session_id"),
         ("sessions", "pane_id"),
     ];
