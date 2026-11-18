@@ -253,7 +253,7 @@ test("an exposed key means the App exists: no new App, only chmod 600 and the ro
   expect(ruleset.textContent).not.toContain("before the key");
 });
 
-test("an App ID Tiller cannot read gets only the App ID line", () => {
+test("an App ID tiller cannot read gets only the App ID line", () => {
   serve(report([]));
   renderSection(BAD_ID);
   expect(screen.getByTestId("merge-step-app").getAttribute("data-tone")).toBe("green");
@@ -264,7 +264,7 @@ test("an App ID Tiller cannot read gets only the App ID line", () => {
   ]);
 });
 
-test("a key file Tiller cannot use gets only the key lines", () => {
+test("a key file tiller cannot use gets only the key lines", () => {
   serve(report([]));
   renderSection(BAD_KEY);
   fireEvent.click(screen.getByRole("button", { name: "Show commands" }));
@@ -305,7 +305,7 @@ test("the folder is the daemon's App folder, with a space or an earlier forge-ap
   );
 });
 
-test("a file Tiller cannot open gets a look at the folder, and step 1 cannot tell", () => {
+test("a file tiller cannot open gets a look at the folder, and step 1 cannot tell", () => {
   serve(report([]));
   renderSection(
     warnOn("/home/user/.tiller/forge-app/private-key.pem", "Permission denied (os error 13)"),
@@ -315,7 +315,7 @@ test("a file Tiller cannot open gets a look at the folder, and step 1 cannot tel
   expect(app.textContent).toContain("cannot tell whether the App exists");
   fireEvent.click(screen.getByRole("button", { name: "Show commands" }));
   expect(commandLines()).toEqual(["dir='/home/user/.tiller/forge-app'", 'ls -la "$dir"']);
-  expect(screen.getByText(/^Tiller cannot open the file/)).toBeTruthy();
+  expect(screen.getByText(/^tiller cannot open the file/)).toBeTruthy();
 });
 
 test("an app-id file that is not there gets its line, and the App exists", () => {

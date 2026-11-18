@@ -640,7 +640,7 @@ function DialogDetail({ agent, ctx }: { agent: AgentRow; ctx: Context }) {
         <>
           <h2 className="d-q">Trust this folder?</h2>
           <p className="d-ctx">
-            Claude Code asks before it works in a folder it has not seen. Tiller records trust
+            Claude Code asks before it works in a folder it has not seen. tiller records trust
             before each launch, so this means that step did not take.
           </p>
         </>

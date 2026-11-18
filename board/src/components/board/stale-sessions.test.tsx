@@ -59,7 +59,7 @@ test("older sessions get a banner, chips and a restart dialog that queues the wo
   expect(banner.textContent).toContain(
     "4 sessions run an older tiller (1 on host-d, 1 on host-f).",
   );
-  expect(banner.textContent).toContain("Tiller is now 0.1.0-pre.21.");
+  expect(banner.textContent).toContain("tiller is now 0.1.0-pre.21.");
   expect(banner.textContent).toContain("host-d runs 0.1.0-pre.17.");
   expect(banner.textContent).toContain(
     "host-f is paired view only, so restart its sessions on host-f.",
