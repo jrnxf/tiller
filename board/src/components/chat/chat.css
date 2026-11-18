@@ -280,6 +280,7 @@
 
 .chat-scroll {
   position: relative;
+  container-type: inline-size;
   flex: 1;
   min-height: 0;
   overflow: auto;
@@ -327,11 +328,15 @@
 .chat-msg.user + .chat-msg.user {
   margin-top: -16px;
 }
-/* When it was sent, beside the bubble while the pointer is on it. */
+/* When it was sent: outside the bubble, in the gutter on its right, while the
+   pointer is on it. A column with no gutter (the drawer, a phone) puts it on
+   the bubble's left instead, so it never overflows. */
 .chat-ask-row {
+  position: relative;
   display: flex;
+  flex-direction: row-reverse;
   align-items: flex-end;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 8px;
   max-width: 100%;
 }
@@ -345,6 +350,13 @@
 }
 .chat-msg.user:hover .chat-ask-time {
   opacity: 1;
+}
+@container (min-width: 840px) {
+  .chat-ask-time {
+    position: absolute;
+    bottom: 0;
+    left: calc(100% + 12px);
+  }
 }
 .chat-bubble {
   max-width: min(560px, 85%);

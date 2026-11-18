@@ -87,8 +87,8 @@ function PrRef({ pr }: { pr: ThreadPr }) {
   );
 }
 
-// The owner's message, on the right. When it was sent shows beside it while
-// the pointer is on it. It says more when it never reached the orchestrator.
+// The owner's message, on the right. When it was sent shows outside it, on
+// its right, while the pointer is on it. It says more when it never reached the orchestrator.
 export function AskMessage({
   ask,
   owner,
@@ -103,8 +103,8 @@ export function AskMessage({
   return (
     <div className="chat-msg user" data-testid="chat-ask" data-fresh={fresh || undefined}>
       <div className="chat-ask-row">
-        <Stamp className="chat-ask-time" at={ask.at} />
         <Markdown className="chat-bubble" text={ask.text} />
+        <Stamp className="chat-ask-time" at={ask.at} />
       </div>
       {ask.cards.length > 0 ? (
         <div className="chat-refs">
