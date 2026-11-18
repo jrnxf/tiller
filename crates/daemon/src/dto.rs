@@ -1178,6 +1178,31 @@ pub struct CodeLoginBody {
     pub code: String,
 }
 
+/// `POST /api/v1/login/handoff`: a signed-in board asks for a one-time
+/// login link to another name the owner allowed, so the browser signs in
+/// there with no code.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HandoffBody {
+    /// An `--allow-host` name, as the owner allowed it.
+    #[schema(example = "board.example.com")]
+    pub host: String,
+    /// Where the link lands after signing in: a path on that name, with its
+    /// query. Default `/`.
+    #[serde(default)]
+    #[schema(example = "/inbox")]
+    pub path: Option<String>,
+}
+
+/// The answer to a handoff: the one-time login link. It signs one browser
+/// in, once, within the minute a `tiller board --login` link has. No
+/// `Debug`, so the link cannot reach a log line by accident.
+#[derive(Serialize, ToSchema)]
+pub struct Handoff {
+    #[schema(example = "https://board.example.com/login/0123abcd?to=%2Finbox")]
+    pub url: String,
+}
+
 /// `GET /api/v1/session`, and the answer to signing out.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct SessionView {

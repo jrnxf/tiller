@@ -8,9 +8,12 @@
 # the daemon's own board. Use scripts/preview.sh for a seeded bench instead.
 #
 # Sign-in: a board session is the owner cookie plus a token kept in the
-# page origin's own storage, so each live board's origin signs in on its own:
-# the owner runs `tiller board --login` in a terminal (an agent cannot) and
-# enters the code on the live board. It lasts 30 days, and a worktree keeps
+# page origin's own storage, so each live board's origin signs in on its own.
+# Under TILLER_LIVE_DOMAIN the signed-out screen has "Sign in from" the main
+# board at https://<TILLER_LIVE_DOMAIN> (or TILLER_SIGN_IN_FROM): a browser
+# signed in there gets this board signed in with one click and no code.
+# Otherwise the owner runs `tiller board --login` in a terminal (an agent
+# cannot) and enters the code on the live board. It lasts 30 days, and a worktree keeps
 # its port while its board is down, so a link keeps its sign-in. On 127.0.0.1
 # every port shares one cookie, so only one loopback live board stays signed
 # in at a time; names under TILLER_LIVE_DOMAIN each keep their own.
@@ -30,6 +33,8 @@
 #                       sends to this machine's <port>; links then use it over
 #                       https. The daemon must allow each such name with
 #                       --allow-host, or it answers them 421.
+#   TILLER_SIGN_IN_FROM the signed-in board a live board's sign-in screen
+#                       offers (default https://<TILLER_LIVE_DOMAIN>)
 #   TILLER_LIVE_STATE   where the port and pid files live
 #                       (default ~/.local/state/tiller-live)
 set -euo pipefail
@@ -97,7 +102,7 @@ link() {
 }
 # What a dev server was started with: a running one is reused only when it
 # matches.
-settings() { printf '%s %s\n' "$daemon" "$domain"; }
+settings() { printf '%s %s %s\n' "$daemon" "$domain" "${TILLER_SIGN_IN_FROM:-}"; }
 
 up() {
   local root name port low high p
@@ -191,7 +196,7 @@ case "${1:-}" in
       name=$(basename "$f" .pid)
       if alive "$name"; then
         # The domain that board was started with, not this shell's.
-        domain=$(cut -d' ' -f2- "$state/$name.settings" 2>/dev/null || true)
+        domain=$(cut -d' ' -f2 "$state/$name.settings" 2>/dev/null || true)
         echo "$name: $(link "$(cat "$state/$name.port")")  $(cat "$state/$name.root")"
       fi
     done

@@ -2,7 +2,7 @@ import { REGEXP_ONLY_DIGITS } from "input-otp";
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
-import { CODE_LENGTH, codeDigits, signIn } from "../../lib/session";
+import { CODE_LENGTH, codeDigits, handoffLink, signIn } from "../../lib/session";
 import { Logo } from "../shell/logo";
 import { InputOTP, InputOTPGroup, InputOTPSeparator, InputOTPSlot } from "../ui/input-otp";
 import { useAppearance } from "../shell/shell";
@@ -27,6 +27,8 @@ export function SignedOutScreen({ onSignedIn }: { onSignedIn: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const field = useRef<HTMLInputElement>(null);
+  // A live board signs in from the main board, which hands it a login link.
+  const from = handoffLink(window.location);
 
   useEffect(() => {
     if (!pending) field.current?.focus();
@@ -100,6 +102,11 @@ export function SignedOutScreen({ onSignedIn }: { onSignedIn: () => void }) {
         <p className="sub signin-hint">
           Get a code with <code>tiller board --login</code> on the machine running tiller.
         </p>
+        {from ? (
+          <a className="btn primary signin-handoff" href={from} data-testid="signin-handoff">
+            Sign in from {new URL(from).host}
+          </a>
+        ) : null}
       </div>
     </main>
   );

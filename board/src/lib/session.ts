@@ -11,6 +11,7 @@ import { dropOwnerToken, keepOwnerToken, ownerFetch } from "./owner";
 export const CODE_LENGTH = 8;
 const LOGIN_PATH = "/api/v1/login";
 const LOGOUT_PATH = "/api/v1/logout";
+const HANDOFF_PATH = "/api/v1/login/handoff";
 
 // True once this browser has signed out, or a read found its cookie gone: the
 // app shows the signed-out screen in place of the board.
@@ -100,4 +101,47 @@ export async function signOut(): Promise<SignIn> {
     return { ok: true };
   }
   return result;
+}
+
+export type Handoff = { ok: true; url: string } | { ok: false; message: string };
+
+// Asks the daemon for a one-time login link to `host`, another name it
+// allows, landing on `path` there. Opened in this browser, the link signs
+// that name in with no code.
+export async function handoff(host: string, path: string): Promise<Handoff> {
+  const { result, code, body } = await post(HANDOFF_PATH, { host, path });
+  if (!result.ok) {
+    return code === "usage"
+      ? { ok: false, message: `This daemon does not allow ${host}, so it cannot sign it in.` }
+      : result;
+  }
+  const url = (body as { url?: unknown } | null)?.url;
+  return typeof url === "string"
+    ? { ok: true, url }
+    : { ok: false, message: "The daemon sent no login link. Try again." };
+}
+
+// The board a live board signs in from (scripts/live.sh): set at build time,
+// empty for the board the daemon serves.
+const SIGN_IN_FROM: string = import.meta.env.VITE_TILLER_SIGN_IN_FROM ?? "";
+
+// The link on `from`'s board that hands this page a sign-in, back to the
+// page it is on, or null when there is no such board or it is this one.
+export function handoffLink(
+  location: Pick<Location, "host" | "origin" | "pathname" | "search">,
+  from: string = SIGN_IN_FROM,
+): string | null {
+  if (from === "") return null;
+  let origin: URL;
+  try {
+    origin = new URL(from);
+  } catch {
+    return null;
+  }
+  if (origin.origin === location.origin) return null;
+  const search = new URLSearchParams({
+    to: location.host,
+    path: `${location.pathname}${location.search}`,
+  });
+  return `${origin.origin}/handoff?${search.toString()}`;
 }

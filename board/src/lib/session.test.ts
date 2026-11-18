@@ -3,7 +3,15 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { ReadError, agentsQuery, boardQuery, healthQuery } from "./queries";
 import { sendMutation } from "../components/attention/api";
 import { ownerToken } from "./owner";
-import { codeDigits, isSignedOut, signIn, signOut, signedOutStore } from "./session";
+import {
+  codeDigits,
+  handoff,
+  handoffLink,
+  isSignedOut,
+  signIn,
+  signOut,
+  signedOutStore,
+} from "./session";
 import { createTestQueryClient } from "../test-app";
 
 beforeEach(() => {
@@ -138,4 +146,44 @@ test("health with only ok, version and initialized means the cookie is gone", as
   answer(200, { ok: true, version: "0.1.0", initialized: true, pollers: [] });
   await queryClient.fetchQuery({ ...healthQuery(), staleTime: 0, retry: false });
   expect(signedOutStore.get()).toBe(false);
+});
+
+const livePage = {
+  host: "7440.board.example.com",
+  origin: "https://7440.board.example.com",
+  pathname: "/inbox",
+  search: "?item=01ABC",
+};
+
+test("a live board signs in from the main board, back to the page it is on", () => {
+  expect(handoffLink(livePage, "https://board.example.com")).toBe(
+    "https://board.example.com/handoff?to=7440.board.example.com&path=%2Finbox%3Fitem%3D01ABC",
+  );
+});
+
+test("no handoff link without a main board, with a bad one, or on the main board itself", () => {
+  expect(handoffLink(livePage, "")).toBeNull();
+  expect(handoffLink(livePage, "not a url")).toBeNull();
+  expect(handoffLink(livePage, "https://7440.board.example.com/")).toBeNull();
+  // The board the daemon serves is built with no main board.
+  expect(handoffLink(livePage)).toBeNull();
+});
+
+test("a handoff asks for that name and path, and answers the login link", async () => {
+  const fetch = answer(200, { url: "https://7440.board.example.com/login/ab12" });
+  expect(await handoff("7440.board.example.com", "/inbox")).toEqual({
+    ok: true,
+    url: "https://7440.board.example.com/login/ab12",
+  });
+  const [path, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
+  expect(path).toBe("/api/v1/login/handoff");
+  expect(JSON.parse(String(init.body))).toEqual({ host: "7440.board.example.com", path: "/inbox" });
+});
+
+test("a handoff to a name the daemon does not allow says so", async () => {
+  answer(400, refusal("usage"));
+  expect(await handoff("evil.example.com", "/")).toEqual({
+    ok: false,
+    message: "This daemon does not allow evil.example.com, so it cannot sign it in.",
+  });
 });
