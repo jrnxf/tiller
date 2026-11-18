@@ -68,8 +68,10 @@ pub struct NoteArgs {
 pub struct EditArgs {
     /// The pending note's id
     pub id: String,
+    /// The new title: one line, at most 120 characters
     #[arg(long)]
     pub title: Option<String>,
+    /// The new body, at most 2000 characters
     #[arg(long)]
     pub body: Option<String>,
     /// `convention`, `decision`, `gotcha` or `how-to`

@@ -139,7 +139,7 @@ impl KbConfig {
     }
 }
 
-/// The kb store's home: `KB_HOME` in `env`, else `~/.kb`.
+/// The kb store's home: `KB_HOME` in `env`, else `.kb` in the home folder.
 pub fn home(var: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
     if let Some(home) = var("KB_HOME").filter(|v| !v.is_empty()) {
         return Some(PathBuf::from(home));

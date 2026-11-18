@@ -94,7 +94,7 @@ fn the_loader_filters_and_orders_the_notes() {
         ],
         kb_command: None,
     };
-    let scopes = config.scopes(Some("git@github.com:example/app.git"));
+    let scopes = config.scopes(Some("https://github.com/example/app.git"));
     assert_eq!(
         scopes,
         [
@@ -172,16 +172,16 @@ fn repo_urls_become_kb_scopes() {
             Some("github.com/example/app"),
         ),
         (
-            "https://user@github.com/Example/App",
-            Some("github.com/example/app"),
+            "https://user@example.org/Example/App",
+            Some("example.org/example/app"),
         ),
         (
             "ssh://git@example.com:2222/team/app.git",
             Some("example.com/team/app"),
         ),
         (
-            "git@github.com:example/app.git",
-            Some("github.com/example/app"),
+            "git@example.org:example/app.git",
+            Some("example.org/example/app"),
         ),
         ("https://example.com/a/b c/", Some("example.com/a/b-c")),
         ("/home/user/app", None),

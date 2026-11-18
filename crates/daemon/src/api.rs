@@ -121,7 +121,7 @@ pub struct Inner {
     /// reach the new host (`protocol.md` 10.1).
     pub ssh: Vec<OsString>,
     /// The kb store the memory view reads (`memory.md` section 3):
-    /// `KB_HOME`, else `~/.kb`; none in a test that sets no store.
+    /// `KB_HOME`, else `.kb` in the home folder; none in a test that sets no store.
     pub kb_home: Option<std::path::PathBuf>,
     /// The backup the board started, if one runs, and the last that failed.
     pub backups: crate::backups::BackupJobs,

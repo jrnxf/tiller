@@ -12,7 +12,7 @@ use utoipa::ToSchema;
 pub struct MemoryKb {
     /// `ok`, `missing` or `unreadable`.
     pub state: String,
-    /// Where the store is: `KB_HOME`, else `~/.kb`; absent when neither is
+    /// Where the store is: `KB_HOME`, else `.kb` in the home folder; absent when neither is
     /// known.
     pub home: Option<String>,
     /// The kb scopes a launch in the project loads, in load order; empty

@@ -1045,13 +1045,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(kb, "missing");
-        // Health warns until a launch reads the store again.
-        let warning = store.kb_warning().unwrap().unwrap();
-        assert!(warning.contains("missing"), "{warning}");
-        store
-            .mem_load(&daemon, &session, &rendered(&["a-note"]))
-            .unwrap();
-        assert_eq!(store.kb_warning().unwrap(), None);
         observe(
             &mut store,
             &session,
@@ -1059,5 +1052,12 @@ mod tests {
             daemon.now.plus_minutes(1),
         );
         assert!(owed(&mut store, &daemon).is_empty());
+        // Health warns until a launch reads the store again.
+        let warning = store.kb_warning().unwrap().unwrap();
+        assert!(warning.contains("missing"), "{warning}");
+        store
+            .mem_load(&daemon, &session, &rendered(&["a-note"]))
+            .unwrap();
+        assert_eq!(store.kb_warning().unwrap(), None);
     }
 }
