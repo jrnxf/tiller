@@ -84,13 +84,13 @@ enum Command {
     /// Away mode
     #[command(subcommand)]
     Away(approval::Away),
-    /// Memory notes and proposals
+    /// Memory: suggested notes that wait for the owner, and what a launch loads
     #[command(subcommand)]
     Mem(mem::MemCmd),
     /// Retros: one per closed card, full ones run by the curator
     #[command(subcommand)]
     Retro(learn::RetroCmd),
-    /// The learning loop: change sets, the holdout gate, status
+    /// The config manifest behind a run's config hash
     #[command(subcommand)]
     Learn(learn::LearnCmd),
     /// Start a project's orchestrator

@@ -263,7 +263,7 @@ Rules:
 - T1.3 maps every hook event and `notification_type` to exactly one `event` and `verdict`.
 - The session's `activity` columns are updated in the same transaction when the new observation is newer than the current `activity_observed_at`. Out-of-order arrivals are stored but do not move the projection backwards.
 - Staleness is derived: an activity whose `activity_observed_at` is older than the role's threshold reads as `stale` (thresholds: T1.2). `unknown` is explicit: a session with no observation yet, or one whose last source has gone away.
-- Retention: 30 days, except rows referenced by an `evidence` row (T1.5) or a retro.
+- Retention: 30 days, except rows referenced by a retro.
 
 ### Event
 
@@ -332,9 +332,9 @@ These tables hold a copy of a fact another system owns. Each row carries `fetche
 
 ### Bookkeeping
 
-- `meta`: key-value: `schema_version`, `host_id`, `created_at`, `import_manifest_sha256`, `boundary` (`personal` or `work`; memory.md section 8: set at install, changed by `host.edit` only while no memory row, backup or export records it), `boot_id` (the boot the daemon last reconciled against; recovery.md), `holder_instance` [H] (the holder `instance` the daemon last reconciled against: a new one with the same boot id is recovery.md R21; written last in that restore, and with `boot_id` in R04; an unset value is recorded with no R21), `memory_watch` (the memory watcher's last look: `HEAD`, each document's digest and Tiller's last commit, as JSON; rebuildable, memory.md `mem.watch`).
+- `meta`: key-value: `schema_version`, `host_id`, `created_at`, `import_manifest_sha256`, `boundary` (`personal` or `work`; memory.md section 8: set at install, changed by `host.edit` only while no memory row, backup or export records it), `boot_id` (the boot the daemon last reconciled against; recovery.md), `holder_instance` [H] (the holder `instance` the daemon last reconciled against: a new one with the same boot id is recovery.md R21; written last in that restore, and with `boot_id` in R04; an unset value is recorded with no R21).
 - `idempotency_keys`: `key`, `command`, `entity`, `entity_id`, `response` (JSON), `created_at`, `actor` (as `events.actor`), `args_sha256` (the SHA-256 of the request's normalized arguments, when the caller passes them). A command that carries a key already present, from the same actor with the same arguments, returns the stored response and performs nothing. The same key from another command, another actor or with other arguments is refused (exit 5, `refused`) and performs nothing: a reused key never returns another request's result. A null `actor` or `args_sha256` matches anything; rows stored before schema 15 have neither, so they replay on the command alone until they expire. Keys expire after 30 days. An expired key is deleted inside the transaction of the mutation that stores it again, so it is gone only if that mutation commits. Keys are bookkeeping, so the delete writes no event (section 10, invariant 3).
-- `memory_sources`, `memory_revisions`, `memories`, `evidence`, `memory_evidence`, `proposals`, `proposal_evidence`, `session_loads`: owned by `memory.md` (T1.5), which defines them in its section 11.
+- `memory_pending` (notes that agents suggest, waiting for the owner; a kept or discarded row is deleted) and `session_notes` (one row per kb note a launch loaded): owned by `memory.md`, which defines them in sections 3 and 4. The notes themselves live in kb, outside `state.db`.
 
 ## 4. Relationships
 
@@ -568,8 +568,8 @@ The table from plan v2, expanded to every table in `schema.sql`.
 | Worktrees | treehouse plus git; `worktrees` is a cache | reconcile input, the cleanup guard |
 | Quota | `quota-axi`; `quota_windows` is a cache | the sidebar footer, Health, the spawn check |
 | Owner marker | the file `~/.tiller/owner` | `tiller` refuses mutations when it names another system |
-| Approved memory and rules | canonical files under git (CLAUDE.md, AGENTS.md, memory dirs, the dotfiles source) | the memory view (T1.5) |
-| Unapproved evidence and proposals | `state.db`: `evidence`, `proposals` (T1.5); never loaded | the proposal view |
+| Memory notes and rules | kb's note store (`memory.md`, section 3); CLAUDE.md and AGENTS.md under git | the memory view, the launcher |
+| Suggested notes that wait for the owner | `state.db`: `memory_pending`; never loaded | the memory view's pending list |
 | Raw transcripts | Claude Code's own JSONL files; read only, never committed | the tailer, retros, the baseline |
 | Board column, staleness, still-current, free slots | nobody: derived by query (`card_column`, `session_activity`) | the board |
 
@@ -621,7 +621,7 @@ Tests in T2.1 and T2.7 prove each one.
 | 17 | `approval.execute` and `approval.finish` are daemon-only; the roles behind that are T1.4 |
 | 20 | `category`, `size`, `acceptance`, `fixes_card_id`, every attempt as a run, `reviews` |
 | 22 | `config_hash` on sessions and runs |
-| 24 | `observations` is never loaded; `evidence` and `proposals` reserved for T1.5 |
+| 24 | `observations` is never loaded; `memory_pending` is never loaded (`memory.md`) |
 | 34 | `handoffs` |
 | 35 | `reservations` inside the spawn transaction; quota cached per account window; stale quota visible |
 | 36 | `attention` carries question, evidence, recommendation, consequence; still-current derived; permission prompts kept apart; receipts from outbox and approval states |

@@ -9,7 +9,7 @@ exit: 0
     "format": "tiller-export/v1",
     "host_id": "<id1>",
     "max_seq": 5,
-    "schema_version": 22,
+    "schema_version": 23,
     "tables": [
       {
         "file": "approvals.jsonl",
@@ -54,26 +54,8 @@ exit: 0
         "sha256": "<sha256>"
       },
       {
-        "file": "change_set_members.jsonl",
-        "name": "change_set_members",
-        "rows": 0,
-        "sha256": "<sha256>"
-      },
-      {
-        "file": "change_sets.jsonl",
-        "name": "change_sets",
-        "rows": 0,
-        "sha256": "<sha256>"
-      },
-      {
         "file": "config_manifests.jsonl",
         "name": "config_manifests",
-        "rows": 0,
-        "sha256": "<sha256>"
-      },
-      {
-        "file": "eval_runs.jsonl",
-        "name": "eval_runs",
         "rows": 0,
         "sha256": "<sha256>"
       },
@@ -81,12 +63,6 @@ exit: 0
         "file": "events.jsonl",
         "name": "events",
         "rows": 5,
-        "sha256": "<sha256>"
-      },
-      {
-        "file": "evidence.jsonl",
-        "name": "evidence",
-        "rows": 0,
         "sha256": "<sha256>"
       },
       {
@@ -126,26 +102,8 @@ exit: 0
         "sha256": "<sha256>"
       },
       {
-        "file": "memories.jsonl",
-        "name": "memories",
-        "rows": 0,
-        "sha256": "<sha256>"
-      },
-      {
-        "file": "memory_evidence.jsonl",
-        "name": "memory_evidence",
-        "rows": 0,
-        "sha256": "<sha256>"
-      },
-      {
-        "file": "memory_revisions.jsonl",
-        "name": "memory_revisions",
-        "rows": 0,
-        "sha256": "<sha256>"
-      },
-      {
-        "file": "memory_sources.jsonl",
-        "name": "memory_sources",
+        "file": "memory_pending.jsonl",
+        "name": "memory_pending",
         "rows": 0,
         "sha256": "<sha256>"
       },
@@ -189,18 +147,6 @@ exit: 0
         "file": "projects.jsonl",
         "name": "projects",
         "rows": 2,
-        "sha256": "<sha256>"
-      },
-      {
-        "file": "proposal_evidence.jsonl",
-        "name": "proposal_evidence",
-        "rows": 0,
-        "sha256": "<sha256>"
-      },
-      {
-        "file": "proposals.jsonl",
-        "name": "proposals",
-        "rows": 0,
         "sha256": "<sha256>"
       },
       {
@@ -258,8 +204,8 @@ exit: 0
         "sha256": "<sha256>"
       },
       {
-        "file": "session_loads.jsonl",
-        "name": "session_loads",
+        "file": "session_notes.jsonl",
+        "name": "session_notes",
         "rows": 0,
         "sha256": "<sha256>"
       },

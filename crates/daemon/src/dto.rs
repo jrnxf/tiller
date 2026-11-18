@@ -1612,26 +1612,10 @@ pub struct HostConfig {
     pub stop_hook_mode: String,
     /// `federation.accept`: unset reads as true.
     pub accept_peers: bool,
-    /// `memory.remote`; absent or empty keeps memory on this host.
-    pub memory_remote: Option<String>,
-    /// `personal` or `work`. A work host never pushes its memory repo.
+    /// `personal` or `work`, as `tiller init` recorded it.
     pub boundary: Option<String>,
-    pub learning: LearningConfig,
     /// Why `config.toml` could not be read; the rest is then the defaults.
     pub config_error: Option<String>,
-}
-
-/// The `[learning]` keys with their defaults (`learning-loop.md` section 10).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
-pub struct LearningConfig {
-    /// One routine card in this many gets a full retro.
-    pub sample_every: i64,
-    /// Cards a kept change set is measured over.
-    pub window_cards: i64,
-    pub curator_model: String,
-    pub curator_timeout_minutes: i64,
-    /// The checkout that holds `evals/run.sh`; absent when unset.
-    pub evals_dir: Option<String>,
 }
 
 /// `POST /api/v1/config`: `tiller config set` for the settings an

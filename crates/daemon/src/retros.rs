@@ -1,4 +1,4 @@
-//! The board's retros (`learning-loop.md` section 4): the list Memory and
+//! The board's retros (`memory.md` section 5): the list Memory and
 //! Health show, and Run again on a retro that did not finish. Run again is
 //! `tiller retro run` started by the board: it claims the retro by the
 //! same rules and runs the curator on a thread of the daemon's. The daemon
@@ -12,16 +12,14 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
-#[cfg(test)]
-use std::time::Duration;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
 use tiller_core::domain::{Retro, RetroOutcome, RetroState};
-use tiller_core::state::learning::{self, Learning};
+use tiller_core::state::learning::{self, CURATOR_TIMEOUT_MINUTES};
 use tiller_core::state::{get, list};
 use tiller_core::{Error, Store, Timestamp};
 use utoipa::{IntoParams, ToSchema};
@@ -66,21 +64,10 @@ pub enum RetroStatus {
     /// Its curator ended without finishing it; the sweep does not run it
     /// again, the owner does.
     Unfinished,
-    /// Finished: nothing, a learning, or a proposal.
+    /// Finished: nothing, or one note for the pending queue.
     Done,
     /// Scheduled, and no curator holds it.
     Pending,
-}
-
-/// The proposal a retro filed.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
-pub struct RetroProposal {
-    pub id: String,
-    /// `proposed` (waiting for review), `accepted`, `applied`, `discarded`,
-    /// `stale` or `failed`.
-    pub state: String,
-    /// The document section it changes, when it names one.
-    pub section: Option<String>,
 }
 
 /// One full retro, as Memory's Retros list and Health's Learning panel
@@ -94,10 +81,9 @@ pub struct RetroView {
     pub title: String,
     pub project_id: String,
     pub status: RetroStatus,
-    /// `nothing`, `evidence`, `proposed` or `unfinished`, once done.
+    /// `nothing`, `noted` or `unfinished`, once done.
     pub outcome: Option<String>,
-    /// The learning it kept, or for an unfinished retro why it did not
-    /// finish.
+    /// For an unfinished retro, why it did not finish.
     pub learning: Option<String>,
     pub created_at: String,
     /// When its newest curator run started.
@@ -105,7 +91,8 @@ pub struct RetroView {
     /// Who started that run: `owner`, `board` or `daemon`.
     pub started_by: Option<String>,
     pub finished_at: Option<String>,
-    pub proposal: Option<RetroProposal>,
+    /// The pending note it added, until the owner keeps or discards it.
+    pub pending_id: Option<String>,
     /// Why Run again is refused now, in plain words; `None` when it would
     /// start.
     pub run_refusal: Option<String>,
@@ -117,7 +104,7 @@ pub struct RetrosResponse {
     /// Full retros of the last 30 days and every unfinished one, newest
     /// first.
     pub retros: Vec<RetroView>,
-    /// `learning.curator_timeout_minutes`: a run is cut at this limit.
+    /// A curator run is cut at this limit.
     pub curator_timeout_minutes: u64,
 }
 
@@ -174,7 +161,6 @@ impl Retros {
 
     /// Stops every running curator and waits up to `wait` for each run to
     /// record how it ended.
-    #[cfg(test)]
     pub fn stop(&self, wait: Duration) {
         self.signal();
         self.wait(Instant::now() + wait);
@@ -194,22 +180,6 @@ impl Retros {
     pub fn wait(&self, deadline: Instant) {
         let handles: Vec<JoinHandle<()>> = self.runs().drain(..).collect();
         crate::threads::join_until(handles, deadline);
-    }
-}
-
-/// `[learning]` from `config.toml`, read on every call so an edit needs no
-/// restart, through the loader the claim uses. A file that cannot be read
-/// gives the defaults and why: the claim refuses it with the same error.
-fn learning_of(home: &std::path::Path) -> (Learning, Option<String>) {
-    let read = tiller_core::config_file::load(&home.join("config.toml"))
-        .map_err(|error| error.to_string())
-        .and_then(|table| Learning::from_table(&table).map_err(|error| error.to_string()));
-    match read {
-        Ok(learning) => (learning, None),
-        Err(error) => (
-            Learning::default(),
-            Some(format!("config.toml cannot be used: {error}")),
-        ),
     }
 }
 
@@ -270,23 +240,6 @@ fn busy(card: &str, other: &Retro) -> String {
     )
 }
 
-fn proposal_of(store: &Store, id: &str) -> tiller_core::Result<Option<RetroProposal>> {
-    let row = store.conn().query_row(
-        "SELECT state, json_extract(memory_fields, '$.section') FROM proposals WHERE id = ?1",
-        [id],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-    );
-    match row {
-        Ok((state, section)) => Ok(Some(RetroProposal {
-            id: id.to_owned(),
-            state,
-            section,
-        })),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(error) => Err(error.into()),
-    }
-}
-
 fn started_by(store: &Store, retro: &str) -> tiller_core::Result<Option<String>> {
     let actor = store.conn().query_row(
         "SELECT actor FROM events WHERE entity = 'retro' AND entity_id = ?1 AND kind = 'retro.started'
@@ -309,10 +262,6 @@ fn view(
 ) -> tiller_core::Result<RetroView> {
     let card: tiller_core::domain::Card = get(store.conn(), "card", &retro.card_id)?;
     let run_refusal = refusal(store, &retro, &card.display_id, now, timeout)?;
-    let proposal = match &retro.proposal_id {
-        Some(id) => proposal_of(store, id)?,
-        None => None,
-    };
     Ok(RetroView {
         status: status(&retro, now, timeout),
         started_by: started_by(store, &retro.id)?,
@@ -323,7 +272,7 @@ fn view(
         created_at: retro.created_at.to_string(),
         curator_started_at: retro.curator_started_at.map(|at| at.to_string()),
         finished_at: retro.finished_at.map(|at| at.to_string()),
-        proposal,
+        pending_id: retro.pending_id,
         run_refusal,
         id: retro.id,
         card_id: retro.card_id,
@@ -366,24 +315,18 @@ pub(crate) async fn list_retros(
     State(state): State<AppState>,
     Query(query): Query<RetrosQuery>,
 ) -> ApiResult<RetrosResponse> {
-    let home = state.0.home.clone();
-    let (retros, minutes) = read(&state, move |store| {
-        let (learning, config_error) = learning_of(&home);
-        let minutes = learning.curator_timeout_minutes;
-        let timeout = i64::try_from(minutes).unwrap_or(i64::MAX);
-        let mut retros = views(store, query.project.as_deref(), Timestamp::now(), timeout)?;
-        if let Some(error) = config_error {
-            // Run again would be refused for it, so it is off with why.
-            for retro in &mut retros {
-                retro.run_refusal.get_or_insert_with(|| error.clone());
-            }
-        }
-        Ok((retros, minutes))
+    let retros = read(&state, move |store| {
+        views(
+            store,
+            query.project.as_deref(),
+            Timestamp::now(),
+            CURATOR_TIMEOUT_MINUTES,
+        )
     })
     .await?;
     Ok(Json(RetrosResponse {
         retros,
-        curator_timeout_minutes: minutes,
+        curator_timeout_minutes: CURATOR_TIMEOUT_MINUTES.unsigned_abs(),
     }))
 }
 
@@ -408,7 +351,6 @@ pub(crate) async fn run_retro(
     let Some(starter) = state.0.orchestrators.clone() else {
         return Err(Error::Unavailable("this daemon cannot run retros".into()).into());
     };
-    let home = state.0.home.clone();
     let retros = state.0.retros.clone();
     let db = state.db();
     let damage = state.0.damage.clone();
@@ -417,10 +359,7 @@ pub(crate) async fn run_retro(
         if !db.exists() {
             return Err(uninitialized());
         }
-        // A config that cannot be used is refused by the claim below. It is
-        // read before the claims lock, so a stop does not wait on it.
-        let timeout =
-            i64::try_from(learning_of(&home).0.curator_timeout_minutes).unwrap_or(i64::MAX);
+        let timeout = CURATOR_TIMEOUT_MINUTES;
         let _claiming = retros.claiming();
         let mut store = Store::open_current(&db).map_err(ApiError::from)?;
         let ctx = board_ctx(&key, args.as_ref());
@@ -463,8 +402,7 @@ pub(crate) async fn run_retro(
                 learning::Finish {
                     outcome: RetroOutcome::Unfinished,
                     learning: Some(note.clone()),
-                    evidence: None,
-                    proposal: None,
+                    note: None,
                 },
             );
             return Err(Error::Internal(note).into());
@@ -525,9 +463,6 @@ mod tests {
         Exits(&'static str),
         /// When the daemon stops it.
         UntilStopped,
-        /// Only once the test sets this flag, stop or not, as a curator
-        /// slow to end.
-        Holds(Arc<AtomicBool>),
     }
 
     /// Claims as `tiller retro run` does and plays the next ending; no
@@ -575,12 +510,6 @@ mod tests {
                             "curator stopped: the daemon stopped before the retro was finished"
                                 .to_owned()
                         }
-                        Ending::Holds(released) => {
-                            while !released.load(Ordering::SeqCst) {
-                                std::thread::sleep(Duration::from_millis(10));
-                            }
-                            "curator released".to_owned()
-                        }
                     };
                     let mut store = Store::open_current(&db).map_err(|e| e.to_string())?;
                     store
@@ -591,8 +520,7 @@ mod tests {
                             learning::Finish {
                                 outcome: RetroOutcome::Unfinished,
                                 learning: Some(note),
-                                evidence: None,
-                                proposal: None,
+                                note: None,
                             },
                         )
                         .map(|applied| applied.value)
@@ -696,25 +624,6 @@ mod tests {
         let other = get_at(&app, "/api/v1/retros?project=beta").await;
         assert_eq!(other.status, StatusCode::OK);
         assert!(other.body.contains("\"retros\":[]"), "{}", other.body);
-    }
-
-    /// A config.toml that cannot be used turns Run again off, with why: the
-    /// claim would refuse it.
-    #[tokio::test]
-    async fn a_config_that_cannot_be_used_turns_run_again_off() {
-        let fleet = fleet();
-        std::fs::write(
-            fleet.dir.path().join("config.toml"),
-            "[learning]\ncurator_timeout_minutes = \"soon\"\n",
-        )
-        .unwrap();
-        let r1 = one(&app(&fleet, Vec::new()), R1).await;
-        assert_eq!(r1.status, RetroStatus::Unfinished);
-        let refusal = r1.run_refusal.unwrap_or_default();
-        assert!(
-            refusal.starts_with("config.toml cannot be used: "),
-            "{refusal}"
-        );
     }
 
     /// The list has every unfinished retro, however many newer ones there
@@ -927,75 +836,6 @@ mod tests {
         assert_eq!(body["data"]["id"], R1);
         assert_eq!(body["data"]["outcome"], "unfinished");
         assert!(retros.runs().is_empty());
-    }
-
-    /// A running curator that ends only once `released` is set, and a
-    /// running holdout eval that runs `eval`.
-    fn slow_runs(
-        released: &Arc<AtomicBool>,
-        eval: impl FnOnce(&tiller_panes::process::Interrupt) + Send + 'static,
-    ) -> (Fleet, Retros, crate::memory::eval::Evals) {
-        let fleet = fleet();
-        let mut store = fleet.open();
-        let curator = FakeCurator {
-            db: fleet.db.clone(),
-            endings: Mutex::new(vec![Ending::Holds(Arc::clone(released))].into()),
-        };
-        let Ok(run) = curator.retro_run(&mut store, &Ctx::new(Actor::Board), R1) else {
-            panic!("the claim is refused");
-        };
-        let retros = Retros::default();
-        retros.start(R1, run).unwrap();
-        let evals = crate::memory::eval::Evals::default();
-        evals.spawn(eval).unwrap();
-        (fleet, retros, evals)
-    }
-
-    /// The daemon's stop raises the eval's flag at once, not after the
-    /// curators' wait, so a running eval spends no quota meanwhile.
-    #[test]
-    fn a_slow_curator_does_not_delay_the_eval_stop() {
-        let released = Arc::new(AtomicBool::new(false));
-        let caught = Arc::new(AtomicBool::new(false));
-        let seen = Arc::clone(&caught);
-        let (_fleet, retros, evals) = slow_runs(&released, move |interrupt| {
-            while !interrupt.caught() {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            seen.store(true, Ordering::SeqCst);
-        });
-        let stopper = {
-            let (retros, evals) = (retros.clone(), evals.clone());
-            std::thread::spawn(move || {
-                crate::server::stop_board_runs(&retros, &evals, Duration::from_secs(60));
-            })
-        };
-        let stopped = tiller_panes::testing::eventually(|| caught.load(Ordering::SeqCst));
-        released.store(true, Ordering::SeqCst);
-        stopper.join().unwrap();
-        assert!(
-            stopped,
-            "the eval was not stopped while a curator still ran"
-        );
-    }
-
-    /// Both waits share one deadline: a stop of runs that never end takes
-    /// the wait once, not once per kind.
-    #[test]
-    fn the_stop_waits_once_for_curators_and_evals() {
-        let released = Arc::new(AtomicBool::new(false));
-        let held = Arc::clone(&released);
-        let (_fleet, retros, evals) = slow_runs(&released, move |_| {
-            while !held.load(Ordering::SeqCst) {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-        });
-        let wait = Duration::from_secs(2);
-        let started = std::time::Instant::now();
-        crate::server::stop_board_runs(&retros, &evals, wait);
-        let took = started.elapsed();
-        released.store(true, Ordering::SeqCst);
-        assert!(took < wait * 2, "the stop took {took:?}");
     }
 
     /// Stopping waits for a Run again that is still claiming, so its run is

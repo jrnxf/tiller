@@ -1,6 +1,6 @@
 ---
 role: curator
-description: A sampled routine card whose only hiccup was a tool version the builder could have checked ends with nothing worth saving; no learning, no proposal.
+description: An incident retro of a card whose only hiccup was a tool version the builder could have checked ends with nothing worth saving; no note.
 max_turns: 20
 allowed_tools: [Read, Glob, Grep]
 ---
@@ -9,7 +9,7 @@ Retro `01JC0000000000000000000RT7` of card alpha-44.
 
 ```json
 {
-  "retro": {"id": "01JC0000000000000000000RT7", "card_id": "01JC0000000000000000000CA44", "depth": "full", "reason": "sample", "state": "pending",
+  "retro": {"id": "01JC0000000000000000000RT7", "card_id": "01JC0000000000000000000CA44", "depth": "full", "reason": "incident", "state": "pending",
             "counts": {"elapsed_minutes": 95, "attempts": {"builder": 1, "reviewer": 1}, "attention": {}, "findings": {"high": 0, "medium": 0, "low": 1},
                        "guard_breaches": 0, "fix_cards": 0, "runs": 2, "run_outcomes": {"landed": 1, "reported": 1}, "models": ["opus"], "status_lines": 4}},
   "card": {"id": "01JC0000000000000000000CA44", "tag": "[alpha-44]", "title": "Add the CSV export button", "kind": "ship", "size": "S", "outcome": "landed",
@@ -30,12 +30,10 @@ Retro `01JC0000000000000000000RT7` of card alpha-44.
     {"seq": 930, "kind": "run.ended", "entity": "run", "entity_id": "01JC0000000000000000000RV44"},
     {"seq": 933, "kind": "card.closed", "entity": "card", "entity_id": "01JC0000000000000000000CA44"}
   ],
-  "evidence": [],
   "earlier_retros": [],
   "finish": {
     "nothing": "tiller retro finish 01JC0000000000000000000RT7 --nothing",
-    "learning": "tiller retro finish 01JC0000000000000000000RT7 --learning <one sentence> --evidence '<json>'",
-    "proposed": "tiller retro finish 01JC0000000000000000000RT7 --proposed <proposal>"
+    "noted": "tiller retro finish 01JC0000000000000000000RT7 --kind <kind> --title <one line> --body <detail>"
   }
 }
 ```

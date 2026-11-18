@@ -29,8 +29,6 @@ function thisWeek(iso: string | null, now: number): boolean {
   );
 }
 
-const KEPT = new Set(["accepted", "applied"]);
-
 // The newest retro that did not finish, with Open in Memory and Run again.
 function Unfinished({ newest, count }: { newest: RetroView; count: number }) {
   const run = useRunAgain(newest);
@@ -46,7 +44,7 @@ function Unfinished({ newest, count }: { newest: RetroView; count: number }) {
         {newest.run_refusal ? `. Run again is off: ${sentence(newest.run_refusal)}` : ""}
       </span>
       <span className="acts">
-        <Link className="btn" to="/memory" search={{ doc: newest.project_id }}>
+        <Link className="btn" to="/memory" search={{ project: newest.project_id }}>
           Open in Memory
         </Link>
         <RunAgain retro={newest} run={run} />
@@ -69,8 +67,7 @@ export function Learning() {
   const done = retros.filter(
     (retro) => retro.status === "done" && thisWeek(retro.finished_at, now),
   );
-  const suggested = done.filter((retro) => retro.proposal !== null);
-  const kept = suggested.filter((retro) => KEPT.has(retro.proposal?.state ?? ""));
+  const noted = done.filter((retro) => retro.outcome === "noted").length;
   const newest: RetroView | undefined = unfinished[0];
 
   return (
@@ -103,9 +100,7 @@ export function Learning() {
             {done.length === 0 ? "No retros done" : `${plural(done.length, "retro")} done`}
           </span>
           <span className="m">
-            {suggested.length === 0
-              ? "No suggestions"
-              : `${plural(suggested.length, "suggestion")}, ${kept.length} kept`}
+            {noted === 0 ? "No notes suggested" : `${plural(noted, "note")} suggested`}
           </span>
         </li>
       </ul>

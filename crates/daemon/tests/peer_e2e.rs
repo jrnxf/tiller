@@ -1280,7 +1280,7 @@ fn launch_words(script: &str) -> (&str, &str) {
 /// launch with `--resume <id>`.
 #[test]
 fn board_resumes_a_peer_agent_with_its_first_launch_flags() {
-    use tiller_agents::spawn::{launch, memory::Memory, trust::ClaudeConfig};
+    use tiller_agents::spawn::{launch, trust::ClaudeConfig};
     use tiller_panes::Panes;
 
     let mut world = World::start();
@@ -1372,7 +1372,7 @@ fn board_resumes_a_peer_agent_with_its_first_launch_flags() {
         claude: "claude",
         claude_config: &ClaudeConfig::at(lab.join("claude")),
         claude_version: None,
-        memory: &Memory::default(),
+        memory: &tiller_core::kb::render(&tiller_core::kb::Read::missing(None), &[], 0, 0),
         note: None,
     })
     .unwrap();

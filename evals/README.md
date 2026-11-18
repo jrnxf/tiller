@@ -66,7 +66,7 @@ nix develop .#evals -c evals/run.sh --case 'reviewer_*' --runs 1
 | `--threshold T` | Tuning only: the pass mark per case. Default 0.8 |
 | `-j N` | Cases run at once. Default 1 |
 | `--keep` | Tuning only: keep the work dir and each run's workspace and transcript |
-| `--candidate FILE` | Append FILE to every case's system prompt after the role body, under a `# Memory (candidate)` heading, the way the launcher renders approved memory. Allowed on both splits: it is what `tiller learn eval` measures a memory change with (`docs/design/learning-loop.md`, section 7) |
+| `--candidate FILE` | Append FILE to every case's system prompt after the role body, under a `# Memory (candidate)` heading, the way the launcher renders approved memory. Allowed on both splits |
 
 Every Bash call inside a run goes through Claude Code's sandbox (bubblewrap
 on Linux), confined to the run's workspace. Run `run.sh` from a plain
