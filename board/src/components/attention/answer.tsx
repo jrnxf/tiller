@@ -92,6 +92,18 @@ export function AnswerForm({
     trigger();
   }, [trigger]);
 
+  // The typed words alone, with no option. A pick made before is let go, and
+  // the answer without it sends once it has rendered, as a pick does.
+  const sendTyped = useCallback(() => {
+    if (note.trim() === "" || !sendable(null)) return;
+    if (pick === null) {
+      trigger();
+      return;
+    }
+    fired.current = true;
+    setPick(null);
+  }, [note, pick, trigger, sendable]);
+
   const choose = useCallback(
     (label: string) => {
       if (!sendable(label)) return;
@@ -164,15 +176,6 @@ export function AnswerForm({
       <PeerNote standing={standing} />
       {options.length ? (
         <>
-          <input
-            className="note-in"
-            name={`note-${item.id}`}
-            placeholder="Add a note for the orchestrator (optional)"
-            aria-label="Note"
-            value={note}
-            disabled={locked}
-            onChange={(event) => setNote(event.target.value)}
-          />
           <div className="opts" role="group" aria-label="Answer" aria-disabled={locked}>
             {options.map((option, index) => (
               <button
@@ -204,6 +207,32 @@ export function AnswerForm({
               An option that changes a project is the owner's own: pick it on {host}'s board.
             </p>
           ) : null}
+          <form
+            className="own-answer"
+            onSubmit={(event) => {
+              event.preventDefault();
+              sendTyped();
+            }}
+          >
+            <input
+              className="note-in"
+              name={`note-${item.id}`}
+              placeholder="Or answer in your own words"
+              aria-label="Your own words"
+              value={note}
+              disabled={locked}
+              onChange={(event) => setNote(event.target.value)}
+            />
+            <button
+              type="submit"
+              className="btn primary"
+              disabled={locked || note.trim() === "" || !sendable(null)}
+              title={off ?? undefined}
+            >
+              <SendIcon />
+              {action.pending && pick === null ? "Sending..." : "Send"}
+            </button>
+          </form>
         </>
       ) : (
         <>

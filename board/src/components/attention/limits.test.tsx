@@ -118,7 +118,7 @@ const options = () => within(screen.getByRole("group", { name: "Answer" })).getA
 
 test("an answer note over 20,000 characters turns every option off", async () => {
   await renderInbox(RETRY);
-  const note = screen.getByRole("textbox", { name: "Note" });
+  const note = screen.getByRole("textbox", { name: "Your own words" });
 
   fireEvent.change(note, { target: { value: "a".repeat(LIMITS.answer - 50) } });
   expect(options().every((button) => !(button as HTMLButtonElement).disabled)).toBe(true);

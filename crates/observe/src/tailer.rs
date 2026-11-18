@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use tiller_core::domain::{Activity, AskSource, ObservationSource, Role, Session};
-use tiller_core::state::asks::NewAsk;
+use tiller_core::state::asks::{NewAsk, is_launch_prompt};
 use tiller_core::state::context::ContextUse;
 use tiller_core::state::get;
 use tiller_core::state::runs::NewObservation;
@@ -429,7 +429,8 @@ impl Tailer {
             return Ok(None);
         };
         let text = texts(entry.pointer("/message/content")).join("\n\n");
-        if text.trim().is_empty() {
+        // Tiller's own launch prompt is not the owner's ask.
+        if text.trim().is_empty() || is_launch_prompt(&text) {
             return Ok(None);
         }
         let session: Session = get(store.conn(), "session", &self.session_id)?;

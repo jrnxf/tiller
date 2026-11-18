@@ -23,7 +23,7 @@ interface ToastLink {
   item: string;
 }
 
-const toastStore = createStore<ToastState | null>(null);
+export const toastStore = createStore<ToastState | null>(null);
 let counter = 0;
 
 export function showToast(

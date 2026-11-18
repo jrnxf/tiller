@@ -1298,6 +1298,23 @@ button.chip:active {
   transform: none;
 }
 
+/* Under the options: the owner's own words, sent alone or with a pick. */
+.own-answer {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+}
+.own-answer .note-in {
+  flex: 1;
+  min-width: 0;
+  margin-top: 0;
+}
+.own-answer .btn {
+  flex: none;
+  height: 34px;
+}
+
 .opts-note {
   margin: 8px 0 0;
   font-size: var(--fs-mini);

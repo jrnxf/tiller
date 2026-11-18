@@ -22,6 +22,7 @@ import { useNamedProjects } from "../board/peer-state";
 const TITLES: Record<string, string> = {
   "/": "Board",
   "/agents": "Agents",
+  "/chat": "Chat",
   "/contributions": "Contributions",
   "/inbox": "Inbox",
   "/memory": "Memory",

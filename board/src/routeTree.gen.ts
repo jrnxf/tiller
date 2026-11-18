@@ -17,6 +17,7 @@ import { Route as InboxRouteImport } from './routes/inbox'
 import { Route as MemoryRouteImport } from './routes/memory'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as CardsCardIdRouteImport } from './routes/cards.$cardId'
+import { Route as ChatIndexRouteImport } from './routes/chat.index'
 import { Route as ChatProjectRouteImport } from './routes/chat.$project'
 
 const IndexRoute = IndexRouteImport.update({
@@ -59,6 +60,11 @@ const CardsCardIdRoute = CardsCardIdRouteImport.update({
   path: '/cards/$cardId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ChatIndexRoute = ChatIndexRouteImport.update({
+  id: '/chat/',
+  path: '/chat/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ChatProjectRoute = ChatProjectRouteImport.update({
   id: '/chat/$project',
   path: '/chat/$project',
@@ -75,6 +81,7 @@ export interface FileRoutesByFullPath {
   '/settings': typeof SettingsRoute
   '/cards/$cardId': typeof CardsCardIdRoute
   '/chat/$project': typeof ChatProjectRoute
+  '/chat/': typeof ChatIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -86,6 +93,7 @@ export interface FileRoutesByTo {
   '/settings': typeof SettingsRoute
   '/cards/$cardId': typeof CardsCardIdRoute
   '/chat/$project': typeof ChatProjectRoute
+  '/chat': typeof ChatIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -98,6 +106,7 @@ export interface FileRoutesById {
   '/settings': typeof SettingsRoute
   '/cards/$cardId': typeof CardsCardIdRoute
   '/chat/$project': typeof ChatProjectRoute
+  '/chat/': typeof ChatIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -111,6 +120,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/cards/$cardId'
     | '/chat/$project'
+    | '/chat/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -122,6 +132,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/cards/$cardId'
     | '/chat/$project'
+    | '/chat'
   id:
     | '__root__'
     | '/'
@@ -133,6 +144,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/cards/$cardId'
     | '/chat/$project'
+    | '/chat/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -145,6 +157,7 @@ export interface RootRouteChildren {
   SettingsRoute: typeof SettingsRoute
   CardsCardIdRoute: typeof CardsCardIdRoute
   ChatProjectRoute: typeof ChatProjectRoute
+  ChatIndexRoute: typeof ChatIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -205,6 +218,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof CardsCardIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/chat/': {
+      id: '/chat/'
+      path: '/chat'
+      fullPath: '/chat/'
+      preLoaderRoute: typeof ChatIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/chat/$project': {
       id: '/chat/$project'
       path: '/chat/$project'
@@ -225,6 +245,7 @@ const rootRouteChildren: RootRouteChildren = {
   SettingsRoute: SettingsRoute,
   CardsCardIdRoute: CardsCardIdRoute,
   ChatProjectRoute: ChatProjectRoute,
+  ChatIndexRoute: ChatIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

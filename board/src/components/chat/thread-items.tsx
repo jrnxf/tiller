@@ -11,6 +11,7 @@ import type {
   ThreadStep,
 } from "../../lib/api-types";
 import { formatLisbon, formatLisbonDay, minutesSince } from "../../lib/clock";
+import { untagged } from "../../lib/orchestrator-text";
 import { useStore } from "../../lib/store";
 import { AnswerForm } from "../attention/answer";
 import { answeredStore } from "../attention/answered";
@@ -29,10 +30,9 @@ import {
   ReplyToIcon,
   RestartIcon,
   StepsIcon,
-  TickIcon,
-  TicksIcon,
 } from "./icons";
-import { decisionText, receiptOf, stepFailed, stepTitle, workedFor } from "./model";
+import { Markdown } from "./markdown-view";
+import { activityText, decisionText, stepFailed, stepTitle, undelivered } from "./model";
 
 // "Tue 18:02" this week, "Thu 12 Nov, 18:00" before it: Lisbon time, with the day.
 export function stamp(iso: string | null): string | null {
@@ -40,7 +40,18 @@ export function stamp(iso: string | null): string | null {
   return minutes !== null && minutes > 6 * 24 * 60 ? formatLisbonDay(iso) : formatLisbon(iso);
 }
 
-function CardRef({ card, owner }: { card: ThreadCard; owner: string | undefined }) {
+// How the orchestrator tied a message to a card: it filed the card for it, or
+// took it as a follow-up on one. A card the owner linked with # says nothing.
+const RELATION: Record<string, string> = { created: "Filed", followup: "Follow-up on" };
+
+function CardRef({
+  card,
+  owner,
+}: {
+  card: ThreadCard & { relation?: string | null };
+  owner: string | undefined;
+}) {
+  const relation = card.relation ? RELATION[card.relation] : undefined;
   return (
     <Link
       to="/cards/$cardId"
@@ -49,6 +60,7 @@ function CardRef({ card, owner }: { card: ThreadCard; owner: string | undefined 
       className="chat-ref"
       title={card.title}
     >
+      {relation ? <span className="rel">{relation}</span> : null}
       <span className="id">{card.display_id}</span>
       <span className="t">{card.title}</span>
     </Link>
@@ -64,12 +76,14 @@ function PrRef({ pr }: { pr: ThreadPr }) {
   );
 }
 
-// The owner's message, on the right, with how far it got under it.
+// The owner's message, on the right, with when it was sent. It says more only
+// when it never reached the orchestrator.
 export function AskMessage({ ask, owner }: { ask: ThreadAsk; owner: string | undefined }) {
-  const receipt = receiptOf(ask, stamp);
+  const failed = undelivered(ask);
+  const at = stamp(ask.at);
   return (
     <div className="chat-msg user" data-testid="chat-ask">
-      <div className="chat-bubble">{ask.text}</div>
+      <Markdown className="chat-bubble" text={ask.text} />
       {ask.cards.length > 0 ? (
         <div className="chat-refs">
           {ask.cards.map((card) => (
@@ -77,19 +91,25 @@ export function AskMessage({ ask, owner }: { ask: ThreadAsk; owner: string | und
           ))}
         </div>
       ) : null}
-      {receipt ? (
-        <div className={`chat-receipt ${receipt.tone}`} data-testid="chat-receipt">
-          {receipt.tone === "sending" ? <span className="chat-spin" aria-hidden="true" /> : null}
-          {receipt.tone === "delivered" ? <TickIcon /> : null}
-          {receipt.tone === "read" ? <TicksIcon /> : null}
-          {receipt.tone === "failed" ? <FailedIcon /> : null}
-          {receipt.text}
+      {failed ? (
+        <div className="chat-meta failed" data-testid="chat-undelivered">
+          <FailedIcon />
+          {failed}
         </div>
       ) : (
-        <div className="chat-receipt" data-testid="chat-receipt">
-          {ask.source === "prompt" ? `Typed in the terminal ${stamp(ask.at) ?? ""}` : stamp(ask.at)}
+        <div className="chat-meta">
+          {ask.source === "prompt" ? `Typed in the terminal ${at ?? ""}` : at}
         </div>
       )}
+    </div>
+  );
+}
+
+// The owner's message while it is on its way: shown at once, as sent.
+export function PendingAsk({ text }: { text: string }) {
+  return (
+    <div className="chat-msg user pending" data-testid="chat-pending">
+      <Markdown className="chat-bubble" text={text} />
     </div>
   );
 }
@@ -110,15 +130,16 @@ export function ReplyMessage({
   onSuggest: (text: string) => void;
 }) {
   const { reply } = item;
+  const body = untagged(reply.body);
   const copy = () => {
-    void navigator.clipboard?.writeText(reply.body).then(
+    void navigator.clipboard?.writeText(body).then(
       () => showToast("ok", "Copied the reply"),
       () => showToast("bad", "Could not copy", "The browser refused the clipboard."),
     );
   };
   return (
     <div className="chat-msg assistant" data-testid="chat-reply">
-      <div className="chat-prose">{reply.body}</div>
+      <Markdown className="chat-prose" text={body} />
       {reply.card ? (
         <div className="chat-refs">
           <CardRef card={reply.card} owner={owner} />
@@ -134,7 +155,7 @@ export function ReplyMessage({
           className="chat-act"
           aria-label="Reply to this"
           title="Reply to this"
-          onClick={() => onReply(reply.body)}
+          onClick={() => onReply(body)}
         >
           <ReplyToIcon />
         </button>
@@ -226,12 +247,7 @@ export function ActivityBlock({
     <details className="chat-cot" data-testid="chat-activity">
       <summary>
         <StepsIcon />
-        <span className="t">
-          {workedFor(activity.duration_seconds)}
-          <span className="n">
-            {count} step{count === 1 ? "" : "s"}
-          </span>
-        </span>
+        <span className="t">{activityText(activity.duration_seconds, count)}</span>
         <ChevronDownIcon />
       </summary>
       <ol className="chat-steps">

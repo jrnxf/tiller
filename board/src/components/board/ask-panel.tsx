@@ -11,6 +11,7 @@ import type {
   MutationResponse,
   ReplyItem,
 } from "../../lib/api-types";
+import { untagged } from "../../lib/orchestrator-text";
 import { ownerKey, ownerOf, projectIndex } from "../../lib/peers";
 import type { Owned } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
@@ -113,7 +114,7 @@ function Answer({ reply }: { reply: ReplyItem }) {
           {reply.read_at ? "" : " - unread"}
         </span>
       </div>
-      <div className="reply-a">{reply.body}</div>
+      <div className="reply-a">{untagged(reply.body)}</div>
     </div>
   );
 }

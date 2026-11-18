@@ -18,6 +18,16 @@ use crate::store::{Applied, Ctx, NewEvent, Store, Tx};
 /// The warning an ask's response carries when nobody was told about it.
 pub const NO_ORCHESTRATOR: &str = "no_orchestrator";
 
+/// The first prompt Tiller types into a session it launches; the brief
+/// itself is in the session's instructions. A relaunch adds its note after it.
+pub const FIRST_PROMPT: &str = "Start on the brief at the end of your instructions.";
+
+/// Whether a prompt is Tiller's own launch prompt, which is never the
+/// owner's ask.
+pub fn is_launch_prompt(text: &str) -> bool {
+    text.trim_start().starts_with(FIRST_PROMPT)
+}
+
 /// An ask to record.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NewAsk {

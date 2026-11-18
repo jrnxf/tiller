@@ -63,7 +63,8 @@ function allReplies(now: number): ReplyItem[] {
       message_id: null,
       question: "How much disk does the cache use now?",
       asked_at: at(now, 26 * 60),
-      body: "About 41 GB, most of it build artifacts older than a week. Nothing needs a card: the weekly trim takes it back under 20 GB on Sunday.",
+      // Written as an orchestrator writes it: the tag first, then Markdown.
+      body: "[chat] gamma: About 41 GB, most of it older than a week:\n\n1. Build artifacts in `target/`: 28 GB\n2. Old image layers: 9 GB\n3. Logs: 4 GB\n\nNothing needs a card: the **weekly trim** takes it back under 20 GB on Sunday.",
       replied_at: at(now, 25 * 60),
       read_at: null,
       rev: 1,

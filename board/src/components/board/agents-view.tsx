@@ -6,6 +6,7 @@ import type { CSSProperties, KeyboardEvent as KeyEvent, RefObject } from "react"
 import type { AgentRow, Machine, PermissionPrompt, Project } from "../../lib/api-types";
 import { leavePageFullScreen, usePageFullScreen } from "../../lib/fullscreen";
 import { holdInertOutside } from "../../lib/inert";
+import { untagged } from "../../lib/orchestrator-text";
 import { VIEW_ONLY_REASON, focusReason, ownerOf, projectKey, shownId } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import {
@@ -64,6 +65,10 @@ const ROLE_COLOR: Record<string, string> = {
 };
 
 // A motion curve from styles.css, for the Web Animations API.
+// The agent's last line, without the tag an orchestrator starts it with.
+const statusLine = (agent: AgentRow): string | null =>
+  agent.last_status_line ? untagged(agent.last_status_line) : null;
+
 function ease(token: "--ease-out" | "--ease-drawer"): string {
   return getComputedStyle(document.documentElement).getPropertyValue(token).trim() || "ease-out";
 }
@@ -218,7 +223,7 @@ function RailRow({
   ) : needs ? (
     (promptText(prompt) ?? activity.label)
   ) : activity.dot === "live" ? (
-    (agent.last_status_line ?? activity.label)
+    (statusLine(agent) ?? activity.label)
   ) : stopped ? (
     `${reportLabel(stopped)}: ${stopped.text}`
   ) : (
@@ -649,7 +654,7 @@ function Stage({
     : paused
       ? `until ${formatLisbonMoment(paused.until) ?? paused.until}`
       : activity.dot === "live"
-        ? agent.last_status_line
+        ? statusLine(agent)
         : stopped
           ? `${reportLabel(stopped)}: ${stopped.text}`
           : null;

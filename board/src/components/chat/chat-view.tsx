@@ -4,7 +4,14 @@ import type { Editor } from "@tiptap/core";
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties, RefObject } from "react";
 
-import type { AgentRow, Project, ThreadContext, ThreadItem, ThreadRead } from "../../lib/api-types";
+import type {
+  AgentRow,
+  BoardRow,
+  Project,
+  ThreadContext,
+  ThreadItem,
+  ThreadRead,
+} from "../../lib/api-types";
 import { hostField, ownerOf, projectKey } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import {
@@ -22,6 +29,7 @@ import { useReplies } from "../attention/replies";
 import { ulid } from "../attention/ulid";
 import { agentActivity } from "../board/activity";
 import { ArrowIcon, TerminalIcon } from "../board/icons";
+import { usePhone } from "../board/live-terminal";
 import { useNamedProjects } from "../board/peer-state";
 import { showToast } from "../board/toast";
 import { CloseIcon } from "../shell/icons";
@@ -35,6 +43,7 @@ import { ChatPrompt, fillEditor } from "./chat-prompt";
 import {
   GROUP_LABELS,
   chatRows,
+  firstRow,
   contextShare,
   queueOf,
   quoteOf,
@@ -49,9 +58,11 @@ import {
   AskMessage,
   CheckpointLine,
   DecisionBlock,
+  PendingAsk,
   ReplyMessage,
   stamp,
 } from "./thread-items";
+import { useChatSend } from "./use-chat-send";
 
 export type ChatVariant = "page" | "drawer";
 
@@ -162,6 +173,17 @@ function ChatHeader({
   };
   return (
     <header className="chat-top">
+      {variant === "page" ? (
+        <Link
+          to="/chat"
+          search={({ host }) => ({ host })}
+          className="btn sm icon chat-back"
+          aria-label="All chats"
+          title="All chats"
+        >
+          <ArrowIcon to="left" />
+        </Link>
+      ) : null}
       <span className="chat-title">
         <span className="pdot" style={{ "--pc": projectColor(row.index) } as CSSProperties} />
         <h2>{project.name}</h2>
@@ -249,10 +271,13 @@ function ThreadBody({
   project,
   row,
   editorRef,
+  pending,
 }: {
   project: Project;
   row: ChatRow;
   editorRef: RefObject<Editor | null>;
+  // The message on its way, shown under the thread until the thread holds it.
+  pending: string | null;
 }) {
   const queryClient = useQueryClient();
   const owner = ownerOf(project);
@@ -273,8 +298,14 @@ function ThreadBody({
   const before = older ? older.before : (thread.data?.next_before ?? null);
   const last = items.at(-1);
   const view = row.orchestrator ? agentActivity(row.orchestrator) : null;
-  const working = view?.dot === "live" && last?.type === "ask";
+  const shownPending = pending !== null && !(last?.type === "ask" && last.text === pending);
+  const working = view?.dot === "live" && last?.type === "ask" && !shownPending;
   const follow = followAt(items);
+
+  // A message sent from the box shows at the bottom, so the view goes there.
+  useEffect(() => {
+    if (pending !== null) stuck.current = true;
+  }, [pending]);
 
   // The newest item stays in view while the owner reads at the bottom: after
   // every render, as a new item, a step or an opened block can each grow it.
@@ -352,7 +383,7 @@ function ThreadBody({
         </button>
       </div>
     );
-  } else if (items.length === 0) {
+  } else if (items.length === 0 && !shownPending) {
     body = (
       <div className="chat-note" data-testid="chat-empty">
         <b>No messages yet</b>
@@ -399,6 +430,7 @@ function ThreadBody({
               return <CheckpointLine key={item.seq} checkpoint={item} />;
           }
         })}
+        {shownPending ? <PendingAsk text={pending} /> : null}
         {working ? (
           <div className="chat-working" data-testid="chat-working">
             <span className="chat-spin" aria-hidden="true" />
@@ -428,6 +460,49 @@ function ThreadBody({
   );
 }
 
+// The chat list's rows and the reads they come from, which the page, its
+// list and the drawer share.
+function useChatRows() {
+  const projects = useNamedProjects(useSuspenseQuery(projectsQuery()).data).projects;
+  const rows = useQuery(boardQuery()).data?.rows ?? [];
+  const orchestrators: AgentRow[] = useQuery(agentsQuery()).data?.orchestrators ?? [];
+  const attention = useQuery(attentionQuery()).data?.items ?? [];
+  const { replies } = useReplies(projects);
+  const list = chatRows(projects, orchestrators, waitingByProject(attention, rows), replies);
+  return { list, rows };
+}
+
+// /chat: on a wide screen, the chat at the top of the list opens at once. On
+// a phone the list is the page, and a project opens its chat.
+export function ChatHome() {
+  const navigate = useNavigate();
+  const phone = usePhone();
+  const { list } = useChatRows();
+  const first = phone ? null : firstRow(list);
+  useEffect(() => {
+    if (!first) return;
+    void navigate({
+      to: "/chat/$project",
+      params: { project: first.project.id },
+      search: ({ host }) => ({ host, owner: ownerOf(first.project) }),
+      replace: true,
+    });
+  }, [first, navigate]);
+  return (
+    <div className="chat" data-variant="page" data-home="" data-testid="chat-home">
+      <ChatList rows={list} current="" />
+      <div className="chat-main">
+        {list.length === 0 ? (
+          <div className="chat-note" data-testid="chat-empty">
+            <b>No projects yet</b>
+            Add a project, and its orchestrator's chat shows here.
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 // The chat with one project's orchestrator: the page at /chat/$project, or
 // the drawer over the board. One component, so both behave alike.
 export function ChatView({
@@ -439,21 +514,10 @@ export function ChatView({
   owner: string | undefined;
   variant: ChatVariant;
 }) {
-  const projects = useNamedProjects(useSuspenseQuery(projectsQuery()).data).projects;
-  const rows = useQuery(boardQuery()).data?.rows ?? [];
-  const orchestrators: AgentRow[] = useQuery(agentsQuery()).data?.orchestrators ?? [];
-  const attention = useQuery(attentionQuery()).data?.items ?? [];
-  const { replies } = useReplies(projects);
-  const editorRef = useRef<Editor | null>(null);
-
-  const list = chatRows(projects, orchestrators, waitingByProject(attention, rows), replies);
+  const { list, rows } = useChatRows();
   const row = list.find(
     (entry) => entry.project.id === projectId && ownerOf(entry.project) === owner,
   );
-  const thread = useQuery({
-    ...threadQuery(projectId, owner),
-    enabled: row !== undefined,
-  }).data;
 
   if (!row) {
     return (
@@ -468,7 +532,29 @@ export function ChatView({
       </div>
     );
   }
+  return (
+    <div className="chat" data-variant={variant} data-testid={`chat-${variant}`}>
+      {variant === "page" ? <ChatList rows={list} current={projectKey(row.project)} /> : null}
+      <ChatMain key={projectKey(row.project)} row={row} rows={rows} variant={variant} />
+    </div>
+  );
+}
+
+// One project's chat: its header, the thread and the box.
+function ChatMain({
+  row,
+  rows,
+  variant,
+}: {
+  row: ChatRow;
+  rows: BoardRow[];
+  variant: ChatVariant;
+}) {
   const { project } = row;
+  const owner = ownerOf(project);
+  const editorRef = useRef<Editor | null>(null);
+  const { pending, send } = useChatSend(project, row.orchestrator !== null);
+  const thread = useQuery(threadQuery(project.id, owner)).data;
   const checkpoints = (thread?.items ?? []).filter((item) => item.type === "checkpoint");
   const since = checkpoints.at(-1)?.at ?? null;
   const queue = queueOf(project, rows, row.orchestrator);
@@ -477,30 +563,28 @@ export function ChatView({
   );
 
   return (
-    <div className="chat" data-variant={variant} data-testid={`chat-${variant}`}>
-      {variant === "page" ? <ChatList rows={list} current={projectKey(project)} /> : null}
-      <div className="chat-main">
-        <ChatHeader
-          project={project}
-          row={row}
-          context={thread?.context ?? null}
-          since={since}
-          variant={variant}
-        />
-        <ThreadBody key={projectKey(project)} project={project} row={row} editorRef={editorRef} />
-        <div className="chat-dock">
-          <div className="chat-dock-in">
-            <ChatPrompt
-              key={projectKey(project)}
-              project={project}
-              index={row.index}
-              orchestrator={row.orchestrator}
-              working={row.group === "working"}
-              rows={projectRows}
-              queue={queue}
-              editorRef={editorRef}
-            />
-          </div>
+    <div className="chat-main">
+      <ChatHeader
+        project={project}
+        row={row}
+        context={thread?.context ?? null}
+        since={since}
+        variant={variant}
+      />
+      <ThreadBody project={project} row={row} editorRef={editorRef} pending={pending} />
+      <div className="chat-dock">
+        <div className="chat-dock-in">
+          <ChatPrompt
+            project={project}
+            index={row.index}
+            orchestrator={row.orchestrator}
+            working={row.group === "working"}
+            rows={projectRows}
+            queue={queue}
+            editorRef={editorRef}
+            pending={pending}
+            send={send}
+          />
         </div>
       </div>
     </div>

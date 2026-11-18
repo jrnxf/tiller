@@ -1,9 +1,8 @@
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
 import { Fragment, useState } from "react";
 import type { CSSProperties } from "react";
 
-import { isPeerRow, ownerKey, ownerOf, projectKey } from "../../lib/peers";
+import { isPeerRow, ownerKey, projectKey } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import { attentionQuery, boardQuery, projectsQuery } from "../../lib/queries";
 import { toggleProjectHidden, updatePrefs, prefsStore, visibleProjects } from "../../lib/prefs";
@@ -18,7 +17,6 @@ import { AddProject } from "./project-add";
 import { ArchivedProjects } from "./projects-archived";
 import { ProjectDetail, StageChip } from "./project-stage";
 import { useNamedProjects } from "../board/peer-state";
-import { ChatIcon } from "../chat/icons";
 
 const VIEWS: SegmentedOption<ViewKnob>[] = [
   { value: "all", label: "All projects", icon: <LayersIcon /> },
@@ -130,17 +128,6 @@ export function ProjectsSection({ activeHost }: { activeHost: string | undefined
                   </span>
                 </button>
                 <span className="pacts">
-                  <Link
-                    to="/chat/$project"
-                    params={{ project: project.id }}
-                    search={({ host }) => ({ host, owner: ownerOf(project) })}
-                    className="eye"
-                    title={`Chat with ${project.name}'s orchestrator`}
-                    aria-label={`Chat with ${project.name}`}
-                    data-testid="project-chat"
-                  >
-                    <ChatIcon />
-                  </Link>
                   <button
                     type="button"
                     className="eye"

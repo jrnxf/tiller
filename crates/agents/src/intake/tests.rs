@@ -320,6 +320,24 @@ fn three_interleaved_asks_map_to_the_right_cards() {
 }
 
 #[test]
+fn the_launch_prompt_is_not_an_ask() {
+    let world = World::new();
+    for (id, text) in [
+        ("p1", crate::spawn::launch::FIRST_PROMPT.to_owned()),
+        ("p2", crate::spawn::launch::relaunch_prompt("tests pass")),
+    ] {
+        let (_, output) = world.hook(
+            &Hooks::default(),
+            "UserPromptSubmit",
+            json!({"prompt": text, "prompt_id": id}),
+        );
+        assert!(output.is_none(), "{output:?}");
+    }
+    let asks: Vec<Ask> = list(world.store.conn(), "1 = 1", &[]).unwrap();
+    assert!(asks.is_empty(), "{asks:?}");
+}
+
+#[test]
 fn redelivered_prompt_is_one_ask_and_a_new_prompt_is_another() {
     let world = World::new();
     let first = world.prompt("p1", "continue");

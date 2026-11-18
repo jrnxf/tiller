@@ -369,7 +369,7 @@ test("keys 1-3 answer, but not while typing in the note", async () => {
   stubDaemon("default");
   replies = [ok({ outbox_id: "01JOUTB0000000000000000001" })];
   await renderInbox("default", RETRY);
-  fireEvent.keyDown(screen.getByRole("textbox", { name: "Note" }), { key: "2" });
+  fireEvent.keyDown(screen.getByRole("textbox", { name: "Your own words" }), { key: "2" });
   await flush();
   expect(calls).toHaveLength(0);
   fireEvent.keyDown(window, { key: "2" });

@@ -7,18 +7,15 @@ import type { AskPiece } from "../../lib/ask-plan";
 import { mentionedKeys } from "../../lib/ask-plan";
 import { ownerOf } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
-import { ActionFailure } from "../attention/action-failure";
 import { SendIcon, StopIcon } from "../board/icons";
 import { TerminalInput } from "../board/terminal-stream";
-import { ModelChip } from "../board/tile";
 import { showToast } from "../board/toast";
 import { LayersIcon } from "../shell/icons";
 import type { MentionOption } from "../shell/ask-mentions";
 import "../shell/ask-dialog.css";
 import { HashIcon } from "./icons";
-import { chatText, queueChip, queueHint } from "./model";
+import { chatText, modelName, queueChip, queueHint } from "./model";
 import type { Queue, QueueEntry } from "./model";
-import { useChatSend } from "./use-chat-send";
 
 // The editor is the heaviest code on the page: it loads on its own.
 const AskEditor = lazy(async () => ({ default: (await import("../shell/ask-editor")).AskEditor }));
@@ -130,6 +127,8 @@ export function ChatPrompt({
   rows,
   queue,
   editorRef,
+  pending,
+  send,
 }: {
   project: Project;
   index: number;
@@ -139,14 +138,16 @@ export function ChatPrompt({
   rows: BoardRow[];
   queue: Queue;
   editorRef: RefObject<Editor | null>;
+  // The message on its way, which holds the next one until it lands.
+  pending: string | null;
+  send: (text: string) => Promise<boolean>;
 }) {
   const labelId = useId();
   const queueId = useId();
   const [pieces, setPieces] = useState<AskPiece[]>([]);
   const [queueOpen, setQueueOpen] = useState(false);
-  const { state, send } = useChatSend(project, orchestrator !== null);
   const text = chatText(pieces);
-  const sending = state.status === "sending";
+  const sending = pending !== null;
   const color = projectColor(index);
   const options = useMemo<MentionOption[]>(
     () =>
@@ -161,10 +162,15 @@ export function ChatPrompt({
     [rows, color],
   );
 
+  // The box empties at once. A send that fails puts the words back, unless
+  // the owner has started on the next message.
   const submit = () => {
     if (sending || text === "") return;
-    void send(text).then((sent) => {
-      if (sent) editorRef.current?.commands.clearContent(true);
+    const words = text;
+    editorRef.current?.commands.clearContent(true);
+    void send(words).then((sent) => {
+      const editor = editorRef.current;
+      if (!sent && editor?.isEmpty) fillEditor(editor, words);
     });
   };
 
@@ -202,7 +208,7 @@ export function ChatPrompt({
           <AskEditor
             options={options}
             used={mentionedKeys(pieces)}
-            locked={sending}
+            locked={false}
             placeholder={`Message ${project.name}. # links a card.`}
             labelledBy={labelId}
             editorRef={editorRef}
@@ -231,46 +237,49 @@ export function ChatPrompt({
               onClick={() => setQueueOpen((open) => !open)}
               data-testid="chat-queue-chip"
             >
-              <LayersIcon />
-              {queue.running.length > 0 ? <span className="chat-qdot" aria-hidden="true" /> : null}
+              {queue.running.length > 0 ? (
+                <span className="chat-qdot" aria-hidden="true" />
+              ) : (
+                <LayersIcon />
+              )}
               <span>{chip ?? "Queue"}</span>
             </button>
-            {orchestrator ? (
-              <span className="chat-tbtn model" title="The orchestrator's model">
-                <span className="hide-sm">Orchestrator</span>
-                <ModelChip model={orchestrator.model} />
-              </span>
+          </div>
+          <div className="r">
+            <span
+              className="chat-model"
+              title={orchestrator ? "The orchestrator's model" : "Sending starts the orchestrator"}
+            >
+              {orchestrator?.model
+                ? modelName(orchestrator.model)
+                : orchestrator
+                  ? null
+                  : "Not running"}
+            </span>
+            {showStop ? (
+              <button
+                type="button"
+                className="chat-submit stop"
+                aria-label="Stop"
+                title="Send Esc to the orchestrator"
+                onClick={stop}
+              >
+                <StopIcon />
+              </button>
             ) : (
-              <span className="chat-tbtn model" title="Sending starts the orchestrator">
-                Not running
-              </span>
+              <button
+                type="submit"
+                className="chat-submit"
+                aria-label="Send"
+                title="Send (Enter)"
+                disabled={sending || text === ""}
+              >
+                <SendIcon />
+              </button>
             )}
           </div>
-          {showStop ? (
-            <button
-              type="button"
-              className="chat-submit stop"
-              aria-label="Stop"
-              title="Send Esc to the orchestrator"
-              onClick={stop}
-            >
-              <StopIcon />
-            </button>
-          ) : (
-            <button
-              type="submit"
-              className="chat-submit"
-              aria-label={sending ? "Sending" : "Send"}
-              disabled={sending || text === ""}
-            >
-              {sending ? <span className="chat-spin" aria-hidden="true" /> : <SendIcon />}
-            </button>
-          )}
         </div>
       </form>
-      {state.status === "failed" ? (
-        <ActionFailure error={state.error} host={ownerOf(project)} />
-      ) : null}
     </>
   );
 }
