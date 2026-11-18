@@ -541,38 +541,48 @@ test("a review pass or obligation event marks the projects stale", () => {
   }
 });
 
-test("a proposal, memory or outside repo edit event marks every memory view and revision stale, and nothing else", () => {
-  for (const entity of [
-    "proposal",
-    "memory",
-    "memory_revision",
-    "eval_run",
-    "change_set",
-    "memory_repo",
-  ]) {
+test("a pending note or memory load event marks every memory and retros read stale, and nothing else", () => {
+  for (const [kind, entity] of [
+    ["memory.noted", "memory_pending"],
+    ["memory.edited", "memory_pending"],
+    ["memory.kept", "memory_pending"],
+    ["memory.discarded", "memory_pending"],
+    ["session.memory_loaded", "session"],
+  ] as const) {
     const queryClient = seededClient();
-    const view = queryKeyFor("/api/v1/memory?scope=alpha");
-    const revision = queryKeyFor("/api/v1/memory/revisions/01JREV");
-    queryClient.setQueryData(view, {});
-    queryClient.setQueryData(revision, {});
+    const view = queryKeyFor("/api/v1/memory?project=alpha&role=builder");
+    const all = queryKeyFor("/api/v1/memory");
+    const retros = queryKeyFor("/api/v1/retros?project=alpha");
+    for (const key of [view, all, retros]) queryClient.setQueryData(key, {});
 
-    applyChange(queryClient, event({ entity }));
+    applyChange(queryClient, event({ kind, entity }));
 
-    expect(queryClient.getQueryState(view)?.isInvalidated).toBe(true);
-    expect(queryClient.getQueryState(revision)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(view)?.isInvalidated, kind).toBe(true);
+    expect(queryClient.getQueryState(all)?.isInvalidated, kind).toBe(true);
+    expect(queryClient.getQueryState(retros)?.isInvalidated, kind).toBe(true);
     expect(queryClient.getQueryState(queryKeyFor(projectsPath))?.isInvalidated).toBe(false);
   }
 });
 
-test("an eval run or change set event marks every memory view stale", () => {
-  for (const entity of ["eval_run", "change_set"]) {
+test("a retro event marks every memory read stale", () => {
+  const queryClient = seededClient();
+  const view = queryKeyFor("/api/v1/memory?project=alpha");
+  queryClient.setQueryData(view, {});
+
+  applyChange(queryClient, event({ kind: "retro.finished", entity: "retro" }));
+
+  expect(queryClient.getQueryState(view)?.isInvalidated).toBe(true);
+});
+
+test("an old memory document event no longer moves the memory read", () => {
+  for (const entity of ["proposal", "memory_revision", "eval_run", "change_set", "memory_repo"]) {
     const queryClient = seededClient();
-    const view = queryKeyFor("/api/v1/memory?scope=alpha");
+    const view = queryKeyFor("/api/v1/memory?project=alpha");
     queryClient.setQueryData(view, {});
 
-    applyChange(queryClient, event({ entity }));
+    applyChange(queryClient, event({ kind: `${entity}.changed`, entity }));
 
-    expect(queryClient.getQueryState(view)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(view)?.isInvalidated, entity).toBe(false);
   }
 });
 
@@ -972,7 +982,7 @@ test("a config event marks the start settings and every project setup stale, and
   const queryClient = seededClient();
   const settings = queryKeyFor(startSettingsPath);
   const setup = queryKeyFor("/api/v1/projects/alpha/setup");
-  const other = queryKeyFor("/api/v1/memory?scope=alpha");
+  const other = queryKeyFor("/api/v1/memory?project=alpha");
   for (const key of [settings, setup, other]) queryClient.setQueryData(key, {});
 
   applyChange(
@@ -1100,7 +1110,7 @@ test("a reset marks every daemon read stale, not only the snapshot paths", async
   const source = FakeSource.all[0] as FakeSource;
   const card = queryKeyFor("/api/v1/cards/c1");
   const timeline = queryKeyFor("/api/v1/cards/c1/timeline");
-  const memory = queryKeyFor("/api/v1/memory?scope=alpha");
+  const memory = queryKeyFor("/api/v1/memory?project=alpha");
   const settings = queryKeyFor(startSettingsPath);
   for (const key of [card, timeline, memory, settings]) queryClient.setQueryData(key, {});
 

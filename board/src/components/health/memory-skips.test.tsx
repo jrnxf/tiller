@@ -61,24 +61,20 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-test("Health names a memory document a launch goes on without, why, and links to it", async () => {
+test("Health warns when kb is missing on this host, and links to Memory", async () => {
   await renderHealth("memory-limits");
   const panel = within(await screen.findByRole("region", { name: "Memory" }, { timeout: 3000 }));
 
   const rows = panel.getAllByRole("listitem");
   expect(rows).toHaveLength(1);
   const row = within(rows[0] as HTMLElement);
-  expect(row.getByText("Launches skip the gamma memory document")).toBeTruthy();
-  expect(
-    row.getByText(
-      "It has no approved revision. An edit in Memory approves its text, and launches load it again.",
-    ),
-  ).toBeTruthy();
+  expect(row.getByText("tiller cannot find kb on this host")).toBeTruthy();
+  expect(row.getByText("The fleet loads no notes on this host until kb works again.")).toBeTruthy();
   const link = row.getByRole("link", { name: "Open in Memory" });
-  expect(link.getAttribute("href")).toBe("/memory?doc=gamma");
+  expect(link.getAttribute("href")).toBe("/memory?tab=live");
 });
 
-test("Health shows no Memory panel while every document loads", async () => {
+test("Health shows no Memory panel while kb works", async () => {
   await renderHealth("default");
   await screen.findByTestId("health");
   await waitFor(() => expect(reads).toContain("/api/v1/memory"));

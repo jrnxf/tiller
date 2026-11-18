@@ -106,8 +106,8 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-test("a project's document lists its retros, and the one that did not finish says why", async () => {
-  await renderAt("/memory?doc=alpha");
+test("a project's Pending tab lists its retros, and the one that did not finish says why", async () => {
+  await renderAt("/memory?project=alpha");
   const list = await retrosList();
 
   expect(list.getByText("alpha · last 30 days")).toBeTruthy();
@@ -122,16 +122,16 @@ test("a project's document lists its retros, and the one that did not finish say
   expect(cut.getByRole("button", { name: "Run the retro of alpha-14 again" })).toBeTruthy();
 
   const done = rowOf(list, "alpha-9", "done");
-  expect(done.getByText("No suggestions · Fri 6 Nov, 13:52")).toBeTruthy();
+  expect(done.getByText("No note · Fri 6 Nov, 13:52")).toBeTruthy();
   expect(done.getByText("Fri 6 Nov")).toBeTruthy();
   expect(done.queryByRole("button")).toBeNull();
-  expect(rowOf(list, "alpha-12", "done").getByText(/^1 suggestion, kept · /)).toBeTruthy();
-  // Only alpha's retros: beta's sits on beta's document.
+  expect(rowOf(list, "alpha-12", "done").getByText(/^1 note suggested · /)).toBeTruthy();
+  // Only alpha's retros: beta's show with beta.
   expect(list.queryByText("beta-28")).toBeNull();
 });
 
 test("a waiting retro says that nothing starts its curator, and how to start it", async () => {
-  await renderAt("/memory?doc=alpha");
+  await renderAt("/memory?project=alpha");
   const waiting = rowOf(await retrosList(), "alpha-15", "pending");
   expect(waiting.getByText("Waiting")).toBeTruthy();
   const meta = waiting.getByText(/^Waiting since /);
@@ -153,19 +153,21 @@ test("the header says so when an older retro that did not finish is listed", asy
         : retro,
     ),
   };
-  await renderAt("/memory?doc=alpha");
+  await renderAt("/memory?project=alpha");
   const list = await retrosList();
   expect(list.getByText("alpha · last 30 days and every unfinished one")).toBeTruthy();
 });
 
-test("the shared document has no Retros list", async () => {
+test("with no project, the Retros list covers every project", async () => {
   await renderAt("/memory");
-  await screen.findByRole("article");
-  expect(screen.queryByRole("region", { name: "Retros" })).toBeNull();
+  const list = await retrosList();
+  expect(list.getByText("All projects · last 30 days")).toBeTruthy();
+  expect(rowOf(list, "beta-28", "done").getByText(/^1 note suggested · /)).toBeTruthy();
+  expect(rowOf(list, "alpha-14", "unfinished")).toBeTruthy();
 });
 
 test("Run again starts the curator, shows it running, then its result", async () => {
-  const { queryClient } = await renderAt("/memory?doc=alpha");
+  const { queryClient } = await renderAt("/memory?project=alpha");
   const list = await retrosList();
 
   fireEvent.click(
@@ -189,12 +191,14 @@ test("Run again starts the curator, shows it running, then its result", async ()
     await queryClient.invalidateQueries();
   });
   const done = await waitFor(() => rowOf(list, "alpha-14", "done"));
-  expect(done.getByText("1 suggestion, waiting in Watch out for · Wed 11 Nov, 15:40")).toBeTruthy();
-  expect(done.getByRole("button", { name: "Review the suggestion from alpha-14" })).toBeTruthy();
-  // The suggestion it filed waits in the document above.
+  expect(done.getByText("1 note suggested · Wed 11 Nov, 15:40")).toBeTruthy();
+  expect(done.queryByRole("button")).toBeNull();
+  // The note it suggested waits in Pending above.
   await waitFor(() =>
     expect(
-      within(screen.getByRole("article")).getByText(/Drain the export queue before a worker/),
+      within(screen.getByRole("list", { name: "Pending notes" })).getByText(
+        "Drain the export queue before a worker is split",
+      ),
     ).toBeTruthy(),
   );
   expect(posts).toHaveLength(1);
@@ -210,7 +214,7 @@ test("Run again is off while another retro of the card runs, and a refusal shows
       retro.card === "alpha-14" ? { ...retro, run_refusal: busy } : retro,
     ),
   };
-  await renderAt("/memory?doc=alpha");
+  await renderAt("/memory?project=alpha");
   const list = await retrosList();
   const cut = rowOf(list, "alpha-14", "unfinished");
   const button = cut.getByRole("button", { name: "Run the retro of alpha-14 again" });
@@ -222,7 +226,7 @@ test("Run again is off while another retro of the card runs, and a refusal shows
   delete override["/api/v1/retros?project=alpha"];
   refuse = { status: 422, code: "refused", message: `retro 01JRETRO000000000000000014: ${busy}` };
   cleanup();
-  await renderAt("/memory?doc=alpha");
+  await renderAt("/memory?project=alpha");
   const again = await retrosList();
   fireEvent.click(
     rowOf(again, "alpha-14", "unfinished").getByRole("button", {
@@ -234,7 +238,7 @@ test("Run again is off while another retro of the card runs, and a refusal shows
 });
 
 test("a retry after a lost answer sends the same key, so the daemon runs it once", async () => {
-  await renderAt("/memory?doc=alpha");
+  await renderAt("/memory?project=alpha");
   const list = await retrosList();
   const button = () =>
     rowOf(list, "alpha-14", "unfinished").getByRole("button", {
@@ -260,7 +264,7 @@ test("a replayed click that had already run and ended says so, and Run again is 
   // The first click's curator failed fast, at 15:39, but its answer was lost
   // and the list was not read again.
   const ended = "2026-11-11T15:39:00Z";
-  await renderAt("/memory?doc=alpha");
+  await renderAt("/memory?project=alpha");
   const list = await retrosList();
   answer = {
     ok: true,
@@ -312,7 +316,7 @@ test("a replayed click that had already run and ended says so, and Run again is 
 });
 
 test("a refusal shows as a sentence, and goes once the row changes", async () => {
-  const { queryClient } = await renderAt("/memory?doc=alpha");
+  const { queryClient } = await renderAt("/memory?project=alpha");
   const list = await retrosList();
   refuse = {
     status: 422,
@@ -360,10 +364,10 @@ test("Health reports the retro that did not finish, with Open in Memory and Run 
   ).toBeTruthy();
   // Since Monday 9 Nov: beta-28 (waiting), alpha-12 (kept) and gamma-31.
   expect(panel.getByText("3 retros done")).toBeTruthy();
-  expect(panel.getByText("2 suggestions, 1 kept")).toBeTruthy();
+  expect(panel.getByText("2 notes suggested")).toBeTruthy();
 
   const open = panel.getByRole("link", { name: "Open in Memory" });
-  expect(open.getAttribute("href")).toBe("/memory?doc=alpha");
+  expect(open.getAttribute("href")).toBe("/memory?project=alpha");
   const actions = open.parentElement;
   // Run again is the primary action, on the right.
   expect(actions?.lastElementChild?.textContent).toBe("Run again");
