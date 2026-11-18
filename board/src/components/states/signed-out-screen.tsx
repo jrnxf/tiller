@@ -54,10 +54,14 @@ export function SignedOutScreen({ onSignedIn }: { onSignedIn: () => void }) {
           <Logo />
         </div>
         <h1>Sign in to this board</h1>
-        <p>
-          Run <code>tiller board --login</code> in a terminal on the machine running Tiller, then
-          enter the 8-digit code it prints.
-        </p>
+        <p>On the machine running Tiller, run:</p>
+        <pre className="signin-command">
+          <span className="signin-prompt" aria-hidden="true">
+            ${" "}
+          </span>
+          tiller board --login
+        </pre>
+        <p>Then enter the 8-digit code it prints.</p>
         <form
           className="signin-form"
           onSubmit={(event) => {
@@ -101,10 +105,6 @@ export function SignedOutScreen({ onSignedIn }: { onSignedIn: () => void }) {
             {withCode(error)}
           </p>
         ) : null}
-        <p className="sub signin-alt">
-          It also prints a link and a QR code that sign in the same way. Each works once, within a
-          minute.
-        </p>
       </div>
     </main>
   );
