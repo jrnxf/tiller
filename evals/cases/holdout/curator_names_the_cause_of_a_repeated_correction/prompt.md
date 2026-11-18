@@ -1,6 +1,6 @@
 ---
 role: curator
-description: An incident retro where the owner corrected the same mistake on two cards ends with one learning that names the cause and points at the record, without quoting the owner.
+description: An incident retro where the owner corrected the same mistake on two cards ends with one note that names the cause and points at the record, without quoting the owner.
 max_turns: 20
 allowed_tools: [Read, Glob, Grep]
 ---
@@ -35,15 +35,10 @@ Retro `01JC0000000000000000000RT9` of card alpha-61.
     {"seq": 1227, "kind": "run.started", "entity": "run", "entity_id": "01JC0000000000000000000RU62"},
     {"seq": 1260, "kind": "card.closed", "entity": "card", "entity_id": "01JC0000000000000000000CA61"}
   ],
-  "evidence": [
-    {"id": "01JC0000000000000000000EV57", "kind": "owner_message", "ref": {"attention": "01JC0000000000000000000AT57", "card": "01JC0000000000000000000CA57"},
-     "excerpt": "builder force-pushed fm/alpha-57 over the reviewer's head", "captured_at": "2026-10-31T16:00:00.000Z", "captured_by": "owner"}
-  ],
   "earlier_retros": [],
   "finish": {
     "nothing": "tiller retro finish 01JC0000000000000000000RT9 --nothing",
-    "learning": "tiller retro finish 01JC0000000000000000000RT9 --learning <one sentence> --evidence '<json>'",
-    "proposed": "tiller retro finish 01JC0000000000000000000RT9 --proposed <proposal>"
+    "noted": "tiller retro finish 01JC0000000000000000000RT9 --kind <kind> --title <one line> --body <detail>"
   }
 }
 ```

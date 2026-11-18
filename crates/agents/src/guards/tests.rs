@@ -887,7 +887,6 @@ fn owner_tiller_commands_denied() {
 fn owner_retro_learn_and_agent_commands_denied() {
     const CASES: &[(&str, Option<Code>)] = &[
         ("tiller retro run alpha", Some(Code::OwnerOnly)),
-        ("tiller learn eval 01JABC", Some(Code::OwnerOnly)),
         ("tiller agent restart --stale", Some(Code::OwnerOnly)),
         ("tiller agent focus alpha-1", Some(Code::OwnerOnly)),
         (

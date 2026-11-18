@@ -33,8 +33,7 @@ CREATE TABLE meta (
   value TEXT NOT NULL
 ) STRICT;
 -- keys: schema_version, host_id, created_at, import_manifest_sha256,
---       boundary (memory.md), boot_id (recovery.md),
---       memory_watch (memory.md, mem.watch; rebuildable)
+--       boundary (memory.md), boot_id (recovery.md)
 
 CREATE TABLE idempotency_keys (
   key        TEXT PRIMARY KEY,
@@ -677,14 +676,44 @@ CREATE TABLE quota_windows (              -- owner: quota-axi; never an account 
   fetch_error              TEXT
 ) STRICT;
 
--- Memory tables (memory_sources, memory_revisions, memories, evidence,
--- memory_evidence, proposals, proposal_evidence, session_loads) are defined
--- in memory.md, section 11, and load after this file. evidence and
--- proposals are never loaded into an agent's context.
+-- Memory (memory.md, section 4; migration 23). The notes themselves live
+-- in kb. Notes that agents suggest wait here for the owner; a kept or
+-- discarded row is deleted, and its event keeps the record. Neither table is
+-- ever loaded into an agent's context.
+CREATE TABLE memory_pending (
+  id          TEXT PRIMARY KEY,               -- ULID
+  project_id  TEXT NOT NULL REFERENCES projects(id),
+  kind        TEXT NOT NULL CHECK (kind IN ('convention','decision','gotcha','how-to')),
+  title       TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND 120),
+  body        TEXT NOT NULL CHECK (length(body) BETWEEN 1 AND 2000),
+  source      TEXT NOT NULL CHECK (source IN ('fleet','curator','migration')),
+  role        TEXT,                           -- the session's role, for source = fleet
+  card_id     TEXT REFERENCES cards(id),
+  run_id      TEXT REFERENCES runs(id),
+  session_id  TEXT,
+  retro_id    TEXT,
+  created_at  TEXT NOT NULL,
+  edited_at   TEXT,                           -- set when the owner edits it
+  rev         INTEGER NOT NULL DEFAULT 1
+) STRICT;
+CREATE INDEX memory_pending_project ON memory_pending(project_id, created_at);
 
--- Learning loop tables (retros, change_sets, change_set_members, eval_runs,
--- config_manifests) are defined in docs/design/learning-loop.md and added by
--- migration 6 (T7.3). None is ever loaded into an agent's context.
+-- One row per kb note a launch loaded (mem.load). The trigger and time key
+-- each load, so a resume, /clear or /compact copies the newest set.
+CREATE TABLE session_notes (
+  session_id  TEXT NOT NULL REFERENCES sessions(id),
+  note_id     TEXT NOT NULL,                  -- the kb note id
+  sha256      TEXT NOT NULL,                  -- of the rendered section
+  trigger     TEXT NOT NULL CHECK (trigger IN ('startup', 'resume', 'clear', 'compact')),
+  loaded_at   TEXT NOT NULL,
+  PRIMARY KEY (session_id, note_id, trigger, loaded_at)
+) STRICT;
+
+-- Learning loop tables (retros, config_manifests) are defined in
+-- docs/design/learning-loop.md and added by migration 6 (T7.3). Migration 23
+-- reshapes retros: a full retro runs only for an incident and ends in
+-- 'nothing', 'noted' (pending_id names the memory_pending row it added) or
+-- 'unfinished'. None is ever loaded into an agent's context.
 
 -- ---------------------------------------------------------------------------
 -- Derived views: the only place a board column exists

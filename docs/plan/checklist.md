@@ -685,6 +685,17 @@ One-time owner setup, per host and repo (CP2, S03):
 - [x] Holdout eval before any change is approved; "nothing worth saving" is a normal result (the gate is `Store::learning_gate`; `mem.decide` runs it before a Keep, and the memory view shows its verdict beside each suggestion)
 - [x] Delivered
 
+### T7.5 Memory moves to kb
+ADR 0005, `docs/spec/memory.md`. It replaces the memory store of T1.5 and T7.2, and the proposals, holdout eval and change sets of T7.3.
+
+- [x] kb loader: a launch renders the host's kb notes into the role prompt in order and under the budget, and records each load in `session_notes`
+- [x] Pending queue: `memory_pending`, `mem.note` within the limits, owner-only `mem.edit`, `mem.keep` (kb `add` first) and `mem.discard`
+- [x] Owner-only memory routes and `tiller mem note|pending|edit|keep|discard|live`; the guard denies every one but `note`
+- [x] Full retros for incidents only; `retro finish` ends with nothing or one note from the curator
+- [x] Migration 23: old memory lines become pending notes, the old tables go; `tiller doctor` names each retired key
+- [ ] Board: the memory view on the new routes
+- [ ] Delivered
+
 ### T7.4 The two-week check
 `opus` high - 1 h - two weeks after the last cutover
 
