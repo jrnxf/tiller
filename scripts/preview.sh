@@ -14,7 +14,7 @@
 #   scripts/preview.sh up [--no-build]   build, seed, start, watch; print the sign-in link
 #   scripts/preview.sh down              stop the watcher and the bench
 #   scripts/preview.sh status            which checkout it follows and what runs
-#   scripts/preview.sh login [main|peer] a fresh owner sign-in link (default main)
+#   scripts/preview.sh login [main|peer] a fresh owner sign-in link and code (default main)
 #   scripts/preview.sh log               follow the watcher's build log
 #   scripts/preview.sh bench ARGS        any usability-bench.sh command on the preview
 #
@@ -158,7 +158,7 @@ case "$command" in
   status) status ;;
   login)
     "$bench" login "${1:-main}"
-    echo "it works once, within one minute; a signed-in browser stays signed in for 30 days" >&2
+    echo "the link or the code works once, within one minute; a signed-in browser stays signed in for 30 days" >&2
     ;;
   log) tail -n 40 -f "$log" ;;
   watch) watch ;;

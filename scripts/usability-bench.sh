@@ -9,7 +9,7 @@
 #   scripts/usability-bench.sh up [--no-build]   build, seed and start; print the URLs
 #   scripts/usability-bench.sh down              stop every process and delete the homes
 #   scripts/usability-bench.sh status            the URLs and which processes live
-#   scripts/usability-bench.sh login main|peer   a fresh owner sign-in link for that board
+#   scripts/usability-bench.sh login main|peer   a fresh owner sign-in link and code for that board
 #   scripts/usability-bench.sh main|peer ARGS    `tiller ARGS` on that host, as the owner
 #   scripts/usability-bench.sh as HOST SESSION ARGS   `tiller ARGS` as that agent session
 #   scripts/usability-bench.sh session HOST PROJECT [CARD]   the live session id of a
@@ -207,6 +207,15 @@ login_link() {
   link=$(t "$1" --json board --login 2>/dev/null | jq -r "$path")
   [ -n "$link" ] || { echo "no login link from $1" >&2; exit 1; }
   echo "$link"
+}
+
+# The owner sign-in of host $1, for a person: the link, and the 8-digit code
+# the signed-out board takes in its place. One mint, so both name one login.
+login() {
+  local out
+  out=$(t "$1" --json board --login 2>/dev/null)
+  echo "$out" | jq -r '.data.allowed_host_urls[0] // .data.url // empty'
+  echo "$out" | jq -r '.data.code // empty | "code: \(.[0:4]) \(.[4:8])"'
 }
 
 # -- the fixed parts of a home -----------------------------------------------
@@ -480,7 +489,7 @@ case "$command" in
   up) up "$@" ;;
   down) down ;;
   status) status ;;
-  login) login_link "${1:?main or peer}" ;;
+  login) login "${1:?main or peer}" ;;
   main | peer) t "$command" "$@" ;;
   as) as "$@" ;;
   session) session "$@" ;;
