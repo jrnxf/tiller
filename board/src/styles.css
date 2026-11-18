@@ -1521,53 +1521,9 @@ kbd {
   margin: 16px 0 0;
 }
 
-.signin-code {
-  display: block;
-  width: 100%;
-  height: 48px;
-  padding: 0 12px;
-  border: 1px solid var(--line-2);
-  border-radius: var(--r8);
-  background: var(--bg-2);
-  color: var(--fg-1);
-  font-family: var(--mono);
-  /* 16px or more, so phones do not zoom in on focus. */
-  font-size: 22px;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.3em;
-  /* Balances the spacing after the last digit, so the code sits centered. */
-  text-indent: 0.3em;
-  text-align: center;
-  outline: none;
-  transition:
-    border-color var(--fast) var(--ease),
-    box-shadow var(--fast) var(--ease);
-}
-
-.signin-code::placeholder {
-  color: var(--fg-4);
-}
-
-.signin-code:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in lch, var(--accent), transparent 80%);
-}
-
-.signin-code[aria-invalid="true"] {
-  border-color: color-mix(in srgb, var(--red) 60%, var(--line-2));
-}
-
-.signin-code[aria-invalid="true"]:focus {
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--red), transparent 82%);
-}
-
 /* A command never breaks across lines. */
 .signin-card code {
   white-space: nowrap;
-}
-
-.signin-code:read-only {
-  color: var(--fg-3);
 }
 
 .setup-card .signin-error {
@@ -1585,6 +1541,83 @@ kbd {
   padding-top: 14px;
   border-top: 1px solid var(--line-1);
   font-size: var(--fs-mini);
+}
+
+/* The one-time code boxes (components/ui/input-otp.tsx). The real input lies
+   over them, transparent, so the boxes draw what it holds. */
+.otp {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.otp:has(.otp-input:disabled, .otp-input:read-only) {
+  opacity: 0.6;
+}
+.otp-group {
+  flex: 1;
+  display: flex;
+  min-width: 0;
+}
+.otp-slot {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line-2);
+  background: var(--bg-2);
+  color: var(--fg-1);
+  font-family: var(--mono);
+  /* 16px or more, so phones do not zoom in on focus. */
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+  transition:
+    border-color var(--fast) var(--ease),
+    box-shadow var(--fast) var(--ease);
+}
+/* Neighbors share one border line, so the active box draws all four sides. */
+.otp-slot + .otp-slot {
+  margin-left: -1px;
+}
+.otp-slot:first-child {
+  border-radius: var(--r8) 0 0 var(--r8);
+}
+.otp-slot:last-child {
+  border-radius: 0 var(--r8) var(--r8) 0;
+}
+.otp-slot[data-active] {
+  z-index: 1;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in lch, var(--accent), transparent 80%);
+}
+.otp:has(.otp-input[aria-invalid="true"]) .otp-slot {
+  border-color: color-mix(in srgb, var(--red) 60%, var(--line-2));
+}
+.otp:has(.otp-input[aria-invalid="true"]) .otp-slot[data-active] {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--red), transparent 82%);
+}
+.otp-ph {
+  color: var(--fg-4);
+}
+.otp-caret {
+  position: absolute;
+  width: 1px;
+  height: 22px;
+  background: var(--fg-1);
+  animation: otp-blink 1s steps(1) infinite;
+}
+@keyframes otp-blink {
+  50% {
+    opacity: 0;
+  }
+}
+.otp-sep {
+  flex: none;
+  width: 8px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--line-3);
 }
 
 /* The board's select (components/ui/select.tsx) */

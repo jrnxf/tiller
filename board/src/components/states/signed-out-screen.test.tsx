@@ -30,6 +30,15 @@ beforeEach(() => {
     addEventListener: () => {},
     removeEventListener: () => {},
   }));
+  // jsdom has no layout: what the input-otp boxes measure with.
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      disconnect() {}
+    },
+  );
+  document.elementFromPoint = () => null;
 });
 
 afterEach(() => {
@@ -66,7 +75,7 @@ test("a pasted code with a space or dash is read as its eight digits", async () 
   const onSignedIn = vi.fn();
   render(<SignedOutScreen onSignedIn={onSignedIn} />);
 
-  fireEvent.change(field(), { target: { value: "1234 5678" } });
+  fireEvent.paste(field(), { clipboardData: { getData: () => "1234 5678" } });
   await waitFor(() => expect(onSignedIn).toHaveBeenCalled());
   expect(sent(fetch)).toEqual(['{"code":"12345678"}']);
 });
