@@ -910,16 +910,18 @@ fn owner_retro_learn_and_agent_commands_denied() {
         ("tiller retro show 01JABC", Some(Code::OwnerOnly)),
         ("tiller retro sweep", Some(Code::OwnerOnly)),
         ("tiller learn status", Some(Code::OwnerOnly)),
-        (
-            "tiller learn bundle placement 01JABC",
-            Some(Code::OwnerOnly),
-        ),
-        ("tiller learn add placement 01JABC", Some(Code::OwnerOnly)),
-        ("tiller learn abandon placement", Some(Code::OwnerOnly)),
-        ("tiller learn gate 01JABC", None),
+        ("tiller learn config 0123abcd", None),
+        // The pending queue and what a launch loads are the owner's; a fleet
+        // session may only suggest a note (`memory.md` section 4).
+        ("tiller mem pending", Some(Code::OwnerOnly)),
+        ("tiller mem edit 01JABC --title x", Some(Code::OwnerOnly)),
+        ("tiller mem keep 01JABC", Some(Code::OwnerOnly)),
+        ("tiller mem discard 01JABC", Some(Code::OwnerOnly)),
+        ("tiller mem live --role builder", Some(Code::OwnerOnly)),
+        ("tiller mem", Some(Code::OwnerOnly)),
         ("tiller agent relaunch alpha-1", None),
         ("tiller agent interrupt \"$SESSION\"", None),
-        ("tiller mem note alpha --text \"$T\"", None),
+        ("tiller mem note --kind gotcha --title \"$T\"", None),
         ("tiller config get \"$KEY\"", None),
     ];
     for role in Role::ALL {
@@ -989,7 +991,7 @@ fn guard_denies_every_cli_owner_command() {
     let labels = cli_owner_labels();
     assert!(labels.len() >= 15, "found only {labels:?}");
     for (label, file) in &labels {
-        // `mem.rs` names its command without the program: "mem approve".
+        // A label may name its command without the program: "mem keep".
         let command = if label.starts_with("tiller ") {
             label.clone()
         } else {

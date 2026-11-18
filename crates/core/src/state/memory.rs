@@ -368,7 +368,7 @@ impl Store {
         self.mem_keep(ctx, None, &note.id, rev, &kept)
     }
 
-    /// `mem.discard` (the owner): deletes the row. Its event keeps the note.
+    /// `mem.discard` (the owner): deletes the row. Its event names only the id.
     pub fn mem_discard(
         &mut self,
         ctx: &Ctx,
@@ -393,12 +393,9 @@ impl Store {
                 NewEvent::new("memory_pending", &note.id, "memory.discarded")
                     .rev(note.rev)
                     .card_opt(note.card_id.clone())
-                    .payload(json!({
-                        "pending_id": note.id,
-                        "kind": note.kind,
-                        "title": note.title,
-                        "body": note.body,
-                    })),
+                    // Only the id: a discarded note's text reaches no
+                    // event a fleet session can read (`memory.md` section 7).
+                    .payload(json!({"pending_id": note.id})),
             )?;
             Ok(json!({}))
         })

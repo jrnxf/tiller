@@ -41,11 +41,9 @@ exit: 0
       }
     ],
     "events_truncated": false,
-    "evidence": [],
     "finish": {
-      "learning": "tiller retro finish <id3> --learning <one sentence> --evidence '<json>'",
-      "nothing": "tiller retro finish <id3> --nothing",
-      "proposed": "tiller retro finish <id3> --proposed <proposal>"
+      "noted": "tiller retro finish <id3> --kind <kind> --title <one line> --body <detail>",
+      "nothing": "tiller retro finish <id3> --nothing"
     },
     "fix_cards": [],
     "retro": {
@@ -72,14 +70,13 @@ exit: 0
       "curator_session": null,
       "curator_started_at": null,
       "depth": "full",
-      "evidence_id": null,
       "finished_at": null,
       "finished_by": null,
       "id": "<id3>",
       "learning": null,
       "outcome": null,
+      "pending_id": null,
       "project_id": "alpha",
-      "proposal_id": null,
       "reason": "incident",
       "rev": 1,
       "short": "<id3.short>",

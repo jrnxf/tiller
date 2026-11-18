@@ -3549,7 +3549,9 @@ impl Walker<'_, '_> {
                 }
                 second != "list"
             }
-            "mem" => unseen || second == "approve",
+            // A fleet session may suggest a note. The pending queue and what
+            // a launch loads are the owner's (`memory.md` section 4).
+            "mem" => unseen || second != "note",
             // Any role may read an ask; marking its reply read is the
             // owner's (UA-17, `authority.md` "mark a reply read").
             "ask" => {
@@ -3568,10 +3570,8 @@ impl Walker<'_, '_> {
             // and `run` only from the owner or the daemon, and `finish` only
             // from the retro's curator.
             "retro" => true,
-            // `gate` and `config` are reads any role may run. The CLI refuses
-            // `status` to any session, and core takes `eval`, `bundle`, `add`
-            // and `abandon` only from the owner or the daemon.
-            "learn" => unseen || !matches!(second, "" | "gate" | "config"),
+            // `config` is a read any role may run.
+            "learn" => unseen || !matches!(second, "" | "config"),
             "agent" => unseen || second == "restart" || second == "focus",
             _ => false,
         };

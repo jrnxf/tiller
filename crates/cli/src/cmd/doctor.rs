@@ -409,6 +409,28 @@ fn herdr_config(table: Option<&toml::Table>) -> Check {
     )
 }
 
+/// `config.toml` sets no key of the old memory store or the learning loop
+/// (ADR 0005, `memory.md` section 6): nothing reads them, and each one left
+/// is named.
+fn retired_config(table: Option<&toml::Table>) -> Check {
+    const NAME: &str = "retired config";
+    let keys = table
+        .map(tiller_core::host_config::retired)
+        .unwrap_or_default();
+    if keys.is_empty() {
+        return Check::new(NAME, false, Status::Ok, "config.toml sets no retired key");
+    }
+    Check::new(
+        NAME,
+        false,
+        Status::Warn,
+        format!(
+            "config.toml sets keys nothing reads since the memory redesign; remove them: {}",
+            keys.join(", ")
+        ),
+    )
+}
+
 /// Every packaged fleet fragment registers `tiller hook <event>` for each
 /// handled event and the guard for `PreToolUse` (`protocol.md` 4.1 and 4.2),
 /// and no Tiller hook sits in the user's own Claude settings, because
@@ -973,6 +995,7 @@ pub fn report(app: &App) -> Report {
     probes.ready(merge_app(&app.home));
     probes.ready(notify(table.as_ref().ok()));
     probes.ready(herdr_config(table.as_ref().ok()));
+    probes.ready(retired_config(table.as_ref().ok()));
     checks.extend(probes.finish());
     let merge_gates = stored(app, &mut checks);
 
@@ -1009,8 +1032,27 @@ pub fn run(app: &App) -> Done {
 mod tests {
     use super::{
         Status, firstmate, firstmate_scripts, floor_refusal, floors_check, herdr_config,
-        herdr_keys, no_mistakes_skew, owner_marker,
+        herdr_keys, no_mistakes_skew, owner_marker, retired_config,
     };
+
+    /// Doctor names each retired memory or learning key still set.
+    #[test]
+    fn doctor_names_each_retired_key() {
+        let none = retired_config(Some(&"[memory]\nkb_command = [\"kb\"]".parse().unwrap()));
+        assert_eq!(none.status, Status::Ok);
+        let left = retired_config(Some(
+            &"[memory]\nremote = \"git@example.com:a/b.git\"\n[memory.review_days]\ngotcha = 30\n[learning]\nwindow_cards = 20"
+                .parse()
+                .unwrap(),
+        ));
+        assert_eq!(left.status, Status::Warn);
+        assert!(
+            left.detail
+                .ends_with("memory.remote, memory.review_days.gotcha, learning.window_cards"),
+            "{}",
+            left.detail
+        );
+    }
 
     fn keys(text: &str) -> Vec<&'static str> {
         herdr_keys(&text.parse().unwrap())

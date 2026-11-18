@@ -1,107 +1,88 @@
-//! `tiller mem ...`: evidence and proposals for the memory store
-//! (`memory.md` section 12). The record work is in
-//! `tiller_core::state::memory`; this module reads the Tiller document at the
-//! memory repo's `HEAD` under the repo lock, the same view the board edits.
+//! `tiller mem ...`: the pending queue (`memory.md` section 4). A fleet
+//! session suggests a note with `note`; the owner lists, edits, keeps and
+//! discards them, and sees what a launch loads now with `live`. The record
+//! work is in `tiller_core::state::memory`; Keep writes to kb through
+//! `tiller_core::kb::add` before the row goes.
+
+use std::io::Read as _;
 
 use clap::{Args, Subcommand};
-use serde_json::{Value, json};
-use tiller_core::memory::document_path;
-use tiller_core::state::learning::Gate;
-use tiller_core::state::memory::{
-    Note, PendingFilter, Proposal, Propose, ProposeOp, proposal_class, proposal_text,
+use serde_json::json;
+use tiller_agents::roles::Role;
+use tiller_agents::spawn::config::SpawnConfig;
+use tiller_agents::spawn::memory::{self as launch, STARTUP_BUDGET};
+use tiller_agents::spawn::trust::ClaudeConfig;
+use tiller_core::kb::{self, KbConfig};
+use tiller_core::state::memory::{NewNote, NoteEdit};
+use tiller_daemon::memory::dto::{
+    MemoryBudget, MemoryKb, MemoryKept, MemoryLive, MemoryPending, state_name,
 };
-use tiller_core::state::{get, resolve_id};
-use tiller_daemon::memory::Writer;
-use tiller_daemon::memory::apply::Repo;
-use tiller_daemon::memory::scrub;
 
 use super::KeyArg;
+use super::admin::load_config;
 use crate::app::{App, Done, Failure, Outcome};
 
 #[derive(Subcommand, Debug)]
 pub enum MemCmd {
-    /// Record one fact as evidence; with --contradicts, that memory comes due
+    /// Suggest one note for the owner to keep or discard; it loads nowhere until kept
     Note(NoteArgs),
-    /// Propose a change to one entry of a project or fleet memory document
-    Propose(ProposeArgs),
-    /// Approve open memory proposals: by id, or every one a filter matches
-    Approve(ApproveArgs),
+    /// List the notes that wait for the owner
+    Pending {
+        /// Only this project's notes (its id)
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Change a pending note's title, body or kind
+    Edit(EditArgs),
+    /// Keep a pending note: add it to kb, then drop it from the queue
+    Keep(DecideArgs),
+    /// Discard a pending note
+    Discard(DecideArgs),
+    /// The notes a launch would load now, with the budget
+    Live {
+        /// The project whose launch to show (its id)
+        #[arg(long)]
+        project: Option<String>,
+        /// The fleet role whose launch to show; default `builder`
+        #[arg(long)]
+        role: Option<String>,
+    },
 }
 
 #[derive(Args, Debug)]
 pub struct NoteArgs {
-    /// The project the fact is about; a fleet session or the curator notes for its own
-    pub project: Option<String>,
-    /// The fact, one or two sentences
+    /// `convention`, `decision`, `gotcha` or `how-to`
     #[arg(long)]
-    pub text: String,
-    /// The evidence kind; default `observation`
+    pub kind: String,
+    /// One line that says the fact
+    #[arg(long)]
+    pub title: String,
+    /// The detail; read from stdin when absent
+    #[arg(long)]
+    pub body: Option<String>,
+    #[command(flatten)]
+    pub key: KeyArg,
+}
+
+#[derive(Args, Debug)]
+pub struct EditArgs {
+    /// The pending note's id
+    pub id: String,
+    #[arg(long)]
+    pub title: Option<String>,
+    #[arg(long)]
+    pub body: Option<String>,
+    /// `convention`, `decision`, `gotcha` or `how-to`
     #[arg(long)]
     pub kind: Option<String>,
-    /// JSON pointers into the record that back the fact
-    #[arg(long = "ref")]
-    pub reference: Option<String>,
-    /// The card the fact comes from, when it is not the caller's own
-    #[arg(long)]
-    pub card: Option<String>,
-    /// A memory this fact contradicts: it comes due for review
-    #[arg(long)]
-    pub contradicts: Option<String>,
     #[command(flatten)]
     pub key: KeyArg,
 }
 
 #[derive(Args, Debug)]
-#[command(group(clap::ArgGroup::new("op").required(true).args(["add", "rewrite", "retire"])))]
-pub struct ProposeArgs {
-    /// `fleet`, or a project id
-    pub project: String,
-    /// Add a line to this section
-    #[arg(long, requires = "text")]
-    pub add: Option<String>,
-    /// Rewrite this memory's line
-    #[arg(long, requires = "text")]
-    pub rewrite: Option<String>,
-    /// Retire this memory's line
-    #[arg(long, conflicts_with = "text")]
-    pub retire: Option<String>,
-    /// The line as it should read
-    #[arg(long)]
-    pub text: Option<String>,
-    /// Evidence rows the change stands on (`tiller mem note` makes them)
-    #[arg(long, num_args = 1..)]
-    pub evidence: Vec<String>,
-    /// What should change, and on which kind of task
-    #[arg(long)]
-    pub expected_effect: Option<String>,
-    /// Why; for a retire, the reason recorded on the memory
-    #[arg(long)]
-    pub rationale: Option<String>,
-    #[command(flatten)]
-    pub key: KeyArg,
-}
-
-/// Name proposals by id, or by filter for a bulk approval; never both, and
-/// never neither, so a bare `tiller mem approve` approves nothing.
-#[derive(Args, Debug)]
-#[command(group(clap::ArgGroup::new("pick").required(true).multiple(true)
-    .args(["proposals", "class", "boundary", "project"])))]
-pub struct ApproveArgs {
-    /// Proposal ids (the full ULID or its last 7 characters)
-    #[arg(group = "pick", conflicts_with_all = ["class", "boundary", "project"])]
-    pub proposals: Vec<String>,
-    /// Every open proposal of this class (rule, requirement, preference, note, ...)
-    #[arg(long)]
-    pub class: Option<String>,
-    /// Every open proposal in this boundary
-    #[arg(long, value_parser = ["personal", "work"])]
-    pub boundary: Option<String>,
-    /// Every open proposal for this project id (`fleet` for the shared document)
-    #[arg(long)]
-    pub project: Option<String>,
-    /// List what would be approved and write nothing
-    #[arg(long)]
-    pub dry_run: bool,
+pub struct DecideArgs {
+    /// The pending note's id
+    pub id: String,
     #[command(flatten)]
     pub key: KeyArg,
 }
@@ -109,260 +90,148 @@ pub struct ApproveArgs {
 pub fn run(app: &App, cmd: MemCmd) -> Done {
     match cmd {
         MemCmd::Note(args) => note(app, args),
-        MemCmd::Propose(args) => propose(app, args),
-        MemCmd::Approve(args) => approve(app, args),
+        MemCmd::Pending { project } => {
+            app.require_owner("mem pending")?;
+            let store = app.read()?;
+            let pending: Vec<MemoryPending> = store
+                .pending_notes(project.as_deref())?
+                .into_iter()
+                .map(MemoryPending::from)
+                .collect();
+            Ok(Outcome::read(json!({"pending": pending})))
+        }
+        MemCmd::Edit(args) => edit(app, args),
+        MemCmd::Keep(args) => keep(app, args),
+        MemCmd::Discard(args) => discard(app, args),
+        MemCmd::Live { project, role } => live(app, project, role),
     }
 }
 
 fn note(app: &App, args: NoteArgs) -> Done {
-    let mut store = app.write()?;
-    let reference = args
-        .reference
-        .as_deref()
-        .map(serde_json::from_str::<Value>)
-        .transpose()
-        .map_err(|error| Failure::usage(format!("--ref is not JSON: {error}")))?;
-    let note = Note {
-        project: args.project,
-        text: args.text,
-        kind: args.kind,
-        reference,
-        card: args.card,
-        contradicts: args.contradicts,
-    };
-    let normalized = json!({"note": note});
-    let keyed = app.key(&store, "mem.note", &normalized, &args.key.key)?;
-    let applied = store.mem_note(&app.ctx(), Some(&keyed.key), &note)?;
-    Ok(Outcome::applied(applied).with_key(&keyed))
-}
-
-fn propose(app: &App, args: ProposeArgs) -> Done {
-    let mut store = app.write()?;
-    let text = args.text.unwrap_or_default();
-    let op = match (args.add, args.rewrite, args.retire) {
-        (Some(section), None, None) => ProposeOp::Add { section, text },
-        (None, Some(memory), None) => ProposeOp::Rewrite { memory, text },
-        (None, None, Some(memory)) => ProposeOp::Retire { memory },
-        _ => {
-            return Err(Failure::usage(
-                "say what changes: --add <section>, --rewrite <memory> or --retire <memory>",
-            ));
+    let body = match args.body {
+        Some(body) => body,
+        None => {
+            let mut text = String::new();
+            std::io::stdin().read_to_string(&mut text)?;
+            text.trim_end().to_owned()
         }
     };
-    let list = scrub::terms(&app.home);
-    let lines = match &op {
-        ProposeOp::Add { section, text } => vec![section, text],
-        ProposeOp::Rewrite { text, .. } => vec![text],
-        ProposeOp::Retire { .. } => vec![],
+    let note = NewNote {
+        project: None,
+        kind: args.kind,
+        title: args.title,
+        body,
     };
-    if let Some(finding) = lines.iter().find_map(|line| scrub::check(line, &list)) {
-        return Err(Failure::refused(format!(
-            "the line would not pass the memory scrub ({finding})"
-        ))
-        .hint("memory is written as if it will be public; drop the private name and retry"));
-    }
-    let propose = Propose {
-        project: args.project,
-        op,
-        evidence: args.evidence,
-        expected_effect: args.expected_effect,
-        rationale: args.rationale,
+    let mut store = app.write()?;
+    let normalized = serde_json::to_value(&note)?;
+    let keyed = app.key(&store, "mem.note", &normalized, &args.key.key)?;
+    let applied = store.mem_note(&app.ctx(), Some(&keyed.key), &note)?;
+    Ok(
+        Outcome::applied_as(applied, |row| json!(MemoryPending::from(row.clone())))
+            .with_key(&keyed),
+    )
+}
+
+/// The row's current rev: the CLI shows no rev, so it acts on the row as it
+/// stands. A row already gone gives 0, and the store refuses it, unless the
+/// key replays an earlier run.
+fn rev_of(store: &tiller_core::Store, id: &str) -> i64 {
+    store.pending_note(id).map(|note| note.rev).unwrap_or(0)
+}
+
+fn edit(app: &App, args: EditArgs) -> Done {
+    app.require_owner("mem edit")?;
+    let edit = NoteEdit {
+        title: args.title,
+        body: args.body,
+        kind: args.kind,
     };
-    let normalized = json!({"propose": propose});
-    let keyed = app.key(&store, "mem.propose", &normalized, &args.key.key)?;
-    let repo = Repo::at(&app.home);
-    let _lock = repo.lock()?;
-    let file = repo.state(&document_path(&propose.project), &list)?;
-    let applied = store.mem_propose(&app.ctx(), Some(&keyed.key), &propose, &file)?;
-    // The id and the target only: a fleet session never reads a proposals
-    // row back (`memory.md` section 9).
-    Ok(Outcome::applied_as(applied, |p| {
-        json!({
-            "id": p.id,
-            "state": p.state,
-            "project_id": p.project_id,
-            "op": p.op,
-            "memory_id": p.memory_id,
-            "card_id": p.card_id,
+    let mut store = app.write()?;
+    let normalized = json!({"id": args.id, "edit": edit});
+    let keyed = app.key(&store, "mem.edit", &normalized, &args.key.key)?;
+    let rev = rev_of(&store, &args.id);
+    let applied = store.mem_edit(&app.ctx(), Some(&keyed.key), &args.id, rev, &edit)?;
+    Ok(
+        Outcome::applied_as(applied, |row| json!(MemoryPending::from(row.clone())))
+            .with_key(&keyed),
+    )
+}
+
+fn keep(app: &App, args: DecideArgs) -> Done {
+    app.require_owner("mem keep")?;
+    let table = load_config(app)?;
+    let command = KbConfig::from_table(&table)
+        .map_err(|error| Failure::usage(format!("config.toml: {error}")))?
+        .command(ClaudeConfig::from_env().home_dir().as_deref());
+    let mut store = app.write()?;
+    let normalized = json!({"id": args.id});
+    let keyed = app.key(&store, "mem.keep", &normalized, &args.key.key)?;
+    // A replayed Keep finds no row and runs no add.
+    let found = store.pending_note(&args.id).ok();
+    let checkout = found.as_ref().and_then(|note| {
+        SpawnConfig::from_table(&table)
+            .ok()
+            .and_then(|config| config.checkouts.get(&note.project_id).cloned())
+    });
+    let rev = found.map(|note| note.rev).unwrap_or(0);
+    let ctx = app.ctx().with_key(keyed.key.clone());
+    let applied = store.mem_keep_with(&ctx, &args.id, rev, |input| {
+        let command = command.ok_or_else(|| kb::NO_COMMAND.to_owned())?;
+        kb::add(&command, checkout.as_deref(), input)
+    })?;
+    Ok(Outcome::applied_as(applied, |kept| {
+        json!(MemoryKept {
+            note_id: kept.note_id.clone(),
+            scope: kept.scope.clone(),
         })
     })
     .with_key(&keyed))
 }
 
-/// Keep on each named or matched proposal, one by one, through the same
-/// `Writer::decide` the board's Keep runs: a held proposal is refused with
-/// the gate's reason and the rest still go. A proposal that is no longer
-/// `proposed` is skipped.
-fn approve(app: &App, args: ApproveArgs) -> Done {
-    app.require_owner("mem approve")?;
-    let filter = PendingFilter {
-        class: args.class,
-        boundary: args.boundary,
-        project: args.project,
-    };
-    let by_id = !args.proposals.is_empty();
-    let store = if args.dry_run {
-        app.read()?
-    } else {
-        app.write()?
-    };
-    let chosen: Vec<Proposal> = if by_id {
-        let mut rows = Vec::new();
-        for given in &args.proposals {
-            let id = resolve_id(store.conn(), "proposals", "proposal", given)?;
-            let row: Proposal = get(store.conn(), "proposal", &id)?;
-            if !rows.iter().any(|seen: &Proposal| seen.id == row.id) {
-                rows.push(row);
-            }
-        }
-        rows
-    } else {
-        store.mem_pending(&filter)?
-    };
-    let line = |p: &Proposal| {
-        json!({
-            "id": p.id,
-            "project_id": p.project_id,
-            "boundary": p.boundary,
-            "class": proposal_class(p),
-            "op": p.op,
-            "text": proposal_text(p),
-        })
-    };
-    let with = |p: &Proposal, result: &str, extra: Value| {
-        let mut item = line(p);
-        item["result"] = json!(result);
-        if let (Some(item), Some(extra)) = (item.as_object_mut(), extra.as_object()) {
-            item.extend(extra.clone());
-        }
-        item
-    };
-    if args.dry_run {
-        let repo = Repo::at(&app.home);
-        let list = scrub::terms(&app.home);
-        let results = chosen
-            .iter()
-            .map(|p| {
-                if p.state != "proposed" {
-                    return Ok(with(p, "skipped", json!({"reason": not_proposed(p)})));
-                }
-                let gate = store.learning_gate(&p.id)?;
-                if !gate.ok {
-                    return Ok(with(
-                        p,
-                        "would_refuse",
-                        json!({"reason": gate_reason(&gate)}),
-                    ));
-                }
-                // Each one is counted on the approved set as it is now, not
-                // after the ones before it in this run. An error in the count
-                // is that proposal's, as the real run records it, and the
-                // rest go on.
-                let counted = repo
-                    .state(&document_path(&p.project_id), &list)
-                    .and_then(|file| store.mem_keep_budget(&p.id, &file, &|sha| repo.blob(sha)));
-                Ok(match counted {
-                    Ok(_) => with(p, "would_approve", json!({})),
-                    Err(error @ tiller_core::Error::Refused { .. }) => {
-                        with(p, "would_refuse", json!({"reason": refusal(p, error)?}))
-                    }
-                    Err(error) => with(p, "would_fail", json!({"reason": error.to_string()})),
-                })
-            })
-            .collect::<Result<Vec<Value>, Failure>>()?;
-        let count = |what: &str| results.iter().filter(|r| r["result"] == what).count();
+fn discard(app: &App, args: DecideArgs) -> Done {
+    app.require_owner("mem discard")?;
+    let mut store = app.write()?;
+    let normalized = json!({"id": args.id});
+    let keyed = app.key(&store, "mem.discard", &normalized, &args.key.key)?;
+    let rev = rev_of(&store, &args.id);
+    let applied = store.mem_discard(&app.ctx(), Some(&keyed.key), &args.id, rev)?;
+    Ok(Outcome::applied(applied).with_key(&keyed))
+}
+
+/// What a launch of `role` in `project` loads now: the memory view's `live`
+/// half (`GET /api/v1/memory`). Without a project, only the store's state.
+fn live(app: &App, project: Option<String>, role: Option<String>) -> Done {
+    app.require_owner("mem live")?;
+    let role_name = role.unwrap_or_else(|| Role::Builder.name().to_owned());
+    let role = Role::parse(&role_name)
+        .ok_or_else(|| Failure::usage(format!("{role_name} is not a fleet role")))?;
+    let kb_home = kb::home_from_env();
+    let shown = kb_home.as_ref().map(|path| path.display().to_string());
+    let Some(project) = project else {
+        let read = kb::read(kb_home.as_deref());
         return Ok(Outcome::read(json!({
-            "dry_run": true,
-            "would_approve": count("would_approve"),
-            "would_refuse": count("would_refuse"),
-            "would_fail": count("would_fail"),
-            "skipped": count("skipped"),
-            "results": results,
+            "project_id": null,
+            "role": role.name(),
+            "kb": MemoryKb { state: state_name(read.state), home: shown, scopes: Vec::new() },
+            "budget": MemoryBudget { used: 0, limit: STARTUP_BUDGET },
+            "live": Vec::<MemoryLive>::new(),
         })));
-    }
-    let normalized = json!({"approve": chosen.iter().map(|p| &p.id).collect::<Vec<_>>()});
-    let keyed = app.key(&store, "mem.approve", &normalized, &args.key.key)?;
-    let mut writer = Writer::open(store, &app.home)?;
-    let mut results = Vec::new();
-    let mut kept: Vec<(String, String)> = Vec::new();
-    for p in &chosen {
-        if p.state != "proposed" {
-            results.push(with(p, "skipped", json!({"reason": not_proposed(p)})));
-            continue;
-        }
-        // Each proposal is decided under a key of its own, named by its id
-        // and bound to it: a later run under the same `--key` that finds
-        // another proposal pending decides that one, and never replays an
-        // earlier proposal's answer (protocol.md 6.3).
-        let key = format!("{}:{}", keyed.key, p.id);
-        let ctx = app
-            .ctx()
-            .with_key(key.clone())
-            .with_args(key, &json!({"approve": p.id}));
-        let after: Vec<String> = kept
-            .iter()
-            .filter(|(project, _)| *project == p.project_id)
-            .map(|(_, id)| id.clone())
-            .collect();
-        match writer.decide(&ctx, &p.id, true, None, &after) {
-            Ok((landed, _)) => {
-                kept.push((p.project_id.clone(), p.id.clone()));
-                results.push(with(
-                    p,
-                    "approved",
-                    json!({"proposal_id": landed.proposal_id, "approval_id": landed.approval_id}),
-                ));
-            }
-            Err(error @ tiller_core::Error::Refused { .. }) => {
-                results.push(with(p, "refused", json!({"reason": refusal(p, error)?})));
-            }
-            Err(error) => results.push(with(p, "failed", json!({"reason": error.to_string()}))),
-        }
-    }
-    let count = |what: &str| results.iter().filter(|r| r["result"] == what).count();
-    let (approved, skipped) = (count("approved"), count("skipped"));
-    let (refused, failed) = (count("refused"), count("failed"));
-    let held = refused + failed;
-    let warning =
-        (held > 0).then(|| format!("{held} proposal(s) were not approved; see their reasons"));
-    let mut outcome = Outcome::read(json!({
-        "dry_run": false,
-        "approved": approved,
-        "skipped": skipped,
-        "refused": refused,
-        "failed": failed,
-        "results": results,
-    }))
-    .with_warning(warning)
-    .with_key(&keyed);
-    outcome.mutation = Some((std::mem::take(&mut writer.events), writer.replayed));
-    Ok(outcome)
-}
-
-/// A refusal's reason as the line about `proposal` shows it: the fact
-/// alone when it is about that proposal, whose id the line already has.
-/// An error that is not a refusal stays the error.
-fn refusal(proposal: &Proposal, error: tiller_core::Error) -> Result<String, Failure> {
-    match error {
-        tiller_core::Error::Refused { entity, id, fact }
-            if entity == "proposal" && id == proposal.id =>
-        {
-            Ok(fact)
-        }
-        error @ tiller_core::Error::Refused { .. } => Ok(error.to_string()),
-        error => Err(error.into()),
-    }
-}
-
-fn not_proposed(proposal: &Proposal) -> String {
-    format!("it is {}, not proposed", proposal.state)
-}
-
-/// What the holdout gate says, with the command that clears it.
-fn gate_reason(gate: &Gate) -> String {
-    let reason = gate.reason.clone().unwrap_or_default();
-    match &gate.hint {
-        Some(hint) => format!("{reason}; {hint}"),
-        None => reason,
-    }
+    };
+    let config = KbConfig::from_table(&load_config(app)?)
+        .map_err(|error| Failure::usage(format!("config.toml: {error}")))?;
+    let store = app.read()?;
+    let project = store.project(&project)?;
+    let rendered = launch::render(&config, kb_home.as_deref(), &project, role)
+        .map_err(super::spawn::failure)?;
+    Ok(Outcome::read(json!({
+        "project_id": project.id,
+        "role": role.name(),
+        "kb": MemoryKb {
+            state: state_name(rendered.kb),
+            home: shown,
+            scopes: launch::scopes(&config, &project),
+        },
+        "budget": MemoryBudget { used: rendered.used, limit: STARTUP_BUDGET },
+        "live": rendered.entries.iter().map(MemoryLive::from).collect::<Vec<_>>(),
+    })))
 }
