@@ -165,6 +165,26 @@ test("a sent note shows its time, a failed one says why, and a card chip says ho
   expect(chips.some((chip) => chip.querySelector(".rel")?.textContent === "Filed")).toBe(true);
 });
 
+test("a run of the owner's messages shows one time, under the last", async () => {
+  await renderAt("/chat/alpha");
+  await screen.findAllByTestId("chat-reply");
+  const asks = screen.getAllByTestId("chat-ask");
+  const at = asks.findIndex((ask) => ask.textContent?.startsWith("Merge alpha-44"));
+  expect(asks[at]?.querySelector("time")).toBeNull();
+  expect(asks[at + 1]?.textContent).toContain("And tell me when it lands.");
+  expect(asks[at + 1]?.querySelector("time")).not.toBeNull();
+});
+
+test("a chat opened with unread replies marks where they start, and the line stays once read", async () => {
+  await renderAt("/chat/alpha");
+  const line = await screen.findByTestId("chat-new");
+  expect(line.textContent).toBe("New");
+  expect(line.nextElementSibling?.getAttribute("data-testid")).toBe("chat-reply");
+  await waitFor(() => expect(callsTo("/thread/read")).toHaveLength(1));
+  await flush();
+  expect(screen.getByTestId("chat-new")).toBe(line);
+});
+
 test("a send shows the message at once, and a refused one comes back to the box", async () => {
   await renderAt("/chat/beta");
   await screen.findAllByTestId("chat-reply");

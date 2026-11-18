@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
 
 import { untagged } from "../../lib/orchestrator-text";
-import { parseBlocks, parseInline } from "./markdown";
+import { parseBlocks, parseInline, plainText } from "./markdown";
 
 test("paragraphs split on blank lines, and a single newline stays a break", () => {
   expect(parseBlocks("One\ntwo\n\nThree")).toEqual([
@@ -109,4 +109,11 @@ test("the tag and project name an orchestrator line starts with are dropped", ()
   );
   expect(untagged("[x] a checkbox stays")).toBe("[x] a checkbox stays");
   expect(untagged("See [alpha-41] inline")).toBe("See [alpha-41] inline");
+});
+
+test("a preview is the words alone, on one line", () => {
+  expect(plainText("Two ways:\n\n1. **retry** the `job`\n2. skip [it](https://example.com)")).toBe(
+    "Two ways: 1. retry the job 2. skip it",
+  );
+  expect(plainText("```\nnix build\n```\n> quoted\n\n- a\n- b")).toBe("nix build quoted • a • b");
 });
