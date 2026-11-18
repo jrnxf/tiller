@@ -15,13 +15,14 @@ import { untagged } from "../../lib/orchestrator-text";
 import { useStore } from "../../lib/store";
 import { AnswerForm } from "../attention/answer";
 import { answeredStore } from "../attention/answered";
-import { ApprovalFacts } from "../attention/approval-facts";
+import { useApprovalPr } from "../attention/approval-facts";
 import { ApproveActions } from "../attention/approve";
 import { KIND_LABELS } from "../attention/format";
-import { NeedsIcon } from "../attention/icons";
+import { OkIcon } from "../attention/icons";
 import { Ago } from "../board/ago";
 import { ChevronDownIcon, PrIcon, TerminalIcon } from "../board/icons";
 import { showToast } from "../board/toast";
+import { CheckIcon, InboxIcon } from "../shell/icons";
 import {
   CopyIcon,
   DoneIcon,
@@ -87,24 +88,25 @@ function PrRef({ pr }: { pr: ThreadPr }) {
   );
 }
 
-// The owner's message, on the right, with when it was sent: under the last of
-// a run of them only. It says more when it never reached the orchestrator.
+// The owner's message, on the right. When it was sent shows outside it, on
+// its right, while the pointer is on it. It says more when it never reached the orchestrator.
 export function AskMessage({
   ask,
   owner,
-  stamped,
   fresh,
 }: {
   ask: ThreadAsk;
   owner: string | undefined;
-  stamped: boolean;
   // It came in while the chat was open, so it eases in.
   fresh: boolean;
 }) {
   const failed = undelivered(ask);
   return (
     <div className="chat-msg user" data-testid="chat-ask" data-fresh={fresh || undefined}>
-      <Markdown className="chat-bubble" text={ask.text} />
+      <div className="chat-ask-row">
+        <Markdown className="chat-bubble" text={ask.text} />
+        <Stamp className="chat-ask-time" at={ask.at} />
+      </div>
       {ask.cards.length > 0 ? (
         <div className="chat-refs">
           {ask.cards.map((card) => (
@@ -118,14 +120,7 @@ export function AskMessage({
           {failed}
         </div>
       ) : ask.source === "prompt" ? (
-        <div className="chat-meta">
-          Typed in the terminal
-          {stamped ? <Stamp at={ask.at} /> : null}
-        </div>
-      ) : stamped ? (
-        <div className="chat-meta">
-          <Stamp at={ask.at} />
-        </div>
+        <div className="chat-meta">Typed in the terminal</div>
       ) : null}
     </div>
   );
@@ -294,8 +289,7 @@ export function CheckpointLine({ checkpoint }: { checkpoint: ThreadCheckpoint })
     <div className="chat-checkpoint" data-testid="chat-checkpoint">
       <span>
         <RestartIcon />
-        {checkpoint.restarted ? "Orchestrator restarted" : "Orchestrator started"}{" "}
-        <Stamp at={checkpoint.at} />
+        Orchestrator restarted <Stamp at={checkpoint.at} />
       </span>
     </div>
   );
@@ -347,23 +341,59 @@ export function DecisionBlock({
     );
   }
   const inbox = item ? item.id : undefined;
+  const approval = item?.approval ? item : null;
+  // An approval is about its card, so the card names it. A question names
+  // itself, and its card goes under it.
+  const titleCard = approval && decision.card ? decision.card : null;
   return (
     <div className="cq chat-confirm" data-testid="chat-confirm">
-      <div className={sent ? "cq-item done" : "cq-item"}>
-        <div className="cq-meta">
-          <NeedsIcon />
-          <b>{sent ? "Answered" : "Needs you"}</b>
-          <span className="lab sm">{kindLabel(decision)}</span>
-          <Ago at={item?.opened_at ?? decision.at} prefix="asked" />
-          <Link to="/inbox" search={({ host }) => ({ host, item: inbox })} className="cq-open">
-            Open in the Inbox
+      <div className="cq-item">
+        <div className="chat-dk">
+          {sent ? <OkIcon /> : <span className="cq-dot" />}
+          <span className="kind">{kindLabel(decision)}</span>
+          {sent ? (
+            <span>Answered</span>
+          ) : (
+            <Ago at={item?.opened_at ?? decision.at} prefix="asked" />
+          )}
+          <Link
+            to="/inbox"
+            search={({ host }) => ({ host, item: inbox })}
+            className="chat-dk-open"
+            aria-label="Open in the Inbox"
+            title="Open in the Inbox"
+          >
+            <InboxIcon />
           </Link>
         </div>
-        <h5 className="cq-q">{question}</h5>
-        {decision.card ? (
-          <div className="chat-refs">
-            <CardRef card={decision.card} owner={owner} />
-            {decision.pr ? <PrRef pr={decision.pr} /> : null}
+        {titleCard ? (
+          <h5 className="chat-dq">
+            <Link
+              to="/cards/$cardId"
+              params={{ cardId: titleCard.display_id }}
+              search={{ owner }}
+              className="chat-dq-card"
+            >
+              <span className="id">{titleCard.display_id}</span>
+              {titleCard.title}
+            </Link>
+          </h5>
+        ) : (
+          <h5 className="chat-dq">{question}</h5>
+        )}
+        {approval ? (
+          <ChatApprovalFacts item={approval} pr={decision.pr ?? null} />
+        ) : decision.card ? (
+          <div className="chat-dfacts">
+            <Link
+              to="/cards/$cardId"
+              params={{ cardId: decision.card.display_id }}
+              search={{ owner }}
+              className="chat-dq-card"
+            >
+              <span className="id">{decision.card.display_id}</span>
+              {decision.card.title}
+            </Link>
           </div>
         ) : null}
         {item?.consequence ? <p className="cq-ctx">{item.consequence}</p> : null}
@@ -371,15 +401,49 @@ export function DecisionBlock({
           {item === null ? (
             <p className="cq-ctx">The Inbox has this decision. Open it there to answer.</p>
           ) : item.approval ? (
-            <>
-              <ApprovalFacts item={item} />
-              <ApproveActions item={item} />
-            </>
+            <ApproveActions item={item} />
           ) : (
             <AnswerForm item={item} keys={false} />
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// What an approval lands, on one line: the pull request, its checks and the
+// branch it merges into. The card's read has them; until it arrives, the
+// thread's own link to the pull request stands in.
+function ChatApprovalFacts({ item, pr: threadPr }: { item: AttentionItem; pr: ThreadPr | null }) {
+  const { pr } = useApprovalPr(item);
+  if (!pr) {
+    return threadPr ? (
+      <div className="chat-dfacts" data-testid="approval-facts">
+        <a href={threadPr.url} target="_blank" rel="noreferrer noopener">
+          <PrIcon />#{threadPr.number}
+        </a>
+      </div>
+    ) : null;
+  }
+  const checks =
+    pr.checks === "passing"
+      ? { tone: "ok", text: "Checks passed" }
+      : pr.checks === "failing"
+        ? { tone: "bad", text: "Checks failed" }
+        : { tone: "yel", text: "Checks running" };
+  return (
+    <div className="chat-dfacts" data-testid="approval-facts">
+      <a href={pr.url} target="_blank" rel="noreferrer noopener" title={pr.title}>
+        <PrIcon />
+        {pr.repo}#{pr.number}
+      </a>
+      <span className={`ck ${checks.tone}`} title={pr.checks_summary ?? undefined}>
+        {pr.checks === "passing" ? <CheckIcon /> : null}
+        {checks.text}
+      </span>
+      <span>
+        into <span className="mono">{pr.base}</span>
+      </span>
     </div>
   );
 }

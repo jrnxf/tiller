@@ -222,7 +222,7 @@ export function ChatPrompt({
           <div className="l">
             <button
               type="button"
-              className="chat-tbtn icon"
+              className="chat-tbtn sq"
               aria-label="Link a card"
               title="Link a card"
               onClick={() => editorRef.current?.chain().focus().insertContent("#").run()}

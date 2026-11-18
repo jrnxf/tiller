@@ -10,7 +10,7 @@ import { ApprovalFacts } from "../attention/approval-facts";
 import { ApproveActions } from "../attention/approve";
 import { answeredStore } from "../attention/answered";
 import { KIND_LABELS, recommender } from "../attention/format";
-import { NeedsIcon, OkIcon } from "../attention/icons";
+import { OkIcon } from "../attention/icons";
 import { Ago } from "./ago";
 
 // What the card asks of the owner now, at the top of the card and answered in
@@ -56,7 +56,7 @@ export function CardQuestions({
         return (
           <div className={done ? "cq-item done" : "cq-item"} key={item.id}>
             <div className="cq-meta">
-              {done ? <OkIcon /> : <NeedsIcon />}
+              {done ? <OkIcon /> : <span className="cq-dot" />}
               <b>{done ? "Answered" : "Needs you"}</b>
               <span className="lab sm">{KIND_LABELS[item.kind] ?? "Decision"}</span>
               <Ago at={item.opened_at} prefix="asked" />

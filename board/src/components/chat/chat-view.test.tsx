@@ -139,10 +139,12 @@ test("/chat on a wide screen opens the chat at the top of the list", async () =>
 test("a merge approval and its attention item are one decision, and Approve binds the head", async () => {
   await renderAt("/chat/alpha");
   const blocks = await screen.findAllByTestId("chat-confirm");
-  const merges = blocks.filter((block) => block.textContent?.includes("Merge PR #52"));
+  const merges = blocks.filter((block) => within(block).queryByText("Merge approval"));
   expect(merges).toHaveLength(1);
   const merge = merges[0] as HTMLElement;
-  expect(within(merge).getByText("Merge approval")).toBeTruthy();
+  // The card names it once, and the button names the commit it binds.
+  expect(merge.querySelectorAll("h5")).toHaveLength(1);
+  expect(within(merge).queryByText(/^Bound to/)).toBeNull();
   fireEvent.click(within(merge).getByRole("button", { name: /^Approve / }));
   await waitFor(() => expect(callsTo("/decide")).toHaveLength(1));
   const [decide] = callsTo("/decide");
@@ -165,14 +167,13 @@ test("a sent note shows its time, a failed one says why, and a card chip says ho
   expect(chips.some((chip) => chip.querySelector(".rel")?.textContent === "Filed")).toBe(true);
 });
 
-test("a run of the owner's messages shows one time, under the last", async () => {
+test("an owner's message keeps its time beside the bubble, not on a line under it", async () => {
   await renderAt("/chat/alpha");
   await screen.findAllByTestId("chat-reply");
-  const asks = screen.getAllByTestId("chat-ask");
-  const at = asks.findIndex((ask) => ask.textContent?.startsWith("Merge alpha-44"));
-  expect(asks[at]?.querySelector("time")).toBeNull();
-  expect(asks[at + 1]?.textContent).toContain("And tell me when it lands.");
-  expect(asks[at + 1]?.querySelector("time")).not.toBeNull();
+  for (const ask of screen.getAllByTestId("chat-ask")) {
+    expect(ask.querySelector(".chat-ask-row > time")).not.toBeNull();
+    expect(ask.querySelector(".chat-meta time")).toBeNull();
+  }
 });
 
 test("a chat opened with unread replies marks where they start, and the line stays once read", async () => {
