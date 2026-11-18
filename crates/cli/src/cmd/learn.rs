@@ -431,6 +431,7 @@ fn prepare(
         claude: &tools.config.spawn.claude,
         model: &config.curator_model,
         brief: &brief_text,
+        claude_config: &tiller_agents::spawn::trust::ClaudeConfig::from_env(),
     })
     .map_err(super::spawn::failure)?;
     launch

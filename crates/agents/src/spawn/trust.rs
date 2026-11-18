@@ -117,6 +117,16 @@ impl ClaudeConfig {
         })
     }
 
+    /// The config home Claude Code keeps its settings and plugins in:
+    /// `CLAUDE_CONFIG_DIR`, or else `~/.claude`.
+    pub fn home(&self) -> Result<PathBuf, String> {
+        let current = self.current()?;
+        Ok(match &self.var {
+            Some(var) => var.clone(),
+            None => current.with_file_name(".claude"),
+        })
+    }
+
     /// `.claude.json` in `CLAUDE_CONFIG_DIR` or `$HOME`.
     fn current(&self) -> Result<PathBuf, String> {
         let dir = match (&self.var, &self.home) {

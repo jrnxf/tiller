@@ -519,6 +519,14 @@ fn render(spec: &LaunchSpec<'_>) -> Result<Rendered, SpawnError> {
     if mode != front.permission_mode {
         fragment["permissions"]["defaultMode"] = Value::String(mode.clone());
     }
+    // Plugin hooks could put unapproved text into the session's context.
+    // The list enters the fragment, so it enters the config hash.
+    let hooked = super::plugins::hooked(spec.claude_config).map_err(|error| {
+        SpawnError::Usage(format!(
+            "cannot list the Claude Code plugins to switch off: {error}"
+        ))
+    })?;
+    super::plugins::switch_off(&mut fragment, &hooked);
     let fragment = serde_json::to_vec_pretty(&fragment)?;
     let manifest = manifest(
         spec.role,
