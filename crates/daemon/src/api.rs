@@ -1309,6 +1309,7 @@ fn routes() -> Router<AppState> {
         .route(LOGIN_PATH, post(login_code))
         .route("/api/v1/logout", post(logout))
         .route("/login/{token}", get(login))
+        .route(HANDOFF_PATH, post(login_handoff))
         .fallback(app_shell)
 }
 
@@ -6774,6 +6775,7 @@ async fn focus(
 
 /// Where the signed-out screen sends a code.
 const LOGIN_PATH: &str = "/api/v1/login";
+const HANDOFF_PATH: &str = "/api/v1/login/handoff";
 const HEALTH_PATH: &str = "/api/v1/health";
 
 /// Whether this browser holds a live owner cookie, for the board's Sign out.
@@ -6923,6 +6925,67 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Res
         .into_response())
 }
 
+/// A one-time login link to another `--allow-host` name, for a browser
+/// signed in here: opened in that browser, it signs that name in with no
+/// code. The board asks the owner first, on its own page, and names the
+/// host. It is the same login `tiller board --login` mints, minus the code,
+/// so it works once, within a minute, and only at an allowed name.
+#[utoipa::path(post, path = "/api/v1/login/handoff", tag = "session", request_body = HandoffBody,
+    responses((status = 200, body = Handoff, description = "the one-time login link to that name"),
+              (status = 400, body = ErrorBody, description = "`usage`: the host is no `--allow-host` name, or the path is not a path on it"),
+              (status = 403, body = ErrorBody, description = "no owner session, or a failed origin check")))]
+async fn login_handoff(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<HandoffBody>,
+) -> Result<Json<Handoff>, ApiError> {
+    same_origin(&state, &headers)?;
+    verified_owner().ok_or_else(not_owner)?;
+    // Only a name the owner allowed: a login link to any other name would
+    // hand a session to whoever serves it.
+    let host = allowed_host(&state, body.host.trim())
+        .ok_or_else(|| ApiError::usage(format!("{} is no --allow-host name", body.host)))?
+        .to_owned();
+    let path = match body.path.as_deref() {
+        None | Some("") => "/".to_owned(),
+        Some(path) => landing(path)
+            .ok_or_else(|| ApiError::usage("the path must be a path on that name, such as /inbox"))?
+            .to_owned(),
+    };
+    let home = state.0.home.clone();
+    let login = tokio::task::spawn_blocking(move || auth::mint_login(&home, Timestamp::now()))
+        .await
+        .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
+        .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?;
+    let mut url = format!("https://{host}/login/{}", login.token);
+    if path != "/" {
+        let query = serde_urlencoded::to_string([("to", path.as_str())])
+            .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?;
+        url = format!("{url}?{query}");
+    }
+    Ok(Json(Handoff { url }))
+}
+
+/// `to` as a place on this same name a login link may land on, or None: a
+/// path (`/` then not `/` or `\\`, which a browser reads as another host),
+/// with a query but no fragment, which carries the owner token, and no
+/// control character.
+fn landing(to: &str) -> Option<&str> {
+    let mut chars = to.chars();
+    let first_two = (chars.next(), chars.next());
+    let path = matches!(first_two, (Some('/'), None))
+        || matches!(first_two, (Some('/'), Some(second)) if second != '/' && second != '\\');
+    (path && to.len() <= 2048 && !to.contains('#') && !to.chars().any(char::is_control))
+        .then_some(to)
+}
+
+/// Where a login link lands: `?to=` when it names a [`landing`], else `/`.
+#[derive(Deserialize)]
+struct LoginQuery {
+    #[serde(default)]
+    to: Option<String>,
+}
+
 /// What the login link's redirect puts before the owner token, in the
 /// board's URL fragment. A browser never sends a fragment, so the token
 /// reaches no request line, log or `Referer`; the board stores it and takes
@@ -6939,8 +7002,13 @@ async fn login(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(token): Path<String>,
+    Query(query): Query<LoginQuery>,
 ) -> Response {
     let secure = at_allowed_host(&state, &headers);
+    let to = query
+        .to
+        .and_then(|to| landing(&to).map(str::to_owned))
+        .unwrap_or_else(|| "/".to_owned());
     let home = state.0.home.clone();
     let redeemed =
         tokio::task::spawn_blocking(move || auth::redeem_login(&home, &token, Timestamp::now()))
@@ -6952,7 +7020,7 @@ async fn login(
                 // The answer names the owner token: no cache keeps it.
                 (header::CACHE_CONTROL, "no-store".to_owned()),
             ],
-            Redirect::to(&format!("/#{OWNER_FRAGMENT}{}", owner.token)),
+            Redirect::to(&format!("{to}#{OWNER_FRAGMENT}{}", owner.token)),
         )
             .into_response(),
         Ok(Ok(None)) => (
@@ -7023,7 +7091,7 @@ async fn app_shell(
         project_grants, create_grant, revoke_grant,
         away_start, away_edit, away_end, away_brief, host_fields, edit_host, crate::backups::list, crate::backups::take, pick_bug_project, recap, mark_recap_seen, project_replies, mark_reply_read, project_thread, mark_thread_read, ask_detail, cancel_ask, relabel_intervention, memory::view,
         memory::edit, memory::keep, memory::discard, crate::retros::list_retros, crate::retros::run_retro,
-        crate::pairings::list, crate::pairings::unpair, crate::pairings::revoke, session, login_code, logout
+        crate::pairings::list, crate::pairings::unpair, crate::pairings::revoke, session, login_code, logout, login_handoff
     ),
     components(schemas(ChangeEvent, ResetEvent, PeerEvent, LinkEvent, PeerResetEvent, TerminalLine, ErrorBody, ErrorDetail)),
     tags(
@@ -8292,6 +8360,115 @@ pub(crate) mod tests {
             let late = redeem(&app, host, &stale).await;
             assert_eq!(late.status, StatusCode::FORBIDDEN, "{host}");
             assert!(late.headers.get(header::SET_COOKIE).is_none(), "{host}");
+        }
+    }
+
+    /// POST a handoff for `body` from the loopback board, with `cookie`.
+    async fn handoff(app: &Router, cookie: Option<&str>, body: Value) -> Answer {
+        let mut request = Request::post(HANDOFF_PATH)
+            .header(header::HOST, HOST)
+            .header(header::ORIGIN, format!("http://{HOST}"))
+            .header("sec-fetch-site", "same-origin")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(cookie) = cookie {
+            request = request.header(header::COOKIE, cookie);
+        }
+        send(app, request.body(Body::from(body.to_string())).unwrap()).await
+    }
+
+    #[tokio::test]
+    async fn a_signed_in_board_hands_a_login_link_to_an_allowed_host_only() {
+        let fleet = Fleet::new();
+        let home = fleet.dir.path();
+        let app = app(home, Assets::of::<Fixture>());
+        let cookie = owner_cookie(home);
+
+        // Signed out: nothing.
+        let refused = handoff(&app, None, json!({"host": "board.example.com"})).await;
+        assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+        assert_eq!(error_code(&refused), "signed_out");
+
+        // A name the owner did not allow, or no path on it: usage.
+        for body in [
+            json!({"host": "evil.example.com"}),
+            json!({"host": HOST}),
+            json!({"host": "board.example.com", "path": "//evil.example.com/"}),
+            json!({"host": "board.example.com", "path": "https://evil.example.com/"}),
+        ] {
+            let refused = handoff(&app, Some(&cookie), body.clone()).await;
+            assert_eq!(
+                refused.status,
+                StatusCode::BAD_REQUEST,
+                "{body}: {}",
+                refused.body
+            );
+            assert_eq!(error_code(&refused), "usage", "{body}");
+        }
+
+        // An allowed name: a link that signs that name in once, and lands on
+        // the path asked for.
+        let answer = handoff(
+            &app,
+            Some(&cookie),
+            json!({"host": "BOARD.example.com", "path": "/inbox?item=a b"}),
+        )
+        .await;
+        assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+        let url: Value = serde_json::from_str(&answer.body).unwrap();
+        let url = url["url"].as_str().unwrap();
+        let rest = url
+            .strip_prefix("https://board.example.com/login/")
+            .unwrap_or_else(|| panic!("{url}"));
+        let (token, query) = rest.split_once('?').unwrap();
+        assert_eq!(query, "to=%2Finbox%3Fitem%3Da+b");
+        let request = Request::get(format!("/login/{token}?{query}"))
+            .header(header::HOST, "board.example.com")
+            .body(Body::empty())
+            .unwrap();
+        let signed = send(&app, request).await;
+        assert_eq!(signed.status, StatusCode::SEE_OTHER, "{}", signed.body);
+        let location = signed.headers[header::LOCATION].to_str().unwrap();
+        let token_there = location
+            .strip_prefix("/inbox?item=a b#owner=")
+            .unwrap_or_else(|| panic!("{location}"));
+        assert!(token_there.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert!(
+            signed.headers[header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .ends_with("; Secure")
+        );
+        let again = redeem(&app, "board.example.com", token).await;
+        assert_eq!(again.status, StatusCode::FORBIDDEN);
+
+        // With no path, the link lands on the board's root.
+        let answer = handoff(&app, Some(&cookie), json!({"host": "board.example.com"})).await;
+        let url: Value = serde_json::from_str(&answer.body).unwrap();
+        assert!(!url["url"].as_str().unwrap().contains('?'), "{url}");
+    }
+
+    #[tokio::test]
+    async fn a_login_link_lands_only_on_a_path_of_its_own_name() {
+        let fleet = Fleet::new();
+        let home = fleet.dir.path();
+        let app = app(home, Assets::of::<Fixture>());
+        for (to, lands) in [
+            ("%2Fchat%2Funehaus", "/chat/unehaus#owner="),
+            ("%2F%2Fevil.example.com", "/#owner="),
+            ("%2F%5Cevil.example.com", "/#owner="),
+            ("https%3A%2F%2Fevil.example.com", "/#owner="),
+            ("%2Fa%23owner%3Dx", "/#owner="),
+            ("%2Fa%0Ab", "/#owner="),
+        ] {
+            let token = auth::mint_login(home, Timestamp::now()).unwrap().token;
+            let request = Request::get(format!("/login/{token}?to={to}"))
+                .header(header::HOST, HOST)
+                .body(Body::empty())
+                .unwrap();
+            let signed = send(&app, request).await;
+            assert_eq!(signed.status, StatusCode::SEE_OTHER, "{to}");
+            let location = signed.headers[header::LOCATION].to_str().unwrap();
+            assert!(location.starts_with(lands), "{to}: {location}");
         }
     }
 

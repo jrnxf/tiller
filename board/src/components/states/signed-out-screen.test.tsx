@@ -104,3 +104,8 @@ test("a wrong code clears the field and says so in plain text, and the next try 
   await waitFor(() => expect(onSignedIn).toHaveBeenCalled());
   expect(fetch).toHaveBeenCalledTimes(2);
 });
+
+test("the board the daemon serves offers no sign-in from another board", () => {
+  render(<SignedOutScreen onSignedIn={() => {}} />);
+  expect(screen.queryByTestId("signin-handoff")).toBeNull();
+});

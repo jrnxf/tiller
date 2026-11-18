@@ -1559,6 +1559,25 @@ kbd {
   font-size: var(--fs-small);
 }
 
+/* A live board's way in: the main board hands it a login link. */
+.setup-card .signin-handoff {
+  margin-top: 16px;
+  width: 100%;
+  justify-content: center;
+}
+
+/* The main board's question before it hands another name a sign-in. */
+.handoff-host {
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+.handoff-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 16px;
+}
+
 /* The one-time code boxes (components/ui/input-otp.tsx). The real input lies
    over them, transparent, so the boxes draw what it holds. */
 .otp {

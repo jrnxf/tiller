@@ -49,7 +49,18 @@ const live: ProxyOptions | undefined = daemon
     }
   : undefined;
 
+// The board a live board's sign-in screen offers to sign in from: a board
+// already signed in hands this one a login link (protocol.md 7.1). The name
+// the live names sit under serves the main board, unless TILLER_SIGN_IN_FROM
+// says otherwise.
+const signInFrom = live
+  ? (process.env.TILLER_SIGN_IN_FROM ?? (liveDomain ? `https://${liveDomain}` : ""))
+  : "";
+
 export default defineConfig({
+  define: {
+    "import.meta.env.VITE_TILLER_SIGN_IN_FROM": JSON.stringify(signInFrom),
+  },
   plugins: [
     // One chunk per route. The router loads the first route's chunk before it
     // renders (main.tsx awaits router.load), and defaultPendingMs keeps the
