@@ -127,14 +127,19 @@ impl Store {
     /// session of the project wrote, the start of each of those sessions, and
     /// the project's asks, replies, approval requests and attention items as
     /// they opened. An attention item bound to an approval is that
-    /// approval's question, so the approval stands for it. Each branch reads an index in `seq` order, so a page
-    /// stops early on a long log.
+    /// approval's question, so the approval stands for it, even when the
+    /// orchestrator opened it and its event falls under the session's own
+    /// events. Each branch reads an index in `seq` order, so a page stops
+    /// early on a long log.
     pub fn thread_events(&self, project_id: &str, before: i64, limit: i64) -> Result<Vec<Event>> {
         list(
             self.conn(),
             "seq IN (
                SELECT seq FROM events WHERE seq < ?2 AND actor IN
                  (SELECT 'session:' || id FROM sessions WHERE project_id = ?1 AND role = 'orchestrator')
+                 AND NOT (kind = 'attention.opened' AND entity_id IN
+                   (SELECT id FROM attention
+                    WHERE json_valid(evidence) AND json_extract(evidence, '$.approval_id') IS NOT NULL))
                UNION SELECT seq FROM events WHERE kind = 'session.started' AND seq < ?2 AND entity_id IN
                  (SELECT id FROM sessions WHERE project_id = ?1 AND role = 'orchestrator')
                UNION SELECT seq FROM events WHERE kind = 'ask.recorded' AND seq < ?2 AND entity_id IN

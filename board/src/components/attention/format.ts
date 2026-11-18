@@ -31,7 +31,7 @@ export function recommender(
   openedBy: string | null,
   agents: AgentRow[],
 ): { initial: string; text: string } {
-  if (openedBy === null) return { initial: "T", text: "Tiller recommended" };
+  if (openedBy === null) return { initial: "T", text: "tiller recommended" };
   const session = agents
     .flatMap((agent) => [agent, ...agent.workers])
     .find((agent) => agent.session_id === openedBy);

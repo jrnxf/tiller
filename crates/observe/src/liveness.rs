@@ -22,6 +22,11 @@ pub enum Probe {
 /// The process name Claude Code runs as.
 pub const AGENT_PROCESS: &str = "claude";
 
+/// `ps` by its full path where there is no `/proc`: the daemon's `PATH`
+/// may not hold it (a service manager's, or one cut down to git), and a
+/// probe that cannot run reads every process as unknown.
+const PS: &str = "/bin/ps";
+
 /// Whether process `pid` exists, for any user's process (a signal-0 probe
 /// would read another user's as dead).
 pub fn process_alive(pid: u32) -> Probe {
@@ -32,7 +37,7 @@ pub fn process_alive(pid: u32) -> Probe {
             Err(_) => Probe::Unknown,
         };
     }
-    match Command::new("ps")
+    match Command::new(PS)
         .args(["-p", &pid.to_string(), "-o", "pid="])
         .output()
     {
@@ -48,7 +53,7 @@ pub fn find_descendant(root: u32, name: &str) -> Result<Option<u32>, String> {
     let table = if cfg!(target_os = "linux") {
         proc_table()?
     } else {
-        let out = Command::new("ps")
+        let out = Command::new(PS)
             .args(["-A", "-o", "pid=,ppid=,comm="])
             .output()
             .map_err(|error| format!("ps failed: {error}"))?;

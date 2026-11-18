@@ -15,9 +15,7 @@
 #
 # --candidate FILE appends the file to every case's system prompt after the
 # role body, under a "# Memory (candidate)" heading, the way the launcher
-# renders approved memory. It is what `tiller learn eval` measures a memory
-# change with (docs/design/learning-loop.md, section 7), so it is allowed on
-# the holdout.
+# renders approved memory. It is allowed on the holdout.
 #
 # Usage: evals/run.sh [--split tuning|holdout] [--case GLOB] [--runs N]
 #                     [--model M] [--out DIR] [--threshold T]

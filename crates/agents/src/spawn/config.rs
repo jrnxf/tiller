@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use tiller_core::domain::{CardKind, Effort, Size};
+use tiller_core::kb::KbConfig;
 
 use super::SpawnError;
 
@@ -21,6 +22,15 @@ pub struct SpawnConfig {
     /// The local checkout of each project, by project id: where treehouse
     /// cuts the run's worktree from.
     pub checkouts: BTreeMap<String, PathBuf>,
+    /// The `[memory]` table: the kb scopes a launch loads and the kb
+    /// command Keep runs (`memory.md` section 3).
+    #[serde(skip)]
+    pub memory: KbConfig,
+    /// The kb store launches read. Not a config key: the process that
+    /// launches sets it from its environment ([`tiller_core::kb::home_from_env`]), and
+    /// `None` is a host with no store.
+    #[serde(skip)]
+    pub kb_home: Option<PathBuf>,
 }
 
 /// The dispatch rules: an ordered model list (cheapest first), rules keyed by
@@ -238,9 +248,11 @@ impl SpawnConfig {
                 own.insert(key.into(), value);
             }
         }
-        let config: Self = own
+        let mut config: Self = own
             .try_into()
             .map_err(|e: toml::de::Error| SpawnError::Config(e.to_string()))?;
+        config.memory =
+            KbConfig::from_table(table).map_err(|e| SpawnError::Config(e.to_string()))?;
         config.validate()?;
         Ok(config)
     }

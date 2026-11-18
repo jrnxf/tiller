@@ -295,11 +295,20 @@ fn import_reproduces_every_card_count_in_the_manifest() {
         ),
         2
     );
+    // Every entry is placed as a pending note or listed by the import.
+    let listed: Value = store
+        .conn()
+        .query_row(
+            "SELECT payload FROM events WHERE kind = 'import.applied'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .map(|text| serde_json::from_str(&text).unwrap())
+        .unwrap();
     assert_eq!(
-        count(
-            &store,
-            "SELECT count(*) FROM evidence WHERE kind = 'legacy'"
-        ) as usize,
+        pending(&store).len()
+            + listed["requirements"].as_array().unwrap().len()
+            + listed["not_placed"].as_array().unwrap().len(),
         counts.memory
     );
 
@@ -445,48 +454,16 @@ fn import_reproduces_every_card_count_in_the_manifest() {
     assert_eq!(sha, bundle.manifest_sha256);
 }
 
-#[test]
-fn memory_becomes_a_placement_plan_with_legacy_import_provenance() {
-    let dir = tempfile::tempdir().unwrap();
-    let bundle = bundle(dir.path());
-    let mut store = store();
-    store.import_apply(&import_ctx(), &bundle).unwrap();
-
-    // Nothing is placed yet: no memory rows and no approved revision.
-    assert_eq!(count(&store, "SELECT count(*) FROM memories"), 0);
-    assert_eq!(
-        count(
-            &store,
-            "SELECT count(*) FROM memory_revisions WHERE review <> 'unreviewed'"
-        ),
-        0
-    );
-    assert_eq!(count(&store, "SELECT count(*) FROM approvals"), 0);
-
-    // Rules and notes become proposals; the requirement and the stale entry do not.
-    let mut stmt = store
+/// The pending notes an import wrote: (legacy id, project, kind, title, body).
+fn pending(store: &Store) -> Vec<(String, String, String, String, String)> {
+    store
         .conn()
         .prepare(
-            "SELECT json_extract(p.memory_fields, '$.legacy_id'), s.canonical_path, p.op, p.state,
-                    json_extract(p.memory_fields, '$.provenance'), p.rationale, p.authored_by_session_id,
-                    p.diff, p.base_blob, p.card_id
-             FROM proposals p JOIN memory_sources s ON s.id = p.target_source_id
-             ORDER BY 1",
+            "SELECT json_extract(e.payload, '$.legacy_id'), p.project_id, p.kind, p.title, p.body
+             FROM memory_pending p JOIN events e ON e.entity_id = p.id AND e.kind = 'memory.noted'
+             WHERE p.source = 'migration' ORDER BY 1",
         )
-        .unwrap();
-    type Row = (
-        String,
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        String,
-        String,
-        Option<String>,
-    );
-    let rows: Vec<Row> = stmt
+        .unwrap()
         .query_map([], |row| {
             Ok((
                 row.get(0)?,
@@ -494,56 +471,57 @@ fn memory_becomes_a_placement_plan_with_legacy_import_provenance() {
                 row.get(2)?,
                 row.get(3)?,
                 row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-                row.get(7)?,
-                row.get(8)?,
-                row.get(9)?,
             ))
         })
         .unwrap()
         .collect::<Result<_, _>>()
-        .unwrap();
-    let placed: Vec<(&str, &str)> = rows.iter().map(|r| (r.0.as_str(), r.1.as_str())).collect();
+        .unwrap()
+}
+
+#[test]
+fn memory_becomes_pending_notes_for_the_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let bundle = bundle(dir.path());
+    let mut store = store();
+    store.import_apply(&import_ctx(), &bundle).unwrap();
+
+    // Rules become conventions and notes gotchas, each a pending note of
+    // its project; nothing reaches kb and nothing asks for an approval.
+    let s = |text: &str| text.to_owned();
     assert_eq!(
-        placed,
+        pending(&store),
         [
-            ("mem-1", "fleet.md"),
-            ("mem-2", "projects/alpha.md"),
-            ("mem-5", "projects/betasite.md")
+            (
+                s("mem-1"),
+                s("fleet"),
+                s("convention"),
+                s("Workers stay on Claude."),
+                s("Workers stay on Claude.")
+            ),
+            (
+                s("mem-2"),
+                s("alpha"),
+                s("gotcha"),
+                s("alpha builds slowly."),
+                s("alpha builds slowly.\n\nUse the cache.")
+            ),
+            (
+                s("mem-5"),
+                s("betasite"),
+                s("convention"),
+                s("Beta deploys on Fridays only."),
+                s("Beta deploys on Fridays only.")
+            ),
         ]
     );
-    for row in &rows {
-        assert_eq!(
-            (row.2.as_str(), row.3.as_str(), row.4.as_str()),
-            ("add", "proposed", "legacy-import")
-        );
-        assert_eq!(row.6, None, "an imported proposal has no authoring session");
-        assert_eq!(row.9, None, "an imported proposal has no origin card");
-        assert_eq!(row.8, plan::EMPTY_BLOB);
-    }
-    // A rationale only where the source stated one.
-    assert_eq!(rows[0].5.as_deref(), Some("The owner said so."));
-    assert_eq!(rows[1].5, None);
-    assert_eq!(
-        rows[1].7,
-        "--- a/projects/alpha.md\n+++ b/projects/alpha.md\n@@ -0,0 +1,5 @@\n\
-         +## Watch out for\n+\n+- alpha builds slowly.\n+\n+  Use the cache.\n"
-    );
-    // Every proposal cites its evidence row.
-    assert_eq!(
-        count(
-            &store,
-            "SELECT count(*) FROM proposal_evidence pe JOIN evidence e ON e.id = pe.evidence_id WHERE e.kind = 'legacy'"
-        ),
-        3
-    );
+    assert_eq!(count(&store, "SELECT count(*) FROM approvals"), 0);
+
     // The requirement and the stale entry are listed in the plan, not placed.
     let plan = store.import_plan(&bundle, Timestamp::now()).unwrap();
     let listed: Vec<(&str, &Placement)> = plan
         .memory
         .iter()
-        .filter(|m| !matches!(m.placement, Placement::Proposal { .. }))
+        .filter(|m| !matches!(m.placement, Placement::Pending { .. }))
         .map(|m| (m.legacy_id.as_str(), &m.placement))
         .collect();
     assert_eq!(
@@ -558,6 +536,7 @@ fn memory_becomes_a_placement_plan_with_legacy_import_provenance() {
             ),
         ]
     );
+    assert!(plan.memory.iter().all(|m| m.action == Action::Exists));
 }
 
 /// `recovery.md` R-idempotency: an import that runs twice.
@@ -856,36 +835,67 @@ fn a_tampered_miscounted_or_foreign_bundle_is_refused() {
     assert_eq!(snapshot(store.conn(), &[]), before);
 }
 
+/// A later bundle adds only its new entries, also after the owner kept or
+/// discarded the first ones: the `memory.noted` event outlives the row.
 #[test]
-fn a_placement_into_a_document_with_content_is_refused() {
+fn a_later_bundle_adds_only_new_memory() {
     let dir = tempfile::tempdir().unwrap();
     let bundle = bundle(dir.path());
     let mut store = store();
     store.import_apply(&import_ctx(), &bundle).unwrap();
-    store
-        .conn()
-        .execute(
-            "INSERT INTO memory_revisions (id, source_id, blob_sha, review, provenance, scrub, recorded_at, recorded_by)
-             SELECT '01JZZZZZZZZZZZZZZZZZZZZZZZ', id, 'abc123', 'unreviewed', 'external', 'passed',
-                    '2099-01-01T00:00:00.000Z', 'daemon'
-             FROM memory_sources WHERE canonical_path = 'fleet.md'",
-            [],
-        )
-        .unwrap();
+    for (id, rev) in store
+        .pending_notes(None)
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.id, row.rev))
+    {
+        store.mem_discard(&owner(), None, &id, rev).unwrap();
+    }
     let mut records = self::records();
+    records.memory.push(memory(
+        "mem-6",
+        "global",
+        "rule",
+        &"A long rule. ".repeat(200),
+    ));
     records
         .memory
-        .push(memory("mem-6", "global", "rule", "A new rule."));
+        .push(memory("mem-7", "global", "note", "A new note."));
     let other = tempfile::tempdir().unwrap();
     write_bundle(other.path(), &records, "final");
-    let error = store
-        .import_apply(&import_ctx(), &Bundle::read(other.path()).unwrap())
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.contains("the document already has content"),
-        "{error}"
+    let later = Bundle::read(other.path()).unwrap();
+    let plan = store.import_apply(&import_ctx(), &later).unwrap().value;
+    let created: Vec<(&str, &Placement)> = plan
+        .memory
+        .iter()
+        .filter(|m| m.action == Action::Create)
+        .map(|m| (m.legacy_id.as_str(), &m.placement))
+        .collect();
+    assert_eq!(
+        created,
+        [
+            (
+                "mem-6",
+                &Placement::NotPlaced {
+                    reason: "longer than 2000 characters, the most a pending note holds".into()
+                }
+            ),
+            (
+                "mem-7",
+                &Placement::Pending {
+                    kind: "gotcha".into()
+                }
+            ),
+        ]
     );
+    let rows = store.pending_notes(None).unwrap();
+    assert_eq!(
+        rows.iter().map(|r| r.title.as_str()).collect::<Vec<_>>(),
+        ["A new note."]
+    );
+    // A third run writes nothing more.
+    let again = store.import_apply(&import_ctx(), &later).unwrap();
+    assert!(again.events.is_empty());
 }
 
 #[test]

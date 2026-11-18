@@ -55,8 +55,6 @@ pub struct Settings {
     pub quota_providers: Vec<String>,
     /// `forge_login` (CP2, C08).
     pub forge_login: Option<String>,
-    /// `[learning]`, for the retro sweep (`docs/design/learning-loop.md`).
-    pub learning: tiller_core::state::learning::Learning,
     /// `[notify] command`: the owner's notification hook
     /// (`terminal-holder.md` 7). Empty when unset.
     pub notify_command: Vec<String>,
@@ -85,11 +83,6 @@ impl Settings {
             .get("forge_login")
             .and_then(toml::Value::as_str)
             .map(str::to_owned);
-        let learning =
-            tiller_core::state::learning::Learning::from_table(&table).unwrap_or_else(|error| {
-                tracing::warn!(%error, "config.toml [learning] does not parse; using the defaults");
-                tiller_core::state::learning::Learning::default()
-            });
         let notify_command = table
             .get("notify")
             .and_then(|notify| notify.get("command"))
@@ -105,7 +98,6 @@ impl Settings {
         Self {
             quota_providers,
             forge_login,
-            learning,
             notify_command,
             checkouts,
         }
@@ -395,8 +387,7 @@ impl Land {
 }
 
 /// The host's private names as SHA-256 hashes, plus the optional plain-text
-/// list `scripts/scrub-check.sh` also reads, kept outside any repo
-/// (`memory.md` section 8).
+/// list `scripts/scrub-check.sh` also reads, kept outside any repo.
 fn scrub_list(home: &Path) -> ScrubList {
     let mut terms = std::fs::read_to_string(home.join("scrub-terms.sha256")).unwrap_or_default();
     if let Some(extra) = std::env::var_os("TILLER_SCRUB_TERMS") {
@@ -795,7 +786,7 @@ impl Source for MemoryLoads {
             tracing::info!(
                 session = loaded.session_id,
                 trigger = loaded.trigger,
-                revisions = loaded.revision_ids.len(),
+                notes = loaded.notes.len(),
                 "copied a session's memory load"
             );
         }
@@ -895,7 +886,6 @@ pub fn start(
     let mut config = ReconcileConfig::new(&local, home);
     config.boot_id = boot_id();
     config.forge_login = settings.forge_login.clone();
-    config.learning = settings.learning.clone();
     config.project_paths = settings.checkouts.clone().into_iter().collect();
     // A resumed agent starts in the holder, and the owner hears of a
     // restore through `[notify] command` (R21).
@@ -984,7 +974,6 @@ pub fn start(
         Lavish::new(tools.lavish.clone(), tools.review_hosts.clone()),
     );
     let quota = crate::quota::Feed::new(open()?, tools.quota.clone(), settings.quota_providers);
-    let memory = crate::memory::watch::Watcher::new(home, open()?);
     let backups = Backups {
         store: open()?,
         paths: backup::Paths::in_home(home),
@@ -1014,7 +1003,6 @@ pub fn start(
     spawn(registry, Gated::new(home, quota), stop, &mut handles);
     spawn(registry, Gated::new(home, pages), stop, &mut handles);
     spawn(registry, Gated::new(home, backups), stop, &mut handles);
-    spawn(registry, Gated::new(home, memory), stop, &mut handles);
     Ok(handles)
 }
 

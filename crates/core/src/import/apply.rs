@@ -1,25 +1,22 @@
 //! `import.apply`: writes a plan in one transaction (`state.md` section 8).
 //! Every row gets its event under `actor = import`, and one `import.applied`
-//! event closes the import. Memory never reaches a canonical file: each
-//! placed entry becomes evidence plus an `add` proposal for the owner to
-//! approve (`memory.md` section 10).
+//! event closes the import. Memory never reaches kb: each placed entry
+//! becomes a pending note (`source = migration`) for the owner to keep or
+//! discard (`memory.md` section 4).
 
 use std::collections::HashMap;
 
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 use serde_json::{Value, json};
 
-use super::bundle::{Bundle, BundleMemory, sha256_hex};
-use super::plan::{Action, CardPlan, EMPTY_BLOB, MemoryPlan, Placement, Plan, Wait, plan};
+use super::bundle::Bundle;
+use super::plan::{Action, CardPlan, Placement, Plan, Wait, imported, note_title, plan};
 use crate::domain::*;
 use crate::error::{Error, Result};
-use crate::ids::{self, FLEET_PROJECT};
+use crate::ids;
 use crate::state::attention::{NewAttention, open_attention};
-use crate::state::projects::{first_card_seq, local_host_id, meta};
+use crate::state::projects::{first_card_seq, local_host_id};
 use crate::store::{Applied, Ctx, NewEvent, Store, Tx};
-
-/// The host's memory repo, as `memory_sources` records it (`memory.md` section 3).
-const MEMORY_REPO: &str = "~/.tiller/memory";
 
 impl Store {
     /// A dry run: the plan a real import would apply now, writing nothing.
@@ -301,227 +298,43 @@ fn write_wait(tx: &mut Tx<'_>, card_id: &str, wait: &Wait) -> Result<()> {
     Ok(())
 }
 
+/// One pending note per placed entry. The limits of `mem.note` do not hold
+/// here, as they do not for the schema migration: the owner approved this
+/// memory once already.
 fn write_memory(tx: &mut Tx<'_>, plan: &Plan) -> Result<()> {
-    let boundary = meta(tx.conn(), "boundary")?.ok_or_else(|| {
-        Error::refused(
-            "host",
-            "local",
-            format!("state.db has no boundary; {}", crate::RUN_INIT),
-        )
-    })?;
-    // (source id, base revision id) per target document.
-    let mut targets: HashMap<String, (String, String)> = HashMap::new();
     for item in plan.memory.iter().filter(|m| m.action == Action::Create) {
+        let Placement::Pending { kind } = &item.placement else {
+            continue;
+        };
         let entry = item
             .entry
             .as_ref()
             .ok_or_else(|| Error::Internal(format!("memory {} has no entry", item.legacy_id)))?;
-        let evidence_id = ids::new_ulid();
-        let reference = json!({
-            "bundle": {"host_label": plan.host_label, "mode": plan.mode, "manifest_sha256": plan.manifest_sha256},
-            "entry": entry.id,
-            "source": entry.source,
-        });
+        let id = ids::new_ulid();
         tx.conn().execute(
-            "INSERT INTO evidence (id, project_id, boundary, kind, ref, excerpt, independence_key, captured_at, captured_by)
-             VALUES (?1, ?2, ?3, 'legacy', ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO memory_pending (id, project_id, kind, title, body, source, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'migration', ?6)",
             params![
-                evidence_id,
+                id,
                 item.project_id,
-                boundary,
-                reference,
-                entry.text,
-                format!("legacy:{}", entry.id),
-                tx.now(),
-                tx.actor().to_string(),
+                kind,
+                note_title(&entry.text),
+                entry.text.trim(),
+                tx.now()
             ],
         )?;
         tx.event(
-            NewEvent::new("evidence", &evidence_id, "evidence.captured")
-                .payload(json!({"kind": "legacy", "legacy_id": entry.id, "class": entry.class})),
-        )?;
-
-        let Placement::Proposal { target, section } = &item.placement else {
-            continue;
-        };
-        let (source_id, revision_id) = match targets.get(target) {
-            Some(found) => found.clone(),
-            None => {
-                let found = document(tx, &item.project_id, &boundary, target)?;
-                targets.insert(target.clone(), found.clone());
-                found
-            }
-        };
-        propose(
-            tx,
-            item,
-            entry,
-            &boundary,
-            &source_id,
-            &revision_id,
-            target,
-            section,
-            &evidence_id,
+            NewEvent::new("memory_pending", &id, "memory.noted")
+                .rev(1)
+                .payload(json!({
+                    "pending_id": id,
+                    "project_id": item.project_id,
+                    "source": "migration",
+                    "legacy_id": entry.id,
+                })),
         )?;
     }
     Ok(())
-}
-
-/// The Tiller document `target` of `project_id`: its source row and the base
-/// revision a placement is made against, created as the empty file's
-/// `baseline` revision (unreviewed, so it loads nothing) when absent.
-fn document(
-    tx: &mut Tx<'_>,
-    project_id: &str,
-    boundary: &str,
-    target: &str,
-) -> Result<(String, String)> {
-    let existing: Option<String> = tx
-        .conn()
-        .query_row(
-            "SELECT id FROM memory_sources
-             WHERE project_id = ?1 AND kind = 'tiller_doc' AND canonical_path = ?2 AND retired_at IS NULL",
-            params![project_id, target],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let source_id = match existing {
-        Some(id) => id,
-        None => {
-            let id = ids::new_ulid();
-            let loaded = format!("{MEMORY_REPO}/{target}");
-            tx.conn().execute(
-                "INSERT INTO memory_sources (id, project_id, boundary, kind, loaded_path, canonical_repo, canonical_path,
-                                             apply_method, load_mode, added_at)
-                 VALUES (?1, ?2, ?3, 'tiller_doc', ?4, ?5, ?6, 'tiller_commit', 'rendered', ?7)",
-                params![id, project_id, boundary, loaded, MEMORY_REPO, target, tx.now()],
-            )?;
-            tx.event(
-                NewEvent::new("memory_source", &id, "memory_source.added")
-                    .rev(1)
-                    .payload(json!({"project_id": project_id, "kind": "tiller_doc", "canonical_path": target})),
-            )?;
-            id
-        }
-    };
-    let revision: Option<String> = tx
-        .conn()
-        .query_row(
-            "SELECT id FROM memory_revisions WHERE source_id = ?1 AND blob_sha = ?2 AND installed_sha256 IS NULL",
-            params![source_id, EMPTY_BLOB],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let revision_id = match revision {
-        Some(id) => id,
-        None => {
-            let id = ids::new_ulid();
-            tx.conn().execute(
-                "INSERT INTO memory_revisions (id, source_id, blob_sha, review, provenance, scrub, recorded_at, recorded_by)
-                 VALUES (?1, ?2, ?3, 'unreviewed', 'baseline', 'passed', ?4, ?5)",
-                params![id, source_id, EMPTY_BLOB, tx.now(), tx.actor().to_string()],
-            )?;
-            tx.event(
-                NewEvent::new("memory_revision", &id, "memory_revision.recorded")
-                    .payload(json!({"source_id": source_id, "blob_sha": EMPTY_BLOB, "provenance": "baseline"})),
-            )?;
-            id
-        }
-    };
-    Ok((source_id, revision_id))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn propose(
-    tx: &mut Tx<'_>,
-    item: &MemoryPlan,
-    entry: &BundleMemory,
-    boundary: &str,
-    source_id: &str,
-    revision_id: &str,
-    target: &str,
-    section: &str,
-    evidence_id: &str,
-) -> Result<()> {
-    let diff = placement_diff(target, section, &entry.text);
-    let scope = if item.project_id == FLEET_PROJECT {
-        json!({"kind": "fleet", "value": Value::Null})
-    } else {
-        json!({"kind": "project", "value": item.project_id})
-    };
-    let fields = json!({
-        "scope": scope,
-        "class": entry.class,
-        "validity": "durable",
-        "section": section,
-        "provenance": "legacy-import",
-        "legacy_id": entry.id,
-        "legacy_section": entry.section,
-        "secret_ref": entry.secret_ref,
-    });
-    let scope_name = if item.project_id == FLEET_PROJECT {
-        "the fleet".to_owned()
-    } else {
-        item.project_id.clone()
-    };
-    let expected = format!(
-        "Firstmate's {} {} loads into Tiller sessions for {scope_name} unchanged, with legacy-import provenance",
-        entry.class, entry.id
-    );
-    let id = ids::new_ulid();
-    tx.conn().execute(
-        "INSERT INTO proposals (id, project_id, boundary, target_source_id, op, base_revision_id, base_blob, diff,
-                                diff_sha256, memory_fields, rationale, expected_effect, created_at, created_by)
-         VALUES (?1, ?2, ?3, ?4, 'add', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-        params![
-            id,
-            item.project_id,
-            boundary,
-            source_id,
-            revision_id,
-            EMPTY_BLOB,
-            diff,
-            sha256_hex(diff.as_bytes()),
-            fields,
-            entry.rationale.as_deref().filter(|r| !r.trim().is_empty()),
-            expected,
-            tx.now(),
-            tx.actor().to_string(),
-        ],
-    )?;
-    tx.conn().execute(
-        "INSERT INTO proposal_evidence (proposal_id, evidence_id) VALUES (?1, ?2)",
-        params![id, evidence_id],
-    )?;
-    tx.event(
-        NewEvent::new("proposal", &id, "proposal.created")
-            .rev(1)
-            .payload(json!({"op": "add", "target": target, "legacy_id": entry.id, "evidence": [evidence_id]})),
-    )?;
-    Ok(())
-}
-
-/// The unified diff that adds one entry, under its section, to the empty
-/// document: one list item, continuation lines indented under it.
-pub(crate) fn placement_diff(target: &str, section: &str, text: &str) -> String {
-    let mut lines = vec![format!("## {section}"), String::new()];
-    for (n, line) in text.trim_end().lines().enumerate() {
-        lines.push(match (n, line.is_empty()) {
-            (0, _) => format!("- {line}"),
-            (_, true) => String::new(),
-            _ => format!("  {line}"),
-        });
-    }
-    let mut diff = format!(
-        "--- a/{target}\n+++ b/{target}\n@@ -0,0 +1,{} @@\n",
-        lines.len()
-    );
-    for line in lines {
-        diff.push('+');
-        diff.push_str(&line);
-        diff.push('\n');
-    }
-    diff
 }
 
 /// After the writes, inside the transaction: every bundle card, project and
@@ -545,14 +358,14 @@ fn verify(tx: &Tx<'_>, bundle: &Bundle, plan: &Plan) -> Result<()> {
         )?;
         projects += usize::from(found);
     }
+    // An entry the import lists and does not place is recorded by the
+    // `import.applied` event this transaction writes next.
     let mut memory = 0;
-    for entry in &bundle.memory {
-        let found: bool = tx.conn().query_row(
-            "SELECT EXISTS (SELECT 1 FROM evidence WHERE kind = 'legacy'
-                             AND json_extract(ref, '$.entry') = ?1 AND excerpt = ?2)",
-            params![entry.id, entry.text],
-            |row| row.get(0),
-        )?;
+    for item in &plan.memory {
+        let found = match item.placement {
+            Placement::Pending { .. } => imported(tx.conn(), &item.legacy_id, &item.placement)?,
+            Placement::Requirement | Placement::NotPlaced { .. } => true,
+        };
         memory += usize::from(found);
     }
     let counts = &bundle.manifest.counts;

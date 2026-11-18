@@ -1652,42 +1652,18 @@ fn delete_holds_no_store_write_while_an_agent_stops() {
     }
 }
 
-/// A relaunch whose memory cannot be rendered refuses before the stop: the
-/// old session keeps running and nothing is recorded.
-#[test]
-fn relaunch_refused_by_its_memory_leaves_the_old_session_running() {
-    let mut rig = Rig::new();
-    let spawned = running(&mut rig);
-    rig.unreadable_memory();
-    let ctx = rig.orchestrator();
-    for request in [
-        note("n"),
-        RelaunchRequest {
-            new_attempt: true,
-            brief: Some("Start again.".into()),
-            ..note("n")
-        },
-    ] {
-        let error = relaunch_it(&mut rig, &ctx, &quick(), &spawned.run.id, request)
-            .map(|_| ())
-            .unwrap_err();
-        assert!(error.to_string().contains("cannot be read"), "{error}");
-        assert!(session(&rig, &spawned.session.id).ended_at.is_none());
-        assert!(
-            !rig.holder.calls().iter().any(|c| c.contains("/exit")),
-            "the old session was sent /exit: {:?}",
-            rig.holder.calls()
-        );
-        assert_eq!(rig.events("run.relaunched", &spawned.run.id), 0);
-    }
-}
-
-/// A memory document may hold the brief's own heading: a same-run relaunch
+/// A kb note may hold the brief's own heading: a same-run relaunch
 /// still keeps the run's brief, and renders the memory once.
 #[test]
 fn relaunch_keeps_the_brief_when_the_memory_holds_its_heading() {
     let mut rig = Rig::new();
-    rig.approved_memory("- Memory line.\n\n# Your brief\n\nA memory paragraph.\n");
+    rig.kb_note(
+        "global",
+        "memory-line",
+        "convention",
+        "Memory line.\n\n# Your brief\n\nA memory paragraph.",
+        true,
+    );
     let spawned = running(&mut rig);
     let scratch = rig.scratch.join(&spawned.run.id);
     let first = std::fs::read_to_string(scratch.join("prompt.md")).unwrap();

@@ -280,6 +280,7 @@
 
 .chat-scroll {
   position: relative;
+  container-type: inline-size;
   flex: 1;
   min-height: 0;
   overflow: auto;
@@ -323,9 +324,39 @@
 .chat-msg.user {
   align-items: flex-end;
 }
-/* A run of the owner's messages sits close, with one time under the last. */
+/* A run of the owner's messages sits close. */
 .chat-msg.user + .chat-msg.user {
   margin-top: -16px;
+}
+/* When it was sent: outside the bubble, in the gutter on its right, while the
+   pointer is on it. A column with no gutter (the drawer, a phone) puts it on
+   the bubble's left instead, so it never overflows. */
+.chat-ask-row {
+  position: relative;
+  display: flex;
+  flex-direction: row-reverse;
+  align-items: flex-end;
+  justify-content: flex-start;
+  gap: 8px;
+  align-self: stretch;
+}
+.chat-ask-time {
+  padding-bottom: 6px;
+  font-size: 11.5px;
+  color: var(--fg-4);
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity var(--fast) var(--ease);
+}
+.chat-msg.user:hover .chat-ask-time {
+  opacity: 1;
+}
+@container (min-width: 840px) {
+  .chat-ask-time {
+    position: absolute;
+    bottom: 0;
+    left: calc(100% + 12px);
+  }
 }
 .chat-bubble {
   max-width: min(560px, 85%);
@@ -790,23 +821,162 @@
   overflow-wrap: anywhere;
 }
 
-/* A decision answered here: the Inbox's own controls, actions on the right. */
-.chat-confirm {
+/* A decision answered here: the Inbox's own controls, actions on the right.
+   The Inbox's .cq margins would add to the thread's gap, so they go. Decisions
+   in a row sit closer, as one group. */
+.chat-thread > .chat-confirm {
   margin: 0;
 }
-.chat-confirm .cq-item .chat-refs {
-  margin: 4px 0;
+.chat-thread > .chat-confirm + .chat-confirm {
+  margin-top: -12px;
 }
-/* In the thread a decision is compact: a neutral card, and its options one
-   numbered list with each consequence in small words under it. */
+/* In the thread a decision is one plain card: what it is and when on one
+   line, the question or the card as its title, the facts on one line, then
+   the answer with its buttons on the right. */
 .chat-confirm .cq-item {
-  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
   border: 1px solid var(--line-2);
+  border-radius: var(--r12);
   background: var(--bg-card);
 }
-.chat-confirm .cq-q {
-  margin: 6px 0 4px;
-  font-size: 14px;
+.chat-dk {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 20px;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+.chat-dk .kind {
+  color: var(--fg-1);
+  font-weight: var(--w-medium);
+}
+.chat-dk > .icon {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  color: var(--green-text);
+}
+.chat-dk-open {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  margin: -3px -6px -3px auto;
+  border-radius: var(--r6);
+  color: var(--fg-3);
+}
+.chat-dk-open:hover {
+  background: var(--bg-hover);
+  color: var(--fg-1);
+}
+.chat-dk-open .icon {
+  width: 14px;
+  height: 14px;
+}
+.chat-dq {
+  margin: 0;
+  font-size: 15px;
+  font-weight: var(--w-semibold);
+  line-height: 1.35;
+  text-wrap: pretty;
+}
+.chat-dq-card {
+  color: inherit;
+  text-decoration: none;
+}
+.chat-dq-card:hover {
+  text-decoration: underline;
+  text-decoration-color: var(--line-3);
+  text-underline-offset: 3px;
+}
+.chat-dq-card .id {
+  margin-right: 8px;
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: var(--w-normal);
+  color: var(--fg-3);
+}
+.chat-dfacts .chat-dq-card .id {
+  font-size: 12px;
+  margin-right: 6px;
+}
+.chat-dfacts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 0;
+  font-size: 12.5px;
+  color: var(--fg-2);
+}
+.chat-dfacts > * {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.chat-dfacts > * + *::before {
+  content: "·";
+  margin: 0 8px;
+  color: var(--fg-4);
+}
+.chat-dfacts a {
+  color: inherit;
+  text-decoration: none;
+}
+.chat-dfacts a:hover {
+  color: var(--fg-1);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.chat-dfacts .icon {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+.chat-dfacts .ck.ok {
+  color: var(--green-text);
+}
+.chat-dfacts .ck.bad {
+  color: var(--red-text);
+}
+.chat-dfacts .ck.yel {
+  color: var(--fg-3);
+}
+.chat-dfacts .mono {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.chat-confirm .cq-ctx,
+.chat-confirm .cq-answer {
+  margin: 0;
+}
+/* The buttons sit a little apart from the facts they act on. */
+.chat-confirm .cq-answer {
+  padding-top: 4px;
+}
+/* The buttons on the right, primary last; what binds them on their left. */
+.chat-confirm .prc-act {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  max-width: none;
+  text-align: left;
+}
+.chat-confirm .prc-act .meta {
+  order: -1;
+  margin-right: auto;
+  font-size: var(--fs-mini);
+  color: var(--fg-4);
+}
+.chat-confirm .prc-act .refusal,
+.chat-confirm .prc-act > :not(.acts, .meta) {
+  order: -2;
+  flex-basis: 100%;
 }
 /* The numbers and the hover Choose say how to answer. */
 .chat-confirm .cq-answer:has(> .opts) > .blk-h {
@@ -1072,7 +1242,7 @@ button.chat-tbtn:hover {
   background: var(--bg-hover);
   color: var(--fg-1);
 }
-.chat-tbtn.icon {
+.chat-tbtn.sq {
   width: 28px;
   padding: 0;
   justify-content: center;

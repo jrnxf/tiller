@@ -434,7 +434,6 @@ function ThreadBody({
           </button>
         ) : null}
         {items.map((item, index) => {
-          const next = items[index + 1];
           const line =
             item.seq === opened?.newFrom ? (
               <div className="chat-new" ref={newLine} role="separator" data-testid="chat-new">
@@ -443,16 +442,7 @@ function ThreadBody({
             ) : null;
           switch (item.type) {
             case "ask":
-              return (
-                <AskMessage
-                  key={item.seq}
-                  ask={item}
-                  owner={owner}
-                  // One time under a run of the owner's messages, on the last.
-                  stamped={next ? next.type !== "ask" : !shownPending}
-                  fresh={fresh(item.seq)}
-                />
-              );
+              return <AskMessage key={item.seq} ask={item} owner={owner} fresh={fresh(item.seq)} />;
             case "activity":
               return (
                 <ActivityBlock

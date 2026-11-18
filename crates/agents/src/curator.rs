@@ -1,5 +1,5 @@
-//! The curator (`docs/design/learning-loop.md`, section 4): the headless
-//! session `tiller retro run` launches for one full retro. It is not a fleet
+//! The curator (`memory.md` section 5): the headless session `tiller retro
+//! run` launches for one full retro, which runs only for an incident. It is not a fleet
 //! role, so it is not in [`crate::roles::Role`]: it has no run, no pane and
 //! no hooks, and its settings fragment carries only the `<tiller>` and
 //! `<scratch>` placeholders. The files are embedded like the roles', so a
@@ -84,6 +84,9 @@ pub struct LaunchSpec<'a> {
     pub claude: &'a str,
     pub model: &'a str,
     pub brief: &'a str,
+    /// Where Claude Code keeps the plugins the launch switches off
+    /// ([`crate::spawn::plugins`]).
+    pub claude_config: &'a crate::spawn::trust::ClaudeConfig,
 }
 
 /// The files written for a launch and the command to run.
@@ -118,7 +121,13 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
     }
     fs::create_dir(spec.scratch)?;
     fs::set_permissions(spec.scratch, fs::Permissions::from_mode(0o700))?;
-    let fragment = render_settings(spec.tiller, spec.scratch, spec.tiller_home)?;
+    let mut fragment = render_settings(spec.tiller, spec.scratch, spec.tiller_home)?;
+    let hooked = crate::spawn::plugins::hooked(spec.claude_config).map_err(|error| {
+        SpawnError::Usage(format!(
+            "cannot list the Claude Code plugins to switch off: {error}"
+        ))
+    })?;
+    crate::spawn::plugins::switch_off(&mut fragment, &hooked);
     let fragment = serde_json::to_vec_pretty(&fragment)?;
     // The curator has no hooks to rewrite a bare `tiller`, so its prompt
     // names the packaged path the sandbox exempts.
@@ -216,9 +225,11 @@ mod tests {
         // No hook rewrites a bare `tiller` here, so the allow rules name only
         // the packaged path the sandbox exempts, and each deny has both forms.
         assert!(allow.contains(&"Bash(/nix/store/x/bin/tiller retro *)"));
-        assert!(allow.contains(&"Bash(/nix/store/x/bin/tiller mem propose *)"));
+        // Its one note goes through `retro finish`: every `mem` command is
+        // denied, so a retro adds at most one note.
         assert!(!allow.iter().any(|rule| rule.starts_with("Bash(tiller ")
-            || rule.starts_with("Bash(/nix/store/x/bin/tiller mem *")));
+            || rule.starts_with("Bash(/nix/store/x/bin/tiller mem ")));
+        assert!(deny.contains(&"Bash(/nix/store/x/bin/tiller mem *)"));
         assert!(deny.contains(&"Bash(tiller learn *)"));
         assert!(deny.contains(&"Bash(/nix/store/x/bin/tiller learn *)"));
         // The curator reads untrusted transcripts, so every dot directory
@@ -255,6 +266,7 @@ mod tests {
     fn a_launch_writes_its_files_and_env() {
         let dir = tempfile::tempdir().unwrap();
         let scratch = dir.path().join("retro");
+        let claude_config = crate::spawn::trust::ClaudeConfig::at(dir.path().join("claude"));
         let launch = write(&LaunchSpec {
             retro_id: "01JC00000000000000000000R1",
             scratch: &scratch,
@@ -263,6 +275,7 @@ mod tests {
             claude: "claude",
             model: "claude-sonnet-5-5",
             brief: "retro: 01JC00000000000000000000R1",
+            claude_config: &claude_config,
         })
         .unwrap();
         let prompt = fs::read_to_string(&launch.prompt).unwrap();
@@ -291,6 +304,7 @@ mod tests {
                 claude: "claude",
                 model: "m",
                 brief: "b",
+                claude_config: &claude_config,
             })
             .is_err()
         );

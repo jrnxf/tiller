@@ -29,6 +29,7 @@ pub const CALLER_ENV: &[&str] = &[
     "TILLER_SSH",
     "TILLER_GH",
     "TILLER_TEST_OWNER",
+    "KB_HOME",
     "CLAUDECODE",
     "SSH_CONNECTION",
 ];
@@ -66,6 +67,13 @@ pub fn isolate(command: &mut Command, root: &Path) {
             },
         );
     }
+    // The toolchain's `cargo` on macOS is a wrapper that exports
+    // `DYLD_LIBRARY_PATH` for its own libcurl, and every test child inherits
+    // it. With it set, dyld cannot use its prebuilt launch closure, so each
+    // `tiller` start costs about 24 ms more CPU, past the startup and hook
+    // budgets. `tiller` links no library from there, and no user's shell
+    // sets it, so the child runs as a user would.
+    command.env_remove("DYLD_LIBRARY_PATH");
 }
 
 /// The real `tiller` binary, with its home names [`isolate`]d under `root`,
@@ -268,6 +276,11 @@ impl World {
 
     pub fn run_with_stdin(&self, args: &[&str], stdin: &str) -> Out {
         self.exec(None, args, Some(stdin))
+    }
+
+    /// [`World::run_with_stdin`] as a Tiller session.
+    pub fn run_with_stdin_as(&self, session: &str, args: &[&str], stdin: &str) -> Out {
+        self.exec(Some(session), args, Some(stdin))
     }
 
     /// Runs as the owner with arguments that need not be UTF-8, as a shell

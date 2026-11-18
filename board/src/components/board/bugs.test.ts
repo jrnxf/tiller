@@ -51,7 +51,7 @@ const bug: Pick<BoardRow, "category" | "project_id" | "column" | "display_id"> =
   display_id: "fleet-4",
 };
 
-test("only an open Tiller bug in fleet is untriaged, and never the Host health card", () => {
+test("only an open tiller bug in fleet is untriaged, and never the Host health card", () => {
   expect(isUntriaged(bug)).toBe(true);
   expect(isUntriaged({ ...bug, category: null })).toBe(false);
   expect(isUntriaged({ ...bug, project_id: "tiller" })).toBe(false);

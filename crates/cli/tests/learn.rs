@@ -12,9 +12,6 @@ use common::{Out, World, snap};
 use serde_json::{Value, json};
 use tiller_panes::testing::gone;
 
-const PROPOSAL: &str = "01JC00000000000000000000P1";
-const OTHER: &str = "01JC00000000000000000000P2";
-
 fn card(world: &World, title: &str) -> (String, String) {
     let out = world.must(&[
         "card", "create", "alpha", "--kind", "ship", "--title", title,
@@ -35,32 +32,6 @@ fn close(world: &World, id: &str, outcome: &str) {
                  created_at = '2026-11-03T08:00:00.000Z', closed_by = 'owner' WHERE id = ?1",
             rusqlite::params![id, outcome],
         )
-        .unwrap();
-}
-
-/// A proposal in `proposed` state on a memory source of `alpha`.
-fn proposal(world: &World, id: &str, diff: &str) {
-    use sha2::Digest;
-    let sha: String = sha2::Sha256::digest(diff.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    world
-        .store()
-        .conn()
-        .execute_batch(&format!(
-            "INSERT OR IGNORE INTO memory_sources (id, project_id, boundary, kind, loaded_path, canonical_repo, canonical_path,
-                                        apply_method, load_mode, added_at)
-             VALUES ('src', 'alpha', 'personal', 'tiller_doc', 'alpha.md', '/home/user/memory', 'alpha.md',
-                     'tiller_commit', 'rendered', '2026-11-01T00:00:00.000Z');
-             INSERT OR IGNORE INTO memory_revisions (id, source_id, blob_sha, review, provenance, scrub, recorded_at, recorded_by)
-             VALUES ('rev', 'src', 'e69de29bb2d1d6434b8b29ae775ad8c2e48c5391', 'approved', 'baseline', 'passed',
-                     '2026-11-01T00:00:00.000Z', 'owner');
-             INSERT INTO proposals (id, project_id, boundary, target_source_id, op, base_revision_id, base_blob, diff,
-                                    diff_sha256, expected_effect, created_at, created_by)
-             VALUES ('{id}', 'alpha', 'personal', 'src', 'add', 'rev', 'e69de29bb2d1d6434b8b29ae775ad8c2e48c5391',
-                     '{diff}', '{sha}', 'fewer corrections', '2026-11-02T00:00:00.000Z', 'owner');"
-        ))
         .unwrap();
 }
 
@@ -85,7 +56,6 @@ fn run_as_curator(world: &World, retro: &str, args: &[&str]) -> Out {
 #[test]
 fn a_sweep_schedules_retros_and_the_curator_finishes_one() {
     let world = World::initialized();
-    world.must(&["config", "set", "learning.sample_every", "1000000"]);
     let (landed, landed_tag) = card(&world, "the login page");
     let (failed, failed_tag) = card(&world, "the export");
     let (_, open_tag) = card(&world, "still open");
@@ -146,7 +116,14 @@ fn a_sweep_schedules_retros_and_the_curator_finishes_one() {
     let no_verdict = world.run(&["retro", "finish", &retro]);
     assert_eq!(no_verdict.code, 2, "{}", no_verdict.json);
 
-    // The curator keeps one learning, which becomes an evidence row.
+    // A note needs its kind, title and body together.
+    let half = run_as_curator(
+        &world,
+        &retro,
+        &["retro", "finish", &retro, "--kind", "gotcha"],
+    );
+    assert_eq!(half.code, 2, "{}", half.json);
+    // The curator keeps one note, which joins the pending queue.
     let done = run_as_curator(
         &world,
         &retro,
@@ -154,29 +131,23 @@ fn a_sweep_schedules_retros_and_the_curator_finishes_one() {
             "retro",
             "finish",
             &retro,
-            "--learning",
-            "Before a push, check that the branch was not already pushed; a rebase of a pushed branch loses the reviewer's comments.",
-            "--evidence",
-            r#"{"events": [3, 4]}"#,
+            "--kind",
+            "gotcha",
+            "--title",
+            "A rebase of a pushed branch loses the reviewer's comments",
+            "--body",
+            "Before a push, check that the branch was not already pushed.",
         ],
     );
     assert!(done.ok(), "{}", done.json);
-    assert_eq!(done.data()["outcome"], "evidence");
+    assert_eq!(done.data()["outcome"], "noted");
     assert_eq!(done.data()["finished_by"], format!("curator:{retro}"));
-    let evidence_id = done.data()["evidence_id"].as_str().unwrap().to_owned();
-    let (kind, by): (String, String) = world
-        .store()
-        .conn()
-        .query_row(
-            "SELECT kind, captured_by FROM evidence WHERE id = ?1",
-            [&evidence_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(
-        (kind.as_str(), by.as_str()),
-        ("incident", format!("curator:{retro}").as_str())
-    );
+    let pending = world.must(&["mem", "pending"]);
+    let pending = pending.data()["pending"].as_array().unwrap().clone();
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert_eq!(pending[0]["source"], "curator");
+    assert_eq!(pending[0]["retro_id"], retro.as_str());
+    assert_eq!(pending[0]["kind"], "gotcha");
     // Finishing again with another verdict is refused, and a curator of
     // another retro is not this retro's curator.
     let again = run_as_curator(&world, &retro, &["retro", "finish", &retro, "--nothing"]);
@@ -194,20 +165,12 @@ fn a_sweep_schedules_retros_and_the_curator_finishes_one() {
     );
     let listed = world.run_as(&worker, &["retro", "list"]);
     assert_eq!(listed.code, 6, "{}", listed.json);
-    let status = world.run_as(&worker, &["learn", "status"]);
-    assert_eq!(status.code, 6, "{}", status.json);
-    let status = world.must(&["learn", "status"]);
-    assert_eq!(status.data()["retros"]["full:incident:evidence"], 1);
-    assert_eq!(status.data()["retros"]["light:routine:nothing"], 1);
-    assert!(status.data()["pending"].as_array().unwrap().is_empty());
-    snap(&world, "learn_status", &status);
     let _ = landed_tag;
 }
 
 #[test]
 fn retro_run_launches_the_curator_headless() {
     let world = World::initialized();
-    world.must(&["config", "set", "learning.sample_every", "1"]);
     let scratch = world.dir.path().join("scratch");
     world.must(&[
         "config",
@@ -231,8 +194,8 @@ fn retro_run_launches_the_curator_headless() {
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
     world.must(&["config", "set", "spawn.claude", fake.to_str().unwrap()]);
 
-    let (id, tag) = card(&world, "a sampled card");
-    close(&world, &id, "landed");
+    let (id, tag) = card(&world, "a failed card");
+    close(&world, &id, "failed");
     world.must(&["retro", "sweep"]);
     let retro = world.must(&["retro", "show", &tag]).data()["retro"]["id"]
         .as_str()
@@ -298,8 +261,8 @@ fn retro_run_launches_the_curator_headless() {
 
     // A curator that exits without finishing leaves the retro unfinished.
     std::fs::write(&fake, "#!/bin/sh\nexit 3\n").unwrap();
-    let (id2, tag2) = card(&world, "another sampled card");
-    close(&world, &id2, "landed");
+    let (id2, tag2) = card(&world, "another failed card");
+    close(&world, &id2, "failed");
     world.must(&["retro", "sweep"]);
     let retro2 = world.must(&["retro", "show", &tag2]).data()["retro"]["id"]
         .as_str()
@@ -323,11 +286,10 @@ fn retro_run_launches_the_curator_headless() {
 }
 
 /// A world whose `spawn.claude` is the stand-in script `body`, with one
-/// closed, sampled card and its pending full retro. Returns the world, the
+/// closed, failed card and its pending full retro. Returns the world, the
 /// script's path and the retro id.
 fn curator_world(body: &str) -> (World, std::path::PathBuf, String) {
     let world = World::initialized();
-    world.must(&["config", "set", "learning.sample_every", "1"]);
     let scratch = world.dir.path().join("scratch");
     world.must(&[
         "config",
@@ -339,8 +301,8 @@ fn curator_world(body: &str) -> (World, std::path::PathBuf, String) {
     std::fs::write(&fake, body).unwrap();
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
     world.must(&["config", "set", "spawn.claude", fake.to_str().unwrap()]);
-    let (id, tag) = card(&world, "a sampled card");
-    close(&world, &id, "landed");
+    let (id, tag) = card(&world, "a failed card");
+    close(&world, &id, "failed");
     world.must(&["retro", "sweep"]);
     let retro = world.must(&["retro", "show", &tag]).data()["retro"]["id"]
         .as_str()
@@ -697,7 +659,6 @@ fn a_curator_that_exits_takes_what_it_started_with_it() {
         ),
     )
     .unwrap();
-    world.must(&["config", "set", "learning.curator_timeout_minutes", "1"]);
     let started = std::time::Instant::now();
     let ran = world.run(&["retro", "run", &retro]);
     let took = started.elapsed();
@@ -714,318 +675,6 @@ fn a_curator_that_exits_takes_what_it_started_with_it() {
     // The run ends with the curator, not at its one-minute limit.
     assert!(took < std::time::Duration::from_secs(30), "took {took:?}");
     assert!(stopped, "the curator's child {grandchild} outlived it");
-}
-
-#[test]
-fn change_sets_eval_runs_and_the_gate() {
-    let world = World::initialized();
-    proposal(
-        &world,
-        PROPOSAL,
-        "--- a/alpha.md\n+++ b/alpha.md\n@@ -0,0 +1 @@\n+- say which branch was pushed\n",
-    );
-    proposal(
-        &world,
-        OTHER,
-        "--- a/alpha.md\n+++ b/alpha.md\n@@ -0,0 +1 @@\n+- other\n",
-    );
-
-    let gate = world.must(&["learn", "gate", PROPOSAL]);
-    assert_eq!(gate.data()["ok"], false);
-    assert!(
-        gate.data()["reason"]
-            .as_str()
-            .unwrap()
-            .contains("no change set")
-    );
-    snap(&world, "learn_gate_no_set", &gate);
-
-    let set = world.must(&[
-        "learn",
-        "bundle",
-        "tighter briefs",
-        PROPOSAL,
-        "--window",
-        "3",
-    ]);
-    assert_eq!(set.data()["name"], "tighter briefs");
-    assert_eq!(set.data()["window_cards"], 3);
-    snap(&world, "learn_bundle", &set);
-    let dup = world.run(&["learn", "bundle", "tighter briefs"]);
-    assert_eq!((dup.code, dup.error_code()), (5, "refused"));
-
-    // A run recorded from a result file made elsewhere.
-    let result = world.dir.path().join("result.json");
-    std::fs::write(
-        &result,
-        json!({"aggregates": {"casesTotal": 4, "casesPassed": 3, "overallScore": 0.81}, "costUsd": 1.5, "partial": false})
-            .to_string(),
-    )
-    .unwrap();
-    let failed = world.must(&[
-        "learn",
-        "eval",
-        "tighter briefs",
-        "--result",
-        result.to_str().unwrap(),
-    ]);
-    assert_eq!(failed.data()["eval_run"]["passed"], 0);
-    assert_eq!(failed.data()["eval_run"]["cases_passed"], 3);
-    assert!(
-        failed.json["help"][0]
-            .as_str()
-            .unwrap()
-            .contains("did not pass")
-    );
-    let gate = world.must(&["learn", "gate", PROPOSAL]);
-    assert_eq!(gate.data()["ok"], false);
-    assert!(
-        gate.data()["reason"]
-            .as_str()
-            .unwrap()
-            .contains("did not pass")
-    );
-
-    std::fs::write(
-        &result,
-        json!({"aggregates": {"casesTotal": 4, "casesPassed": 4, "overallScore": 0.97}, "costUsd": 1.6, "partial": false})
-            .to_string(),
-    )
-    .unwrap();
-    let passed = world.must(&[
-        "learn",
-        "eval",
-        "tighter briefs",
-        "--result",
-        result.to_str().unwrap(),
-    ]);
-    assert_eq!(passed.data()["eval_run"]["passed"], 1);
-    // The result path is a temp file here, so the shape is asserted, not
-    // snapshotted.
-    assert_eq!(passed.data()["eval_run"]["cases_total"], 4);
-    assert_eq!(passed.data()["eval_run"]["overall_score"], 0.97);
-    assert_eq!(passed.data()["eval_run"]["split"], "holdout");
-    assert_eq!(passed.data()["change_set"]["name"], "tighter briefs");
-    assert!(passed.json["help"][0].as_str().unwrap().contains("passed"));
-    let gate = world.must(&["learn", "gate", PROPOSAL]);
-    assert_eq!(gate.data()["ok"], true, "{}", gate.json);
-    snap(&world, "learn_gate_ok", &gate);
-
-    // Adding a member makes the run stale.
-    world.must(&["learn", "add", "tighter briefs", OTHER]);
-    let gate = world.must(&["learn", "gate", PROPOSAL]);
-    assert_eq!(gate.data()["ok"], false);
-    assert!(
-        gate.data()["reason"]
-            .as_str()
-            .unwrap()
-            .contains("other members")
-    );
-    // The members are a read of the record, so the same proposal cannot
-    // join a second set.
-    let other = world.run(&["learn", "bundle", "second", OTHER]);
-    assert_eq!(other.code, 5, "{}", other.json);
-
-    // A lone proposal already in an open set evals that set; without a
-    // result file or an evals dir there is nothing to run. Once its set is
-    // abandoned it gets a set of one, named after it.
-    let lone = world.run(&["learn", "eval", "--proposal", OTHER]);
-    assert_eq!(
-        (lone.code, lone.error_code()),
-        (2, "usage"),
-        "{}",
-        lone.json
-    );
-    assert!(
-        lone.json["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("evals_dir")
-    );
-    let status = world.must(&["learn", "status"]);
-    assert_eq!(status.data()["open_sets"].as_array().unwrap().len(), 1);
-    world.must(&["learn", "abandon", "tighter briefs"]);
-    let closed = world.run(&[
-        "learn",
-        "eval",
-        "tighter briefs",
-        "--result",
-        result.to_str().unwrap(),
-    ]);
-    assert_eq!(closed.code, 3, "{}", closed.json);
-    let lone = world.run(&["learn", "eval", "--proposal", OTHER]);
-    assert_eq!(
-        (lone.code, lone.error_code()),
-        (2, "usage"),
-        "{}",
-        lone.json
-    );
-    let status = world.must(&["learn", "status"]);
-    assert_eq!(status.data()["open_sets"].as_array().unwrap().len(), 1);
-    assert_eq!(status.data()["open_sets"][0]["name"], "00000P2");
-    // The gate reads the open set, so the abandoned run no longer counts.
-    let gate = world.must(&["learn", "gate", PROPOSAL]);
-    assert_eq!(gate.data()["ok"], false);
-    assert!(
-        gate.data()["reason"]
-            .as_str()
-            .unwrap()
-            .contains("no change set")
-    );
-}
-
-#[test]
-fn the_eval_runner_appends_the_candidate_and_records_the_run() {
-    let world = World::initialized();
-    proposal(
-        &world,
-        PROPOSAL,
-        "--- a/alpha.md\n+++ b/alpha.md\n@@ -0,0 +1 @@\n+- say which branch was pushed\n",
-    );
-    world.must(&["learn", "bundle", "briefs", PROPOSAL]);
-    // A stand-in evals/run.sh that checks its arguments and writes the
-    // sealed result the real one leaves.
-    let evals = world.dir.path().join("checkout");
-    std::fs::create_dir_all(evals.join("evals")).unwrap();
-    std::fs::write(
-        evals.join("evals/pins.env"),
-        "CLAUDE_CODE_VERSION=2.1.0\nJUDGE_MODEL=judge-model\n",
-    )
-    .unwrap();
-    let runner = evals.join("evals/run.sh");
-    std::fs::write(
-        &runner,
-        "#!/bin/sh\nset -e\n[ \"$1\" = --split ] && [ \"$2\" = holdout ] && [ \"$3\" = --candidate ] || exit 9\n\
-         grep -q 'say which branch was pushed' \"$4\" || exit 8\n\
-         [ \"$5\" = --out ] || exit 7\n\
-         echo \"holdout: 2 of 2 cases\"\n\
-         echo \"a note\" >&2\n\
-         mkdir -p \"$6/sealed\"\n\
-         printf '%s' '{\"aggregates\":{\"casesTotal\":2,\"casesPassed\":2,\"overallScore\":0.9},\"costUsd\":0.4,\"partial\":false}' > \"$6/sealed/result.json\"\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
-    world.must(&[
-        "config",
-        "set",
-        "learning.evals_dir",
-        evals.to_str().unwrap(),
-    ]);
-
-    // No canonical repo exists for the fixture's source, so the candidate
-    // comes from a file here; rendering from members is the git path.
-    let candidate = world.dir.path().join("candidate.md");
-    std::fs::write(&candidate, "## alpha.md\n\n- say which branch was pushed\n").unwrap();
-    let out = world.dir.path().join("out");
-    let ran = world.must(&[
-        "learn",
-        "eval",
-        "briefs",
-        "--candidate-file",
-        candidate.to_str().unwrap(),
-        "--out",
-        out.to_str().unwrap(),
-    ]);
-    assert_eq!(ran.data()["eval_run"]["passed"], 1, "{}", ran.json);
-    assert_eq!(ran.data()["eval_run"]["claude_version"], "2.1.0");
-    assert_eq!(ran.data()["eval_run"]["judge_model"], "judge-model");
-    assert!(
-        ran.data()["eval_run"]["candidate_sha256"]
-            .as_str()
-            .unwrap()
-            .len()
-            == 64
-    );
-    assert!(
-        ran.data()["eval_run"]["result_path"]
-            .as_str()
-            .unwrap()
-            .ends_with("sealed/result.json")
-    );
-    // What the runner printed is in the run's log, not in tiller's answer.
-    assert_eq!(
-        std::fs::read_to_string(out.join("runner.log")).unwrap(),
-        "holdout: 2 of 2 cases\na note\n"
-    );
-    assert_eq!(world.must(&["learn", "gate", PROPOSAL]).data()["ok"], true);
-
-    // A runner that leaves no result records nothing.
-    std::fs::write(&runner, "#!/bin/sh\nexit 1\n").unwrap();
-    let out2 = world.dir.path().join("out2");
-    // A stale sealed result in a reused --out is not read either.
-    std::fs::create_dir_all(out2.join("sealed")).unwrap();
-    std::fs::write(
-        out2.join("sealed/result.json"),
-        r#"{"aggregates":{"casesTotal":1,"casesPassed":1}}"#,
-    )
-    .unwrap();
-    let none = world.run(&[
-        "learn",
-        "eval",
-        "briefs",
-        "--candidate-file",
-        candidate.to_str().unwrap(),
-        "--out",
-        out2.to_str().unwrap(),
-    ]);
-    assert_eq!(
-        (none.code, none.error_code()),
-        (7, "unavailable"),
-        "{}",
-        none.json
-    );
-    let runs: i64 = world
-        .store()
-        .conn()
-        .query_row("SELECT COUNT(*) FROM eval_runs", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(runs, 1);
-    // A run whose runner exits non-zero but writes a result is not recorded.
-    std::fs::write(
-        &runner,
-        "#!/bin/sh\nmkdir -p \"$6/sealed\"\nprintf '%s' '{\"aggregates\":{\"casesTotal\":2,\"casesPassed\":2}}' > \"$6/sealed/result.json\"\nexit 1\n",
-    )
-    .unwrap();
-    let half = world.run(&[
-        "learn",
-        "eval",
-        "briefs",
-        "--candidate-file",
-        candidate.to_str().unwrap(),
-        "--out",
-        out2.to_str().unwrap(),
-    ]);
-    assert_eq!(
-        (half.code, half.error_code()),
-        (7, "unavailable"),
-        "{}",
-        half.json
-    );
-    assert_eq!(
-        half.json["error"]["message"],
-        "evals/run.sh exited with code 1 and left sealed/result.json; nothing recorded",
-        "{}",
-        half.json
-    );
-    assert_eq!(
-        half.json["error"]["hint"],
-        format!("the run's files are in {}", out2.display()).as_str()
-    );
-    let both = world.run(&[
-        "learn",
-        "eval",
-        "briefs",
-        "--result",
-        out2.join("sealed/result.json").to_str().unwrap(),
-        "--candidate-file",
-        candidate.to_str().unwrap(),
-    ]);
-    assert_eq!(
-        (both.code, both.error_code()),
-        (2, "usage"),
-        "{}",
-        both.json
-    );
 }
 
 #[test]

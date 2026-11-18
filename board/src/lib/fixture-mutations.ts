@@ -23,7 +23,6 @@ import type {
   ProjectFields,
   ProjectRetirePreview,
   ProjectsResponse,
-  QuotaResponse,
 } from "./api-types.ts";
 import { awayBrief } from "./fixtures-away.ts";
 import { grantMutation, grantsFor } from "./fixtures-grants.ts";
@@ -1189,7 +1188,7 @@ function withTriage(pathname: string, body: unknown, scenario: Scenario): unknow
           seq: 4200,
           at: new Date().toISOString(),
           actor: "you",
-          text: `filed as a Tiller bug into ${moved.project_id}`,
+          text: `filed as a tiller bug into ${moved.project_id}`,
         },
       ],
       next_before: null,
@@ -1493,7 +1492,7 @@ function pickBugProject(body: Record<string, unknown>, scenario: Scenario): Muta
   }
   const project = typeof body.project === "string" ? body.project : null;
   if (project === "fleet") {
-    return refusal(422, "refused", "fleet cannot take Tiller bugs: pick another project");
+    return refusal(422, "refused", "fleet cannot take tiller bugs: pick another project");
   }
   const projects = (fixtureResponses(scenario)[projectsPath] as ProjectsResponse).projects;
   if (project && !projects.some((p) => p.id === project && !p.host && !gone(p.id))) {
@@ -1849,11 +1848,7 @@ function handle(
       followUps: [changed("retro.started", 100), changed("retro.finished", RUN_MS + 200)],
     };
   }
-  // A holdout eval plans against the scenario's quota, as the daemon's does.
-  const quota = path.startsWith("/api/v1/memory/proposals/")
-    ? ((fixtureResource("/api/v1/quota", scenario) as QuotaResponse | undefined)?.windows ?? [])
-    : [];
-  const memory = memoryMutation(method, path, body, quota, scenario);
+  const memory = memoryMutation(method, path, body, scenario);
   if (memory) {
     if (!memory.ok) {
       return {
@@ -1861,17 +1856,18 @@ function handle(
         followUps: [],
       };
     }
-    // The commit records a revision, which every open memory view refetches.
+    // Every open memory view refetches on the note's event.
+    const id = /\/pending\/([^/]+)/.exec(path)?.[1] ?? path;
     return {
-      reply: recorded(memory.data, null, memory.approvalId),
+      reply: recorded(memory.data, null, null),
       followUps: [
         {
           delayMs: 100,
           event: {
-            kind: "memory_revision.recorded",
-            txn: "mem.apply",
-            entity: "memory_revision",
-            entity_id: path,
+            kind: memory.kind,
+            txn: memory.txn,
+            entity: "memory_pending",
+            entity_id: id,
             rev_after: null,
             card_id: null,
             entity_state: null,

@@ -18,9 +18,7 @@ import type {
   HostConfig,
   HostFields,
   MachinesResponse,
-  MemoryEvalPlan,
   MemoryResponse,
-  MemoryRevision,
   ProjectDeletePreview,
   ProjectFields,
   ProjectGrants,
@@ -349,10 +347,12 @@ const runPath = (runId: string, owner?: string): QueryPath =>
 export const runQuery = (runId: string, owner?: string) =>
   readQuery<RunDetail>(runPath(runId, owner));
 
-// The memory view: the document list and one document, `fleet` for the shared
-// one (protocol.md section 7.3). Memory is local, so there is no `host`.
-const memoryPath = (scope?: string): QueryPath => withParams("/api/v1/memory", { scope });
-export const memoryQuery = (scope?: string) => readQuery<MemoryResponse>(memoryPath(scope));
+// The memory view: the kb state, what a launch of `role` in `project` loads
+// now, and the pending notes (memory.md section 4). Without `project` the
+// pending notes of every project. Memory is local, so there is no `host`.
+const MEMORY_PREFIX = "/api/v1/memory";
+export const memoryQuery = (project?: string, role?: string) =>
+  readQuery<MemoryResponse>(withParams(MEMORY_PREFIX, { project, role }));
 
 // The full retros of the last 30 days and every unfinished one, for one
 // project or all (learning-loop.md section 4). Retros are local, so there is
@@ -360,15 +360,3 @@ export const memoryQuery = (scope?: string) => readQuery<MemoryResponse>(memoryP
 export const RETROS_PREFIX = "/api/v1/retros";
 export const retrosQuery = (project?: string) =>
   readQuery<RetrosResponse>(withParams(RETROS_PREFIX, { project }));
-
-export const revisionQuery = (id: string) =>
-  readQuery<MemoryRevision>(`/api/v1/memory/revisions/${id}`);
-
-// What a proposal's holdout eval will cost, and why it will not start. Read
-// fresh each time the dialog opens: the quota moves under it.
-export const evalPlanQuery = (proposal: string) =>
-  queryOptions({
-    ...readQuery<MemoryEvalPlan>(`/api/v1/memory/proposals/${proposal}/eval`),
-    staleTime: 0,
-    gcTime: 0,
-  });

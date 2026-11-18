@@ -147,24 +147,11 @@ fn label_free(conn: &rusqlite::Connection, host: &Host, label: &str) -> Result<(
     Ok(())
 }
 
-/// What already records this host's boundary, if anything: a memory row
-/// stamped with it, or a backup or an export a restore or an import would
-/// check it against (`memory.md` section 8). Until one exists nothing has
-/// read the boundary, so the owner may still pick the one the host belongs
-/// to.
-fn boundary_record(
-    conn: &rusqlite::Connection,
-    home: Option<&std::path::Path>,
-) -> Result<Option<&'static str>> {
-    let stamped: bool = conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM memory_sources) OR EXISTS (SELECT 1 FROM evidence)
-             OR EXISTS (SELECT 1 FROM proposals)",
-        [],
-        |row| row.get(0),
-    )?;
-    if stamped {
-        return Ok(Some("memory"));
-    }
+/// What already records this host's boundary, if anything: a backup or an
+/// export a restore or an import would check it against. Until one exists
+/// nothing has read the boundary, so the owner may still pick the one the
+/// host belongs to.
+fn boundary_record(home: Option<&std::path::Path>) -> Result<Option<&'static str>> {
     Ok(match home {
         Some(home) => {
             crate::backup::Manifest::load(&crate::backup::Paths::in_home(home))?.records_boundary()
@@ -175,12 +162,7 @@ fn boundary_record(
 
 /// Refuses a boundary change on a remote host, or once anything records the
 /// boundary ([`boundary_record`]).
-fn boundary_unused(
-    conn: &rusqlite::Connection,
-    host: &Host,
-    home: Option<&std::path::Path>,
-    kept: &str,
-) -> Result<()> {
+fn boundary_unused(host: &Host, home: Option<&std::path::Path>, kept: &str) -> Result<()> {
     if host.kind == HostKind::Remote {
         return Err(Error::refused(
             "host",
@@ -188,12 +170,12 @@ fn boundary_unused(
             "a remote host keeps the boundary set on that host",
         ));
     }
-    match boundary_record(conn, home)? {
+    match boundary_record(home)? {
         Some(what) => Err(Error::refused(
             "host",
             &host.id,
             format!(
-                "{what} already records the {kept} boundary; it changes only before any memory, backup or export"
+                "{what} already records the {kept} boundary; it changes only before any backup or export"
             ),
         )),
         None => Ok(()),
@@ -272,6 +254,21 @@ fn non_negative(name: &str, value: Option<i64>) -> Result<()> {
     match value {
         Some(n) if n < 0 => Err(Error::Usage(format!(
             "{name} must not be negative, got {n}"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// The most a RAM or disk floor may be, in MB (100 TB). A floor is in MB, so a
+/// larger number is almost surely a unit mix-up, and it would refuse every run.
+const MAX_FLOOR_MB: i64 = 100_000_000;
+
+/// A host floor in MB: not negative and not past `MAX_FLOOR_MB`.
+fn floor_mb(name: &str, value: Option<i64>) -> Result<()> {
+    non_negative(name, value)?;
+    match value {
+        Some(n) if n > MAX_FLOOR_MB => Err(Error::Usage(format!(
+            "{name} is in MB and must be at most {MAX_FLOOR_MB}, got {n}"
         ))),
         _ => Ok(()),
     }
@@ -419,8 +416,8 @@ impl Store {
         require_owner(&ctx.actor, "tiller init")?;
         required("host label", &init.host_label)?;
         positive("lane capacity", init.lane_capacity)?;
-        non_negative("ram floor", init.ram_floor_mb)?;
-        non_negative("disk floor", init.disk_floor_mb)?;
+        floor_mb("ram floor", init.ram_floor_mb)?;
+        floor_mb("disk floor", init.disk_floor_mb)?;
         self.write(ctx, "init", None, |tx| {
             if let Some(host_id) = meta(tx.conn(), "host_id")? {
                 let host: Host = get(tx.conn(), "host", &host_id)?;
@@ -539,10 +536,10 @@ impl Store {
     }
 
     /// What already records this host's boundary, so `host.edit` refuses to
-    /// change it: `memory`, `a backup` or `an export`; `None` while nothing
+    /// change it: `a backup` or `an export`; `None` while nothing
     /// does.
     pub fn boundary_recorded(&self) -> Result<Option<&'static str>> {
-        boundary_record(self.conn(), self.home())
+        boundary_record(self.home())
     }
 
     /// `host.edit`: the label, capacity, resource floors, the bug project and
@@ -566,8 +563,8 @@ impl Store {
         if let Some(n) = edit.lane_capacity {
             positive("lane capacity", n)?;
         }
-        non_negative("ram floor", edit.ram_floor_mb.flatten())?;
-        non_negative("disk floor", edit.disk_floor_mb.flatten())?;
+        floor_mb("ram floor", edit.ram_floor_mb.flatten())?;
+        floor_mb("disk floor", edit.disk_floor_mb.flatten())?;
         let home = self.home().map(std::path::Path::to_path_buf);
         self.write(ctx, "host.edit", None, |tx| {
             let host: Host = get(tx.conn(), "host", host_id)?;
@@ -621,7 +618,7 @@ impl Store {
                 label_free(tx.conn(), &host, label)?;
             }
             if changed.contains_key("boundary") {
-                boundary_unused(tx.conn(), &host, home.as_deref(), kept.as_deref().unwrap_or("unset"))?;
+                boundary_unused(&host, home.as_deref(), kept.as_deref().unwrap_or("unset"))?;
             }
             if host.kind == HostKind::Remote && changed.contains_key("lane_capacity") {
                 return Err(Error::refused("host", &host.id, "a remote host has no lane capacity here"));

@@ -53,7 +53,7 @@ A prompt of the form `tiller inbox <ULID>` is a message from the orchestrator; r
 
 ## Memory files
 
-You may edit `AGENTS.md` and `CLAUDE.md` in this worktree to correct text that is wrong, including text your change made wrong. The edit rides the PR as a memory change the owner accepts separately; it loads nowhere before then. `.claude/rules/*.md` changes go through `tiller mem propose`.
+You may edit `AGENTS.md` and `CLAUDE.md` in this worktree to correct text that is wrong, including text your change made wrong. The edit rides the PR, and the owner reviews it with the rest. To suggest a note for later runs, run `tiller mem note`; it waits for the owner and loads nowhere until kept.
 
 ## Hard guardrails
 

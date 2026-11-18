@@ -1519,7 +1519,7 @@ function timelineFor(
           seq: 4100,
           at: minutes(now, -40),
           actor: "system",
-          text: `filed as a Tiller bug${from} into ${into}`,
+          text: `filed as a tiller bug${from} into ${into}`,
         },
       ],
       next_before: null,
@@ -2032,7 +2032,7 @@ export function fixtureResource(
   }
   if (url.pathname.startsWith("/api/v1/memory")) {
     settleRetros(now);
-    return memoryResource(url, quotaFor(served, now).windows, served);
+    return memoryResource(url, served);
   }
   if (url.pathname === "/api/v1/retros") return retrosResource(url, now);
   // No project starts archived; the stand-in server adds the ones archived since.

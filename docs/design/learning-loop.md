@@ -1,5 +1,7 @@
 # The learning loop
 
+> **Superseded** on Wednesday 2026-11-18, Lisbon time, by [ADR 0005](../adr/0005-kb-holds-memory.md). The holdout gate, change sets, the measuring window, evidence and sampled retros are gone. Full retros run only for incidents, and the curator's one note goes to the pending queue (`docs/spec/memory.md` section 5). This file stays as the record of the old design.
+
 How Tiller learns from its own cards without letting an unapproved word reach a fleet role. This is the design T7.3 builds. It sits on `docs/spec/memory.md` (evidence, proposals, approvals; sections 6 and 7), `docs/design/plan.md` section 11 (the loop and its metric) and `docs/design/plan-v2.md` points 22 and 23 (attribution, successes, "nothing worth saving"). It adds no memory contract; it adds the tables and commands that feed memory's `evidence` and `proposals` from the record, and the gate that stands in front of an approval.
 
 Written Wednesday 2026-11-04, Lisbon time. Task T7.3.

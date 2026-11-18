@@ -1,7 +1,7 @@
-//! A launch loads the project's approved memory: the prompt holds the text
-//! and `session_loads` names the revision (`memory.md` sections 2 and 7).
-//! The real binary, one `state.db`, the memory repo under the home and a
-//! terminal holder that takes the launch.
+//! A launch loads the kb notes in the project's scopes: the prompt holds
+//! them and `session_notes` names each one (`memory.md` sections 2 and 7).
+//! A pending note reaches no prompt. The real binary, one `state.db`, a kb
+//! store in a temp dir and a terminal holder that takes the launch.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -50,51 +50,30 @@ fn launchable(world: &World) {
     world.must(&["config", "set", "spawn.claude", claude.to_str().unwrap()]);
 }
 
-/// One approved line in alpha's memory document, the way the owner adds it:
-/// a note, a proposal, a passed holdout run and the approval.
-fn approve_line(world: &World, text: &str) {
-    let noted = world.must(&["mem", "note", "alpha", "--text", text]);
-    let evidence = noted.data()["evidence_id"].as_str().unwrap().to_owned();
-    let proposed = world.must(&[
-        "mem",
-        "propose",
-        "alpha",
-        "--add",
-        "How we work here",
-        "--text",
-        text,
-        "--evidence",
-        &evidence,
-        "--expected-effect",
-        "sessions follow the line",
-    ]);
-    let proposal = proposed.data()["id"].as_str().unwrap().to_owned();
-    world.must(&["learn", "bundle", "placement", &proposal]);
-    let result = world.dir.path().join("result.json");
+/// A kb store under the world's directory with one global note, set as
+/// `KB_HOME` for every later command. Never the owner's own store.
+fn kb_store(world: &World) {
+    let kb = world.dir.path().join("kb");
+    let notes = kb.join("notes/global");
+    std::fs::create_dir_all(&notes).unwrap();
     std::fs::write(
-        &result,
-        r#"{"aggregates": {"casesTotal": 4, "casesPassed": 4, "overallScore": 0.97}, "costUsd": 1.0, "partial": false}"#,
+        notes.join("run-the-formatter.md"),
+        "---\nid: run-the-formatter\ntitle: Run the formatter before a commit\nscope: global\n\
+         kind: convention\ncreated: 2026-11-10T09:00:00Z\nlast_verified: 2026-11-10T09:00:00Z\n\
+         confidence: medium\nindexed: true\n---\nThe gate fails on an unformatted file.\n",
     )
     .unwrap();
-    world.must(&[
-        "learn",
-        "eval",
-        "placement",
-        "--result",
-        result.to_str().unwrap(),
-    ]);
-    let approved = world.must(&["mem", "approve", &proposal]);
-    assert_eq!(approved.data()["approved"], 1, "{}", approved.json);
+    world.set_env("KB_HOME", kb.to_str().unwrap());
 }
 
-/// The `(revision, trigger)` rows of `session`.
+/// The `(note, trigger)` rows of `session`.
 fn loads(world: &World, session: &str) -> Vec<(String, String)> {
     world
         .store()
         .conn()
         .prepare(
-            "SELECT revision_id, trigger FROM session_loads WHERE session_id = ?1
-             ORDER BY loaded_at, revision_id",
+            "SELECT note_id, trigger FROM session_notes WHERE session_id = ?1
+             ORDER BY loaded_at, note_id",
         )
         .unwrap()
         .query_map([session], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -103,29 +82,27 @@ fn loads(world: &World, session: &str) -> Vec<(String, String)> {
         .unwrap()
 }
 
-/// The current approved revision of alpha's memory document.
-fn approved_revision(world: &World) -> String {
-    world
-        .store()
-        .conn()
-        .query_row(
-            "SELECT r.id FROM memory_revisions r JOIN memory_sources s ON s.id = r.source_id
-             WHERE s.project_id = 'alpha' AND s.canonical_path = 'projects/alpha.md'
-               AND r.review = 'approved'
-             ORDER BY r.recorded_at DESC, r.id DESC LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap()
-}
+/// A pending note's text, which must reach no fleet surface.
+const CANARY: &str = "canary-7f3c pending text";
 
 #[test]
-fn a_launch_loads_the_approved_memory_into_the_prompt_and_the_loads() {
+fn a_launch_loads_the_kb_notes_into_the_prompt_and_the_loads() {
     let world = World::initialized();
     launchable(&world);
     let (_holder, _) = start_holder(&world);
-    approve_line(&world, "Run the formatter before a commit.");
-    let revision = approved_revision(&world);
+    kb_store(&world);
+    // A pending note waits for the owner.
+    world
+        .store()
+        .conn()
+        .execute(
+            "INSERT INTO memory_pending (id, project_id, kind, title, body, source, created_at)
+             VALUES ('01JC00000000000000000000N1', 'alpha', 'gotcha', ?1, ?1, 'migration',
+                     '2026-11-10T09:00:00.000Z')",
+            [CANARY],
+        )
+        .unwrap();
+    let note = "run-the-formatter".to_owned();
 
     let started = world.must(&["orchestrator", "start", "alpha"]);
     let session = started.data()["session"]["id"].as_str().unwrap().to_owned();
@@ -140,13 +117,14 @@ fn a_launch_loads_the_approved_memory_into_the_prompt_and_the_loads() {
     )
     .unwrap();
     assert!(
-        prompt.contains("Run the formatter before a commit."),
+        prompt.contains("Run the formatter before a commit"),
         "{prompt}"
     );
-    assert!(prompt.contains("# Memory"), "{prompt}");
+    assert!(prompt.contains("\n# Memory\n"), "{prompt}");
+    assert!(!prompt.contains("canary-7f3c"), "{prompt}");
     assert_eq!(
         loads(&world, &session),
-        vec![(revision.clone(), "startup".to_owned())]
+        vec![(note.clone(), "startup".to_owned())]
     );
 
     // The appended prompt survives `/clear`, `/compact` and a resume. The
@@ -163,13 +141,13 @@ fn a_launch_loads_the_approved_memory_into_the_prompt_and_the_loads() {
     }
     assert_eq!(
         loads(&world, &session),
-        vec![(revision.clone(), "startup".to_owned())]
+        vec![(note.clone(), "startup".to_owned())]
     );
 
     // The daemon copies the set under each later trigger, once.
     let _daemon = git_only_daemon(&world);
     let want = ["startup", "clear", "compact", "resume"]
-        .map(|trigger| (revision.clone(), trigger.to_owned()))
+        .map(|trigger| (note.clone(), trigger.to_owned()))
         .to_vec();
     let deadline = Instant::now() + WAIT;
     while loads(&world, &session) != want {
