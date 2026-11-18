@@ -48,3 +48,4 @@ The switch carries the most output risk of the three options. The plan answers i
 - rollback triggers that go live at each flip: lost work, an unauthorized action, or a duplicate dispatch;
 - hosts cut over one at a time: host A, then host B, then host C;
 - Firstmate stopped but not deleted until checkpoint CP8, so falling back on a host means stopping Tiller, flipping the owner marker back and restarting Firstmate.
+
