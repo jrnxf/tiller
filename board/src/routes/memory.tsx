@@ -1,35 +1,40 @@
 import { createFileRoute } from "@tanstack/react-router";
 
-import { MemoryPage } from "../components/memory/memory-page";
+import { MemoryPage, type MemoryTab } from "../components/memory/memory-page";
 import { memoryQuery, projectsQuery } from "../lib/queries";
 
 interface MemorySearch {
-  // The project whose document is open; without it the shared one is.
-  doc?: string;
+  // The project whose notes are open; without it Pending lists every project.
+  project?: string;
+  // The role whose launch Live shows; the daemon answers for builder without it.
+  role?: string;
+  // The open tab; without it Pending opens when it has notes, else Live.
+  tab?: MemoryTab;
 }
 
+const text = (value: unknown) => (typeof value === "string" && value !== "" ? value : undefined);
+
 export const Route = createFileRoute("/memory")({
-  // The shared document is the one with no `doc`, so `?doc=fleet` is the same
-  // search and reads it once, not once as `fleet` and once as the default.
   validateSearch: (search): MemorySearch => ({
-    doc:
-      typeof search.doc === "string" && search.doc !== "" && search.doc !== "fleet"
-        ? search.doc
-        : undefined,
+    project: text(search.project),
+    role: text(search.role),
+    tab: search.tab === "pending" || search.tab === "live" ? search.tab : undefined,
   }),
-  loaderDeps: ({ search }) => ({ doc: search.doc }),
-  // The document is read once, with no retry (the client's default is one):
-  // a failed open shows the section's note at once. Its Retry reads the
-  // document again, and the page says it is reading until the read answers.
+  loaderDeps: ({ search }) => ({ project: search.project, role: search.role }),
+  // The view is read once, with no retry (the client's default is one): a
+  // failed open shows the section's note at once.
   loader: ({ context, deps }) =>
     Promise.allSettled([
-      context.queryClient.ensureQueryData({ ...memoryQuery(deps.doc), retry: false }),
+      context.queryClient.ensureQueryData({
+        ...memoryQuery(deps.project, deps.role),
+        retry: false,
+      }),
       context.queryClient.ensureQueryData(projectsQuery()),
     ]),
   component: MemoryRoute,
 });
 
 function MemoryRoute() {
-  const { doc } = Route.useSearch();
-  return <MemoryPage scope={doc ?? "fleet"} />;
+  const { project, role, tab } = Route.useSearch();
+  return <MemoryPage project={project} role={role} tab={tab} />;
 }

@@ -12,9 +12,9 @@ import { useAction } from "../attention/use-action";
 import { useTick } from "../board/ago";
 import { day, sentence, when } from "./parts";
 
-// The Retros list under a project's memory document (learning-loop.md section
-// 4): what each full retro of the last 30 days came to, every one whose
-// curator did not finish, why, with Run again. Nothing runs such a retro
+// The Retros list under the pending queue (learning-loop.md section 4): what
+// each full retro of the last 30 days came to, every one whose curator did
+// not finish, why, with Run again. Nothing runs such a retro
 // again by itself; the owner does, here or from Health.
 
 // A running retro is read again on this beat, besides its change events, so
@@ -62,24 +62,10 @@ export function Elapsed({ from }: { from: string | null }) {
   return <span className="r">{elapsed(from, serverNow())}</span>;
 }
 
-const PROPOSAL: Record<string, string> = {
-  accepted: "kept",
-  applied: "kept",
-  discarded: "discarded",
-  stale: "no longer applies",
-  failed: "could not be applied",
-};
-
 // What a done retro came to, without its date.
 function result(retro: RetroView): string {
-  if (retro.proposal) {
-    const where = retro.proposal.section
-      ? `waiting in ${retro.proposal.section}`
-      : "waiting for you";
-    return `1 suggestion, ${PROPOSAL[retro.proposal.state] ?? where}`;
-  }
-  if (retro.outcome === "evidence") return "1 learning noted, no suggestion";
-  return "No suggestions";
+  if (retro.outcome === "noted") return "1 note suggested";
+  return "No note";
 }
 
 // What `POST /api/v1/retros/{id}/run` answers with: the retro its key claimed.
@@ -237,12 +223,7 @@ function Row({ retro, limit }: { retro: RetroView; limit: number }) {
     case "done":
       label = { text: "Done", tone: " ok" };
       meta = `${result(retro)} · ${when(finishedAt(retro))}`;
-      right =
-        retro.proposal?.state === "proposed" ? (
-          <Review proposal={retro.proposal.id} card={retro.card} />
-        ) : (
-          <span className="r">{day(finishedAt(retro))}</span>
-        );
+      right = <span className="r">{day(finishedAt(retro))}</span>;
       break;
   }
   return (
@@ -254,26 +235,6 @@ function Row({ retro, limit }: { retro: RetroView; limit: number }) {
   );
 }
 
-// The suggestion a done retro filed sits in the document above: Review goes
-// to its card there.
-function Review({ proposal, card }: { proposal: string; card: string }) {
-  const toCard = () => {
-    const target = document.getElementById(`sug-${proposal}`);
-    target?.scrollIntoView?.({ behavior: "smooth", block: "center" });
-    target?.focus({ preventScroll: true });
-  };
-  return (
-    <button
-      type="button"
-      className="btn sm"
-      aria-label={`Review the suggestion from ${card}`}
-      onClick={toCard}
-    >
-      Review
-    </button>
-  );
-}
-
 const WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 // A row the 30 days do not hold: an unfinished retro is listed however old.
@@ -282,7 +243,7 @@ function older(retro: RetroView, now: number): boolean {
   return Math.max(...times.map((at) => (at ? Date.parse(at) : 0))) < now - WINDOW_MS;
 }
 
-export function Retros({ project, doc }: { project: string; doc: string }) {
+export function Retros({ project, name }: { project?: string; name: string }) {
   const read = useQuery(retrosQueryWhileRunning(project));
   if (!read.data) return null;
   const { retros, curator_timeout_minutes: limit } = read.data;
@@ -294,7 +255,7 @@ export function Retros({ project, doc }: { project: string; doc: string }) {
     <section className="h-box rt-box" aria-labelledby="retros-title">
       <div className="h-head">
         <h2 id="retros-title">Retros</h2>
-        <span className="c">{`${doc} · ${span}`}</span>
+        <span className="c">{`${name} · ${span}`}</span>
       </div>
       {retros.length === 0 ? (
         <p className="h-none">No retros in the last 30 days.</p>
