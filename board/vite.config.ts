@@ -26,21 +26,25 @@ function atLiveDomain(host: string | undefined): boolean {
   return Boolean(liveDomain && name?.endsWith(`.${liveDomain.toLowerCase()}`));
 }
 
+// Makes a proxied request speak as `target`'s own loopback origin, unless the
+// page is a live-domain one.
+function asDaemon(
+  target: URL,
+  out: { setHeader(name: string, value: string): void; getHeader(name: string): unknown },
+  host: string | undefined,
+): void {
+  if (atLiveDomain(host)) return;
+  out.setHeader("host", target.host);
+  if (out.getHeader("origin") !== undefined) out.setHeader("origin", target.origin);
+}
+
 const live: ProxyOptions | undefined = daemon
   ? {
       target: daemon.origin,
       ws: true,
       configure: (proxy) => {
-        const asDaemon = (
-          out: { setHeader(name: string, value: string): void; getHeader(name: string): unknown },
-          host: string | undefined,
-        ) => {
-          if (atLiveDomain(host)) return;
-          out.setHeader("host", daemon.host);
-          if (out.getHeader("origin") !== undefined) out.setHeader("origin", daemon.origin);
-        };
-        proxy.on("proxyReq", (out, req) => asDaemon(out, req.headers.host));
-        proxy.on("proxyReqWs", (out, req) => asDaemon(out, req.headers.host));
+        proxy.on("proxyReq", (out, req) => asDaemon(daemon, out, req.headers.host));
+        proxy.on("proxyReqWs", (out, req) => asDaemon(daemon, out, req.headers.host));
       },
     }
   : undefined;
