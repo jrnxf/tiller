@@ -28,7 +28,7 @@ const BOUNDARY: ReactNode = (
 const NOTES: Record<"owner" | "init", ReactNode> = {
   owner: (
     <>
-      Hand this machine to Tiller. <code>tiller init</code> refuses while another system owns it.
+      Hand this machine to tiller. <code>tiller init</code> refuses while another system owns it.
     </>
   ),
   init: (
@@ -76,9 +76,9 @@ export function SetupScreen({ command, onReady }: { command: string; onReady: ()
         <div className="ws">
           <Logo />
         </div>
-        <h1>Set up Tiller on this machine</h1>
+        <h1>Set up tiller on this machine</h1>
         <p>
-          The daemon is running, but this machine has no Tiller state yet.{" "}
+          The daemon is running, but this machine has no tiller state yet.{" "}
           {numbered
             ? "Run these in a terminal, one at a time, in this order:"
             : "Run this in a terminal:"}

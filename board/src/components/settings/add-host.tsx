@@ -89,7 +89,7 @@ export function AddHostForm({
         <h2>Add a host</h2>
         <p>
           This host runs <code>ssh {alias.trim() || "<alias>"} tiller peer accept</code>. The alias
-          must connect with no password or question, and the host must run Tiller.
+          must connect with no password or question, and the host must run tiller.
         </p>
       </div>
       <div className="form-fields">

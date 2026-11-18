@@ -272,7 +272,7 @@ test("a terminal holder out of reach is named and tried again", async () => {
     kind: "unreachable",
     title: "Can't reach the terminal holder on this machine",
     detail:
-      "The agent may still be running. Run tiller holder to start the holder. Tiller tries again on its own, or now.",
+      "The agent may still be running. Run tiller holder to start the holder. tiller tries again on its own, or now.",
     mark: "holder unreachable",
   });
   await new Promise((resolve) => setTimeout(resolve, 300));

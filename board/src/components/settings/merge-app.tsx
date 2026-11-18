@@ -47,7 +47,7 @@ const PLACEHOLDER_NOTE =
 const ROTATE_NOTE =
   "If anyone else could have read the key, rotate it: on GitHub, Settings, Developer settings, GitHub Apps, open the App, generate a new key, replace private-key.pem (mode 600), then delete the old key.";
 const ACCESS_NOTE =
-  "Tiller cannot open the file, so writing it again would not help. Check its owner and mode: it must be yours, and the key must be a file with mode 600.";
+  "tiller cannot open the file, so writing it again would not help. Check its owner and mode: it must be yours, and the key must be a file with mode 600.";
 
 // What health's detail says, read from the daemon's own wording
 // (`merge_app_health` and `KeyError`): the App folder, and on a `warn` the
@@ -191,7 +191,7 @@ function AppStep({ app, host }: { app: MergeAppHealth; host: string | null }) {
           title="Create the App"
           detail={
             missing
-              ? `${app.status === "warn" ? "Tiller cannot open the key, so it cannot tell whether the App exists. If it does not: " : ""}Name it tiller-merge. Give it Contents, Pull requests and Workflows read and write, Checks read-only, and no webhook.`
+              ? `${app.status === "warn" ? "tiller cannot open the key, so it cannot tell whether the App exists. If it does not: " : ""}Name it tiller-merge. Give it Contents, Pull requests and Workflows read and write, Checks read-only, and no webhook.`
               : app.status === "ok" && app.app_id !== null
                 ? `App ${app.app_id} has its key on this host.`
                 : "A key for the App is on this host."

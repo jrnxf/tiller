@@ -308,7 +308,7 @@ test("a recommendation says who made it, never always the orchestrator", async (
   // Opened by Tiller itself (the reconciler, a gate, the nightly backup): no
   // session behind it. The owner never opens an item with a recommendation.
   await renderInbox("default", CAPACITY);
-  expect(screen.getByText("Tiller recommended")).toBeTruthy();
+  expect(screen.getByText("tiller recommended")).toBeTruthy();
   expect(screen.queryByText("You recommended")).toBeNull();
   expect(screen.queryByText(/The orchestrator recommend/)).toBeNull();
   cleanup();
@@ -916,7 +916,7 @@ test("the folder trust dialog is answered from its detail, with no digits", asyn
   expect(screen.getByText("Dialog")).toBeTruthy();
   expect(
     screen.getByText(
-      /Tiller records trust before each launch, so this means that step did not take\./,
+      /tiller records trust before each launch, so this means that step did not take\./,
     ),
   ).toBeTruthy();
   expect(screen.getByText("/home/user/project")).toBeTruthy();

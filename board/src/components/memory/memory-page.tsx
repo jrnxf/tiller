@@ -255,7 +255,7 @@ function Who({
         <EditIcon />
       </span>
     );
-    name = "outside Tiller";
+    name = "outside tiller";
   } else {
     mark = (
       <span className="m2av bot">
@@ -1000,10 +1000,10 @@ function DocSection({
 }
 
 const PROVENANCE: Record<string, string> = {
-  tiller: "Written through Tiller",
-  external: "Edited outside Tiller",
+  tiller: "Written through tiller",
+  external: "Edited outside tiller",
   "legacy-import": "Carried over",
-  baseline: "The text Tiller started from",
+  baseline: "The text tiller started from",
 };
 
 const REVIEW: Record<MemoryRevision["review"], string> = {

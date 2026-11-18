@@ -124,7 +124,7 @@ const ACTOR_LABEL = {
   orchestrator: "Orchestrator",
   worker: "Worker",
   hook: "Hook",
-  system: "Tiller",
+  system: "tiller",
 };
 
 function ActorIcon({ actor }: { actor: TimelineEntry["actor"] }) {
@@ -1013,7 +1013,7 @@ export function CardPage({
                 {card.project_id === HOST_PROJECT ? (
                   <span className="meta">
                     {bugProject
-                      ? `filed before ${bugProject.name} took Tiller bugs`
+                      ? `filed before ${bugProject.name} took tiller bugs`
                       : "no bug project here"}
                   </span>
                 ) : null}

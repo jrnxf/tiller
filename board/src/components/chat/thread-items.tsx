@@ -244,7 +244,7 @@ function Step({ step, owner }: { step: ThreadStep; owner: string | undefined }) 
           {stepTitle(step.label)}
           <Stamp className="when" at={step.at} />
         </div>
-        {step.system ? <div className="desc">Recorded by Tiller</div> : null}
+        {step.system ? <div className="desc">Recorded by tiller</div> : null}
         {step.card || step.pr ? (
           <div className="chat-refs">
             {step.card ? <CardRef card={step.card} owner={owner} /> : null}
