@@ -591,13 +591,9 @@
     max-width: none;
   }
 
-  .mem-root .h-list li {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .mem-root .h-list .btn,
-  .mem-root .h-list .r {
-    grid-column: 1;
+  /* A date is short, so it stays on the right. A button goes under the row. */
+  .mem-root .h-list .btn {
+    grid-column: 1 / -1;
     grid-row: auto;
     justify-self: end;
     margin-top: 6px;
