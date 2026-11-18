@@ -949,8 +949,13 @@
   font-family: var(--mono);
   font-size: 12px;
 }
-.chat-confirm .cq-ctx {
+.chat-confirm .cq-ctx,
+.chat-confirm .cq-answer {
   margin: 0;
+}
+/* The buttons sit a little apart from the facts they act on. */
+.chat-confirm .cq-answer {
+  padding-top: 4px;
 }
 /* The buttons on the right, primary last; what binds them on their left. */
 .chat-confirm .prc-act {
