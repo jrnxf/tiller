@@ -142,18 +142,26 @@ export function useRunAgain(retro: RetroView) {
   };
 }
 
-export function RunAgain({ retro, run }: { retro: RetroView; run: RunAgainState }) {
+export function RunAgain({
+  retro,
+  run,
+  first = false,
+}: {
+  retro: RetroView;
+  run: RunAgainState;
+  first?: boolean;
+}) {
   return (
     <button
       type="button"
       className="btn primary sm"
       disabled={run.off}
       title={retro.run_refusal ?? undefined}
-      aria-label={`Run the retro of ${retro.card} again`}
+      aria-label={first ? `Run the retro of ${retro.card}` : `Run the retro of ${retro.card} again`}
       onClick={run.trigger}
     >
       <ReopenIcon />
-      Run again
+      {first ? "Run" : "Run again"}
     </button>
   );
 }
@@ -170,9 +178,6 @@ export function RunAgainNote({ run, className }: { run: RunAgainState; className
   );
 }
 
-// The command that runs a waiting retro's curator now, by the retro's short id.
-const runCommand = (retro: RetroView) => `tiller retro run ${retro.id.slice(-7).toLowerCase()}`;
-
 function Unfinished({ retro }: { retro: RetroView }) {
   const run = useRunAgain(retro);
   let meta = `${why(retro.learning)}, ${when(finishedAt(retro))}. Nothing runs it again by itself.`;
@@ -182,6 +187,20 @@ function Unfinished({ retro }: { retro: RetroView }) {
       <RowTitle retro={retro} label={{ text: "Did not finish", tone: " bad" }} />
       <span className="m">{meta}</span>
       <RunAgain retro={retro} run={run} />
+      <RunAgainNote run={run} className="h-refusal" />
+    </li>
+  );
+}
+
+// Nothing starts a waiting full retro's curator by itself: the owner does,
+// with Run. It is the same call as Run again.
+function Waiting({ retro }: { retro: RetroView }) {
+  const run = useRunAgain(retro);
+  return (
+    <li data-status={retro.status}>
+      <RowTitle retro={retro} label={{ text: "Waiting", tone: " mute" }} />
+      <span className="m">{`Waiting since ${when(retro.created_at)}. Nothing starts its curator by itself.`}</span>
+      <RunAgain retro={retro} run={run} first />
       <RunAgainNote run={run} className="h-refusal" />
     </li>
   );
@@ -210,16 +229,7 @@ function Row({ retro, limit }: { retro: RetroView; limit: number }) {
       right = <Elapsed from={retro.curator_started_at} />;
       break;
     case "pending":
-      // Nothing starts a waiting full retro's curator: the owner does.
-      label = { text: "Waiting", tone: " mute" };
-      meta = (
-        <>
-          Waiting since {when(retro.created_at)}. Nothing starts its curator by itself: run{" "}
-          <code>{runCommand(retro)}</code> in a terminal.
-        </>
-      );
-      right = <span className="r">{day(retro.created_at)}</span>;
-      break;
+      return <Waiting retro={retro} />;
     case "done":
       label = { text: "Done", tone: " ok" };
       meta = `${result(retro)} · ${when(finishedAt(retro))}`;

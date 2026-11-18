@@ -130,16 +130,18 @@ test("a project's Pending tab lists its retros, and the one that did not finish 
   expect(list.queryByText("beta-28")).toBeNull();
 });
 
-test("a waiting retro says that nothing starts its curator, and how to start it", async () => {
+test("a waiting retro says that nothing starts its curator, and Run starts it", async () => {
   await renderAt("/memory?project=alpha");
   const waiting = rowOf(await retrosList(), "alpha-15", "pending");
   expect(waiting.getByText("Waiting")).toBeTruthy();
-  const meta = waiting.getByText(/^Waiting since /);
-  expect(meta.textContent).toBe(
-    "Waiting since Wed 11 Nov, 13:30. Nothing starts its curator by itself: run tiller retro run 0000015 in a terminal.",
+  expect(waiting.getByText(/^Waiting since /).textContent).toBe(
+    "Waiting since Wed 11 Nov, 13:30. Nothing starts its curator by itself.",
   );
-  expect(within(meta).getByText("tiller retro run 0000015").tagName).toBe("CODE");
-  expect(waiting.queryByRole("button")).toBeNull();
+  expect(waiting.queryByText(/in a terminal/)).toBeNull();
+  fireEvent.click(waiting.getByRole("button", { name: "Run the retro of alpha-15" }));
+  await waitFor(() => expect(posts).toHaveLength(1));
+  expect(posts[0]?.path).toBe("/api/v1/retros/01JRETRO000000000000000015/run");
+  expect(typeof posts[0]?.body.idempotency_key).toBe("string");
 });
 
 test("the header says so when an older retro that did not finish is listed", async () => {
