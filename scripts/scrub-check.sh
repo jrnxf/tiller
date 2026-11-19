@@ -61,7 +61,7 @@ sub private_ip {
 my @rules = (
   ["home path", qr{/(?:Users|home)/(?!user\b)[A-Za-z0-9._-]+|(?<![\w.])/(?:var/)?root/[A-Za-z0-9._-]+}],
   ["mounted volume", qr{/Volume[s]/}],
-  ["home-relative path", qr{(?<![\w.~/-])~/(?!\.(?:tiller|claude|config|local|cache|npmrc|pypirc|cargo|gem)\b)[A-Za-z0-9._-]+}],
+  ["home-relative path", qr{(?<![\w.~/-])~/(?!\.(?:tiller|claude|config|local|cache|npmrc|pypirc|netrc|bunfig|yarnrc|cargo|gem)\b)[A-Za-z0-9._-]+}],
   ["LAN link", qr{\blan\.[a-z0-9-]+\.[a-z]{2,}}i],
   ["LAN hostname", qr{(?<![.\w\$])[a-z0-9-]{2,}\.(?:lan|local|internal|home\.arpa|ts\.net)\b(?!-|\.?\w)}i],
   ["machine name", qr{\bagents["\x27`]? (?:host|machine|box)\b}i],

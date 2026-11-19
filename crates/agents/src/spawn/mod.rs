@@ -145,6 +145,14 @@ pub fn card_brief(card: &Card) -> String {
 /// delivery (`docs/design/pre-launch-validation.md` section 2). A direct-pr
 /// worker only commits; the daemon pushes and opens the PR (`authority.md`
 /// G12).
+/// A worker's own package cache under the fleet's cache root: one per
+/// project and role, so no worker writes what another project's or another
+/// role's builds read (`authority.md` section 8, "Amended: package
+/// registries").
+pub fn package_cache_for(root: &Path, project: &str, role: roles::Role) -> PathBuf {
+    root.join(project).join(role.name())
+}
+
 pub fn delivery_line(project: &Project) -> String {
     let effective = project.effective_delivery();
     let mut line = format!("\nDelivery: {effective}.");
@@ -598,7 +606,7 @@ fn launch_in(
         tiller: world.tiller,
         default_branch: &project.default_branch,
         network_allow: &world.config.spawn.network_allow_for(true),
-        package_cache: Some(world.package_cache),
+        package_cache: Some(&package_cache_for(world.package_cache, &project.id, role)),
         review_hosts: &world.config.spawn.review_allowed_hosts,
         no_mistakes_socket: world.config.spawn.no_mistakes_socket.as_deref(),
         gh_login_readable: project.effective_delivery() == Delivery::NoMistakes,

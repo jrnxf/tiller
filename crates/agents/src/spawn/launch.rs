@@ -564,13 +564,27 @@ fn first_prompt(spec: &LaunchSpec<'_>) -> Vec<String> {
 /// Makes the package cache a worker's fragment names, so the sandbox has a
 /// directory to let it write. Only the owner may read it.
 fn make_package_cache(spec: &LaunchSpec<'_>) -> Result<(), SpawnError> {
-    if let Some(cache) = spec.package_cache
-        && !cache.is_dir()
-    {
+    spec.package_cache.map_or(Ok(()), make_cache_dir)
+}
+
+/// Makes a package cache directory, owner-only, when it is missing: the
+/// sandbox lets a worker write the cache but not its parents.
+fn make_cache_dir(cache: &Path) -> Result<(), SpawnError> {
+    if !cache.is_dir() {
         fs::create_dir_all(cache)?;
         fs::set_permissions(cache, fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
+}
+
+/// Makes again the package cache a kept fragment names
+/// ([`roles::PACKAGE_CACHE_ENV`]), for a resume: the owner may have removed
+/// it since the launch. A fragment that names none needs none.
+fn remake_package_cache(fragment: &Value) -> Result<(), SpawnError> {
+    match fragment["env"][roles::PACKAGE_CACHE_ENV].as_str() {
+        Some(cache) if Path::new(cache).is_absolute() => make_cache_dir(Path::new(cache)),
+        _ => Ok(()),
+    }
 }
 
 /// Writes the prompt, the fragment, the MCP config and the launch script
@@ -750,6 +764,7 @@ pub fn write_again(spec: &AgainSpec<'_>, start: Start<'_>) -> Result<Launch, Spa
         .map_err(|_| refused(&launch.prompt, "is not UTF-8"))?;
     let mut fragment = json(&launch.settings)?;
     json(&launch.mcp)?;
+    remake_package_cache(&fragment)?;
     let front = spec.role.frontmatter()?;
     let (mode, _) = effective_mode(spec.claude, &front.permission_mode);
     // The fragment must name the mode the flag does.
@@ -799,6 +814,22 @@ pub fn write_again(spec: &AgainSpec<'_>, start: Start<'_>) -> Result<Launch, Spa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A resume reuses the fragment, so it makes again the package cache the
+    /// fragment names, which the owner may have removed since the launch.
+    #[test]
+    fn a_resume_makes_the_named_package_cache_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache/alpha/builder");
+        let fragment = json!({ "env": { roles::PACKAGE_CACHE_ENV: cache } });
+        remake_package_cache(&fragment).unwrap();
+        assert!(cache.is_dir());
+        let mode = fs::metadata(&cache).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        remake_package_cache(&json!({ "env": {} })).unwrap();
+        remake_package_cache(&json!({ "env": { roles::PACKAGE_CACHE_ENV: "cache" } })).unwrap();
+        assert!(!Path::new("cache").exists());
+    }
 
     const HELP_WITH_AUTO: &str = "  --permission-mode <mode>   Permission mode\n                             (choices: \"acceptEdits\", \"auto\",\n                             \"dontAsk\", \"plan\")\n";
     const HELP_WITHOUT_AUTO: &str = "  --permission-mode <mode>   Permission mode\n                             (choices: \"acceptEdits\", \"default\",\n                             \"dontAsk\", \"plan\")\n  --other   an \"auto\" thing\n";

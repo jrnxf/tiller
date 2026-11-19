@@ -204,12 +204,13 @@ pub const FORGE_HOSTS: [&str; 2] = ["github.com", "api.github.com"];
 
 /// The public package registries a worker's sandbox may reach, so it can
 /// install a project's dependencies and run its checks without the owner:
-/// npm (and the yarn mirror of it), PyPI, crates.io, the Go module proxy and
-/// RubyGems. Read access only: every role is denied the publish tokens
-/// (`authority.md` section 8).
-pub const PACKAGE_REGISTRIES: [&str; 10] = [
+/// npm (and the yarn mirror of it, and the Yarn releases corepack fetches),
+/// PyPI, crates.io, the Go module proxy and RubyGems. Read access only:
+/// every role is denied the publish tokens (`authority.md` section 8).
+pub const PACKAGE_REGISTRIES: [&str; 11] = [
     "registry.npmjs.org",
     "registry.yarnpkg.com",
+    "repo.yarnpkg.com",
     "pypi.org",
     "files.pythonhosted.org",
     "index.crates.io",
@@ -267,33 +268,29 @@ impl Paths {
         hosts
     }
 
-    /// The package cache: `package_cache`, else
+    /// The package cache root: `package_cache`, else
     /// `$HOME/.local/state/tiller/cache`.
     pub fn package_cache_dir(&self) -> Result<PathBuf, SpawnError> {
-        if let Some(root) = &self.package_cache {
-            return Ok(root.clone());
-        }
-        std::env::var_os("HOME")
-            .filter(|home| !home.is_empty())
-            .map(|home| PathBuf::from(home).join(".local/state/tiller/cache"))
-            .ok_or_else(|| {
-                SpawnError::Usage("HOME is not set; set spawn.package_cache in config.toml".into())
-            })
+        state_dir(self.package_cache.as_ref(), "cache", "spawn.package_cache")
     }
 
     /// The run scratch root: `scratch_root`, else
     /// `$HOME/.local/state/tiller/runs`.
     pub fn scratch_dir(&self) -> Result<PathBuf, SpawnError> {
-        if let Some(root) = &self.scratch_root {
-            return Ok(root.clone());
-        }
-        std::env::var_os("HOME")
-            .filter(|home| !home.is_empty())
-            .map(|home| PathBuf::from(home).join(".local/state/tiller/runs"))
-            .ok_or_else(|| {
-                SpawnError::Usage("HOME is not set; set spawn.scratch_root in config.toml".into())
-            })
+        state_dir(self.scratch_root.as_ref(), "runs", "spawn.scratch_root")
     }
+}
+
+/// `configured`, else `$HOME/.local/state/tiller/<leaf>`; `key` is the
+/// setting that names it when HOME is not set.
+fn state_dir(configured: Option<&PathBuf>, leaf: &str, key: &str) -> Result<PathBuf, SpawnError> {
+    if let Some(root) = configured {
+        return Ok(root.clone());
+    }
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(|home| PathBuf::from(home).join(".local/state/tiller").join(leaf))
+        .ok_or_else(|| SpawnError::Usage(format!("HOME is not set; set {key} in config.toml")))
 }
 
 impl SpawnConfig {

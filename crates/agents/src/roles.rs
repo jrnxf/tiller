@@ -107,9 +107,11 @@ pub struct Placeholders {
     /// placeholder, which only those two templates carry; every other role
     /// keeps `allowLocalBinding` false in its template.
     pub local_binding: bool,
-    /// The fleet's package cache, which a worker's launch environment points
-    /// every package manager at (`npm_config_cache`, `CARGO_HOME` and the
-    /// rest), so an install writes there and never to the owner's own caches.
+    /// The worker's package cache, one per project and role under the
+    /// fleet's cache root, which its fragment's `env` points every package
+    /// manager at (`npm_config_cache`, `CARGO_HOME` and the rest), so an
+    /// install writes there and never to the owner's own caches, and no
+    /// worker writes what another project's or role's builds read.
     /// Expands the `<package_cache>` list entry of the worker write sets;
     /// `None` removes it.
     pub package_cache: Option<String>,
@@ -119,19 +121,32 @@ pub struct Placeholders {
 /// directory under the package cache, so every package manager reads and
 /// writes there: the sandbox lets a worker write its worktree, its scratch
 /// and this cache, not the owner's own npm, cargo or system caches.
-pub const PACKAGE_CACHE_VARS: [(&str, &str); 11] = [
+///
+/// `YARN_CACHE_FOLDER` is left out on purpose: Yarn Berry reads it as
+/// `cacheFolder` over the project's own `.yarnrc.yml`, which would move a
+/// committed zero-install cache out of the repository. Berry's global cache
+/// follows `YARN_GLOBAL_FOLDER`, and Yarn 1's follows `XDG_CACHE_HOME` on
+/// Linux.
+pub const PACKAGE_CACHE_VARS: [(&str, &str); 14] = [
     ("npm_config_cache", "npm"),
     ("PNPM_HOME", "pnpm"),
-    ("YARN_CACHE_FOLDER", "yarn"),
     ("YARN_GLOBAL_FOLDER", "yarn-berry"),
+    ("COREPACK_HOME", "corepack"),
     ("BUN_INSTALL_CACHE_DIR", "bun"),
     ("CARGO_HOME", "cargo"),
     ("PIP_CACHE_DIR", "pip"),
     ("UV_CACHE_DIR", "uv"),
+    ("GOPATH", "go/path"),
     ("GOMODCACHE", "go/mod"),
     ("GOCACHE", "go/build"),
+    ("GEM_HOME", "gem"),
+    ("BUNDLE_USER_HOME", "bundle"),
     ("XDG_CACHE_HOME", "xdg"),
 ];
+
+/// The `env` variable that names the worker's package cache itself, so a
+/// resume, which reuses the fragment, can make the directory again.
+pub const PACKAGE_CACHE_ENV: &str = "TILLER_PACKAGE_CACHE";
 
 /// The packaged MCP config: no servers. Tiller ships no MCP server in v1.
 pub const MCP_CONFIG: &str = include_str!("../../../roles/mcp.json");
@@ -343,12 +358,15 @@ impl Placeholders {
         // A write-set entry: the same rule as the string paths.
         if let Some(cache) = &self.package_cache
             && template.contains("<package_cache>")
-            && !fill_path(cache)
+            && (!fill_path(cache)
+                || Path::new(cache)
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir)))
         {
             return Err(RoleError::InvalidPlaceholder {
                 role,
                 placeholder: "<package_cache>",
-                requirement: "an absolute path without a trailing slash or a quote",
+                requirement: "an absolute path without `..`, a trailing slash or a quote",
                 value: cache.clone(),
             });
         }
@@ -422,8 +440,18 @@ pub fn render_settings(role: Role, fill: &Placeholders) -> Result<Value, RoleErr
     // Only a template that lets the role write the cache points it there.
     if let Some(cache) = &fill.package_cache
         && template.contains("<package_cache>")
-        && let Some(env) = value.get_mut("env").and_then(Value::as_object_mut)
+        && let Some(object) = value.as_object_mut()
     {
+        let env = object
+            .entry("env")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        let Some(env) = env.as_object_mut() else {
+            return Err(RoleError::InvalidTemplate {
+                role,
+                message: "`env` is not an object".into(),
+            });
+        };
+        env.insert(PACKAGE_CACHE_ENV.into(), Value::String(cache.clone()));
         for (name, dir) in PACKAGE_CACHE_VARS {
             env.insert(name.into(), Value::String(format!("{cache}/{dir}")));
         }
@@ -521,6 +549,9 @@ mod tests {
         "Read(~/.cargo/credentials.toml)",
         "Read(~/.cargo/credentials)",
         "Read(~/.gem/credentials)",
+        "Read(~/.local/share/gem/credentials)",
+        "Read(~/.netrc)",
+        "Read(~/.bunfig.toml)",
         "Bash(gh pr merge *)",
         "Bash(gh-axi pr merge *)",
         "Bash(gh api *)",
@@ -1509,6 +1540,11 @@ mod tests {
                     "{role}: {name}"
                 );
             }
+            assert_eq!(
+                rendered["env"][PACKAGE_CACHE_ENV].as_str(),
+                role.is_worker().then_some(cache),
+                "{role}: {PACKAGE_CACHE_ENV}"
+            );
             if role.is_worker() {
                 let mut fill = sample_fill(role);
                 fill.package_cache = None;
@@ -1517,6 +1553,14 @@ mod tests {
                 assert!(!write.contains(&cache), "{role}: cache without a fill");
                 assert!(rendered["env"].get("CARGO_HOME").is_none(), "{role}: env");
                 fill.package_cache = Some("/home/user/.tiller/cache".into());
+                assert!(matches!(
+                    render_settings(role, &fill),
+                    Err(RoleError::InvalidPlaceholder {
+                        placeholder: "<package_cache>",
+                        ..
+                    })
+                ));
+                fill.package_cache = Some("/home/user/x/../.tiller/cache".into());
                 assert!(matches!(
                     render_settings(role, &fill),
                     Err(RoleError::InvalidPlaceholder {

@@ -27,6 +27,9 @@
       "Read(~/.cargo/credentials.toml)",
       "Read(~/.cargo/credentials)",
       "Read(~/.gem/credentials)",
+      "Read(~/.local/share/gem/credentials)",
+      "Read(~/.netrc)",
+      "Read(~/.bunfig.toml)",
       "Read(/<tiller_home>/**)",
       "Read(~/.claude/**)",
       "Read(~/.config/**)",
@@ -110,7 +113,10 @@
         "~/.pypirc",
         "~/.cargo/credentials.toml",
         "~/.cargo/credentials",
-        "~/.gem/credentials"
+        "~/.gem/credentials",
+        "~/.local/share/gem/credentials",
+        "~/.netrc",
+        "~/.bunfig.toml"
       ]
     },
     "network": {

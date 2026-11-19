@@ -49,7 +49,7 @@ Model and effort are the role's defaults; the `[dispatch]` rules in the config d
 | `<home>`, `<pool>`, `<checkouts>` | the orchestrator's home, the treehouse pool root, the root of the project checkouts (orchestrator only) |
 | `<default>` | the project's default branch |
 | `<network_allow>` | a list entry replaced by the hosts the sandbox may reach: the forge for every role, the common public registries for workers, and the hosts `spawn.network_allow` adds |
-| `<package_cache>` | a list entry replaced by the fleet's package cache (`spawn.package_cache`, default `~/.local/state/tiller/cache`), which workers write and whose package manager variables the fragment's `env` points there, or removed for the orchestrator (`authority.md` section 8, "Amended: package registries") |
+| `<package_cache>` | a list entry replaced by the worker's package cache, `<root>/<project>/<role>` under `spawn.package_cache` (default `~/.local/state/tiller/cache`), or removed for the orchestrator. The fragment's `env` points each package manager there (`PACKAGE_CACHE_VARS` in `crates/agents/src/roles.rs`) and names the cache in `TILLER_PACKAGE_CACHE` (`authority.md` section 8, "Amended: package registries") |
 | `<no_mistakes_socket>` | a list entry replaced by the `no-mistakes` daemon socket, or removed when the project has none |
 
 Rule paths are written `/<worktree>/**` in the template so the filled rule is `Edit(//home/user/pool/3/repo/**)`, the absolute form Claude Code's permission rules use. Sandbox entries use the plain path. `render_settings` in `crates/agents` does the filling and refuses a fragment that still carries a placeholder.
