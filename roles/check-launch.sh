@@ -197,7 +197,7 @@ EOF
 		def fill: gsub("<tiller>"; $tiller) | gsub("<worktree>"; $worktree) | gsub("<scratch>"; $scratch)
 			| gsub("<home>"; $home) | gsub("<pool>"; $pool) | gsub("<checkouts>"; $checkouts) | gsub("<default>"; $default);
 		walk(if type == "string" then fill else . end)
-		| walk(if type == "array" then map(select(. != "<network_allow>" and . != "<no_mistakes_socket>")) else . end)
+		| walk(if type == "array" then map(select(. != "<network_allow>" and . != "<no_mistakes_socket>" and . != "<package_cache>")) else . end)
 		| .sandbox.enabled = $sandbox
 		| .sandbox.failIfUnavailable = $sandbox
 	' "$template" >"$w/settings.json"

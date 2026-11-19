@@ -97,6 +97,7 @@ pub struct Tools {
     tiller: PathBuf,
     tiller_home: PathBuf,
     scratch: PathBuf,
+    package_cache: PathBuf,
     claude: ClaudeConfig,
 }
 
@@ -139,6 +140,7 @@ impl Tools {
         // The kb store a launch renders from: `KB_HOME`, else `.kb` in the home folder.
         config.kb_home = tiller_core::kb::home_from_env();
         let scratch = config.spawn.scratch_dir().map_err(failure)?;
+        let package_cache = config.spawn.package_cache_dir().map_err(failure)?;
         let tiller_home = absolute_home(&app.home)?;
         // A home whose holder has made no socket launches nothing.
         let holder = HolderLink::present(&tiller_home).then(|| HolderLink::new(&tiller_home));
@@ -153,6 +155,7 @@ impl Tools {
             tiller: crate::stable::tiller_path()?,
             tiller_home,
             scratch,
+            package_cache,
             claude: ClaudeConfig::from_env(),
             config,
         })
@@ -187,6 +190,7 @@ impl Tools {
             listeners: &self.listeners,
             tiller: &self.tiller,
             scratch_root: &self.scratch,
+            package_cache: &self.package_cache,
             tiller_home: &self.tiller_home,
             claude_config: &self.claude,
             ram_free_mb,

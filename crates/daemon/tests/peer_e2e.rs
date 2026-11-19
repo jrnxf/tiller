@@ -1365,6 +1365,7 @@ fn board_resumes_a_peer_agent_with_its_first_launch_flags() {
         tiller: &tiller(),
         default_branch: "main",
         network_allow: &[],
+        package_cache: None,
         review_hosts: &[],
         no_mistakes_socket: None,
         gh_login_readable: false,

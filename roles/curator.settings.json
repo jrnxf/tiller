@@ -22,6 +22,14 @@
       "Read(**/.envrc)",
       "Read(**/*.pem)",
       "Read(**/*.key)",
+      "Read(~/.npmrc)",
+      "Read(~/.pypirc)",
+      "Read(~/.cargo/credentials.toml)",
+      "Read(~/.cargo/credentials)",
+      "Read(~/.gem/credentials)",
+      "Read(~/.local/share/gem/credentials)",
+      "Read(~/.netrc)",
+      "Read(~/.bunfig.toml)",
       "Read(/<tiller_home>/**)",
       "Read(~/.claude/**)",
       "Read(~/.config/**)",
@@ -100,7 +108,15 @@
         "~/.claude"
       ],
       "denyRead": [
-        "<tiller_home>"
+        "<tiller_home>",
+        "~/.npmrc",
+        "~/.pypirc",
+        "~/.cargo/credentials.toml",
+        "~/.cargo/credentials",
+        "~/.gem/credentials",
+        "~/.local/share/gem/credentials",
+        "~/.netrc",
+        "~/.bunfig.toml"
       ]
     },
     "network": {

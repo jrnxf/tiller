@@ -2375,6 +2375,11 @@ fn secret_paths_are_never_handed_to_tiller() {
         "tiller card create alpha --kind ship --title x --body-file .env",
         "tiller artifact add alpha-1 --path config/server.key",
         "tiller card create alpha --kind ship --title x --body-file=/home/user/.ssh/id_ed25519",
+        "tiller card note alpha-1 --body-file /home/user/.npmrc",
+        "tiller card note alpha-1 --body-file ~/.pypirc",
+        "tiller card note alpha-1 --body-file /home/user/.cargo/credentials.toml",
+        "tiller card note alpha-1 --body-file /home/user/.local/share/gem/credentials",
+        "tiller artifact add alpha-1 --path /home/user/.netrc",
     ] {
         denied(Role::Builder, command, Code::StateWrite);
     }
@@ -2606,6 +2611,7 @@ fn fill(role: Role) -> Placeholders {
         no_mistakes_socket: None,
         gh_login_readable: false,
         local_binding: false,
+        package_cache: None,
     }
 }
 

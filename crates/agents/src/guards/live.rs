@@ -127,6 +127,7 @@ impl Lab {
             no_mistakes_socket: None,
             gh_login_readable: false,
             local_binding: false,
+            package_cache: None,
         };
         let fragment = render_settings(role, &fill).unwrap();
         fs::write(

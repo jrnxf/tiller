@@ -440,6 +440,18 @@ pub(crate) fn is_secret_path(text: &str) -> bool {
         || name.starts_with("id_ed25519")
         || name.starts_with("id_ecdsa")
         || has_segment(text, ".ssh")
+        || is_registry_token(text, name)
+}
+
+/// Whether a path names a package registry token (`authority.md` G32,
+/// "Amended: package registries"): a worker reaches the registries, so a
+/// token handed to `tiller` would let it publish.
+fn is_registry_token(text: &str, name: &str) -> bool {
+    matches!(name, ".npmrc" | ".pypirc" | ".netrc" | ".bunfig.toml")
+        || (matches!(name, "credentials" | "credentials.toml")
+            && (has_segment(text, ".cargo")
+                || has_segment(text, ".gem")
+                || has_segment(text, "gem")))
 }
 
 /// The hook transport for Claude Code (pinned against the installed CLI at
