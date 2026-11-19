@@ -219,6 +219,9 @@ pub struct World<'a> {
     pub tiller: &'a Path,
     /// The run scratch root; each run gets `<root>/<run id>`.
     pub scratch_root: &'a Path,
+    /// The fleet's package cache every worker writes
+    /// ([`config::Paths::package_cache_dir`]).
+    pub package_cache: &'a Path,
     /// The effective Tiller home: hidden from every session's sandbox and
     /// exported to it as `TILLER_HOME`.
     pub tiller_home: &'a Path,
@@ -594,7 +597,8 @@ fn launch_in(
         roots: None,
         tiller: world.tiller,
         default_branch: &project.default_branch,
-        network_allow: &world.config.spawn.network_allow,
+        network_allow: &world.config.spawn.network_allow_for(true),
+        package_cache: Some(world.package_cache),
         review_hosts: &world.config.spawn.review_allowed_hosts,
         no_mistakes_socket: world.config.spawn.no_mistakes_socket.as_deref(),
         gh_login_readable: project.effective_delivery() == Delivery::NoMistakes,

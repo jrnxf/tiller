@@ -148,8 +148,17 @@ pub struct Paths {
     pub treehouse: Vec<String>,
     /// The Claude Code command.
     pub claude: String,
-    /// Hosts the worker sandbox may reach (`<network_allow>`).
+    /// Hosts the sandbox may reach beyond the built-in ones
+    /// ([`FORGE_HOSTS`] for every role, [`PACKAGE_REGISTRIES`] for workers):
+    /// a private registry or mirror. See [`Paths::network_allow_for`].
     pub network_allow: Vec<String>,
+    /// The fleet's package cache, which every worker writes and its launch
+    /// environment points each package manager at
+    /// ([`crate::roles::PACKAGE_CACHE_VARS`]).
+    /// Kept apart from the owner's own caches, so nothing a worker writes
+    /// there reaches a build the owner runs. Empty means
+    /// `~/.local/state/tiller/cache`.
+    pub package_cache: Option<PathBuf>,
     /// The hostnames the developer opens review links by. Every launch
     /// exports them as `LAVISH_AXI_ALLOWED_HOSTS`, so the review server a
     /// worker starts accepts requests for those names (P49); empty serves
@@ -178,7 +187,8 @@ impl Default for Paths {
             scratch_root: None,
             treehouse: vec!["treehouse".into()],
             claude: "claude".into(),
-            network_allow: ["github.com", "api.github.com"].map(String::from).into(),
+            network_allow: Vec::new(),
+            package_cache: None,
             review_allowed_hosts: Vec::new(),
             lavish: vec!["lavish-axi".into()],
             no_mistakes_socket: None,
@@ -188,6 +198,27 @@ impl Default for Paths {
         }
     }
 }
+
+/// The forge hosts every role's sandbox may reach.
+pub const FORGE_HOSTS: [&str; 2] = ["github.com", "api.github.com"];
+
+/// The public package registries a worker's sandbox may reach, so it can
+/// install a project's dependencies and run its checks without the owner:
+/// npm (and the yarn mirror of it), PyPI, crates.io, the Go module proxy and
+/// RubyGems. Read access only: every role is denied the publish tokens
+/// (`authority.md` section 8).
+pub const PACKAGE_REGISTRIES: [&str; 10] = [
+    "registry.npmjs.org",
+    "registry.yarnpkg.com",
+    "pypi.org",
+    "files.pythonhosted.org",
+    "index.crates.io",
+    "static.crates.io",
+    "proxy.golang.org",
+    "sum.golang.org",
+    "rubygems.org",
+    "index.rubygems.org",
+];
 
 /// The `[spawn]` keys herdr read. The terminal holder replaced herdr, so
 /// they are dropped before the table is read: a config that still names one
@@ -217,6 +248,37 @@ impl Paths {
                 .map_err(|e: toml::de::Error| SpawnError::Config(format!("spawn: {e}"))),
             None => Ok(Self::default()),
         }
+    }
+
+    /// The hosts a role's sandbox may reach: the forge, the package
+    /// registries for a worker, and the configured extra hosts, each once.
+    pub fn network_allow_for(&self, worker: bool) -> Vec<String> {
+        let registries: &[&str] = if worker { &PACKAGE_REGISTRIES } else { &[] };
+        let mut hosts: Vec<String> = Vec::new();
+        let built_in = FORGE_HOSTS
+            .iter()
+            .chain(registries)
+            .map(|h| (*h).to_owned());
+        for host in built_in.chain(self.network_allow.iter().cloned()) {
+            if !hosts.contains(&host) {
+                hosts.push(host);
+            }
+        }
+        hosts
+    }
+
+    /// The package cache: `package_cache`, else
+    /// `$HOME/.local/state/tiller/cache`.
+    pub fn package_cache_dir(&self) -> Result<PathBuf, SpawnError> {
+        if let Some(root) = &self.package_cache {
+            return Ok(root.clone());
+        }
+        std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .map(|home| PathBuf::from(home).join(".local/state/tiller/cache"))
+            .ok_or_else(|| {
+                SpawnError::Usage("HOME is not set; set spawn.package_cache in config.toml".into())
+            })
     }
 
     /// The run scratch root: `scratch_root`, else
@@ -312,5 +374,56 @@ impl Quota {
     pub fn host_floor(&self) -> f64 {
         let floor = self.account_floor_percent;
         floor + (100.0 - floor) * (1.0 - self.host_share_percent / 100.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn paths(toml: &str) -> Paths {
+        Paths::from_table(&toml.parse::<toml::Table>().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn workers_reach_the_registries_and_the_orchestrator_only_the_forge() {
+        let defaults = paths("");
+        assert_eq!(defaults.network_allow_for(false), FORGE_HOSTS);
+        let worker = defaults.network_allow_for(true);
+        assert_eq!(&worker[..2], FORGE_HOSTS);
+        assert_eq!(&worker[2..], PACKAGE_REGISTRIES);
+    }
+
+    #[test]
+    fn configured_hosts_add_to_the_defaults_once() {
+        let extra = paths(
+            "[spawn]\nnetwork_allow = [\"npm.example.com\", \"github.com\", \"registry.npmjs.org\"]\n",
+        );
+        let orchestrator = extra.network_allow_for(false);
+        assert_eq!(
+            orchestrator,
+            [
+                "github.com",
+                "api.github.com",
+                "npm.example.com",
+                "registry.npmjs.org"
+            ]
+        );
+        let worker = extra.network_allow_for(true);
+        assert_eq!(
+            worker.len(),
+            FORGE_HOSTS.len() + PACKAGE_REGISTRIES.len() + 1
+        );
+        assert_eq!(worker.last().map(String::as_str), Some("npm.example.com"));
+    }
+
+    #[test]
+    fn the_package_cache_is_configurable() {
+        let set = paths("[spawn]\npackage_cache = \"/home/user/cache\"\n");
+        assert_eq!(
+            set.package_cache_dir().unwrap(),
+            std::path::Path::new("/home/user/cache")
+        );
+        assert!(paths("").package_cache.is_none());
     }
 }

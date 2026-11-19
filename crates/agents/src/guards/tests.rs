@@ -2606,6 +2606,7 @@ fn fill(role: Role) -> Placeholders {
         no_mistakes_socket: None,
         gh_login_readable: false,
         local_binding: false,
+        package_cache: None,
     }
 }
 

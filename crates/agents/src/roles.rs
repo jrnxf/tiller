@@ -107,7 +107,31 @@ pub struct Placeholders {
     /// placeholder, which only those two templates carry; every other role
     /// keeps `allowLocalBinding` false in its template.
     pub local_binding: bool,
+    /// The fleet's package cache, which a worker's launch environment points
+    /// every package manager at (`npm_config_cache`, `CARGO_HOME` and the
+    /// rest), so an install writes there and never to the owner's own caches.
+    /// Expands the `<package_cache>` list entry of the worker write sets;
+    /// `None` removes it.
+    pub package_cache: Option<String>,
 }
+
+/// The variables a worker's fragment sets in its `env`, each to its own
+/// directory under the package cache, so every package manager reads and
+/// writes there: the sandbox lets a worker write its worktree, its scratch
+/// and this cache, not the owner's own npm, cargo or system caches.
+pub const PACKAGE_CACHE_VARS: [(&str, &str); 11] = [
+    ("npm_config_cache", "npm"),
+    ("PNPM_HOME", "pnpm"),
+    ("YARN_CACHE_FOLDER", "yarn"),
+    ("YARN_GLOBAL_FOLDER", "yarn-berry"),
+    ("BUN_INSTALL_CACHE_DIR", "bun"),
+    ("CARGO_HOME", "cargo"),
+    ("PIP_CACHE_DIR", "pip"),
+    ("UV_CACHE_DIR", "uv"),
+    ("GOMODCACHE", "go/mod"),
+    ("GOCACHE", "go/build"),
+    ("XDG_CACHE_HOME", "xdg"),
+];
 
 /// The packaged MCP config: no servers. Tiller ships no MCP server in v1.
 pub const MCP_CONFIG: &str = include_str!("../../../roles/mcp.json");
@@ -127,11 +151,12 @@ pub const STRING_PLACEHOLDERS: [&str; 8] = [
 
 /// The list placeholders: a list entry that is exactly one of these is
 /// replaced by zero or more entries.
-pub const LIST_PLACEHOLDERS: [&str; 4] = [
+pub const LIST_PLACEHOLDERS: [&str; 5] = [
     "<network_allow>",
     "<no_mistakes_socket>",
     "<gh_login_rule>",
     "<gh_login_path>",
+    "<package_cache>",
 ];
 
 /// The value placeholders: a string that is exactly one of these is
@@ -298,12 +323,7 @@ impl Placeholders {
                 // sandbox exempts it by text, so it must stay one plain word.
                 crate::guards::plain_path(value)
             } else {
-                // The guard command quotes the orchestrator's roots, so a
-                // path may hold a space but not a quote.
-                value.starts_with('/')
-                    && value.len() > 1
-                    && !value.ends_with('/')
-                    && !value.contains(['\'', '"', '\\'])
+                fill_path(value)
             };
             if !ok {
                 return Err(RoleError::InvalidPlaceholder {
@@ -320,8 +340,30 @@ impl Placeholders {
                 });
             }
         }
+        // A write-set entry: the same rule as the string paths.
+        if let Some(cache) = &self.package_cache
+            && template.contains("<package_cache>")
+            && !fill_path(cache)
+        {
+            return Err(RoleError::InvalidPlaceholder {
+                role,
+                placeholder: "<package_cache>",
+                requirement: "an absolute path without a trailing slash or a quote",
+                value: cache.clone(),
+            });
+        }
         Ok(())
     }
+}
+
+/// A path a fragment may carry: absolute, without a trailing slash, and
+/// without a quote. The guard command quotes the orchestrator's roots, so a
+/// path may hold a space but not a quote.
+fn fill_path(value: &str) -> bool {
+    value.starts_with('/')
+        && value.len() > 1
+        && !value.ends_with('/')
+        && !value.contains(['\'', '"', '\\'])
 }
 
 impl fmt::Display for Role {
@@ -354,6 +396,20 @@ pub fn render_settings(role: Role, fill: &Placeholders) -> Result<Value, RoleErr
             value: socket.clone(),
         });
     }
+    // The cache is written by every worker, so it may hold nothing the
+    // sandbox hides: never the Tiller home, nor a parent of it.
+    if let Some(cache) = &fill.package_cache
+        && !fill.tiller_home.is_empty()
+        && (Path::new(cache).starts_with(&fill.tiller_home)
+            || Path::new(&fill.tiller_home).starts_with(cache))
+    {
+        return Err(RoleError::InvalidPlaceholder {
+            role,
+            placeholder: "<package_cache>",
+            requirement: "a directory apart from the Tiller home",
+            value: cache.clone(),
+        });
+    }
     let mut value: Value =
         serde_json::from_str(template).map_err(|e| RoleError::InvalidTemplate {
             role,
@@ -362,6 +418,15 @@ pub fn render_settings(role: Role, fill: &Placeholders) -> Result<Value, RoleErr
     fill_value(&mut value, fill);
     if let Some(placeholder) = first_placeholder(&value) {
         return Err(RoleError::UnfilledPlaceholder { role, placeholder });
+    }
+    // Only a template that lets the role write the cache points it there.
+    if let Some(cache) = &fill.package_cache
+        && template.contains("<package_cache>")
+        && let Some(env) = value.get_mut("env").and_then(Value::as_object_mut)
+    {
+        for (name, dir) in PACKAGE_CACHE_VARS {
+            env.insert(name.into(), Value::String(format!("{cache}/{dir}")));
+        }
     }
     Ok(value)
 }
@@ -389,6 +454,9 @@ fn fill_value(value: &mut Value, fill: &Placeholders) {
                     }
                     Some("<no_mistakes_socket>") => {
                         filled.extend(fill.no_mistakes_socket.iter().cloned().map(Value::String));
+                    }
+                    Some("<package_cache>") => {
+                        filled.extend(fill.package_cache.iter().cloned().map(Value::String));
                     }
                     Some("<gh_login_rule>") => {
                         if !fill.gh_login_readable {
@@ -448,6 +516,11 @@ mod tests {
         "Read(**/.envrc)",
         "Read(**/*.pem)",
         "Read(**/*.key)",
+        "Read(~/.npmrc)",
+        "Read(~/.pypirc)",
+        "Read(~/.cargo/credentials.toml)",
+        "Read(~/.cargo/credentials)",
+        "Read(~/.gem/credentials)",
         "Bash(gh pr merge *)",
         "Bash(gh-axi pr merge *)",
         "Bash(gh api *)",
@@ -569,7 +642,7 @@ mod tests {
                 "WebSearch",
                 "Agent",
             ],
-            write_set: &["<worktree>", "<scratch>"],
+            write_set: &["<worktree>", "<scratch>", "<package_cache>"],
         },
         RoleRow {
             role: Role::Builder,
@@ -587,7 +660,7 @@ mod tests {
                 "WebSearch",
                 "Agent",
             ],
-            write_set: &["<worktree>", "<scratch>"],
+            write_set: &["<worktree>", "<scratch>", "<package_cache>"],
         },
         RoleRow {
             role: Role::Reviewer,
@@ -601,7 +674,7 @@ mod tests {
                 "Bash(no-mistakes *)",
             ],
             allow: &["Bash", "Read", "WebFetch", "WebSearch", "Agent"],
-            write_set: &["<scratch>"],
+            write_set: &["<scratch>", "<package_cache>"],
         },
         RoleRow {
             role: Role::Verifier,
@@ -618,7 +691,7 @@ mod tests {
                 "Read",
                 "WebFetch",
             ],
-            write_set: &["<worktree>", "<scratch>"],
+            write_set: &["<worktree>", "<scratch>", "<package_cache>"],
         },
     ];
 
@@ -793,6 +866,7 @@ mod tests {
             no_mistakes_socket: Some("/run/user/1000/no-mistakes.sock".into()),
             gh_login_readable: false,
             local_binding: false,
+            package_cache: (!orchestrator).then(|| "/home/user/.local/state/tiller/cache".into()),
         }
     }
 
@@ -1201,7 +1275,8 @@ mod tests {
             strings(&builder["sandbox"]["filesystem"]["allowWrite"]),
             [
                 "/home/user/pool/3/alpha",
-                "/home/user/scratch/alpha-42-build"
+                "/home/user/scratch/alpha-42-build",
+                "/home/user/.local/state/tiller/cache"
             ]
         );
 
@@ -1389,6 +1464,76 @@ mod tests {
         let worker = sample_fill(Role::Builder);
         assert!(worker.home.is_empty());
         render_settings(Role::Builder, &worker).unwrap();
+    }
+
+    /// The registry publish tokens, hidden from every role's shell, so a
+    /// worker that may reach a package registry cannot publish to it
+    /// (`authority.md` section 8, G32).
+    #[test]
+    fn registry_tokens_are_hidden() {
+        let tokens = [
+            "~/.npmrc",
+            "~/.pypirc",
+            "~/.cargo/credentials.toml",
+            "~/.cargo/credentials",
+            "~/.gem/credentials",
+        ];
+        for role in Role::ALL {
+            let rendered = render_settings(role, &sample_fill(role)).unwrap();
+            let deny_read = strings(&rendered["sandbox"]["filesystem"]["denyRead"]);
+            let deny = strings(&rendered["permissions"]["deny"]);
+            for token in tokens {
+                assert!(deny_read.contains(&token), "{role}: {token} readable");
+                let rule = format!("Read({token})");
+                assert!(deny.contains(&rule.as_str()), "{role}: no {rule}");
+            }
+        }
+    }
+
+    /// A worker writes the fleet's package cache, and nothing else of the
+    /// owner's home; the orchestrator and the curator never get it. A fill
+    /// with no cache drops the entry, and a relative cache is refused.
+    #[test]
+    fn workers_write_the_package_cache() {
+        let cache = "/home/user/.local/state/tiller/cache";
+        for role in Role::ALL {
+            let rendered = render_settings(role, &sample_fill(role)).unwrap();
+            let write = strings(&rendered["sandbox"]["filesystem"]["allowWrite"]);
+            assert_eq!(write.contains(&cache), role.is_worker(), "{role}: cache");
+            for (name, dir) in PACKAGE_CACHE_VARS {
+                let set = rendered["env"][name].as_str();
+                let want = format!("{cache}/{dir}");
+                assert_eq!(
+                    set,
+                    role.is_worker().then_some(want.as_str()),
+                    "{role}: {name}"
+                );
+            }
+            if role.is_worker() {
+                let mut fill = sample_fill(role);
+                fill.package_cache = None;
+                let rendered = render_settings(role, &fill).unwrap();
+                let write = strings(&rendered["sandbox"]["filesystem"]["allowWrite"]);
+                assert!(!write.contains(&cache), "{role}: cache without a fill");
+                assert!(rendered["env"].get("CARGO_HOME").is_none(), "{role}: env");
+                fill.package_cache = Some("/home/user/.tiller/cache".into());
+                assert!(matches!(
+                    render_settings(role, &fill),
+                    Err(RoleError::InvalidPlaceholder {
+                        placeholder: "<package_cache>",
+                        ..
+                    })
+                ));
+                fill.package_cache = Some("cache".into());
+                assert!(matches!(
+                    render_settings(role, &fill),
+                    Err(RoleError::InvalidPlaceholder {
+                        placeholder: "<package_cache>",
+                        ..
+                    })
+                ));
+            }
+        }
     }
 
     /// The orchestrator's Bash is not auto-approved by the sandbox: its allow

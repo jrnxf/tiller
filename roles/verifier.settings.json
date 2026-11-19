@@ -12,6 +12,11 @@
       "Read(**/.envrc)",
       "Read(**/*.pem)",
       "Read(**/*.key)",
+      "Read(~/.npmrc)",
+      "Read(~/.pypirc)",
+      "Read(~/.cargo/credentials.toml)",
+      "Read(~/.cargo/credentials)",
+      "Read(~/.gem/credentials)",
       "Bash(gh pr merge *)",
       "Bash(gh-axi pr merge *)",
       "Bash(gh api *)",
@@ -358,7 +363,8 @@
     "filesystem": {
       "allowWrite": [
         "<worktree>",
-        "<scratch>"
+        "<scratch>",
+        "<package_cache>"
       ],
       "denyWrite": [
         "<tiller_home>",
@@ -368,6 +374,11 @@
       ],
       "denyRead": [
         "<tiller_home>",
+        "~/.npmrc",
+        "~/.pypirc",
+        "~/.cargo/credentials.toml",
+        "~/.cargo/credentials",
+        "~/.gem/credentials",
         "<worktree>/.env",
         "<worktree>/.envrc"
       ]

@@ -79,7 +79,12 @@ pub struct LaunchSpec<'a> {
     /// The packaged `tiller` binary, by its absolute path.
     pub tiller: &'a Path,
     pub default_branch: &'a str,
+    /// The hosts the sandbox may reach
+    /// ([`super::config::Paths::network_allow_for`]).
     pub network_allow: &'a [String],
+    /// The fleet's package cache, which a worker writes and its fragment's
+    /// `env` points each package manager at; `None` for the orchestrator.
+    pub package_cache: Option<&'a Path>,
     /// The hostnames the developer opens review links by, exported as
     /// `LAVISH_AXI_ALLOWED_HOSTS` (P49).
     pub review_hosts: &'a [String],
@@ -471,6 +476,10 @@ fn render(spec: &LaunchSpec<'_>) -> Result<Rendered, SpawnError> {
     let scratch = absolute("the scratch directory", spec.scratch)?;
     let tiller_home = absolute("the Tiller home", spec.tiller_home)?;
     let tiller = absolute("the tiller binary", spec.tiller)?;
+    let package_cache = spec
+        .package_cache
+        .map(|cache| absolute("the package cache", cache))
+        .transpose()?;
 
     let front = spec.role.frontmatter()?;
     let body = spec.role.prompt_body()?;
@@ -507,6 +516,7 @@ fn render(spec: &LaunchSpec<'_>) -> Result<Rendered, SpawnError> {
             no_mistakes_socket: spec.no_mistakes_socket.map(str::to_owned),
             gh_login_readable: spec.gh_login_readable,
             local_binding: spec.local_binding,
+            package_cache,
         },
     )?;
     let (mode, mode_note) = effective_mode(spec.claude, &front.permission_mode);
@@ -551,10 +561,23 @@ fn first_prompt(spec: &LaunchSpec<'_>) -> Vec<String> {
     }
 }
 
+/// Makes the package cache a worker's fragment names, so the sandbox has a
+/// directory to let it write. Only the owner may read it.
+fn make_package_cache(spec: &LaunchSpec<'_>) -> Result<(), SpawnError> {
+    if let Some(cache) = spec.package_cache
+        && !cache.is_dir()
+    {
+        fs::create_dir_all(cache)?;
+        fs::set_permissions(cache, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
 /// Writes the prompt, the fragment, the MCP config and the launch script
 /// into `spec.scratch`, which must not exist yet.
 pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
     let rendered = render(spec)?;
+    make_package_cache(spec)?;
     if let Some(parent) = spec.scratch.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -648,6 +671,7 @@ pub fn write_refreshed(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
         )));
     }
     let rendered = render(spec)?;
+    make_package_cache(spec)?;
     let dir = spec.scratch;
     let launch = Launch {
         prompt: dir.join("prompt.md"),

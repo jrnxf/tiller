@@ -50,6 +50,8 @@ pub struct Sandbox {
     /// The `tiller` path written into launch lines; nothing runs it.
     pub tiller: PathBuf,
     pub scratch: PathBuf,
+    /// The fleet package cache launches name, inside the sandbox.
+    pub package_cache: PathBuf,
     /// The Claude config dir launches record trust in, inside the sandbox.
     pub claude: ClaudeConfig,
     /// The live orchestrator session of each project used so far.
@@ -114,6 +116,7 @@ impl Sandbox {
         Ok(Self {
             pool: StubPool::new(root.join("pool")),
             tiller: root.join("bin").join("tiller"),
+            package_cache: root.join("cache"),
             root,
             home,
             store,
@@ -220,6 +223,7 @@ impl Sandbox {
             listeners: &NoListeners,
             tiller: &self.tiller,
             scratch_root: &self.scratch,
+            package_cache: &self.package_cache,
             tiller_home: &self.home,
             claude_config: &self.claude,
             ram_free_mb: Some(FREE_MB),
